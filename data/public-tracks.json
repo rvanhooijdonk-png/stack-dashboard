@@ -1,0 +1,4 @@
+{
+  "_toelichting": "Vloottracks die bij naam op de openbare pagina mogen. Een bestandsnaam uit CONTROL/TASK-QUEUE/ kan een project-, klant- of branchnaam zijn; wat hier niet staat wordt alleen geteld, niet benoemd. Deze vier zijn met de hand nagelopen op 23-07-2026: interne codenamen zonder klant- of omzetinformatie. README is geen track en staat er daarom niet in. Een nieuw queue-bestand verschijnt dus NIET vanzelf op de pagina — dat is de bedoeling.",
+  "tracks": ["COA", "DECK", "MODELLENVLOOT", "NQ"]
+}

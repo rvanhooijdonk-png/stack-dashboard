@@ -1,0 +1,527 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rvanhooijdonk-png/stack-dashboard/contracts/dashboard-snapshot.schema.json",
+  "title": "DashboardSnapshotV2",
+  "description": "Contract voor de PUBLIEKE snapshot die het dashboard rendert — de gereduceerde DTO uit build.mjs, niet de interne collectoruitvoer. v2 (23-07-2026, derde review): evidence.source is verwijderd (een bronpad is op een openbare pagina zelf een aanwijzing), tracker draagt twee aparte tekst-vlaggen, en workstream-titel en -raming zijn nullable omdat publicatie per regel expliciet aangezet moet worden. Elke sectie draagt zijn eigen trust-oordeel; een mislukte bron wordt SOURCE_UNAVAILABLE en nooit een gecachte groene stand.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "generatedAt",
+    "overallStatus",
+    "sources",
+    "workstreams",
+    "pullRequests",
+    "merged",
+    "tracker",
+    "decisions",
+    "fleet",
+    "logbook",
+    "ci"
+  ],
+  "properties": {
+    "contractVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "overallStatus": {
+      "enum": [
+        "OK",
+        "DEGRADED"
+      ]
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "key",
+          "trust",
+          "retrievedAt"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "trust": {
+            "$ref": "#/$defs/trust"
+          },
+          "retrievedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "workstreams": {
+      "type": "array",
+      "description": "Roadmap-formaat uit data/workstreams.json. Titel en raming verschijnen alleen als die regel `public: true` draagt en de raming een duur is; anders null.",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "estimate"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9]{2}$",
+            "description": "Alleen het workstreamnummer. Elke andere waarde breekt de build — een id was een publicatieroute langs public:true heen."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "null = regel niet vrijgegeven voor publicatie."
+          },
+          "estimate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "null = niet vrijgegeven of geen geldige duur."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "pullRequests": {
+      "type": "object",
+      "required": [
+        "available",
+        "repositories",
+        "hiddenRepositories",
+        "totals",
+        "evidence"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "repositories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "repository",
+              "open",
+              "draft",
+              "ready"
+            ],
+            "properties": {
+              "repository": {
+                "type": "string"
+              },
+              "open": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "draft": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "ready": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "totals": {
+          "type": "object",
+          "required": [
+            "open",
+            "draft",
+            "ready"
+          ],
+          "properties": {
+            "open": {
+              "type": "integer"
+            },
+            "draft": {
+              "type": "integer"
+            },
+            "ready": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "hiddenRepositories": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Aantal open PR's in repo's die niet bij naam getoond worden (allowlist data/public-repos.json)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "merged": {
+      "type": "object",
+      "required": [
+        "available",
+        "windowDays",
+        "count",
+        "byRepository",
+        "evidence"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "windowDays": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "byRepository": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "repository",
+              "merged"
+            ],
+            "properties": {
+              "repository": {
+                "type": "string"
+              },
+              "merged": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tracker": {
+      "type": "object",
+      "required": [
+        "available",
+        "updates",
+        "decisionPoints",
+        "evidence",
+        "updatesTextWithheld",
+        "decisionPointsTextWithheld"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "updates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "number",
+              "date",
+              "title"
+            ],
+            "properties": {
+              "number": {
+                "type": "integer"
+              },
+              "date": {
+                "type": "string"
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "null = tekst ingehouden (data/publish-text.json)."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "decisionPoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "title"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "null = tekst ingehouden (data/publish-text.json)."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "updatesTextWithheld": {
+          "type": "boolean"
+        },
+        "decisionPointsTextWithheld": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "decisions": {
+      "type": "object",
+      "required": [
+        "available",
+        "entries",
+        "evidence",
+        "textWithheld"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "date",
+              "decision"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "date": {
+                "type": "string"
+              },
+              "decision": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "null = tekst ingehouden (data/publish-text.json)."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "textWithheld": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "fleet": {
+      "type": "object",
+      "required": [
+        "available",
+        "tracks",
+        "evidence",
+        "hiddenTracks"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "tracks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "track",
+              "lastChangeAt",
+              "trust"
+            ],
+            "properties": {
+              "track": {
+                "type": "string"
+              },
+              "lastChangeAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})$"
+              },
+              "trust": {
+                "$ref": "#/$defs/trust"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "hiddenTracks": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Aantal tracks dat niet bij naam getoond wordt (allowlist data/public-tracks.json)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "logbook": {
+      "type": "object",
+      "required": [
+        "available",
+        "entries",
+        "evidence",
+        "textWithheld"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "title"
+            ],
+            "properties": {
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "null = tekst ingehouden (data/publish-text.json)."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "textWithheld": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ci": {
+      "type": "object",
+      "required": [
+        "available",
+        "lights",
+        "evidence",
+        "hiddenCiRepositories"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "lights": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "repository",
+              "state",
+              "at"
+            ],
+            "properties": {
+              "repository": {
+                "type": "string"
+              },
+              "state": {
+                "enum": [
+                  "GROEN",
+                  "ROOD",
+                  "GRIJS",
+                  "GEEN_CI",
+                  "ONBEKEND"
+                ]
+              },
+              "at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})$"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "hiddenCiRepositories": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Aantal CI-repo's dat niet bij naam getoond wordt (allowlist data/public-repos.json)."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "trust": {
+      "description": "Vertrouwensoordeel per bron. SOURCE_UNAVAILABLE is een geldige eindstand, geen fout die je wegcachet.",
+      "enum": [
+        "VERIFIED_CURRENT",
+        "STALE",
+        "UNVERIFIED",
+        "SOURCE_UNAVAILABLE",
+        "CONFLICTING_EVIDENCE"
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "required": [
+        "retrievedAt",
+        "trust",
+        "errorCode"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "retrievedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "trust": {
+          "$ref": "#/$defs/trust"
+        },
+        "errorCode": {
+          "description": "Gesloten codelijst; nooit de fouttekst van een collector. Zie ERROR_CODE_BY_TRUST in scripts/build.mjs.",
+          "enum": [
+            null,
+            "VEROUDERD",
+            "NIET_GEVERIFIEERD",
+            "BRON_ONBEREIKBAAR",
+            "TEGENSTRIJDIG",
+            "ONBEKEND"
+          ]
+        }
+      }
+    }
+  }
+}

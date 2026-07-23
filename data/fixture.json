@@ -1,0 +1,158 @@
+{
+  "contractVersion": "2.0.0",
+  "generatedAt": "2026-07-23T12:00:00.000Z",
+  "overallStatus": "DEGRADED",
+  "sources": [
+    {
+      "key": "pullRequests",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT"
+    },
+    {
+      "key": "logbook",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "SOURCE_UNAVAILABLE"
+    }
+  ],
+  "workstreams": [
+    {
+      "id": "01",
+      "title": "Voorbeeldworkstream",
+      "estimate": "2 weken"
+    },
+    {
+      "id": "02",
+      "title": null,
+      "estimate": null
+    }
+  ],
+  "pullRequests": {
+    "available": true,
+    "repositories": [
+      {
+        "repository": "voorbeeld-repo",
+        "open": 3,
+        "draft": 1,
+        "ready": 2
+      }
+    ],
+    "totals": {
+      "open": 3,
+      "draft": 1,
+      "ready": 2
+    },
+    "evidence": {
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "errorCode": null
+    },
+    "hiddenRepositories": 2
+  },
+  "merged": {
+    "available": true,
+    "windowDays": 7,
+    "count": 4,
+    "byRepository": [
+      {
+        "repository": "voorbeeld-repo",
+        "merged": 4
+      }
+    ],
+    "evidence": {
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "errorCode": null
+    }
+  },
+  "tracker": {
+    "available": true,
+    "updates": [
+      {
+        "number": 24,
+        "date": "23/7",
+        "title": null
+      }
+    ],
+    "decisionPoints": [
+      {
+        "id": "23a",
+        "title": null
+      }
+    ],
+    "evidence": {
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "errorCode": null
+    },
+    "updatesTextWithheld": true,
+    "decisionPointsTextWithheld": true
+  },
+  "decisions": {
+    "available": true,
+    "entries": [
+      {
+        "id": "D-0001",
+        "date": "2026-07-15",
+        "decision": null
+      }
+    ],
+    "evidence": {
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "errorCode": null
+    },
+    "textWithheld": true
+  },
+  "fleet": {
+    "available": true,
+    "tracks": [
+      {
+        "track": "VOORBEELD",
+        "lastChangeAt": "2026-07-22T09:00:00Z",
+        "trust": "VERIFIED_CURRENT"
+      }
+    ],
+    "evidence": {
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "errorCode": null
+    },
+    "hiddenTracks": 1
+  },
+  "logbook": {
+    "available": false,
+    "entries": [],
+    "evidence": {
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "SOURCE_UNAVAILABLE",
+      "errorCode": "BRON_ONBEREIKBAAR"
+    },
+    "textWithheld": true
+  },
+  "ci": {
+    "available": true,
+    "lights": [
+      {
+        "repository": "voorbeeld-repo",
+        "state": "GROEN",
+        "at": "2026-07-23T08:00:00Z"
+      },
+      {
+        "repository": "andere-repo",
+        "state": "GEEN_CI",
+        "at": null
+      },
+      {
+        "repository": "derde-repo",
+        "state": "ONBEKEND",
+        "at": null
+      }
+    ],
+    "evidence": {
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "errorCode": null
+    },
+    "hiddenCiRepositories": 0
+  }
+}

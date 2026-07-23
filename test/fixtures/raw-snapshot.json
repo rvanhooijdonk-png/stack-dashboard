@@ -1,0 +1,162 @@
+{
+  "generatedAt": "2026-07-23T12:00:00.000Z",
+  "workstreams": [
+    {
+      "id": "01",
+      "title": "Voorbeeldworkstream",
+      "estimate": "1-2 dagen",
+      "public": true,
+      "internNotitie": "NIET PUBLICEREN"
+    },
+    {
+      "id": "02",
+      "title": "Project Saffier: overname klant Zephyr",
+      "estimate": "vrijdag live, wacht op Gemini"
+    },
+    {
+      "id": "03",
+      "title": "Vrijgegeven maar met statustekst i.p.v. duur",
+      "estimate": "Railway-diagnose: klaar, wacht op Richard",
+      "public": true
+    }
+  ],
+  "pullRequests": {
+    "available": true,
+    "repositories": [
+      {
+        "repository": "r",
+        "open": 1,
+        "draft": 0,
+        "ready": 1,
+        "url": "https://intern/pr/1"
+      }
+    ],
+    "hiddenRepositories": 3,
+    "totals": {
+      "open": 1,
+      "draft": 0,
+      "ready": 1
+    },
+    "evidence": {
+      "source": "s",
+      "sourceRef": "INTERN/PAD",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "https://intern",
+      "error": null
+    }
+  },
+  "merged": {
+    "available": true,
+    "windowDays": 7,
+    "count": 0,
+    "byRepository": [],
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "p",
+      "error": null
+    }
+  },
+  "tracker": {
+    "available": true,
+    "updates": [
+      {
+        "number": 24,
+        "date": "23/7",
+        "title": "KLANTGEHEIM in de kop"
+      }
+    ],
+    "decisionPoints": [
+      {
+        "id": "24a",
+        "title": "overname van klant Zephyr"
+      }
+    ],
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "UNVERIFIED",
+      "proofUrl": "p",
+      "error": "Project Saffier staat in CONTROL/KLANTEN/Zephyr.md"
+    }
+  },
+  "decisions": {
+    "available": true,
+    "entries": [
+      {
+        "id": "D-0013",
+        "date": "2026-07-23",
+        "decision": "Project Saffier: overname van klant Zephyr gaat vrijdag live"
+      }
+    ],
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "p",
+      "error": null
+    }
+  },
+  "fleet": {
+    "available": true,
+    "tracks": [
+      {
+        "track": "VOORBEELD",
+        "lastChangeAt": "2026-07-22T09:00:00Z",
+        "trust": "VERIFIED_CURRENT",
+        "internNotitie": "NIET PUBLICEREN"
+      }
+    ],
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "p",
+      "error": null
+    },
+    "hiddenTracks": 2
+  },
+  "logbook": {
+    "available": true,
+    "entries": [
+      {
+        "title": "journaalkop met interne duiding"
+      }
+    ],
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "p",
+      "error": null
+    }
+  },
+  "ci": {
+    "available": true,
+    "lights": [
+      {
+        "repository": "r",
+        "state": "GROEN",
+        "conclusion": "success",
+        "at": "2026-07-23T08:00:00Z",
+        "workflow": "geheime-workflow-naam"
+      }
+    ],
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "p",
+      "error": null
+    },
+    "hiddenCiRepositories": 1
+  }
+}
