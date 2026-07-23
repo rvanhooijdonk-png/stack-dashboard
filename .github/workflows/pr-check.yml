@@ -63,9 +63,19 @@ jobs:
 
       # Genereren hoort erbij: zonder output valt er niets te saneren en niets te scannen.
       # Er wordt hier alleen gebouwd en gecontroleerd — nergens geüpload of gepubliceerd.
+      #
+      # Nadrukkelijk NIET ORG_PR_READ_TOKEN, anders dan in publish.yml. Bij een pull request
+      # vanuit een branch in deze repository zijn repository- en org-secrets gewoon
+      # beschikbaar, terwijl checkout het merge-resultaat inclusief de PR-code uitvoert. Een
+      # PR die scripts/build.mjs of deze workflow aanpast zou het org-token dan kunnen
+      # wegsturen; `permissions:` beperkt alleen GITHUB_TOKEN, niet een eigen secret. Het
+      # alternatief pull_request_target is juist gevaarlijker zodra er PR-code draait.
+      # Gevolg: de org-brede PR-secties vallen in deze controle terug op SOURCE_UNAVAILABLE.
+      # Dat is precies wat we hier willen weten — dat de generator en de saneerpoort werken,
+      # niet of het org-token geldig is. Die laatste vraag beantwoordt de main-run.
       - name: Genereren (read-only aggregatie)
         env:
-          GH_TOKEN: ${{ secrets.ORG_PR_READ_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: node scripts/build.mjs
 
       - name: Alleen toegestane bestanden in de publicatiemap
