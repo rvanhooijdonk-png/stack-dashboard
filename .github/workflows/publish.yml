@@ -31,8 +31,14 @@ jobs:
         with:
           node-version: '20'
 
+      # Geen pad-argument, want elke vorm mét argument is versiegevoelig: node 20 vouwt een glob
+      # in `--test` niet zelf uit (dat kan pas vanaf 21) en de aanhalingstekens hielden de shell
+      # er ook vanaf, dus zocht de runner letterlijk naar een bestand `test/*.test.mjs`; een map
+      # meegeven werkt op 20 wél maar laat node 22+ juist crashen ("Cannot find module"), omdat
+      # die een map als te draaien module leest. Kaal `node --test` doet op beide de ontdekking
+      # zelf, vindt dezelfde 69 tests, en neemt een nieuw testbestand vanzelf mee.
       - name: Tests
-        run: node --test 'test/*.test.mjs'
+        run: node --test
 
       # Poort 3 komt van buiten onze eigen regexen. Vaste versie, geverifieerde checksum:
       # een secretsscanner die je niet kunt vertrouwen, is geen poort.
