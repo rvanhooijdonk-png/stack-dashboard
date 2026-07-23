@@ -77,9 +77,23 @@ test('draagt een restrictieve CSP', () => {
   assert.match(html, /default-src 'none'/);
 });
 
-test('waarschuwt zichtbaar dat een oude stempel een kapotte build betekent', () => {
+test('waarschuwt zichtbaar dat een oude stempel betekent dat er niets gepubliceerd is', () => {
+  // Stond hier eerst als "ouder dan een uur betekent dat de build stukstaat". Dat is gemeten
+  // onwaar: de geplande kwartierrun van GitHub vuurt hier niet (drie slots achter elkaar
+  // overgeslagen), dus een oude stempel zegt alleen dat er sindsdien niet gepubliceerd is.
   const html = renderHtml(fixture);
-  assert.match(html, /Een stempel ouder dan een uur betekent dat de build stukstaat/);
+  assert.match(html, /er is sindsdien niets gepubliceerd/i);
+});
+
+test('de pagina belooft geen verversingsinterval dat we niet waarmaken', () => {
+  // De stempelregel mag zeggen dat de bróuwser opnieuw ophaalt — dat doet de meta-refresh echt.
+  // Ze mag niet suggereren dat de dáta elk kwartier ververst, want dat hangt aan een scheduler
+  // die hier niet betrouwbaar draait. De lijst met verboden formuleringen staat in
+  // data/verboden-beloftes.json en wordt in publiekepaginas.test.mjs op béide publieke pagina's
+  // toegepast; hier staat alleen wat deze pagina in de plaats zegt.
+  const html = renderHtml(fixture);
+  assert.match(html, /niet op een gegarandeerd interval/i);
+  assert.match(html, /bij elke push naar main en bij een handmatige run/i);
 });
 
 test('meldt verborgen repo\'s in plaats van ze bij naam te noemen', () => {

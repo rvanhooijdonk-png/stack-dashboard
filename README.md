@@ -45,9 +45,35 @@ build. Die is weg; `data/fixture.json` dient nu alleen de tests.
 
 ## Publicatie
 
-GitHub Pages, gebouwd door `.github/workflows/publish.yml`: elke 15 minuten, bij elke push naar
-`main`, en handmatig via *Run workflow*. De pagina ververst zichzelf met
+GitHub Pages, gebouwd door `.github/workflows/publish.yml`: bij elke push naar `main` en
+handmatig via *Run workflow*. De pagina haalt zichzelf opnieuw op met
 `<meta http-equiv="refresh">`; er draait geen client-side JavaScript.
+
+**De kwartiercron staat ingesteld maar vuurt hier niet.** Gemeten op 2026-07-23: na de merge van
+#3 zijn de slots van 15:45, 16:00 en 16:15 alle drie leeg voorbijgegaan — nul runs met
+`event=schedule`. Geen quotakwestie (publieke repo, onbeperkte minuten) en geen uitgeschakelde
+workflow (`state=active`). Wat de meting bewijst: déze workflow werd in dat tijdvak niet gestart.
+De oorzaak is niet los aangetoond; GitHub documenteert zelf dat geplande runs vertraagd en bij
+drukte gedropt worden, met het hele uur als expliciet genoemd druk moment — en `*/15` raakt dat
+eenmaal per uur. De cron blijft
+staan — hij kost hier geen Actions-minuten en levert winst zodra hij wél aanslaat — maar hij telt
+niet als garantie. De trigger die je zelf in de hand hebt:
+
+```
+gh workflow run publish.yml --repo rvanhooijdonk-png/stack-dashboard
+```
+
+Dat commando garandeert een *aanvraag*, niet dat build en deploy slagen — controleer de run.
+
+Beide publieke pagina's zeggen dit ook zelf: geen interval beloven, en melden dat een oude stempel
+betekent dat er sindsdien niets is gepubliceerd. `data/verboden-beloftes.json` houdt de
+formuleringen bij die dat zouden ondermijnen; `test/publiekepaginas.test.mjs` toetst ze op de
+gewone pagina én op de foutpagina in de workflow.
+
+Zodra de autopilot-runner op de mini draait — die heeft al een waakvlam — kan die dit commando elk
+kwartier aanroepen en de uitkomst nakijken. Dat is de echte fallback: een externe scheduler die
+`workflow_dispatch` aanroept en zo nodig opnieuw probeert. Een tweede *schedule*-workflow zou niets
+oplossen, want die hangt aan dezelfde GitHub-scheduler.
 
 `public/` staat in `.gitignore` — de gegenereerde output wordt nooit gecommit, alleen als
 Pages-artefact gedeployed.
