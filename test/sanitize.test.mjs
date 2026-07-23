@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { sanitizeString, sanitizeTree, assertPublishable } from '../scripts/lib/sanitize.mjs';
+import { sanitizeString, sanitizeTree, assertPublishable, loadDenyTerms } from '../scripts/lib/sanitize.mjs';
 
 // De testwaarden hieronder zijn verzonnen en volgen alleen het vórmpatroon van een echte
 // sleutel. Er staat bewust geen enkel echt credential in deze repo.
@@ -25,11 +25,17 @@ test('redigeert lokale paden en e-mailadressen', () => {
   assert.equal(e.value.includes('@voorbeeld.nl'), false);
 });
 
-test('spaart een git-SHA — dat is juist bewijsmateriaal', () => {
+test('spaart een losstaande git-SHA — dat is juist bewijsmateriaal', () => {
   const sha = 'a'.repeat(40);
-  const { value, findings } = sanitizeString(`commit ${sha}`);
-  assert.ok(value.includes(sha));
+  const { value, findings } = sanitizeString(sha);
+  assert.equal(value, sha);
   assert.equal(findings.length, 0);
+});
+
+test('spaart 40-hex NIET wanneer het middenin andere tekst staat', () => {
+  // Review Codex: een 40-hex waarde kan net zo goed een sleutel zijn als een SHA.
+  const { value } = sanitizeString('commit ' + 'a'.repeat(40));
+  assert.ok(value.includes('[REDACTED]'));
 });
 
 test('vangt hoog-entropische niet-hex strings', () => {
@@ -80,4 +86,63 @@ test('niet-strikte modus redigeert en telt in plaats van te breken', () => {
   const { snapshot, findings } = assertPublishable({ note: 'ghp_' + 'C'.repeat(36) }, { strict: false });
   assert.equal(snapshot.note.includes('ghp_'), false);
   assert.equal(findings.length, 1);
+});
+
+// --- Bevindingen uit de dubbele review van 23-07-2026 (Codex + Gemini) ---
+
+test('saneert ook OBJECTSLEUTELS, niet alleen waarden', () => {
+  const { value, findings } = sanitizeTree({ client_secret: 'ok' });
+  assert.equal(Object.keys(value)[0], '[REDACTED]');
+  assert.ok(findings.some((f) => f.id === 'secret-name'));
+});
+
+test('vangt niet-hoofdletterige secretnamen', () => {
+  for (const naam of ['client_secret', 'api-key', 'githubToken', 'access_token']) {
+    const { value } = sanitizeString(`veld ${naam} ontbreekt`);
+    assert.equal(value.includes(naam), false, naam);
+  }
+});
+
+test('vangt runner- en Windows-paden, niet alleen home', () => {
+  for (const pad of ['/github/workspace/geheim', '/root/.ssh/config', 'C:\\Users\\iemand\\map']) {
+    const { value } = sanitizeString(`pad ${pad}`);
+    assert.equal(value.includes(pad), false, pad);
+  }
+});
+
+test('breekt niet op gewoon proza over wachtwoorden', () => {
+  const text = 'Rotatie van credentials staat nog open; password rotation volgt.';
+  const { findings } = sanitizeString(text);
+  assert.equal(findings.length, 0, 'proza mag de publicatie niet blokkeren');
+});
+
+test('laat een ISO-tijdstempel heel (IPv6-patroon mag die niet raken)', () => {
+  const iso = '2026-07-23T12:00:00.000Z';
+  const { value, findings } = sanitizeString(iso);
+  assert.equal(value, iso);
+  assert.equal(findings.length, 0);
+});
+
+test('kapt te lange strings af vóór regexverwerking (ReDoS-plafond)', () => {
+  const evil = 'x@' + 'a.'.repeat(20000) + '1';
+  const start = process.hrtime.bigint();
+  const { value, findings } = sanitizeString(evil);
+  const ms = Number(process.hrtime.bigint() - start) / 1e6;
+  assert.ok(value.length < 2100);
+  assert.ok(findings.some((f) => f.id === 'oversized'));
+  assert.ok(ms < 250, `sanitize duurde ${ms.toFixed(0)} ms — ReDoS-plafond werkt niet`);
+});
+
+test('deny-terms redigeren eigennamen die geen patroon kan raden', async () => {
+  const { writeFile, mkdtemp } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(join(tmpdir(), 'dash-'));
+  const file = join(dir, 'deny.json');
+  await writeFile(file, JSON.stringify({ terms: ['Acme Holding'] }));
+  assert.equal(loadDenyTerms(file), 1);
+  const { value, findings } = sanitizeString('migratie voor Acme Holding gepland');
+  assert.equal(value.includes('Acme'), false);
+  assert.ok(findings.some((f) => f.id === 'deny-term'));
+  loadDenyTerms(join(dir, 'bestaat-niet.json'));
 });

@@ -8,28 +8,55 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Read-only op de eigen repo; alle GitHub-lezing loopt via ORG_PR_READ_TOKEN.
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+# Standaard niets. Elke job krijgt hieronder precies wat hij nodig heeft.
+permissions: {}
 
 concurrency:
   group: pages
   cancel-in-progress: true
 
+env:
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: '20'
 
       - name: Tests
         run: node --test 'test/*.test.mjs'
+
+      # Poort 3 komt van buiten onze eigen regexen. Vaste versie, geverifieerde checksum:
+      # een secretsscanner die je niet kunt vertrouwen, is geen poort.
+      - name: gitleaks installeren (gepind + checksum)
+        run: |
+          set -euo pipefail
+          curl -sSL --fail -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
+
+      # Bewijs dat poort 3 écht dichtgaat. Faalt deze stap niet, dan is de scan een placebo.
+      - name: Zelftest — een nepsecret MOET de scan laten falen
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/gate-selftest
+          printf 'token: ghp_%s\n' "$(printf 'A%.0s' $(seq 36))" > /tmp/gate-selftest/leak.txt
+          if ./gitleaks dir /tmp/gate-selftest --redact --exit-code 1 --no-banner; then
+            echo "::error::gitleaks vond het geplante nepsecret NIET — de outputpoort werkt niet."
+            exit 1
+          fi
+          echo "zelftest ok: gitleaks faalt op een geplant nepsecret"
+          rm -rf /tmp/gate-selftest
 
       - name: Genereren (read-only aggregatie)
         env:
@@ -38,36 +65,79 @@ jobs:
           GH_TOKEN: ${{ secrets.ORG_PR_READ_TOKEN || github.token }}
         run: node scripts/build.mjs
 
-      # SANITIZE-GATE-poort 3: onafhankelijk van onze eigen regexen.
-      # Faalt deze stap, dan wordt er niet gepubliceerd.
+      - name: Alleen toegestane bestanden in de publicatiemap
+        run: |
+          set -euo pipefail
+          onverwacht=$(find public -mindepth 1 \
+            ! -name 'index.html' ! -name 'status.json' ! -name '.nojekyll' -printf '%P\n')
+          if [ -n "$onverwacht" ]; then
+            echo "::error::onverwachte bestanden in public: $onverwacht"
+            exit 1
+          fi
+
       - name: gitleaks op de output
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITLEAKS_ENABLE_COMMENTS: 'false'
-        with:
-          args: detect --no-git --source public --redact --exit-code 1
+        run: ./gitleaks dir public --redact --exit-code 1 --no-banner
 
       - name: Samenvatting
         run: |
           {
             echo '### stack-dashboard'
             echo ''
-            echo "status: $(node -p "require('./public/snapshot.json').overallStatus")"
+            echo "status: $(node -p "require('./public/status.json').overallStatus")"
             echo ''
-            echo 'Onbereikbare bronnen:'
-            node -p "require('./public/snapshot.json').sources.filter(s=>s.trust==='SOURCE_UNAVAILABLE').map(s=>'- '+s.key).join('\n') || '- geen'"
+            node -p "require('./public/status.json').sources.map(s=>'- '+s.key+': '+s.trust).join('\n')"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: public
+
+  # Faalt de build, dan publiceren we een datavrije foutpagina. Dat is opzettelijk:
+  # GitHub Pages haalt een oude versie niet weg, en een stilstaande groene pagina is
+  # gevaarlijker dan een pagina die zegt dat ze niets weet.
+  failure-page:
+    needs: build
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Foutpagina genereren (geen enkele brondata)
+        run: |
+          set -euo pipefail
+          mkdir -p public
+          : > public/.nojekyll
+          cat > public/index.html <<'HTML'
+          <!doctype html>
+          <html lang="nl"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <meta http-equiv="refresh" content="900">
+          <meta name="robots" content="noindex,nofollow">
+          <title>Stack-dashboard — build gefaald</title>
+          <style>body{margin:0;background:#0f1115;color:#e6e8ec;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+          .w{max-width:640px;margin:0 auto;padding:64px 20px}h1{font-size:22px}p{color:#9aa3b2}</style>
+          </head><body><div class="w">
+          <h1>Geen actuele stand beschikbaar</h1>
+          <p>De generator is afgebroken: een test, de sanitize-gate of de secretsscan gaf een fout.
+          Er wordt met opzet géén oudere stand getoond — een verouderde groene pagina is misleidender
+          dan deze melding.</p>
+          <p>De pagina probeert het elk kwartier opnieuw en herstelt vanzelf zodra een build slaagt.</p>
+          </div></body></html>
+          HTML
+
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         with:
           path: public
 
   deploy:
-    needs: build
+    needs: [build, failure-page]
+    if: always() && (needs.build.result == 'success' || needs.failure-page.result == 'success')
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

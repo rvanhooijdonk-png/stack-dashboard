@@ -54,3 +54,35 @@ test('rendert alle CI-ampeltoestanden zonder te breken', () => {
   assert.match(html, /dot ok/);
   assert.match(html, /geen CI/);
 });
+
+// --- Bevindingen uit de dubbele review van 23-07-2026 (Codex + Gemini) ---
+
+test('een "getal" dat stiekem HTML is, komt er niet in — bewezen probe van Codex', () => {
+  const evil = structuredClone(fixture);
+  evil.pullRequests.repositories[0].open = '</td><script>alert(1)</script><td>';
+  evil.pullRequests.totals.open = '</p><script>alert(2)</script><p>';
+  const html = renderHtml(evil);
+  assert.equal(/<script/i.test(html), false, 'numerieke velden moeten door num() gaan');
+});
+
+test('refreshSeconds kan geen meta-tag-injectie worden', () => {
+  const html = renderHtml(fixture, { refreshSeconds: '0; url=javascript:alert(1)' });
+  assert.equal(html.includes('javascript:'), false);
+  assert.match(html, /<meta http-equiv="refresh" content="900">/);
+});
+
+test('draagt een restrictieve CSP', () => {
+  const html = renderHtml(fixture);
+  assert.match(html, /content-security-policy/i);
+  assert.match(html, /default-src 'none'/);
+});
+
+test('waarschuwt zichtbaar dat een oude stempel een kapotte build betekent', () => {
+  const html = renderHtml(fixture);
+  assert.match(html, /Een stempel ouder dan een uur betekent dat de build stukstaat/);
+});
+
+test('meldt verborgen repo\'s in plaats van ze bij naam te noemen', () => {
+  const html = renderHtml(fixture);
+  assert.match(html, /2 PR's staan in repo's die niet bij naam getoond worden/);
+});

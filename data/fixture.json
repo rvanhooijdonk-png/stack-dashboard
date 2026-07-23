@@ -3,52 +3,162 @@
   "generatedAt": "2026-07-23T12:00:00.000Z",
   "overallStatus": "DEGRADED",
   "sources": [
-    { "key": "pullRequests", "source": "GitHub search API", "sourceRef": "owner:voorbeeld state:open", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "https://github.com/voorbeeld", "error": null },
-    { "key": "logbook", "source": "control / journaal", "sourceRef": "main", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "SOURCE_UNAVAILABLE", "proofUrl": "https://github.com/voorbeeld", "error": "Staat nog niet op main." }
+    {
+      "key": "pullRequests",
+      "source": "GitHub search API",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "error": null
+    },
+    {
+      "key": "logbook",
+      "source": "control / journaal",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "SOURCE_UNAVAILABLE",
+      "error": "Staat nog niet op main."
+    }
   ],
   "workstreams": [
-    { "id": "WS01", "title": "Voorbeeldworkstream", "estimate": "2 weken" }
+    {
+      "id": "WS01",
+      "title": "Voorbeeldworkstream",
+      "estimate": "2 weken"
+    }
   ],
   "pullRequests": {
     "available": true,
-    "repositories": [{ "repository": "voorbeeld-repo", "open": 3, "draft": 1, "ready": 2 }],
-    "totals": { "open": 3, "draft": 1, "ready": 2 },
-    "evidence": { "source": "GitHub search API", "sourceRef": "owner:voorbeeld state:open", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "https://github.com/voorbeeld", "error": null }
+    "repositories": [
+      {
+        "repository": "voorbeeld-repo",
+        "open": 3,
+        "draft": 1,
+        "ready": 2
+      }
+    ],
+    "totals": {
+      "open": 3,
+      "draft": 1,
+      "ready": 2
+    },
+    "evidence": {
+      "source": "GitHub search API",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "error": null
+    },
+    "hiddenRepositories": 2
   },
   "merged": {
     "available": true,
     "windowDays": 7,
     "count": 4,
-    "byRepository": [{ "repository": "voorbeeld-repo", "merged": 4 }],
-    "evidence": { "source": "GitHub search API", "sourceRef": "merged>=2026-07-16", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "https://github.com/voorbeeld", "error": null }
+    "byRepository": [
+      {
+        "repository": "voorbeeld-repo",
+        "merged": 4
+      }
+    ],
+    "evidence": {
+      "source": "GitHub search API",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "error": null
+    }
   },
   "tracker": {
     "available": true,
-    "updates": [{ "number": 24, "date": "23/7", "title": "Voorbeeldupdate" }],
-    "decisionPoints": [{ "id": "23a", "title": "Voorbeeldbeslispunt" }],
-    "evidence": { "source": "control / tracker", "sourceRef": "main", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "https://github.com/voorbeeld", "error": null }
+    "updates": [
+      {
+        "number": 24,
+        "date": "23/7",
+        "title": "Voorbeeldupdate"
+      }
+    ],
+    "decisionPoints": [
+      {
+        "id": "23a",
+        "title": "Voorbeeldbeslispunt"
+      }
+    ],
+    "evidence": {
+      "source": "control / tracker",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "error": null
+    }
   },
   "decisions": {
     "available": true,
-    "entries": [{ "id": "D-0001", "date": "2026-07-15", "decision": "Voorbeeldbesluit" }],
-    "evidence": { "source": "control / besluiten", "sourceRef": "main", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "https://github.com/voorbeeld", "error": null }
+    "entries": [
+      {
+        "id": "D-0001",
+        "date": "2026-07-15",
+        "decision": "Voorbeeldbesluit"
+      }
+    ],
+    "evidence": {
+      "source": "control / besluiten",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "error": null
+    }
   },
   "fleet": {
     "available": true,
-    "tracks": [{ "track": "VOORBEELD", "lastChangeAt": "2026-07-22T09:00:00Z", "trust": "VERIFIED_CURRENT" }],
-    "evidence": { "source": "control / task-queue", "sourceRef": "main", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "https://github.com/voorbeeld", "error": null }
+    "tracks": [
+      {
+        "track": "VOORBEELD",
+        "lastChangeAt": "2026-07-22T09:00:00Z",
+        "trust": "VERIFIED_CURRENT"
+      }
+    ],
+    "evidence": {
+      "source": "control / task-queue",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "error": null
+    }
   },
   "logbook": {
     "available": false,
     "entries": [],
-    "evidence": { "source": "control / journaal", "sourceRef": "main", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "SOURCE_UNAVAILABLE", "proofUrl": "https://github.com/voorbeeld", "error": "Staat nog niet op main." }
+    "evidence": {
+      "source": "control / journaal",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "SOURCE_UNAVAILABLE",
+      "error": "Staat nog niet op main."
+    }
   },
   "ci": {
     "available": true,
     "lights": [
-      { "repository": "voorbeeld-repo", "state": "GROEN", "conclusion": "success", "at": "2026-07-23T08:00:00Z", "workflow": "ci" },
-      { "repository": "andere-repo", "state": "GEEN_CI", "conclusion": null, "at": null, "workflow": null }
+      {
+        "repository": "voorbeeld-repo",
+        "state": "GROEN",
+        "conclusion": "success",
+        "at": "2026-07-23T08:00:00Z",
+        "workflow": "ci"
+      },
+      {
+        "repository": "andere-repo",
+        "state": "GEEN_CI",
+        "conclusion": null,
+        "at": null,
+        "workflow": null
+      },
+      {
+        "repository": "derde-repo",
+        "state": "ONBEKEND",
+        "conclusion": null,
+        "at": null,
+        "workflow": null
+      }
     ],
-    "evidence": { "source": "GitHub Actions API", "sourceRef": "laatste run", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "https://github.com/voorbeeld", "error": null }
+    "evidence": {
+      "source": "GitHub Actions API",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "error": null
+    }
   }
 }

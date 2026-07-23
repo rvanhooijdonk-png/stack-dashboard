@@ -1,13 +1,23 @@
 /**
- * SANITIZE-GATE — de enige plek waar tekst uit privé-canon naar publieke output mag.
+ * SANITIZE-GATE — de laatste grens tussen privé-canon en publieke output.
  *
- * Ontwerpregel: fail-closed. Een patroon dat we herkennen wordt geredigeerd én geteld;
- * bij een strikte build (STRICT=1) breekt een enkele treffer de publicatie af. Beter
- * geen dashboard dan een dashboard dat iets prijsgeeft.
+ * Ontwerpregel: fail-closed. Een herkend patroon wordt geredigeerd én geteld; in strikte modus
+ * breekt één treffer de publicatie af. Beter geen dashboard dan een dashboard dat iets prijsgeeft.
  *
- * Wat hier NIET thuishoort: het besluit wát er getoond wordt. Dat is de veldenallowlist
- * in collect.mjs. Deze module is het laatste vangnet, niet het eerste.
+ * EERLIJKE GRENS VAN DEZE MODULE (review Codex + Gemini, 23-07-2026): dit is
+ * *fail-on-known-pattern*, geen semantisch begrip. Een klantnaam, contracttekst of intern
+ * projectcodenaam matcht geen enkel patroon en zou hier gewoon doorheen gaan. Daarom is de
+ * échte verdediging de veldenallowlist in collect.mjs plus de publieke DTO in build.mjs: wat
+ * nooit wordt opgehaald of gekopieerd, kan niet lekken. Deze module is het vangnet eronder,
+ * niet de muur zelf. Voor eigennamen die weg moeten: `data/deny-terms.json`.
  */
+
+import { readFileSync } from 'node:fs';
+
+/** Langere strings worden vóór regexverwerking afgekapt — ReDoS-plafond én lekplafond. */
+const MAX_STRING = 2000;
+const PLACEHOLDER = '[REDACTED]';
+const TRUNCATED = ' […]';
 
 /** Patronen die nooit in publieke output mogen belanden. Volgorde = toepassingsvolgorde. */
 export const DENY_PATTERNS = [
@@ -19,27 +29,48 @@ export const DENY_PATTERNS = [
   { id: 'slack-token', re: /\bxox[abposr]-[A-Za-z0-9-]{10,}\b/g },
   { id: 'private-key-block', re: /-----BEGIN[A-Z ]*PRIVATE KEY-----/g },
   { id: 'bearer', re: /\bBearer\s+[A-Za-z0-9._-]{16,}/gi },
-  { id: 'url-credentials', re: /\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/gi },
-  // Secret-NAMEN: zelfs de naam publiceren we niet op een openbare pagina
-  { id: 'secret-name', re: /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|PAT)\b/g },
-  // Gevoelige paden en persoonsgegevens
-  { id: 'home-path', re: /(?:\/Users\/|\/home\/|C:\\Users\\)[^\s"'`,;)\]]+/g },
-  { id: 'email', re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
+  // Credentials in een URL. Geen nesting: elk deel heeft zijn eigen, disjuncte tekenklasse.
+  { id: 'url-credentials', re: /\b[a-z][a-z0-9+.-]{0,20}:\/\/[^\s/:@]{1,64}:[^\s/@]{1,64}@/gi },
+
+  // Secret-NAMEN. Op een openbare pagina is de naam zelf al een aanwijzing.
+  // Bewust identifier-vormig, zodat gewone prozawoorden ("wachtwoordrotatie", "credentials")
+  // de build niet breken — die zeggen niets, een veldnaam wel.
+  // Meerdere segmenten toegestaan: in ORG_PR_READ_TOKEN bestaat er geen \b vóór "READ".
+  { id: 'secret-name', re: /\b[A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)*?[_-](?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|PAT)\b/gi },
+  { id: 'secret-name-camel', re: /\b[a-z][a-z0-9]*(?:Token|Secret|Password|Passwd|Credentials?|ApiKey|AccessKey|PrivateKey)\b/g },
+  { id: 'secret-assignment', re: /\b(?:password|passwd|secret|token|apikey|api_key)\s*[:=]\s*\S{4,}/gi },
+
+  // Gevoelige paden: home-, runner- en containerpaden, Windows-drives en UNC-shares.
+  { id: 'home-path', re: /(?:\/Users\/|\/home\/|\/root\/|\/workspace\/|\/github\/workspace\/)[^\s"'`,;)\]]*/g },
+  { id: 'windows-path', re: /(?:[A-Za-z]:\\|\\\\)[^\s"'`,;)\]]+/g },
+
+  // Persoonsgegevens en netwerkadressen
+  { id: 'email', re: /\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}\b/g },
   { id: 'ipv4', re: /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g },
+  // Minimaal vier dubbele punten: een ISO-tijdstempel (`12:00:00`) haalt dat niet en blijft heel.
+  { id: 'ipv6', re: /\b(?:[0-9A-Fa-f]{1,4}:){4,7}[0-9A-Fa-f]{1,4}\b/g },
 ];
 
 /**
- * Waarden die na redactie nog steeds verdacht lang/hoog-entropisch zijn.
- *
- * Twee patronen in plaats van één, omdat een URL-pad anders als blob telt: bewijs-URL's naar
- * GitHub zijn lang en bestaan uit dezelfde tekens. Daarom wordt `/` hier als scheidingsteken
- * behandeld — elk padsegment wordt apart gewogen — en vangt een tweede patroon klassiek base64
- * (waarin `/` wél voorkomt maar `.` en `-` niet, zodat echte URL's er niet in vallen).
+ * Hoog-entropische resten. Twee patronen: `/` scheidt padsegmenten (anders telt een lange
+ * bewijs-URL als blob), en een tweede patroon vangt klassiek base64 mét `/` maar zonder `.`/`-`.
  */
 const HIGH_ENTROPY = /\b[A-Za-z0-9+_-]{40,}={0,2}\b/g;
 const BASE64_BLOB = /\b[A-Za-z0-9+/]{40,}={0,2}\b/g;
 
-const PLACEHOLDER = '[REDACTED]';
+/** Eigennamen die weg moeten en die geen patroon kan raden. Beheerd door mensen. */
+let denyTerms = null;
+export function loadDenyTerms(path) {
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    denyTerms = (Array.isArray(raw) ? raw : raw.terms ?? [])
+      .filter((t) => typeof t === 'string' && t.trim().length >= 3)
+      .map((t) => t.trim().toLowerCase());
+  } catch {
+    denyTerms = [];
+  }
+  return denyTerms.length;
+}
 
 /**
  * Redigeer één string. Geeft de gesaneerde tekst plus de gevonden patroon-id's terug.
@@ -47,33 +78,54 @@ const PLACEHOLDER = '[REDACTED]';
  */
 export function sanitizeString(value, { path = '' } = {}) {
   if (typeof value !== 'string') return { value, findings: [] };
-  let out = value;
+
   const findings = [];
+  let out = value;
+
+  // ReDoS-plafond: begrens vóór er ook maar één regex over de string loopt.
+  if (out.length > MAX_STRING) {
+    out = out.slice(0, MAX_STRING) + TRUNCATED;
+    findings.push({ id: 'oversized', path });
+  }
 
   for (const { id, re } of DENY_PATTERNS) {
     re.lastIndex = 0;
-    if (re.test(out)) {
+    if (!re.test(out)) continue;
+    re.lastIndex = 0;
+    out = out.replace(re, PLACEHOLDER);
+    findings.push({ id, path });
+  }
+
+  // Een op zichzelf staande git-SHA is bewijsmateriaal en blijft staan; een 40-hexwaarde
+  // middenin andere tekst krijgt dat voorrecht niet (review Codex: 40-hex kan ook een sleutel zijn).
+  const isBareSha = /^[0-9a-f]{40}$/i.test(out.trim());
+  if (!isBareSha) {
+    for (const re of [HIGH_ENTROPY, BASE64_BLOB]) {
       re.lastIndex = 0;
+      if (!re.test(out)) continue;
+      re.lastIndex = 0;
+      const before = out;
       out = out.replace(re, PLACEHOLDER);
-      findings.push({ id, path });
+      if (out !== before) findings.push({ id: 'high-entropy', path });
     }
   }
 
-  // Git-SHA's zijn hex en juist bewijsmateriaal — die sparen we.
-  const keepSha = (m) => (/^[0-9a-f]{40}$/i.test(m) ? m : PLACEHOLDER);
-  for (const re of [HIGH_ENTROPY, BASE64_BLOB]) {
-    re.lastIndex = 0;
-    if (!re.test(out)) continue;
-    re.lastIndex = 0;
-    const before = out;
-    out = out.replace(re, keepSha);
-    if (out !== before) findings.push({ id: 'high-entropy', path });
+  if (denyTerms?.length) {
+    const lower = out.toLowerCase();
+    for (const term of denyTerms) {
+      if (!lower.includes(term)) continue;
+      out = out.replace(new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), PLACEHOLDER);
+      findings.push({ id: 'deny-term', path });
+    }
   }
 
   return { value: out, findings };
 }
 
-/** Loop een willekeurige JSON-structuur af en saneer elke string erin. */
+/**
+ * Loop een JSON-structuur af en saneer elke string — waarden én sleutels. Een veldnaam als
+ * `client_secret` is zelf al informatie, en het pad in een bevinding mag geen lek zijn.
+ */
 export function sanitizeTree(node, { path = '$' } = {}) {
   const findings = [];
 
@@ -85,7 +137,13 @@ export function sanitizeTree(node, { path = '$' } = {}) {
     }
     if (Array.isArray(n)) return n.map((v, i) => walk(v, `${p}[${i}]`));
     if (n && typeof n === 'object') {
-      return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, walk(v, `${p}.${k}`)]));
+      const out = {};
+      for (const [k, v] of Object.entries(n)) {
+        const sk = sanitizeString(k, { path: `${p}.<key>` });
+        findings.push(...sk.findings);
+        out[sk.value] = walk(v, `${p}.${sk.value}`);
+      }
+      return out;
     }
     return n;
   };

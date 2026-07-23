@@ -7,8 +7,9 @@
 const AMBER = {
   GROEN: { dot: 'ok', label: 'groen' },
   ROOD: { dot: 'bad', label: 'rood' },
-  GRIJS: { dot: 'warn', label: 'onbekend' },
+  GRIJS: { dot: 'warn', label: 'afgebroken of overgeslagen' },
   GEEN_CI: { dot: 'none', label: 'geen CI' },
+  ONBEKEND: { dot: 'warn', label: 'niet op te halen' },
 };
 
 const TRUST_LABEL = {
@@ -24,6 +25,15 @@ export function esc(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/**
+ * Getallen worden als getal geïnterpoleerd, niet als string. Een "aantal" dat stiekem een
+ * string met HTML erin is, werd anders rauw in de pagina gezet — review Codex, bewezen probe.
+ */
+export function num(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? String(Math.trunc(n)) : '—';
 }
 
 const dt = (iso) => {
@@ -64,10 +74,14 @@ function section(id, title, ev, body) {
 function pullRequests(pr) {
   if (!pr?.available) return section('prs', 'Open pull requests', pr?.evidence, unavailable(pr?.evidence));
   const rows = pr.repositories.map((r) => `<tr>
-      <td>${esc(r.repository)}</td><td class="num">${r.open}</td>
-      <td class="num">${r.ready}</td><td class="num muted">${r.draft}</td></tr>`).join('\n');
+      <td>${esc(r.repository)}</td><td class="num">${num(r.open)}</td>
+      <td class="num">${num(r.ready)}</td><td class="num muted">${num(r.draft)}</td></tr>`).join('\n');
+  const hidden = pr.hiddenRepositories
+    ? `<p class="lead muted">${num(pr.hiddenRepositories)} PR's staan in repo's die niet bij naam getoond worden; die zijn samengevoegd tot “overige repo's”.</p>`
+    : '';
   return section('prs', 'Open pull requests', pr.evidence, `
-  <p class="lead"><strong>${pr.totals.open}</strong> open over <strong>${pr.repositories.length}</strong> repo's · ${pr.totals.ready} klaar · ${pr.totals.draft} draft</p>
+  <p class="lead"><strong>${num(pr.totals.open)}</strong> open · ${num(pr.totals.ready)} klaar · ${num(pr.totals.draft)} draft</p>
+  ${hidden}
   <div class="scroll"><table>
     <thead><tr><th>Repo</th><th class="num">open</th><th class="num">klaar</th><th class="num">draft</th></tr></thead>
     <tbody>${rows}</tbody>
@@ -77,15 +91,15 @@ function pullRequests(pr) {
 function merged(m) {
   if (!m?.available) return section('merged', 'Gemerged', m?.evidence, unavailable(m?.evidence));
   const rows = m.byRepository.slice(0, 12)
-    .map((r) => `<tr><td>${esc(r.repository)}</td><td class="num">${r.merged}</td></tr>`).join('\n');
-  return section('merged', `Gemerged (${m.windowDays} dagen)`, m.evidence, `
-  <p class="lead"><strong>${m.count}</strong> pull requests gemerged</p>
+    .map((r) => `<tr><td>${esc(r.repository)}</td><td class="num">${num(r.merged)}</td></tr>`).join('\n');
+  return section('merged', `Gemerged (${num(m.windowDays)} dagen)`, m.evidence, `
+  <p class="lead"><strong>${num(m.count)}</strong> pull requests gemerged</p>
   <div class="scroll"><table><thead><tr><th>Repo</th><th class="num">merges</th></tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 
 function tracker(t) {
   if (!t?.available) return section('tracker', 'Tracker', t?.evidence, unavailable(t?.evidence));
-  const updates = t.updates.map((u) => `<li><span class="tag">${u.number}</span> ${esc(u.title)} <span class="muted">${esc(u.date)}</span></li>`).join('\n');
+  const updates = t.updates.map((u) => `<li><span class="tag">${num(u.number)}</span> ${esc(u.title)} <span class="muted">${esc(u.date)}</span></li>`).join('\n');
   const points = t.decisionPoints.length
     ? `<ul class="chips">${t.decisionPoints.map((d) => `<li><span class="tag warn">${esc(d.id)}</span> ${esc(d.title)}</li>`).join('')}</ul>`
     : '<p class="empty">Geen open beslispunten in de tracker.</p>';
@@ -184,14 +198,17 @@ a{color:var(--acc)}
 export function renderHtml(snapshot, { refreshSeconds = 900 } = {}) {
   const s = snapshot;
   const stale = s.sources.filter((x) => x.trust !== 'VERIFIED_CURRENT');
+  // Harde integer: deze waarde staat in een meta-tag en mag daar niets anders kunnen worden.
+  const refresh = Math.min(3600, Math.max(60, Math.trunc(Number(refreshSeconds)) || 900));
 
   return `<!doctype html>
 <html lang="nl">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="${refreshSeconds}">
+<meta http-equiv="refresh" content="${refresh}">
 <meta name="robots" content="noindex,nofollow">
+<meta http-equiv="content-security-policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
 <title>Stack-dashboard — ${esc(s.generatedAt.slice(0, 16).replace('T', ' '))} UTC</title>
 <style>${STYLE}</style>
 </head>
@@ -199,10 +216,13 @@ export function renderHtml(snapshot, { refreshSeconds = 900 } = {}) {
 <div class="wrap">
 <header>
   <h1>Stack-dashboard</h1>
-  <p class="stamp">Laatst bijgewerkt: <strong>${esc(dt(s.generatedAt))}</strong> · ververst automatisch elke ${Math.round(refreshSeconds / 60)} min</p>
+  <p class="stamp">Laatst bijgewerkt: <strong>${esc(dt(s.generatedAt))}</strong> · ververst automatisch elke ${num(refresh / 60)} min</p>
 </header>
 <p class="muted">Weergave van bestaande canon — nooit een tweede waarheid. Alles is read-only en gesaneerd;
-${stale.length === 0 ? 'alle bronnen zijn geverifieerd.' : `<strong>${stale.length}</strong> van ${s.sources.length} bronnen is niet geverifieerd (zie de badges).`}</p>
+${stale.length === 0 ? 'alle bronnen zijn geverifieerd.' : `<strong>${num(stale.length)}</strong> van ${num(s.sources.length)} bronnen is niet geverifieerd (zie de badges).`}
+<strong>Lees altijd eerst de stempel hierboven:</strong> deze pagina is statisch, dus als de generator faalt
+blijft de laatst geslaagde versie staan. Een stempel ouder dan een uur betekent dat de build stukstaat,
+niet dat de stack stilstaat.</p>
 
 <div class="grid">
   ${pullRequests(s.pullRequests)}
@@ -217,10 +237,11 @@ ${stale.length === 0 ? 'alle bronnen zijn geverifieerd.' : `<strong>${stale.leng
 ${workstreams(s.workstreams)}
 
 <footer>
-  Gegenereerd door <code>stack-dashboard</code> (contract ${esc(s.contractVersion)}) uit publieke en
-  gecureerde bronnen op GitHub. Deze pagina toont geen secretnamen, tokens, klantdata of lokale paden:
-  elke build passeert een sanitize-gate die fail-closed is. Bij een onbereikbare bron staat er
-  <em>bron onbereikbaar</em> — geen gecachte groene stand.
+  Gegenereerd door <code>stack-dashboard</code> (contract ${esc(s.contractVersion)}) uit gecureerde bronnen
+  op GitHub. Wat hier staat is met de hand geselecteerd: koppen, tellingen en statussen — geen
+  documentinhoud, geen tokens, geen secretnamen, geen lokale paden. Elke build passeert een
+  sanitize-gate die fail-closed is, plus een onafhankelijke secretsscan vóór publicatie.
+  Bij een onbereikbare bron staat er <em>bron onbereikbaar</em> — geen gecachte groene stand.
 </footer>
 </div>
 </body>
