@@ -1,97 +1,24 @@
-[
- {
-  "id": "00",
-  "title": "Stack Control(control-plane)",
-  "estimate": "PR#98: uren (wacht op Gemini) · volledige triage: dagen"
- },
- {
-  "id": "01",
-  "title": "GitHub Canon & Obsidian Sync",
-  "estimate": "4-7 uur eerste findings · volledige 335-set: dagen"
- },
- {
-  "id": "02",
-  "title": "Autopilot / Zero-start Orchestration",
-  "estimate": "1-2 dagen"
- },
- {
-  "id": "03",
-  "title": "Command Canon & Model Governance",
-  "estimate": "Besluit eerst · uitvoering 1-2 dagen"
- },
- {
-  "id": "04",
-  "title": "Platform Core & Execution Runtime",
-  "estimate": "Her-review: 15-30 min · PAT-check: 5 min zodra gedaan"
- },
- {
-  "id": "05",
-  "title": "Claude Ops / Richard Queue",
-  "estimate": "Kanaal: 1-2 dagen — in de wachtrij"
- },
- {
-  "id": "06",
-  "title": "CHIEF (COA)",
-  "estimate": "Doc-fix: nu mogelijk · rest 1-1,5 dag"
- },
- {
-  "id": "07",
-  "title": "CRM, Mail, Consent & Revenue Ops",
-  "estimate": "Merge: 2 klikken · ALTER: 10 min · Railway-diagnose: klaar, wacht op Richards 2 stappen hierboven"
- },
- {
-  "id": "08",
-  "title": "Studio (Content Pipeline)",
-  "estimate": "2-3 uur"
- },
- {
-  "id": "09",
-  "title": "Trading Intelligence",
-  "estimate": "2-4 dagen"
- },
- {
-  "id": "10",
-  "title": "Web Factory",
-  "estimate": "1-2 dagen (cutover is het risicovolle deel)"
- },
- {
-  "id": "11",
-  "title": "Keynote Studio & Media",
-  "estimate": "Blocker 1-3 dagen · opschalen dagen-weken (scope-afhankelijk)"
- },
- {
-  "id": "12",
-  "title": "Infra/Security & Backup",
-  "estimate": "2-2,5 uur"
- },
- {
-  "id": "13",
-  "title": "Stack Dashboard",
-  "estimate": "Grotendeels afgerond — 1 klein besluit open"
- },
- {
-  "id": "14",
-  "title": "Scraper & Lead Intelligence",
-  "estimate": "1-1,5 dag (excl. opportunity-engine)"
- },
- {
-  "id": "15",
-  "title": "Health / Wearables",
-  "estimate": "30 min"
- },
- {
-  "id": "16",
-  "title": "Knowledge Base",
-  "estimate": "Enkele uren onderzoek — in de wachtrij"
- },
- {
-  "id": "17",
-  "title": "Video Automation",
-  "estimate": "2-4 uur voor de cheap fixes"
- },
- {
-  "id": "18",
-  "title": "Customer Conversation Intelligence",
-  "estimate": "Statusfix: afgerond · bouw: 2-4 weken (laag vertrouwen)"
- }
-]
+{
+  "_toelichting": "De roadmapsectie. Deze inhoud staat in een OPENBARE repo en is dus per definitie publiek — dit bestand is daarmee zelf de publicatiebeslissing, met de hand genomen. Regels, na de derde review (Codex, 23-07-2026): (1) `public: true` is verplicht per regel, letterlijk de boolean; zonder dat toont de pagina alleen het nummer. (2) `title` is de neutrale workstreamnaam, geen status. (3) `estimate` is uitsluitend een duur — de build weigert alles wat niet aan het duurpatroon voldoet. De vorige versie bevatte operationele tekst ('wacht op Gemini', 'Railway-diagnose: klaar, wacht op Richards 2 stappen') en dat is precies het soort proza dat op een openbare pagina niets te zoeken heeft. De stand per workstream staat in de canon, niet hier.",
+  "workstreams": [
+    { "id": "00", "title": "Stack Control (control-plane)", "estimate": "dagen", "public": true },
+    { "id": "01", "title": "GitHub Canon & Obsidian Sync", "estimate": "dagen", "public": true },
+    { "id": "02", "title": "Autopilot / Zero-start Orchestration", "estimate": "1-2 dagen", "public": true },
+    { "id": "03", "title": "Command Canon & Model Governance", "estimate": "1-2 dagen", "public": true },
+    { "id": "04", "title": "Platform Core & Execution Runtime", "estimate": "uren", "public": true },
+    { "id": "05", "title": "Claude Ops / Richard Queue", "estimate": "1-2 dagen", "public": true },
+    { "id": "06", "title": "CHIEF (COA)", "estimate": "1-2 dagen", "public": true },
+    { "id": "07", "title": "CRM, Mail, Consent & Revenue Ops", "estimate": "uren", "public": true },
+    { "id": "08", "title": "Studio (Content Pipeline)", "estimate": "2-3 uur", "public": true },
+    { "id": "09", "title": "Trading Intelligence", "estimate": "2-4 dagen", "public": true },
+    { "id": "10", "title": "Web Factory", "estimate": "1-2 dagen", "public": true },
+    { "id": "11", "title": "Keynote Studio & Media", "estimate": "weken", "public": true },
+    { "id": "12", "title": "Infra/Security & Backup", "estimate": "uren", "public": true },
+    { "id": "13", "title": "Stack Dashboard", "estimate": "dagen", "public": true },
+    { "id": "14", "title": "Scraper & Lead Intelligence", "estimate": "1-2 dagen", "public": true },
+    { "id": "15", "title": "Health / Wearables", "estimate": "30 minuten", "public": true },
+    { "id": "16", "title": "Knowledge Base", "estimate": "uren", "public": true },
+    { "id": "17", "title": "Video Automation", "estimate": "2-4 uur", "public": true },
+    { "id": "18", "title": "Customer Conversation Intelligence", "estimate": "weken", "public": true }
+  ]
+}

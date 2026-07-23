@@ -39,11 +39,9 @@ open public/index.html
 Vereist Node ≥ 20 en een ingelogde `gh`. Zonder org-breed leesrecht vallen de PR-secties terug op
 `SOURCE_UNAVAILABLE` — zichtbaar leeg, nooit stilletjes groen.
 
-Bouwen zonder netwerk, tegen een vaste fixture:
-
-```sh
-node scripts/build.mjs --fixture data/fixture.json
-```
+Er is bewust **één** weg naar `public/`. De vroegere `--fixture`-modus sloeg de publieke reducer
+over en schreef een bestand rechtstreeks naar de publicatiemap — een tweede, ongecontroleerde
+build. Die is weg; `data/fixture.json` dient nu alleen de tests.
 
 ## Publicatie
 

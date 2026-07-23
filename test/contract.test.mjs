@@ -5,38 +5,52 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { toPublicSnapshot } from '../scripts/build.mjs';
+import { validate } from '../scripts/lib/validate.mjs';
 
-// Een contract dat niemand controleert, is een wens. Deze test is met opzet klein: geen
-// validator-afhankelijkheid, wél de twee eigenschappen die er hier toe doen — géén onbekende
-// velden (want additionalProperties: false is precies de belofte "dit lekt niets extra's")
-// en geen ontbrekende verplichte velden.
+// Een contract dat niemand controleert, is een wens. De eerste versie van deze test keek alleen
+// naar topniveau-sleutelnamen — die had een fout diep in een sectie nooit gezien. Sinds de derde
+// review (Codex, 23-07-2026) loopt alles door een echte schemavalidatie.
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const schema = JSON.parse(await readFile(join(ROOT, 'contracts/dashboard-snapshot.schema.json'), 'utf8'));
-const fixture = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8'));
+const read = async (p) => JSON.parse(await readFile(join(ROOT, p), 'utf8'));
+
+const schema = await read('contracts/dashboard-snapshot.schema.json');
+const statusSchema = await read('contracts/status-json.schema.json');
+const fixture = await read('data/fixture.json');
+const raw = await read('test/fixtures/raw-snapshot.json');
 
 test('de fixture voldoet aan het gepubliceerde contract', () => {
-  const toegestaan = new Set(Object.keys(schema.properties));
-  const onbekend = Object.keys(fixture).filter((k) => !toegestaan.has(k));
-  assert.deepEqual(onbekend, [], 'onbekende topvelden zijn per definitie ongereviewde publicatie');
-  for (const veld of schema.required) {
-    assert.ok(veld in fixture, `verplicht veld ontbreekt: ${veld}`);
-  }
+  assert.deepEqual(validate(schema, fixture), []);
 });
 
-test('evidence draagt nooit meer dan de vier toegestane velden', () => {
-  const toegestaan = new Set(Object.keys(schema.$defs.evidence.properties));
-  for (const [sectie, waarde] of Object.entries(fixture)) {
-    if (!waarde || typeof waarde !== 'object' || !('evidence' in waarde)) continue;
-    const onbekend = Object.keys(waarde.evidence).filter((k) => !toegestaan.has(k));
-    assert.deepEqual(onbekend, [], `${sectie}.evidence lekt extra velden`);
-  }
+test('de DTO-uitvoer van build.mjs voldoet aan het contract', () => {
+  assert.deepEqual(validate(schema, toPublicSnapshot(raw)), []);
 });
 
-test('de DTO-uitvoer van build.mjs blijft binnen het contract', async () => {
-  const raw = JSON.parse(await readFile(join(ROOT, 'test/fixtures/raw-snapshot.json'), 'utf8'));
+test('status.json heeft zijn eigen contract — en voldoet eraan', () => {
   const dto = toPublicSnapshot(raw);
-  const toegestaan = new Set(Object.keys(schema.properties));
-  assert.deepEqual(Object.keys(dto).filter((k) => !toegestaan.has(k)), []);
-  for (const veld of schema.required) assert.ok(veld in dto, `ontbreekt: ${veld}`);
+  const status = {
+    contractVersion: dto.contractVersion,
+    generatedAt: dto.generatedAt,
+    overallStatus: dto.overallStatus,
+    sources: dto.sources,
+  };
+  assert.deepEqual(validate(statusSchema, status), []);
+  // Het snapshot-schema eist acht secties die status.json bewust niet heeft: één schema voor
+  // twee bestanden kon nooit slagen. Deze assertie legt vast dat het twee contracten blijven.
+  assert.ok(validate(schema, status).length > 0, 'status.json is géén volledige snapshot');
+});
+
+test('een onbekend veld in de DTO breekt de contractcontrole', () => {
+  const vies = { ...toPublicSnapshot(raw), stiekemVeld: 'ongereviewde publicatie' };
+  const fouten = validate(schema, vies);
+  assert.equal(fouten.length, 1);
+  assert.match(fouten[0], /onbekend veld/);
+});
+
+test('de validator weigert een schema met een trefwoord dat hij niet kent', () => {
+  // Anders zou een `not`/`oneOf` in het contract stilzwijgend genegeerd worden — een gate die
+  // niets doet is gevaarlijker dan geen gate.
+  const fouten = validate({ type: 'object', oneOf: [] }, {});
+  assert.match(fouten.join(' '), /niet-ondersteund trefwoord "oneOf"/);
 });

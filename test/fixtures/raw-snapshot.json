@@ -3,9 +3,21 @@
   "workstreams": [
     {
       "id": "WS01",
-      "title": "T",
-      "estimate": "1w",
+      "title": "Voorbeeldworkstream",
+      "estimate": "1-2 dagen",
+      "public": true,
       "internNotitie": "NIET PUBLICEREN"
+    },
+    {
+      "id": "WS02",
+      "title": "Project Saffier: overname klant Zephyr",
+      "estimate": "vrijdag live, wacht op Gemini"
+    },
+    {
+      "id": "WS03",
+      "title": "Vrijgegeven maar met statustekst i.p.v. duur",
+      "estimate": "Railway-diagnose: klaar, wacht op Richard",
+      "public": true
     }
   ],
   "pullRequests": {

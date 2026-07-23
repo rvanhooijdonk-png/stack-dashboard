@@ -108,12 +108,24 @@ async function lastCommitDate(repo, path) {
  */
 function trustWithAge(count, lastChangeAt) {
   if (count === 0) return { trust: 'UNVERIFIED', note: parserNote(count) };
+  const aged = ageTrust(lastChangeAt);
+  if (aged.trust !== 'VERIFIED_CURRENT') return aged;
+  return { trust: 'VERIFIED_CURRENT', note: null };
+}
+
+/**
+ * Alleen de leeftijdsregel, zonder inhoudstelling — bruikbaar voor bronnen die per stuk een
+ * datum dragen (vloottracks). Exact in milliseconden: `Math.floor` naar dagen liet een bron tot
+ * bijna vijftien dagen groen staan, wat precies het misverstand is dat STALE moest wegnemen.
+ */
+export function ageTrust(lastChangeAt, now = Date.now()) {
   if (!lastChangeAt) return { trust: 'UNVERIFIED', note: 'Laatste wijzigingsdatum van de bron onbekend.' };
-  const days = Math.floor((Date.now() - new Date(lastChangeAt).getTime()) / 86400000);
-  if (!Number.isFinite(days)) return { trust: 'UNVERIFIED', note: 'Datum van de bron onleesbaar.' };
-  return days > STALE_DAYS
-    ? { trust: 'STALE', note: `Bron ${days} dagen niet gewijzigd — de pagina is vers, de inhoud niet.` }
-    : { trust: 'VERIFIED_CURRENT', note: null };
+  const ms = now - new Date(lastChangeAt).getTime();
+  if (!Number.isFinite(ms)) return { trust: 'UNVERIFIED', note: 'Datum van de bron onleesbaar.' };
+  if (ms > STALE_DAYS * 86400000) {
+    return { trust: 'STALE', note: `Bron ${Math.floor(ms / 86400000)} dagen niet gewijzigd — de pagina is vers, de inhoud niet.` };
+  }
+  return { trust: 'VERIFIED_CURRENT', note: null };
 }
 
 /** Org-brede open PR's, gegroepeerd per repo. Vereist een read-token met org-bereik. */
@@ -267,11 +279,14 @@ export async function collectFleet() {
       '-q', '.[0].commit.committer.date',
     ], { json: false });
     const date = res.ok ? (res.data ?? '').trim() : '';
+    const lastChangeAt = date && date !== 'null' ? date : null;
     return {
       track: name,
       named: publicTracks.has(name),
-      lastChangeAt: date && date !== 'null' ? date : null,
-      trust: res.ok ? 'VERIFIED_CURRENT' : 'SOURCE_UNAVAILABLE',
+      lastChangeAt,
+      // Een geslaagde API-call zegt alleen dat we het konden lézen. Of de track nog leeft,
+      // zegt de datum — dezelfde leeftijdsregel als bij de documentbronnen.
+      trust: res.ok ? ageTrust(lastChangeAt).trust : 'SOURCE_UNAVAILABLE',
     };
   }));
 
@@ -280,13 +295,18 @@ export async function collectFleet() {
   const hiddenTracks = all.length - tracks.length;
 
   // Eén mislukte track maakt de hele sectie onbetrouwbaar — niet stilzwijgend groen.
-  const failed = all.filter((t) => t.trust !== 'VERIFIED_CURRENT').length;
+  // Een oude track is iets anders dan een onleesbare: die zakt naar STALE, met eigen tekst.
+  const failed = all.filter((t) => t.trust === 'SOURCE_UNAVAILABLE').length;
+  const stale = all.filter((t) => t.trust === 'STALE').length;
+  const trust = failed ? 'UNVERIFIED' : stale ? 'STALE' : trustFor(all.length);
+  const note = failed ? `${failed} van ${all.length} tracks kon niet worden opgehaald.`
+    : stale ? `${stale} van ${all.length} tracks is langer dan ${STALE_DAYS} dagen niet gewijzigd.`
+      : parserNote(all.length);
   return {
     available: true,
     tracks: tracks.sort((a, b) => (b.lastChangeAt ?? '').localeCompare(a.lastChangeAt ?? '')),
     hiddenTracks,
-    evidence: evidence(src, 'main', failed ? 'UNVERIFIED' : trustFor(all.length), proof,
-      failed ? `${failed} van ${all.length} tracks kon niet worden opgehaald.` : parserNote(all.length)),
+    evidence: evidence(src, 'main', trust, proof, note),
   };
 }
 

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rvanhooijdonk-png/stack-dashboard/contracts/status-json.schema.json",
+  "title": "StatusJsonV2",
+  "description": "Contract voor public/status.json — de machineleesbare kop van de pagina. Dit is nadrukkelijk NIET de volledige snapshot: alleen versie, tijdstempel, algemene stand en het trust-oordeel per bronkey. Eerder werd status.json tegen het volledige snapshot-schema gehouden; dat schema eist acht secties die hier bewust niet in staan, dus die controle kon nooit slagen. Twee bestanden, twee contracten.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "generatedAt", "overallStatus", "sources"],
+  "properties": {
+    "contractVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "overallStatus": { "enum": ["OK", "DEGRADED"] },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "trust", "retrievedAt"],
+        "properties": {
+          "key": {
+            "enum": ["pullRequests", "merged", "tracker", "decisions", "fleet", "logbook", "ci"],
+            "description": "Vaste bronkeys. Een nieuwe bron moet hier eerst worden opgenomen — anders faalt de build, in plaats van stilletjes een nieuwe naam te publiceren."
+          },
+          "trust": {
+            "enum": ["VERIFIED_CURRENT", "STALE", "UNVERIFIED", "SOURCE_UNAVAILABLE", "CONFLICTING_EVIDENCE"]
+          },
+          "retrievedAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

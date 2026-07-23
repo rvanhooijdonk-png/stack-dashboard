@@ -56,7 +56,8 @@ const ago = (iso) => {
 function badge(ev) {
   if (!ev) return '';
   const cls = ev.trust === 'VERIFIED_CURRENT' ? 'ok' : ev.trust === 'SOURCE_UNAVAILABLE' ? 'bad' : 'warn';
-  return `<span class="badge ${cls}" title="${esc(ev.source)} · ${esc(dt(ev.retrievedAt))}">${esc(TRUST_LABEL[ev.trust] ?? ev.trust)}</span>`;
+  // Geen bronnaam in de tooltip: het pad naar een privé-bestand is zelf een aanwijzing.
+  return `<span class="badge ${cls}" title="opgehaald ${esc(dt(ev.retrievedAt))}">${esc(TRUST_LABEL[ev.trust] ?? ev.trust)}</span>`;
 }
 
 function unavailable(ev) {
@@ -114,9 +115,10 @@ function tracker(t) {
     ? `<ul class="chips">${t.decisionPoints.map((d) => `<li><span class="tag warn">${esc(d.id)}</span> ${txt(d.title)}</li>`).join('')}</ul>`
     : '<p class="empty">Geen open beslispunten in de tracker.</p>';
   return section('tracker', 'Tracker — laatste updates', t.evidence, `
-  ${t.textWithheld ? WITHHELD : ''}
+  ${t.updatesTextWithheld ? WITHHELD : ''}
   <ul class="list">${updates}</ul>
-  <h3>Beslispunten (${num(t.decisionPoints.length)})</h3>${points}`);
+  <h3>Beslispunten (${num(t.decisionPoints.length)})</h3>
+  ${t.decisionPointsTextWithheld ? WITHHELD : ''}${points}`);
 }
 
 function decisions(d) {
@@ -166,10 +168,12 @@ function ci(c) {
 function workstreams(ws) {
   if (!ws?.length) return '';
   const rows = ws.map((w) => `<tr>
-      <td class="nowrap">${esc(w.id)}</td><td>${esc(w.title)}</td><td class="nowrap muted">${esc(w.estimate ?? '')}</td></tr>`).join('\n');
+      <td class="nowrap">${esc(w.id)}</td><td>${txt(w.title)}</td><td class="nowrap muted">${txt(w.estimate)}</td></tr>`).join('\n');
+  const withheld = ws.filter((w) => w.title == null).length;
   return `<section id="roadmap" class="card">
   <h2>Roadmap — 19 workstreams <span class="badge warn">handmatig vastgelegd</span></h2>
-  <p class="lead muted">Overgenomen uit het roadmap-overzicht. Deze sectie vervangt de losse handmatige refreshes.</p>
+  <p class="lead muted">Overgenomen uit het roadmap-overzicht. Deze sectie vervangt de losse handmatige refreshes.${
+  withheld ? ` <strong>${num(withheld)}</strong> workstream(s) zijn niet vrijgegeven voor publicatie en tonen alleen hun nummer.` : ''}</p>
   <div class="scroll"><table><thead><tr><th>WS</th><th>Workstream</th><th>raming</th></tr></thead><tbody>${rows}</tbody></table></div>
 </section>`;
 }

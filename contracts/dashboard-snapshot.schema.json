@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/rvanhooijdonk-png/stack-dashboard/contracts/dashboard-snapshot.schema.json",
-  "title": "DashboardSnapshotV1",
-  "description": "Contract voor de PUBLIEKE snapshot die het dashboard rendert — de gereduceerde DTO uit build.mjs, niet de interne collectoruitvoer. Afgeleid van het Codex-artefact stack-dashboard, uitgebreid met tracker-, vloot- en workstreamsecties en na de review van 23-07-2026 teruggesnoeid: bronpaden en bewijs-URL's staan er bewust NIET in, want deze structuur wordt openbaar gepubliceerd. Elke sectie draagt zijn eigen trust-oordeel; een mislukte bron wordt SOURCE_UNAVAILABLE en nooit een gecachte groene stand.",
+  "title": "DashboardSnapshotV2",
+  "description": "Contract voor de PUBLIEKE snapshot die het dashboard rendert — de gereduceerde DTO uit build.mjs, niet de interne collectoruitvoer. v2 (23-07-2026, derde review): evidence.source is verwijderd (een bronpad is op een openbare pagina zelf een aanwijzing), tracker draagt twee aparte tekst-vlaggen, en workstream-titel en -raming zijn nullable omdat publicatie per regel expliciet aangezet moet worden. Elke sectie draagt zijn eigen trust-oordeel; een mislukte bron wordt SOURCE_UNAVAILABLE en nooit een gecachte groene stand.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -60,27 +60,34 @@
     },
     "workstreams": {
       "type": "array",
-      "description": "Roadmap-formaat, handmatig vastgelegd. Vervangt de losse handmatige refreshes.",
+      "description": "Roadmap-formaat uit data/workstreams.json. Titel en raming verschijnen alleen als die regel `public: true` draagt en de raming een duur is; anders null.",
       "items": {
         "type": "object",
         "required": [
           "id",
-          "title"
+          "title",
+          "estimate"
         ],
         "properties": {
           "id": {
             "type": "string"
           },
           "title": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "null = regel niet vrijgegeven voor publicatie."
           },
           "estimate": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "null = niet vrijgegeven of geen geldige duur."
           }
-        }
+        },
+        "additionalProperties": false
       }
     },
     "pullRequests": {
@@ -122,7 +129,8 @@
                 "type": "integer",
                 "minimum": 0
               }
-            }
+            },
+            "additionalProperties": false
           }
         },
         "totals": {
@@ -142,7 +150,8 @@
             "ready": {
               "type": "integer"
             }
-          }
+          },
+          "additionalProperties": false
         },
         "evidence": {
           "$ref": "#/$defs/evidence"
@@ -152,7 +161,8 @@
           "minimum": 0,
           "description": "Aantal open PR's in repo's die niet bij naam getoond worden (allowlist data/public-repos.json)."
         }
-      }
+      },
+      "additionalProperties": false
     },
     "merged": {
       "type": "object",
@@ -190,13 +200,15 @@
               "merged": {
                 "type": "integer"
               }
-            }
+            },
+            "additionalProperties": false
           }
         },
         "evidence": {
           "$ref": "#/$defs/evidence"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "tracker": {
       "type": "object",
@@ -205,7 +217,8 @@
         "updates",
         "decisionPoints",
         "evidence",
-        "textWithheld"
+        "updatesTextWithheld",
+        "decisionPointsTextWithheld"
       ],
       "properties": {
         "available": {
@@ -216,7 +229,9 @@
           "items": {
             "type": "object",
             "required": [
-              "number"
+              "number",
+              "date",
+              "title"
             ],
             "properties": {
               "number": {
@@ -232,7 +247,8 @@
                 ],
                 "description": "null = tekst ingehouden (data/publish-text.json)."
               }
-            }
+            },
+            "additionalProperties": false
           }
         },
         "decisionPoints": {
@@ -240,7 +256,8 @@
           "items": {
             "type": "object",
             "required": [
-              "id"
+              "id",
+              "title"
             ],
             "properties": {
               "id": {
@@ -253,16 +270,21 @@
                 ],
                 "description": "null = tekst ingehouden (data/publish-text.json)."
               }
-            }
+            },
+            "additionalProperties": false
           }
         },
         "evidence": {
           "$ref": "#/$defs/evidence"
         },
-        "textWithheld": {
+        "updatesTextWithheld": {
+          "type": "boolean"
+        },
+        "decisionPointsTextWithheld": {
           "type": "boolean"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "decisions": {
       "type": "object",
@@ -281,7 +303,9 @@
           "items": {
             "type": "object",
             "required": [
-              "id"
+              "id",
+              "date",
+              "decision"
             ],
             "properties": {
               "id": {
@@ -297,7 +321,8 @@
                 ],
                 "description": "null = tekst ingehouden (data/publish-text.json)."
               }
-            }
+            },
+            "additionalProperties": false
           }
         },
         "evidence": {
@@ -306,7 +331,8 @@
         "textWithheld": {
           "type": "boolean"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "fleet": {
       "type": "object",
@@ -341,7 +367,8 @@
               "trust": {
                 "$ref": "#/$defs/trust"
               }
-            }
+            },
+            "additionalProperties": false
           }
         },
         "evidence": {
@@ -352,7 +379,8 @@
           "minimum": 0,
           "description": "Aantal tracks dat niet bij naam getoond wordt (allowlist data/public-tracks.json)."
         }
-      }
+      },
+      "additionalProperties": false
     },
     "logbook": {
       "type": "object",
@@ -370,7 +398,9 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": [],
+            "required": [
+              "title"
+            ],
             "properties": {
               "title": {
                 "type": [
@@ -379,7 +409,8 @@
                 ],
                 "description": "null = tekst ingehouden (data/publish-text.json)."
               }
-            }
+            },
+            "additionalProperties": false
           }
         },
         "evidence": {
@@ -388,7 +419,8 @@
         "textWithheld": {
           "type": "boolean"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "ci": {
       "type": "object",
@@ -429,7 +461,8 @@
                   "null"
                 ]
               }
-            }
+            },
+            "additionalProperties": false
           }
         },
         "evidence": {
@@ -440,7 +473,8 @@
           "minimum": 0,
           "description": "Aantal CI-repo's dat niet bij naam getoond wordt (allowlist data/public-repos.json)."
         }
-      }
+      },
+      "additionalProperties": false
     }
   },
   "$defs": {
@@ -457,15 +491,12 @@
     "evidence": {
       "type": "object",
       "required": [
-        "source",
         "retrievedAt",
-        "trust"
+        "trust",
+        "error"
       ],
       "additionalProperties": false,
       "properties": {
-        "source": {
-          "type": "string"
-        },
         "retrievedAt": {
           "type": "string",
           "format": "date-time"

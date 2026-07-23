@@ -1,21 +1,17 @@
 {
-  "contractVersion": "1.0.0",
+  "contractVersion": "2.0.0",
   "generatedAt": "2026-07-23T12:00:00.000Z",
   "overallStatus": "DEGRADED",
   "sources": [
     {
       "key": "pullRequests",
-      "source": "GitHub search API",
       "retrievedAt": "2026-07-23T12:00:00.000Z",
-      "trust": "VERIFIED_CURRENT",
-      "error": null
+      "trust": "VERIFIED_CURRENT"
     },
     {
       "key": "logbook",
-      "source": "control / journaal",
       "retrievedAt": "2026-07-23T12:00:00.000Z",
-      "trust": "SOURCE_UNAVAILABLE",
-      "error": "Staat nog niet op main."
+      "trust": "SOURCE_UNAVAILABLE"
     }
   ],
   "workstreams": [
@@ -23,6 +19,11 @@
       "id": "WS01",
       "title": "Voorbeeldworkstream",
       "estimate": "2 weken"
+    },
+    {
+      "id": "WS02",
+      "title": null,
+      "estimate": null
     }
   ],
   "pullRequests": {
@@ -41,7 +42,6 @@
       "ready": 2
     },
     "evidence": {
-      "source": "GitHub search API",
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
       "error": null
@@ -59,7 +59,6 @@
       }
     ],
     "evidence": {
-      "source": "GitHub search API",
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
       "error": null
@@ -81,12 +80,12 @@
       }
     ],
     "evidence": {
-      "source": "control / tracker",
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
       "error": null
     },
-    "textWithheld": true
+    "updatesTextWithheld": true,
+    "decisionPointsTextWithheld": true
   },
   "decisions": {
     "available": true,
@@ -98,7 +97,6 @@
       }
     ],
     "evidence": {
-      "source": "control / besluiten",
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
       "error": null
@@ -115,7 +113,6 @@
       }
     ],
     "evidence": {
-      "source": "control / task-queue",
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
       "error": null
@@ -126,7 +123,6 @@
     "available": false,
     "entries": [],
     "evidence": {
-      "source": "control / journaal",
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "SOURCE_UNAVAILABLE",
       "error": "Staat nog niet op main."
@@ -139,27 +135,20 @@
       {
         "repository": "voorbeeld-repo",
         "state": "GROEN",
-        "conclusion": "success",
-        "at": "2026-07-23T08:00:00Z",
-        "workflow": "ci"
+        "at": "2026-07-23T08:00:00Z"
       },
       {
         "repository": "andere-repo",
         "state": "GEEN_CI",
-        "conclusion": null,
-        "at": null,
-        "workflow": null
+        "at": null
       },
       {
         "repository": "derde-repo",
         "state": "ONBEKEND",
-        "conclusion": null,
-        "at": null,
-        "workflow": null
+        "at": null
       }
     ],
     "evidence": {
-      "source": "GitHub Actions API",
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
       "error": null

@@ -49,6 +49,44 @@ Daarom is de verdediging niet langer "filteren", maar **niet meenemen**:
 
 De structuur draagt de status; de tekst draagt het bedrijfsgeheim.
 
+**De roadmap was het gat dat hierna nog openstond.** De derde review (Codex, 23-07-2026) plantte
+dezelfde probe in `data/workstreams.json` en zag hem gewoon op de pagina verschijnen: die sectie
+liep buiten `publish-text.json` om. De oude inhoud publiceerde bovendien echte operationele tekst
+("wacht op Gemini", "Railway-diagnose: klaar, wacht op Richards 2 stappen"). Nu geldt daar
+dezelfde doctrine:
+
+- elke roadmapregel draagt `public: true` — letterlijk de boolean — of de pagina toont alleen zijn
+  nummer;
+- `title` is de neutrale workstreamnaam, maximaal 80 tekens;
+- `estimate` moet een **duur** zijn (`2-4 uur`, `dagen`, `weken`). Alles wat niet aan dat patroon
+  voldoet wordt weggelaten, want dan is het status- of proza-tekst.
+
+Dit bestand staat in een openbare repo en is daarmee zelf de publicatiebeslissing. De regel dat
+er per regel een menselijke `true` bij moet, is er om die beslissing bewust te houden.
+
+## 3b. Eén weg naar `public/`
+
+De vroegere `--fixture`-modus schreef een bestand rechtstreeks naar de publicatiemap, langs
+`toPublicSnapshot()` heen — een tweede publicatiebuild zonder enige poort, ook aangetoond met een
+probe. Die modus bestaat niet meer. Elke byte in `public/` komt via `buildSnapshot()` →
+`toPublicSnapshot()` → sanitize-gate → contract-gate → renderer.
+
+## 3c. Contract-gate
+
+`scripts/lib/validate.mjs` houdt de publieke DTO tegen `contracts/dashboard-snapshot.schema.json`
+en `public/status.json` tegen `contracts/status-json.schema.json` — een echte schemacontrole, niet
+alleen een blik op de topniveau-sleutels. `additionalProperties: false` staat overal aan, dus een
+veld dat het contract niet kent, breekt de build. Een onbekend veld is een veld waar niemand naar
+gekeken heeft, en dat gaat er niet uit.
+
+Twee bestanden, twee contracten: `status.json` is de kop, geen volledige snapshot. Ze tegen
+hetzelfde schema houden kon per definitie niet slagen — dat was een controle die alleen bestond.
+
+De validator is met opzet eigen, kleine code: deze repo heeft nul afhankelijkheden, en een
+openbare pagina hoort geen supply-chain-oppervlak te krijgen voor iets wat in CI draait. Hij
+weigert schema-trefwoorden die hij niet kent, zodat een `oneOf` in het contract nooit stilzwijgend
+genegeerd wordt.
+
 ## 4. Namen zijn ook inhoud — twee allowlists
 
 Een bestandsnaam of reponaam is vaak al de informatie. Beide paden zijn daarom allowlist-only,
@@ -108,6 +146,11 @@ gewijzigd is, kreeg voorheen `VERIFIED_CURRENT` — groen, terwijl de inhoud oud
 review geldt: een bron die langer dan **14 dagen** (`STALE_DAYS` in `collect.mjs`) niet is gewijzigd
 krijgt `STALE`, met de notitie *"de pagina is vers, de inhoud niet"*. Is de laatste wijzigingsdatum
 niet vast te stellen, dan `UNVERIFIED` — niet groen bij gebrek aan bewijs.
+
+De grens wordt in milliseconden gemeten, niet in afgeronde dagen: `Math.floor` liet een bron tot
+bijna vijftien dagen groen staan. Dezelfde leeftijdsregel geldt sinds de derde review ook per
+vloottrack — een geslaagde API-call zegt alleen dat we het bestand kónden lezen, niet dat de track
+nog leeft.
 
 `overallStatus` wordt `DEGRADED` zodra één bron niet `VERIFIED_CURRENT` is.
 
