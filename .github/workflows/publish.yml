@@ -31,12 +31,13 @@ jobs:
         with:
           node-version: '20'
 
-      # Geen pad-argument, want elke vorm mét argument is versiegevoelig: node 20 vouwt een glob
-      # in `--test` niet zelf uit (dat kan pas vanaf 21) en de aanhalingstekens hielden de shell
-      # er ook vanaf, dus zocht de runner letterlijk naar een bestand `test/*.test.mjs`; een map
-      # meegeven werkt op 20 wél maar laat node 22+ juist crashen ("Cannot find module"), omdat
-      # die een map als te draaien module leest. Kaal `node --test` doet op beide de ontdekking
-      # zelf, vindt dezelfde 69 tests, en neemt een nieuw testbestand vanzelf mee.
+      # Geen pad-argument. Een glob werkt hier niet: de aanhalingstekens hielden de shell ervan
+      # af en node 20 vouwt een patroon in `--test` niet zelf uit (dat kan pas vanaf 21), dus
+      # zocht de runner letterlijk naar een bestand `test/*.test.mjs`. Een map meegeven werkt op
+      # 20 wél, maar laat node 24 crashen ("Cannot find module") omdat die een map als te draaien
+      # module leest — gemeten op 20.19.0 en 24.14.1; ertussenin niet nagemeten. Een expliciete
+      # bestandslijst zou op beide werken, maar slaat een later toegevoegde test stil over. Kaal
+      # `node --test` doet de ontdekking zelf en vond op beide versies dezelfde 69 tests.
       - name: Tests
         run: node --test
 
