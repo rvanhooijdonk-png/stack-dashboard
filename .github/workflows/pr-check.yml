@@ -1,0 +1,82 @@
+name: pr-check
+
+# Bewust een eigen bestand naast publish.yml, niet een extra trigger daarin. Twee redenen:
+# publish.yml deelt `concurrency: group: pages` met `cancel-in-progress: true`, dus een
+# PR-run zou daar een lopende live-deploy kunnen afbreken; en "geen deploy vanaf een PR"
+# is hier een eigenschap van het bestand — er staat simpelweg geen deploy-job in — in
+# plaats van een `if`-conditie die iemand later per ongeluk kan verruimen.
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+# Per pull request, niet de gedeelde pages-groep: een nieuwe push op een PR mag alleen de
+# vorige controle van diezelfde PR afbreken.
+concurrency:
+  group: pr-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  # Zelfde pin als publish.yml. test/workflows.test.mjs faalt als die twee uit elkaar lopen.
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  controle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+
+      - name: Tests
+        run: node --test
+
+      - name: gitleaks installeren (gepind + checksum)
+        run: |
+          set -euo pipefail
+          curl -sSL --fail -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
+
+      # Het nepsecret moet er ook voor de scanner als een secret uitzien: een herhaald teken
+      # haalt de entropiedrempel niet en wordt niet gevonden — dan meldt deze stap ten onrechte
+      # dat de poort stuk is.
+      - name: Zelftest — een nepsecret MOET de scan laten falen
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/gate-selftest
+          printf 'token: ghp_%s\n' "$(openssl rand -hex 18)" > /tmp/gate-selftest/leak.txt
+          if ./gitleaks dir /tmp/gate-selftest --redact --exit-code 1 --no-banner; then
+            echo "::error::gitleaks vond het geplante nepsecret NIET — de outputpoort werkt niet."
+            exit 1
+          fi
+          echo "zelftest ok: gitleaks faalt op een geplant nepsecret"
+          rm -rf /tmp/gate-selftest
+
+      # Genereren hoort erbij: zonder output valt er niets te saneren en niets te scannen.
+      # Er wordt hier alleen gebouwd en gecontroleerd — nergens geüpload of gepubliceerd.
+      - name: Genereren (read-only aggregatie)
+        env:
+          GH_TOKEN: ${{ secrets.ORG_PR_READ_TOKEN || github.token }}
+        run: node scripts/build.mjs
+
+      - name: Alleen toegestane bestanden in de publicatiemap
+        run: |
+          set -euo pipefail
+          onverwacht=$(find public -mindepth 1 \
+            ! -name 'index.html' ! -name 'status.json' ! -name '.nojekyll' -printf '%P\n')
+          if [ -n "$onverwacht" ]; then
+            echo "::error::onverwachte bestanden in public: $onverwacht"
+            exit 1
+          fi
+
+      - name: gitleaks op de output
+        run: ./gitleaks dir public --redact --exit-code 1 --no-banner
