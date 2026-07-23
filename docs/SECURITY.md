@@ -83,6 +83,13 @@ er per regel een menselijke `true` bij moet, is er om die beslissing bewust te h
 De les die zich blijft herhalen: **elk veld dat ergens vandaan wordt gekopieerd, is een kandidaat
 om te lekken — ook een technisch veld.** Afleiden is veiliger dan doorgeven.
 
+De vijfde ronde bewees dat nog één keer op het laatste gekopieerde veld: **`trust` zelf.** Codex
+zette een klantnaam ín de trust-waarde, en die kwam zo de DTO in — pas de contract-gate hield hem
+tegen. Eén gate is geen gate: een trust-waarde die niet in de gesloten lijst staat, breekt de
+build nu al bij het samenstellen, en de melding noemt de waarde niet. Datums uit de GitHub-API
+(`fleet.tracks[].lastChangeAt`, `ci.lights[].at`) moeten sindsdien ook een ISO-vorm hebben in
+plaats van "wat de API ook stuurt".
+
 ## 3b. Eén weg naar `public/`
 
 De vroegere `--fixture`-modus schreef een bestand rechtstreeks naar de publicatiemap, langs
@@ -113,6 +120,12 @@ een `$ref`-keten viel na één stap stil, en `key in properties` hield `toString
 veld. Sindsdien wordt het schema in zijn geheel gekeurd vóór de instance wordt bekeken, worden
 `$ref`-ketens helemaal gevolgd (met `properties` samengevoegd in plaats van overschreven), en gaat
 alles via `Object.hasOwn`. Elk van de drie heeft een eigen regressietest.
+
+De vijfde ronde vond er nog vijf, allemaal van dezelfde soort: een schemavorm die de validator
+niet kende, gold als "alles toegestaan". Een booleanschema (`false`), de tuple-vorm van `items`,
+de objectvorm van `additionalProperties`, een ongeldige regex op een pad zonder data, en een
+`required` naast een `$ref` die de geërfde eis verving. Grondregel sindsdien: **wat de validator
+niet kan controleren, keurt hij af** — en `required` wordt bij een `$ref` verenigd, niet vervangen.
 
 ## 4. Namen zijn ook inhoud — twee allowlists
 

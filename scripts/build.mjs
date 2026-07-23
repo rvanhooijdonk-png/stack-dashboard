@@ -124,14 +124,23 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
   // `source` is een intern bronpad ("stack-control / AUDIT-INPUT/…") en gaat er niet in:
   // op een openbare pagina is het pad zelf een aanwijzing. De sectiekop zegt genoeg.
   // `error` gaat er evenmin in — zie ERROR_CODE_BY_TRUST. De code wordt afgeleid, niet gekopieerd.
+  // Ook `trust` wordt niet blind gekopieerd. Codex zette in de vijfde ronde een klantnaam ín de
+  // trust-waarde; die kwam zo de DTO in en werd pas door de contract-gate gestopt. Eén gate is
+  // geen gate: een waarde die niet in de gesloten lijst staat, breekt de build hier al.
+  const trustOf = (e) => {
+    if (!Object.hasOwn(ERROR_CODE_BY_TRUST, e.trust)) {
+      throw new Error('een bron leverde een trust-waarde die niet in de gesloten lijst staat');
+    }
+    return e.trust;
+  };
   const ev = (e) => ({
     retrievedAt: e.retrievedAt,
-    trust: e.trust,
-    errorCode: Object.hasOwn(ERROR_CODE_BY_TRUST, e.trust) ? ERROR_CODE_BY_TRUST[e.trust] : 'ONBEKEND',
+    trust: trustOf(e),
+    errorCode: ERROR_CODE_BY_TRUST[e.trust],
   });
 
   const sources = ['pullRequests', 'merged', 'tracker', 'decisions', 'fleet', 'logbook', 'ci']
-    .map((key) => ({ key, trust: raw[key].evidence.trust, retrievedAt: raw[key].evidence.retrievedAt }));
+    .map((key) => ({ key, trust: trustOf(raw[key].evidence), retrievedAt: raw[key].evidence.retrievedAt }));
 
   return {
     contractVersion: CONTRACT_VERSION,
@@ -179,7 +188,7 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
     },
     fleet: {
       available: raw.fleet.available,
-      tracks: raw.fleet.tracks.map((x) => ({ track: x.track, lastChangeAt: x.lastChangeAt, trust: x.trust })),
+      tracks: raw.fleet.tracks.map((x) => ({ track: x.track, lastChangeAt: x.lastChangeAt, trust: trustOf(x) })),
       hiddenTracks: raw.fleet.hiddenTracks ?? 0,
       evidence: ev(raw.fleet.evidence),
     },

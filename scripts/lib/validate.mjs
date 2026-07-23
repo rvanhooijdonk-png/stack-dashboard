@@ -46,6 +46,11 @@ function resolve(schema, root, seen = new Set()) {
   if (has(target, 'properties') || has(local, 'properties')) {
     merged.properties = { ...target.properties, ...local.properties };
   }
+  // Net als bij properties: een lokale `required` vult aan, hij vervangt niet. Anders laat een
+  // broertje van de `$ref` de geërfde verplichte velden vervallen (probe, vijfde ronde).
+  if (has(target, 'required') || has(local, 'required')) {
+    merged.required = [...new Set([...(target.required ?? []), ...(local.required ?? [])])];
+  }
   return merged;
 }
 
@@ -55,13 +60,30 @@ function resolve(schema, root, seen = new Set()) {
  * heeft. Een gate die pas afgaat als er data langskomt, is geen gate.
  */
 export function auditSchema(schema, { root = schema, path = '', seen = new Set() } = {}) {
-  if (!isPlainObject(schema) || seen.has(schema)) return [];
+  const here = path || '/';
+  // Een schema dat geen object is (`false`, een tuple-`items`, een string) werd stilzwijgend
+  // overgeslagen en gold daarmee als "alles toegestaan" — vijf van die vormen kwamen als geldig
+  // door de probes van de vijfde ronde. Wat de validator niet kan controleren, keurt hij af.
+  if (!isPlainObject(schema)) return [`${here}: schema is geen object (${typeOf(schema)})`];
+  if (seen.has(schema)) return [];
   seen.add(schema);
   const errors = [];
-  const here = path || '/';
 
   for (const key of Object.keys(schema)) {
     if (!KNOWN.has(key)) errors.push(`${here}: schema gebruikt niet-ondersteund trefwoord "${key}"`);
+  }
+  // `additionalProperties` kent in JSON Schema ook een objectvorm. Die ondersteunen we niet, en
+  // niet-ondersteund is een fout: anders leest `{additionalProperties: {...}}` als "geen gate".
+  if (has(schema, 'additionalProperties') && typeof schema.additionalProperties !== 'boolean') {
+    errors.push(`${here}: additionalProperties moet true of false zijn`);
+  }
+  // Een ongeldige regex in het contract bleef onzichtbaar zolang er geen data langs dat pad kwam.
+  if (has(schema, 'pattern')) {
+    try {
+      new RegExp(schema.pattern);
+    } catch {
+      errors.push(`${here}: pattern is geen geldige reguliere expressie`);
+    }
   }
   if (has(schema, '$ref')) {
     try {

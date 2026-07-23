@@ -145,7 +145,7 @@
         "repository": "r",
         "state": "GROEN",
         "conclusion": "success",
-        "at": "x",
+        "at": "2026-07-23T08:00:00Z",
         "workflow": "geheime-workflow-naam"
       }
     ],

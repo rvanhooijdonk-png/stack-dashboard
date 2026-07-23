@@ -144,6 +144,21 @@ test('een tekstbeleid dat geen object is, wordt niet als "alles uit" gelezen', (
   assert.throws(() => readTextPolicy({ constructor: true }), /onbekende sleutel/);
 });
 
+// --- Bevinding uit de vijfde ronde (Codex, 23-07-2026): trust was óók een gekopieerd veld ---
+
+test('een trust-waarde buiten de gesloten lijst breekt de build, niet pas het contract', () => {
+  const vies = structuredClone(raw);
+  vies.tracker.evidence.trust = 'vreemde-Project Orion klant AlphaZeven';
+  assert.throws(() => toPublicSnapshot(vies), /gesloten lijst/);
+  assert.throws(() => toPublicSnapshot(vies), (err) => !err.message.includes('Orion'));
+});
+
+test('ook de trust van een losse vloottrack wordt gekeurd', () => {
+  const vies = structuredClone(raw);
+  vies.fleet.tracks[0].trust = 'GROEN-GENOEG';
+  assert.throws(() => toPublicSnapshot(vies), /gesloten lijst/);
+});
+
 test('verborgen tracks en CI-repo\'s worden geteld, niet benoemd', () => {
   const pub = toPublicSnapshot(raw);
   assert.equal(pub.fleet.hiddenTracks, 2);

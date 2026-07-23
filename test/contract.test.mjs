@@ -101,6 +101,27 @@ test('additionalProperties:false geldt ook zonder properties-blok', () => {
   assert.match(fouten.join(' '), /wat: onbekend veld/);
 });
 
+// --- Bevindingen uit de vijfde ronde (Codex, 23-07-2026) — vijf schemavormen die "geldig" heetten ---
+
+test('een schemavorm die de validator niet kan controleren, keurt hij af', () => {
+  const afgekeurd = (schema, value) => assert.ok(validate(schema, value).length > 0, JSON.stringify(schema));
+  afgekeurd(false, 'wat dan ook');                                   // booleanschema
+  afgekeurd({ type: 'array', items: [] }, ['wat dan ook']);          // tuple-items
+  afgekeurd({ type: 'object', additionalProperties: { type: 'string' } }, { x: 42 });
+  afgekeurd({ type: 'object', properties: { x: { type: 'string', pattern: '[' } } }, {});
+});
+
+test('naast een $ref blijven ook de geërfde required-velden gelden', () => {
+  const s = {
+    $defs: { basis: { type: 'object', required: ['a'], properties: { a: { type: 'string' } } } },
+    $ref: '#/$defs/basis',
+    required: ['b'],
+    properties: { b: { type: 'number' } },
+  };
+  assert.match(validate(s, { b: 1 }).join(' '), /\/a: verplicht veld ontbreekt/);
+  assert.deepEqual(validate(s, { a: 'x', b: 1 }), []);
+});
+
 test('het contract eist de datumvelden die de DTO altijd levert', () => {
   const zonderDatum = structuredClone(toPublicSnapshot(raw));
   delete zonderDatum.fleet.tracks[0].lastChangeAt;
