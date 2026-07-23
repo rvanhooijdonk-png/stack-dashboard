@@ -1,6 +1,11 @@
 name: publish
 
-# Elke 15 minuten, bij elke merge naar main, en handmatig.
+# Bij elke merge naar main en handmatig — dat zijn de twee triggers waarop je kunt rekenen.
+# De kwartiercron staat er wel, maar vuurt hier niet: gemeten op 2026-07-23 gingen drie
+# opeenvolgende slots leeg voorbij (nul runs met event=schedule), terwijl de workflow active is
+# en de repo publiek is, dus zonder minutenlimiet. GitHub vertraagt of slaat kwartierschema's
+# over. Hij blijft staan omdat hij niets kost en winst is zodra hij aanslaat — maar de pagina
+# belooft daarom geen verversingsinterval meer.
 on:
   schedule:
     - cron: '*/15 * * * *'

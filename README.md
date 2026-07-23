@@ -45,9 +45,25 @@ build. Die is weg; `data/fixture.json` dient nu alleen de tests.
 
 ## Publicatie
 
-GitHub Pages, gebouwd door `.github/workflows/publish.yml`: elke 15 minuten, bij elke push naar
-`main`, en handmatig via *Run workflow*. De pagina ververst zichzelf met
+GitHub Pages, gebouwd door `.github/workflows/publish.yml`: bij elke push naar `main` en
+handmatig via *Run workflow*. De pagina haalt zichzelf opnieuw op met
 `<meta http-equiv="refresh">`; er draait geen client-side JavaScript.
+
+**De kwartiercron staat ingesteld maar vuurt hier niet.** Gemeten op 2026-07-23: na de merge van
+#3 zijn de slots van 15:45, 16:00 en 16:15 alle drie leeg voorbijgegaan — nul runs met
+`event=schedule`. Geen quotakwestie (publieke repo, onbeperkte minuten) en geen uitgeschakelde
+workflow (`state=active`); het is GitHub's scheduler, die kwartierschema's op verse repo's
+vertraagt of overslaat. De cron blijft staan — hij kost niets en levert winst zodra hij wél
+aanslaat — maar hij telt niet als garantie. Betrouwbaar verversen doe je zo:
+
+```
+gh workflow run publish.yml --repo rvanhooijdonk-png/stack-dashboard
+```
+
+De pagina zegt dit ook zelf: ze belooft geen interval en meldt dat een oude stempel betekent dat
+er sindsdien niets is gepubliceerd. Zodra de autopilot-runner op de mini draait — die heeft al een
+waakvlam — kan die dit commando elk kwartier aanroepen; dan is er een echte verversing zonder dat
+er nu een tweede always-on ding bij komt dat zelf bewaakt moet worden.
 
 `public/` staat in `.gitignore` — de gegenereerde output wordt nooit gecommit, alleen als
 Pages-artefact gedeployed.

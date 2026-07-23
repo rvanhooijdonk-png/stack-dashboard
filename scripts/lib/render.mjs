@@ -256,13 +256,16 @@ export function renderHtml(snapshot, { refreshSeconds = 900 } = {}) {
 <div class="wrap">
 <header>
   <h1>Stack-dashboard</h1>
-  <p class="stamp">Laatst bijgewerkt: <strong>${esc(dt(s.generatedAt))}</strong> · ververst automatisch elke ${num(refresh / 60)} min</p>
+  <p class="stamp">Laatst bijgewerkt: <strong>${esc(dt(s.generatedAt))}</strong> · deze pagina haalt zichzelf elke ${num(refresh / 60)} min opnieuw op</p>
 </header>
 <p class="muted">Weergave van bestaande canon — nooit een tweede waarheid. Alles is read-only en gesaneerd;
 ${stale.length === 0 ? 'alle bronnen zijn geverifieerd.' : `<strong>${num(stale.length)}</strong> van ${num(s.sources.length)} bronnen is niet geverifieerd (zie de badges).`}
-<strong>Lees altijd eerst de stempel hierboven:</strong> deze pagina is statisch, dus als de generator faalt
-blijft de laatst geslaagde versie staan. Een stempel ouder dan een uur betekent dat de build stukstaat,
-niet dat de stack stilstaat.</p>
+<strong>Lees altijd eerst de stempel hierboven:</strong> deze pagina is statisch en wordt opnieuw gebouwd
+bij elke merge naar main en bij een handmatige run — <strong>niet op een gegarandeerd interval</strong>.
+De geplande kwartierrun staat wel ingesteld, maar GitHub voert die hier niet betrouwbaar uit. Een oude
+stempel betekent dus: er is sindsdien niets gepubliceerd. Dat kan een stukke build zijn, maar net zo goed
+gewoon een periode zonder merges. De stempel is de enige leeftijd die je hebt — vertrouw de cijfers niet
+ouder dan die.</p>
 
 <div class="grid">
   ${pullRequests(s.pullRequests)}
