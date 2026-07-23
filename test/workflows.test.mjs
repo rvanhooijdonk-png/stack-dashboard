@@ -34,10 +34,49 @@ test('publiceren blijft main-only — publish.yml draait niet op pull requests',
 
 test('de teststap draait zonder pad-argument in beide workflows', () => {
   // Een glob werkt niet op node 20 en een map-argument crasht node 24; zie de comment in
-  // publish.yml. Deze test houdt die regressie tegen.
+  // publish.yml. Deze test houdt die regressie tegen. Álle voorkomens, niet alleen de eerste:
+  // een correcte regel bovenaan mag geen verkeerde eronder maskeren.
   for (const [naam, tekst] of [['publish', publish], ['pr-check', prCheck]]) {
-    const treffer = tekst.match(/^\s*run: (node --test.*)$/m);
-    assert.ok(treffer, `geen teststap gevonden in ${naam}.yml`);
-    assert.equal(treffer[1], 'node --test', `${naam}.yml geeft --test een pad-argument`);
+    const treffers = [...tekst.matchAll(/^\s*run: (node --test.*)$/gm)].map((m) => m[1]);
+    assert.ok(treffers.length > 0, `geen teststap gevonden in ${naam}.yml`);
+    for (const treffer of treffers) {
+      assert.equal(treffer, 'node --test', `${naam}.yml geeft --test een pad-argument`);
+    }
   }
+});
+
+test('de PR-controle krijgt geen org-secret te zien', () => {
+  // Bij een PR vanuit een branch in deze repository zijn org-secrets beschikbaar terwijl
+  // checkout de PR-code uitvoert; die combinatie laat een PR het token wegsturen. De
+  // publish-workflow op main mag het token wél gebruiken.
+  assert.ok(!/secrets\./.test(prCheck), 'pr-check mag geen enkel secret aanspreken');
+  assert.ok(publish.includes('secrets.ORG_PR_READ_TOKEN'), 'publish hoort het token wél te gebruiken');
+});
+
+// Haalt het scriptlichaam van een `run: |`-stap op, op naam van de stap.
+const stapScript = (tekst, naam) => {
+  const regels = tekst.split('\n');
+  const start = regels.findIndex((r) => r.trim().startsWith(`- name: ${naam}`));
+  assert.ok(start !== -1, `stap "${naam}" niet gevonden`);
+  const runOp = regels.findIndex((r, i) => i > start && r.trim() === 'run: |');
+  assert.ok(runOp !== -1 && runOp <= start + 3, `stap "${naam}" heeft geen run-blok`);
+  const inspringing = regels[runOp].search(/\S/) + 2;
+  const lichaam = [];
+  for (const regel of regels.slice(runOp + 1)) {
+    if (regel.trim() !== '' && regel.search(/\S/) < inspringing) break;
+    lichaam.push(regel.slice(inspringing));
+  }
+  return lichaam.join('\n').trimEnd();
+};
+
+test('beide workflows draaien exact dezelfde zelftest op de secretsscan', () => {
+  // De zelftest is de enige stap die bewijst dat de scan geen placebo is. Loopt hij tussen de
+  // twee bestanden uiteen, dan controleert de PR iets anders dan wat main straks doet.
+  const naam = 'Zelftest — een nepsecret MOET de scan laten falen';
+  const script = stapScript(publish, naam);
+  assert.equal(stapScript(prCheck, naam), script);
+  // En de twee eigenschappen die deze stap fail-closed maken, expliciet vastgelegd:
+  // gitleaks gebruikt exit 1 voor zowel "gevonden" als "scannerfout".
+  assert.ok(script.includes('--exit-code 42'), 'de zelftest moet een eigen exitcode afdwingen');
+  assert.ok(/-ne 42/.test(script), 'alleen exitcode 42 mag als vangst tellen');
 });

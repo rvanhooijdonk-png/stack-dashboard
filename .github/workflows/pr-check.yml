@@ -46,16 +46,31 @@ jobs:
           tar -xzf gitleaks.tar.gz gitleaks
           ./gitleaks version
 
-      # Het nepsecret moet er ook voor de scanner als een secret uitzien: een herhaald teken
-      # haalt de entropiedrempel niet en wordt niet gevonden — dan meldt deze stap ten onrechte
-      # dat de poort stuk is.
       - name: Zelftest — een nepsecret MOET de scan laten falen
         run: |
-          set -uo pipefail
+          set -euo pipefail
           mkdir -p /tmp/gate-selftest
-          printf 'token: ghp_%s\n' "$(openssl rand -hex 18)" > /tmp/gate-selftest/leak.txt
-          if ./gitleaks dir /tmp/gate-selftest --redact --exit-code 1 --no-banner; then
-            echo "::error::gitleaks vond het geplante nepsecret NIET — de outputpoort werkt niet."
+          # Het nepsecret moet er ook vóór de scanner als een secret uitzien. `ghp_` gevolgd door
+          # 36× dezelfde letter haalt de entropiedrempel van de github-pat-regel niet: gemeten op
+          # gitleaks 8.30.1 wordt zo'n token NIET gevonden, en dan meldt deze zelftest ten
+          # onrechte dat de poort stuk is. Een bekend voorbeeldsecret werkt om dezelfde reden
+          # niet — de AWS-documentatiesleutel staat op de allowlist van gitleaks zelf, gemeten.
+          # Dus een verse willekeurige waarde per run; die staat ook nergens in de repo.
+          # Apart genereren, want een mislukte openssl binnen $(...) wordt door de printf
+          # eromheen gemaskeerd en zou hier als "poort stuk" uitkomen.
+          achtervoegsel="$(openssl rand -hex 18)" || true
+          [ ${#achtervoegsel} -eq 36 ] || { echo "::error::kon geen nepsecret genereren (openssl) — er wordt niet gepubliceerd."; exit 1; }
+          printf 'token: ghp_%s\n' "$achtervoegsel" > /tmp/gate-selftest/leak.txt
+          # Eigen exitcode, want gitleaks gebruikt 1 zowel voor "gevonden" als voor een
+          # scannerfout (gemeten: ontbrekende map en onleesbare config geven allebei 1). Met de
+          # standaardcode zou een kapotte scanner hier als geslaagde zelftest doorgaan — precies
+          # het fail-open dat deze stap moet uitsluiten. Nu telt alleen 42 als "gevonden".
+          set +e
+          ./gitleaks dir /tmp/gate-selftest --redact --exit-code 42 --no-banner
+          code=$?
+          set -e
+          if [ "$code" -ne 42 ]; then
+            echo "::error::zelftest mislukt (gitleaks exit $code; 42 = nepsecret gevonden, 0 = niet gevonden, anders scannerfout) — er wordt niet gepubliceerd."
             exit 1
           fi
           echo "zelftest ok: gitleaks faalt op een geplant nepsecret"
