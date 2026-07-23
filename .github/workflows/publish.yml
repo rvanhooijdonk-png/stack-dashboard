@@ -151,9 +151,9 @@ jobs:
           <p>De generator is afgebroken: een test, de sanitize-gate of de secretsscan gaf een fout.
           Er wordt met opzet géén oudere stand getoond — een verouderde groene pagina is misleidender
           dan deze melding.</p>
-          <p>Deze melding blijft staan tot een volgende build slaagt. Die start bij een push naar main of bij
-          een handmatige run; er is hier geen geplande run die dit vanzelf oplost. De browser herlaadt deze
-          pagina wel periodiek, maar dat start geen nieuwe build.</p>
+          <p>Een nieuwe build start bij een push naar main, bij een handmatige run, of bij de ingestelde
+          kwartierrun — op die laatste kun je hier niet vertrouwen. Deze melding verdwijnt pas nadat build
+          én publicatie slagen. De browser herlaadt deze pagina wel periodiek, maar dat start geen build.</p>
           </div></body></html>
           HTML
 
