@@ -57,7 +57,12 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p /tmp/gate-selftest
-          printf 'token: ghp_%s\n' "$(printf 'A%.0s' $(seq 36))" > /tmp/gate-selftest/leak.txt
+          # Het nepsecret moet er ook voor de scanner als een secret uitzien. `ghp_` gevolgd
+          # door 36× dezelfde letter haalt de entropiedrempel van de github-pat-regel niet:
+          # gemeten op gitleaks 8.30.1 wordt zo'n token NIET gevonden, en dan meldt deze
+          # zelftest ten onrechte dat de poort stuk is. Een verse willekeurige waarde per run
+          # wordt wel gevonden — en er staat nooit een secret-vormige string in de repo zelf.
+          printf 'token: ghp_%s\n' "$(openssl rand -hex 18)" > /tmp/gate-selftest/leak.txt
           if ./gitleaks dir /tmp/gate-selftest --redact --exit-code 1 --no-banner; then
             echo "::error::gitleaks vond het geplante nepsecret NIET — de outputpoort werkt niet."
             exit 1
