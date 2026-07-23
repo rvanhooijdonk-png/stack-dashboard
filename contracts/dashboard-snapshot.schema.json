@@ -204,7 +204,8 @@
         "available",
         "updates",
         "decisionPoints",
-        "evidence"
+        "evidence",
+        "textWithheld"
       ],
       "properties": {
         "available": {
@@ -215,8 +216,7 @@
           "items": {
             "type": "object",
             "required": [
-              "number",
-              "title"
+              "number"
             ],
             "properties": {
               "number": {
@@ -226,7 +226,11 @@
                 "type": "string"
               },
               "title": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "null = tekst ingehouden (data/publish-text.json)."
               }
             }
           }
@@ -236,21 +240,27 @@
           "items": {
             "type": "object",
             "required": [
-              "id",
-              "title"
+              "id"
             ],
             "properties": {
               "id": {
                 "type": "string"
               },
               "title": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "null = tekst ingehouden (data/publish-text.json)."
               }
             }
           }
         },
         "evidence": {
           "$ref": "#/$defs/evidence"
+        },
+        "textWithheld": {
+          "type": "boolean"
         }
       }
     },
@@ -259,7 +269,8 @@
       "required": [
         "available",
         "entries",
-        "evidence"
+        "evidence",
+        "textWithheld"
       ],
       "properties": {
         "available": {
@@ -270,8 +281,7 @@
           "items": {
             "type": "object",
             "required": [
-              "id",
-              "decision"
+              "id"
             ],
             "properties": {
               "id": {
@@ -281,13 +291,20 @@
                 "type": "string"
               },
               "decision": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "null = tekst ingehouden (data/publish-text.json)."
               }
             }
           }
         },
         "evidence": {
           "$ref": "#/$defs/evidence"
+        },
+        "textWithheld": {
+          "type": "boolean"
         }
       }
     },
@@ -296,7 +313,8 @@
       "required": [
         "available",
         "tracks",
-        "evidence"
+        "evidence",
+        "hiddenTracks"
       ],
       "properties": {
         "available": {
@@ -328,6 +346,11 @@
         },
         "evidence": {
           "$ref": "#/$defs/evidence"
+        },
+        "hiddenTracks": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Aantal tracks dat niet bij naam getoond wordt (allowlist data/public-tracks.json)."
         }
       }
     },
@@ -336,7 +359,8 @@
       "required": [
         "available",
         "entries",
-        "evidence"
+        "evidence",
+        "textWithheld"
       ],
       "properties": {
         "available": {
@@ -346,18 +370,23 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": [
-              "title"
-            ],
+            "required": [],
             "properties": {
               "title": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "null = tekst ingehouden (data/publish-text.json)."
               }
             }
           }
         },
         "evidence": {
           "$ref": "#/$defs/evidence"
+        },
+        "textWithheld": {
+          "type": "boolean"
         }
       }
     },
@@ -366,7 +395,8 @@
       "required": [
         "available",
         "lights",
-        "evidence"
+        "evidence",
+        "hiddenCiRepositories"
       ],
       "properties": {
         "available": {
@@ -404,6 +434,11 @@
         },
         "evidence": {
           "$ref": "#/$defs/evidence"
+        },
+        "hiddenCiRepositories": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Aantal CI-repo's dat niet bij naam getoond wordt (allowlist data/public-repos.json)."
         }
       }
     }

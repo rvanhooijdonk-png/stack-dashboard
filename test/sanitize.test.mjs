@@ -25,15 +25,14 @@ test('redigeert lokale paden en e-mailadressen', () => {
   assert.equal(e.value.includes('@voorbeeld.nl'), false);
 });
 
-test('spaart een losstaande git-SHA — dat is juist bewijsmateriaal', () => {
-  const sha = 'a'.repeat(40);
-  const { value, findings } = sanitizeString(sha);
-  assert.equal(value, sha);
-  assert.equal(findings.length, 0);
+test('redigeert ook een losstaande 40-hexwaarde — die vorm is niet alleen van git', () => {
+  // Review Gemini: een legacy-token of session-ID heeft exact de vorm van een SHA. De
+  // publieke DTO draagt geen SHA's meer, dus de oude uitzondering kostte alleen dekking.
+  const { value } = sanitizeString('a'.repeat(40));
+  assert.equal(value, '[REDACTED]');
 });
 
 test('spaart 40-hex NIET wanneer het middenin andere tekst staat', () => {
-  // Review Codex: een 40-hex waarde kan net zo goed een sleutel zijn als een SHA.
   const { value } = sanitizeString('commit ' + 'a'.repeat(40));
   assert.ok(value.includes('[REDACTED]'));
 });
@@ -128,7 +127,8 @@ test('kapt te lange strings af vóór regexverwerking (ReDoS-plafond)', () => {
   const start = process.hrtime.bigint();
   const { value, findings } = sanitizeString(evil);
   const ms = Number(process.hrtime.bigint() - start) / 1e6;
-  assert.ok(value.length < 2100);
+  // Volledig weg, geen prefix: een credential dat op de knip begint mag niet half overleven.
+  assert.equal(value, '[REDACTED — te lang]');
   assert.ok(findings.some((f) => f.id === 'oversized'));
   assert.ok(ms < 250, `sanitize duurde ${ms.toFixed(0)} ms — ReDoS-plafond werkt niet`);
 });

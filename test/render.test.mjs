@@ -86,3 +86,21 @@ test('meldt verborgen repo\'s in plaats van ze bij naam te noemen', () => {
   const html = renderHtml(fixture);
   assert.match(html, /2 PR's staan in repo's die niet bij naam getoond worden/);
 });
+
+// --- Bevindingen uit de tweede dubbele review van 23-07-2026 (Codex + Gemini) ---
+
+test('zegt zichtbaar dát de titels ingehouden zijn — geen stille leegte', () => {
+  const html = renderHtml(fixture);
+  assert.match(html, /Titels worden hier niet getoond/);
+  assert.match(html, /de structuur — nummers, ID's, datums en aantallen/);
+});
+
+test('een ingehouden titel wordt een streepje, geen "null"', () => {
+  const html = renderHtml(fixture);
+  assert.equal(/>\s*null\s*</.test(html), false, 'null mag nooit als tekst op de pagina staan');
+});
+
+test('meldt verborgen vloottracks', () => {
+  const html = renderHtml(fixture);
+  assert.match(html, /1 track\(s\) worden niet bij naam getoond/);
+});

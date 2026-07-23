@@ -71,13 +71,13 @@
       {
         "number": 24,
         "date": "23/7",
-        "title": "Voorbeeldupdate"
+        "title": null
       }
     ],
     "decisionPoints": [
       {
         "id": "23a",
-        "title": "Voorbeeldbeslispunt"
+        "title": null
       }
     ],
     "evidence": {
@@ -85,7 +85,8 @@
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
       "error": null
-    }
+    },
+    "textWithheld": true
   },
   "decisions": {
     "available": true,
@@ -93,7 +94,7 @@
       {
         "id": "D-0001",
         "date": "2026-07-15",
-        "decision": "Voorbeeldbesluit"
+        "decision": null
       }
     ],
     "evidence": {
@@ -101,7 +102,8 @@
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
       "error": null
-    }
+    },
+    "textWithheld": true
   },
   "fleet": {
     "available": true,
@@ -117,7 +119,8 @@
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
       "error": null
-    }
+    },
+    "hiddenTracks": 1
   },
   "logbook": {
     "available": false,
@@ -127,7 +130,8 @@
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "SOURCE_UNAVAILABLE",
       "error": "Staat nog niet op main."
-    }
+    },
+    "textWithheld": true
   },
   "ci": {
     "available": true,
@@ -159,6 +163,7 @@
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
       "error": null
-    }
+    },
+    "hiddenCiRepositories": 0
   }
 }

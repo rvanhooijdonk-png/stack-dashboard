@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 /** Langere strings worden vóór regexverwerking afgekapt — ReDoS-plafond én lekplafond. */
 const MAX_STRING = 2000;
 const PLACEHOLDER = '[REDACTED]';
-const TRUNCATED = ' […]';
+const TRUNCATED = '[REDACTED — te lang]';
 
 /** Patronen die nooit in publieke output mogen belanden. Volgorde = toepassingsvolgorde. */
 export const DENY_PATTERNS = [
@@ -82,10 +82,12 @@ export function sanitizeString(value, { path = '' } = {}) {
   const findings = [];
   let out = value;
 
-  // ReDoS-plafond: begrens vóór er ook maar één regex over de string loopt.
+  // ReDoS-plafond: begrens vóór er ook maar één regex over de string loopt. Bewust géén
+  // prefix bewaren — een credential dat toevallig op de knip begint, zou anders half
+  // overleven (review Gemini, 23-07-2026). Te lang = helemaal weg.
   if (out.length > MAX_STRING) {
-    out = out.slice(0, MAX_STRING) + TRUNCATED;
     findings.push({ id: 'oversized', path });
+    return { value: TRUNCATED, findings };
   }
 
   for (const { id, re } of DENY_PATTERNS) {
@@ -96,18 +98,17 @@ export function sanitizeString(value, { path = '' } = {}) {
     findings.push({ id, path });
   }
 
-  // Een op zichzelf staande git-SHA is bewijsmateriaal en blijft staan; een 40-hexwaarde
-  // middenin andere tekst krijgt dat voorrecht niet (review Codex: 40-hex kan ook een sleutel zijn).
-  const isBareSha = /^[0-9a-f]{40}$/i.test(out.trim());
-  if (!isBareSha) {
-    for (const re of [HIGH_ENTROPY, BASE64_BLOB]) {
-      re.lastIndex = 0;
-      if (!re.test(out)) continue;
-      re.lastIndex = 0;
-      const before = out;
-      out = out.replace(re, PLACEHOLDER);
-      if (out !== before) findings.push({ id: 'high-entropy', path });
-    }
+  // Géén uitzondering meer voor een losstaande 40-hexwaarde. Die zag er als git-SHA
+  // onschuldig uit, maar een legacy-token of session-ID heeft exact dezelfde vorm
+  // (review Gemini, 23-07-2026). De publieke DTO draagt sinds de vorige ronde toch geen
+  // SHA's meer, dus de uitzondering kostte alleen maar dekking.
+  for (const re of [HIGH_ENTROPY, BASE64_BLOB]) {
+    re.lastIndex = 0;
+    if (!re.test(out)) continue;
+    re.lastIndex = 0;
+    const before = out;
+    out = out.replace(re, PLACEHOLDER);
+    if (out !== before) findings.push({ id: 'high-entropy', path });
   }
 
   if (denyTerms?.length) {

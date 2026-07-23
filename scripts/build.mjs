@@ -18,7 +18,7 @@ import { assertPublishable, loadDenyTerms } from './lib/sanitize.mjs';
 import { renderHtml } from './lib/render.mjs';
 import {
   collectPullRequests, collectMergedRecent, collectTracker,
-  collectDecisions, collectFleet, collectLogbook, collectCi, setPublicRepos,
+  collectDecisions, collectFleet, collectLogbook, collectCi, setPublicRepos, setPublicTracks,
 } from './lib/collect.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -38,10 +38,21 @@ const readJson = async (p, fallback) => {
 };
 
 /**
+ * Standaardbeleid voor vrije tekst: niets. Zie `data/publish-text.json` en de probe die dit
+ * afdwong (Codex, 23-07-2026): "Project Saffier: overname van klant Zephyr gaat vrijdag live"
+ * passeerde elke gate en stond gewoon op de pagina. Geen enkel patroon herkent zoiets — dus
+ * gaat de tekst er standaard niet in, en draagt de structuur eromheen de status.
+ */
+const TEXT_OFF = { trackerUpdates: false, trackerDecisionPoints: false, decisions: false, logbook: false };
+
+/**
  * Reduceer de interne snapshot tot wat de pagina toont — veld voor veld, met de hand.
  * Er is bewust geen spread: een nieuw veld in een collector verschijnt hier niet vanzelf.
  */
-export function toPublicSnapshot(raw) {
+export function toPublicSnapshot(raw, textPolicy = {}) {
+  const t = { ...TEXT_OFF, ...textPolicy };
+  /** Vrije tekst komt er alleen in als iemand die sectie expliciet heeft vrijgegeven. */
+  const text = (allowed, value) => (allowed ? value : null);
   const ev = (e) => ({ source: e.source, retrievedAt: e.retrievedAt, trust: e.trust, error: e.error ?? null });
 
   const sources = ['pullRequests', 'merged', 'tracker', 'decisions', 'fleet', 'logbook', 'ci']
@@ -71,28 +82,39 @@ export function toPublicSnapshot(raw) {
     },
     tracker: {
       available: raw.tracker.available,
-      updates: raw.tracker.updates.map((u) => ({ number: u.number, date: u.date, title: u.title })),
-      decisionPoints: raw.tracker.decisionPoints.map((d) => ({ id: d.id, title: d.title })),
+      textWithheld: !(t.trackerUpdates && t.trackerDecisionPoints),
+      updates: raw.tracker.updates.map((u) => ({
+        number: u.number, date: u.date, title: text(t.trackerUpdates, u.title),
+      })),
+      decisionPoints: raw.tracker.decisionPoints.map((d) => ({
+        id: d.id, title: text(t.trackerDecisionPoints, d.title),
+      })),
       evidence: ev(raw.tracker.evidence),
     },
     decisions: {
       available: raw.decisions.available,
-      entries: raw.decisions.entries.map((e) => ({ id: e.id, date: e.date, decision: e.decision })),
+      textWithheld: !t.decisions,
+      entries: raw.decisions.entries.map((e) => ({
+        id: e.id, date: e.date, decision: text(t.decisions, e.decision),
+      })),
       evidence: ev(raw.decisions.evidence),
     },
     fleet: {
       available: raw.fleet.available,
-      tracks: raw.fleet.tracks.map((t) => ({ track: t.track, lastChangeAt: t.lastChangeAt, trust: t.trust })),
+      tracks: raw.fleet.tracks.map((x) => ({ track: x.track, lastChangeAt: x.lastChangeAt, trust: x.trust })),
+      hiddenTracks: raw.fleet.hiddenTracks ?? 0,
       evidence: ev(raw.fleet.evidence),
     },
     logbook: {
       available: raw.logbook.available,
-      entries: raw.logbook.entries.map((e) => ({ title: e.title })),
+      textWithheld: !t.logbook,
+      entries: raw.logbook.entries.map((e) => ({ title: text(t.logbook, e.title) })),
       evidence: ev(raw.logbook.evidence),
     },
     ci: {
       available: raw.ci.available,
       lights: raw.ci.lights.map((l) => ({ repository: l.repository, state: l.state, at: l.at })),
+      hiddenCiRepositories: raw.ci.hiddenCiRepositories ?? 0,
       evidence: ev(raw.ci.evidence),
     },
   };
@@ -102,6 +124,7 @@ export async function buildSnapshot({ fixture = null } = {}) {
   if (fixture) return JSON.parse(await readFile(fixture, 'utf8'));
 
   setPublicRepos(await readJson('data/public-repos.json', []));
+  setPublicTracks((await readJson('data/public-tracks.json', {})).tracks ?? []);
   const workstreams = await readJson('data/workstreams.json', []);
   const ciRepos = await readJson('data/ci-repos.json', ['stack-control']);
 
@@ -124,8 +147,9 @@ async function main() {
 
   const termCount = loadDenyTerms(join(ROOT, 'data/deny-terms.json'));
 
+  const textPolicy = await readJson('data/publish-text.json', {});
   const raw = await buildSnapshot({ fixture: arg('fixture') });
-  const reduced = arg('fixture') ? raw : toPublicSnapshot(raw);
+  const reduced = arg('fixture') ? raw : toPublicSnapshot(raw, textPolicy);
 
   // SANITIZE-GATE — fail-closed. Alles hierna is publicabel of we publiceren niet.
   const { snapshot, findings } = assertPublishable(reduced, { strict });
@@ -152,6 +176,8 @@ async function main() {
   const degraded = snapshot.sources.filter((s) => s.trust !== 'VERIFIED_CURRENT');
   console.log(`gebouwd: ${relative(ROOT, join(outDir, 'index.html'))} (allowlist: ${PUBLISH_ALLOWLIST.join(', ')})`);
   console.log(`deny-terms geladen: ${termCount}`);
+  const vrijgegeven = ['trackerUpdates', 'trackerDecisionPoints', 'decisions', 'logbook'].filter((k) => textPolicy[k]);
+  console.log(`vrije tekst gepubliceerd: ${vrijgegeven.length ? vrijgegeven.join(', ') : 'geen (alleen structuur)'}`);
   console.log(`status: ${snapshot.overallStatus}${degraded.length ? ` · niet-geverifieerd: ${degraded.map((s) => `${s.key}=${s.trust}`).join(', ')}` : ''}`);
 }
 

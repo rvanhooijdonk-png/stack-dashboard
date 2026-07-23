@@ -21,11 +21,18 @@ Live: **https://rvanhooijdonk-png.github.io/stack-dashboard/**
 
 De roadmapsectie vervangt de losse handmatige roadmap-refreshes.
 
+**Wat je er níét op ziet: de tekst zelf.** De pagina toont de structuur van de canon — nummers,
+ID's, datums, statussen, aantallen — en houdt kopregels, besluitregels en journaalkoppen in. Dat is
+geen omissie maar het ontwerp: dit is een openbare pagina en de canon is intern. Per sectie
+vrijgeven kan, met de hand, in `data/publish-text.json`; de reden en de voorwaarde staan in
+`docs/SECURITY.md` §3. Repo- en tracknamen werken net zo: allowlist in `data/public-repos.json` en
+`data/public-tracks.json`, de rest wordt geteld en niet benoemd.
+
 ## Draaien
 
 ```sh
-node --test test/          # tests
-node scripts/build.mjs     # bouwt public/index.html + public/snapshot.json
+node --test 'test/*.test.mjs'   # tests
+node scripts/build.mjs          # bouwt public/index.html + public/status.json
 open public/index.html
 ```
 
@@ -50,8 +57,13 @@ Pages-artefact gedeployed.
 ## Veiligheid
 
 De repo is **openbaar** op expliciet besluit van Richard (afwijking van de standaardregel
-"nieuwe repo's privé", hardop benoemd). Daarom zit er een verplichte **sanitize-gate** in de
-pijplijn die fail-closed is, plus `gitleaks` op de output vóór elke publicatie.
+"nieuwe repo's privé", hardop benoemd). De verdediging is daarom in de eerste plaats *niet
+meenemen* — vrije tekst en niet-vrijgegeven namen komen de publieke DTO niet in. Daaronder zit een
+fail-closed **sanitize-gate** als vangnet, plus `gitleaks` op de output vóór elke publicatie.
+
+De volgorde is opzettelijk: de gate herkent patronen, geen bedrijfsinhoud. Een dubbele review
+bewees dat met een besluitregel over een klantovername die elke patroongate passeerde
+(`docs/SECURITY.md` §3).
 
 Lees `docs/SECURITY.md` vóór je een collector toevoegt. Token-setup: `docs/TOKEN-SETUP.md`
 (machine-recht — Richard voert dat zelf uit).

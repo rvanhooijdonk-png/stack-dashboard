@@ -21,6 +21,12 @@ const CONTROL_REPO = validName(process.env.DASHBOARD_CONTROL_REPO ?? 'stack-cont
 const TRACKER_PATH = 'AUDIT-INPUT/stack-open-beslispunten.md';
 const GH_TIMEOUT_MS = 60_000;
 
+/**
+ * Een bron die leesbaar is maar al weken niet is aangeraakt, is niet "actueel" — hij is oud.
+ * Zonder deze grens toont een stilstaande stack een groene pagina (review Gemini, 23-07-2026).
+ */
+const STALE_DAYS = 14;
+
 /** GitHub-namen zijn alfanumeriek met `-._`. Alles daarbuiten is geen naam maar een poging. */
 function validName(value, label) {
   if (!/^[A-Za-z0-9._-]{1,100}$/.test(value)) throw new Error(`ongeldige ${label}`);
@@ -37,6 +43,16 @@ export function setPublicRepos(names) {
   publicRepos = new Set((names ?? []).filter((n) => /^[A-Za-z0-9._-]{1,100}$/.test(n)));
 }
 const shown = (name) => (publicRepos.has(name) ? name : null);
+
+/**
+ * Hetzelfde principe voor vloottracks. Een bestandsnaam in de queue-map kan een project-,
+ * klant- of branchnaam bevatten; zonder allowlist lekt die naam zo naar buiten
+ * (review Gemini, 23-07-2026). Niet-genoemde tracks worden geteld, niet benoemd.
+ */
+let publicTracks = new Set();
+export function setPublicTracks(names) {
+  publicTracks = new Set((names ?? []).filter((n) => typeof n === 'string' && n.length <= 100));
+}
 
 /** `gh` aanroepen. Onderscheidt expliciet "mislukt" van "geslaagd maar leeg". */
 async function gh(args, { json = true } = {}) {
@@ -75,6 +91,30 @@ async function fileFromRepo(repo, path, ref = 'main') {
 /** Een bron die leesbaar was maar niets herkenbaars opleverde, is niet geverifieerd. */
 const trustFor = (count) => (count > 0 ? 'VERIFIED_CURRENT' : 'UNVERIFIED');
 const parserNote = (count) => (count > 0 ? null : 'Bron gelezen, maar geen enkele regel herkend — parser mogelijk verouderd.');
+
+/** Laatste commitdatum van één bestand. Leeg = onbekend, en onbekend is niet "vers". */
+async function lastCommitDate(repo, path) {
+  const res = await gh([
+    'api', `repos/${OWNER}/${seg(repo)}/commits?path=${path.split('/').map(seg).join('/')}&per_page=1`,
+    '-q', '.[0].commit.committer.date',
+  ], { json: false });
+  const date = res.ok ? (res.data ?? '').trim() : '';
+  return date && date !== 'null' ? date : null;
+}
+
+/**
+ * Combineer "is er iets herkend" met "hoe oud is de bron". Een leesbaar maar bejaard bestand
+ * levert STALE op, geen groen vinkje — het verschil tussen "dit klopt nog" en "dit staat stil".
+ */
+function trustWithAge(count, lastChangeAt) {
+  if (count === 0) return { trust: 'UNVERIFIED', note: parserNote(count) };
+  if (!lastChangeAt) return { trust: 'UNVERIFIED', note: 'Laatste wijzigingsdatum van de bron onbekend.' };
+  const days = Math.floor((Date.now() - new Date(lastChangeAt).getTime()) / 86400000);
+  if (!Number.isFinite(days)) return { trust: 'UNVERIFIED', note: 'Datum van de bron onleesbaar.' };
+  return days > STALE_DAYS
+    ? { trust: 'STALE', note: `Bron ${days} dagen niet gewijzigd — de pagina is vers, de inhoud niet.` }
+    : { trust: 'VERIFIED_CURRENT', note: null };
+}
 
 /** Org-brede open PR's, gegroepeerd per repo. Vereist een read-token met org-bereik. */
 export async function collectPullRequests() {
@@ -174,9 +214,10 @@ export async function collectTracker() {
     .slice(0, 12);
 
   const n = updates.length + decisionPoints.length;
+  const { trust, note } = trustWithAge(n, await lastCommitDate(CONTROL_REPO, TRACKER_PATH));
   return {
     available: true, updates, decisionPoints,
-    evidence: evidence(src, 'main', trustFor(n), proof, parserNote(n)),
+    evidence: evidence(src, 'main', trust, proof, note),
   };
 }
 
@@ -195,9 +236,10 @@ export async function collectDecisions() {
     .map((m) => ({ id: m[1], date: m[2], decision: m[3].trim() }))
     .sort((a, b) => b.id.localeCompare(a.id))
     .slice(0, 10);
+  const { trust, note } = trustWithAge(entries.length, await lastCommitDate(CONTROL_REPO, 'CONTROL/DECISIONS.md'));
   return {
     available: true, entries,
-    evidence: evidence(src, 'main', trustFor(entries.length), proof, parserNote(entries.length)),
+    evidence: evidence(src, 'main', trust, proof, note),
   };
 }
 
@@ -218,26 +260,33 @@ export async function collectFleet() {
   }
 
   const files = listing.data.filter((f) => typeof f.name === 'string' && f.name.endsWith('.md'));
-  const tracks = await Promise.all(files.map(async (file) => {
+  const all = await Promise.all(files.map(async (file) => {
+    const name = file.name.replace(/\.md$/, '');
     const res = await gh([
       'api', `repos/${OWNER}/${CONTROL_REPO}/commits?path=CONTROL/TASK-QUEUE/${seg(file.name)}&per_page=1`,
       '-q', '.[0].commit.committer.date',
     ], { json: false });
     const date = res.ok ? (res.data ?? '').trim() : '';
     return {
-      track: file.name.replace(/\.md$/, ''),
+      track: name,
+      named: publicTracks.has(name),
       lastChangeAt: date && date !== 'null' ? date : null,
       trust: res.ok ? 'VERIFIED_CURRENT' : 'SOURCE_UNAVAILABLE',
     };
   }));
 
+  // Niet-genoemde tracks tellen mee voor het beeld, maar hun naam blijft binnen.
+  const tracks = all.filter((t) => t.named).map(({ named, ...t }) => t);
+  const hiddenTracks = all.length - tracks.length;
+
   // Eén mislukte track maakt de hele sectie onbetrouwbaar — niet stilzwijgend groen.
-  const failed = tracks.filter((t) => t.trust !== 'VERIFIED_CURRENT').length;
+  const failed = all.filter((t) => t.trust !== 'VERIFIED_CURRENT').length;
   return {
     available: true,
     tracks: tracks.sort((a, b) => (b.lastChangeAt ?? '').localeCompare(a.lastChangeAt ?? '')),
-    evidence: evidence(src, 'main', failed ? 'UNVERIFIED' : trustFor(tracks.length), proof,
-      failed ? `${failed} van ${tracks.length} tracks kon niet worden opgehaald.` : parserNote(tracks.length)),
+    hiddenTracks,
+    evidence: evidence(src, 'main', failed ? 'UNVERIFIED' : trustFor(all.length), proof,
+      failed ? `${failed} van ${all.length} tracks kon niet worden opgehaald.` : parserNote(all.length)),
   };
 }
 
@@ -254,15 +303,22 @@ export async function collectLogbook() {
     };
   }
   const entries = [...text.matchAll(/^#{2,3}\s+(.{3,110})$/gm)].map((m) => ({ title: m[1].trim() })).slice(0, 6);
+  const { trust, note } = trustWithAge(entries.length, await lastCommitDate(CONTROL_REPO, 'CONTROL/FABLE-JOURNAAL.md'));
   return {
     available: true, entries,
-    evidence: evidence(src, 'main', trustFor(entries.length), proof, parserNote(entries.length)),
+    evidence: evidence(src, 'main', trust, proof, note),
   };
 }
 
 /** CI-ampels: de laatste voltooide run op de default branch, per repo. */
 export async function collectCi(repositories) {
-  const lights = await Promise.all(repositories.map(async (repo) => {
+  // Dezelfde allowlist als bij de PR's: een ampel met een privérepo-naam eronder is nog steeds
+  // een gepubliceerde repo-naam (review Gemini, 23-07-2026). Niet-genoemde repo's tellen mee
+  // in het aantal, maar krijgen geen regel op de pagina.
+  const named = (repositories ?? []).filter((r) => shown(r));
+  const hiddenCiRepositories = (repositories ?? []).length - named.length;
+
+  const lights = await Promise.all(named.map(async (repo) => {
     validName(repo, 'DASHBOARD_CI_REPOS');
 
     const meta = await gh(['api', `repos/${OWNER}/${seg(repo)}`, '-q', '.default_branch'], { json: false });
@@ -292,6 +348,7 @@ export async function collectCi(repositories) {
   return {
     available: lights.length > 0,
     lights,
+    hiddenCiRepositories,
     evidence: evidence('GitHub Actions API', 'laatste voltooide run op de default branch',
       unknown ? 'UNVERIFIED' : trustFor(lights.length), `https://github.com/${OWNER}`,
       unknown ? `${unknown} van ${lights.length} repo's kon niet worden opgehaald.` : null),

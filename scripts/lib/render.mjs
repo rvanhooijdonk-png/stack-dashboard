@@ -97,22 +97,34 @@ function merged(m) {
   <div class="scroll"><table><thead><tr><th>Repo</th><th class="num">merges</th></tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 
+/**
+ * Vrije tekst uit de canon staat hier standaard niet. Wat je ziet is de structuur: nummers,
+ * ID's, datums, aantallen. De tekst zelf is bedrijfsinhoud en die hoort niet op een openbare
+ * pagina — zie `data/publish-text.json`.
+ */
+const WITHHELD = '<p class="lead muted">Titels worden hier niet getoond: dit is een openbare pagina en de brontekst is intern. Wat blijft staan is de structuur — nummers, ID\'s, datums en aantallen.</p>';
+
+/** Toon een titel, of een streepje als de tekst is ingehouden. */
+const txt = (value) => (value == null ? '<span class="muted">—</span>' : esc(value));
+
 function tracker(t) {
   if (!t?.available) return section('tracker', 'Tracker', t?.evidence, unavailable(t?.evidence));
-  const updates = t.updates.map((u) => `<li><span class="tag">${num(u.number)}</span> ${esc(u.title)} <span class="muted">${esc(u.date)}</span></li>`).join('\n');
+  const updates = t.updates.map((u) => `<li><span class="tag">${num(u.number)}</span> ${txt(u.title)} <span class="muted">${esc(u.date)}</span></li>`).join('\n');
   const points = t.decisionPoints.length
-    ? `<ul class="chips">${t.decisionPoints.map((d) => `<li><span class="tag warn">${esc(d.id)}</span> ${esc(d.title)}</li>`).join('')}</ul>`
+    ? `<ul class="chips">${t.decisionPoints.map((d) => `<li><span class="tag warn">${esc(d.id)}</span> ${txt(d.title)}</li>`).join('')}</ul>`
     : '<p class="empty">Geen open beslispunten in de tracker.</p>';
   return section('tracker', 'Tracker — laatste updates', t.evidence, `
+  ${t.textWithheld ? WITHHELD : ''}
   <ul class="list">${updates}</ul>
-  <h3>Beslispunten</h3>${points}`);
+  <h3>Beslispunten (${num(t.decisionPoints.length)})</h3>${points}`);
 }
 
 function decisions(d) {
   if (!d?.available) return section('decisions', 'Besluiten', d?.evidence, unavailable(d?.evidence));
-  const rows = d.entries.map((e) => `<tr><td class="nowrap">${esc(e.id)}</td><td class="nowrap muted">${esc(e.date)}</td><td>${esc(e.decision)}</td></tr>`).join('\n');
+  const rows = d.entries.map((e) => `<tr><td class="nowrap">${esc(e.id)}</td><td class="nowrap muted">${esc(e.date)}</td><td>${txt(e.decision)}</td></tr>`).join('\n');
   return section('decisions', 'Besluitenregister', d.evidence,
-    `<div class="scroll"><table><thead><tr><th>ID</th><th>datum</th><th>besluit</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+    `${d.textWithheld ? WITHHELD : ''}
+  <div class="scroll"><table><thead><tr><th>ID</th><th>datum</th><th>besluit</th></tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 
 function fleet(f) {
@@ -121,15 +133,21 @@ function fleet(f) {
       <td>${esc(t.track)}</td>
       <td class="nowrap">${esc(dt(t.lastChangeAt))}</td>
       <td class="muted nowrap">${esc(ago(t.lastChangeAt))}</td></tr>`).join('\n');
+  const hidden = f.hiddenTracks
+    ? `<p class="lead muted">${num(f.hiddenTracks)} track(s) worden niet bij naam getoond; een queue-bestandsnaam kan een project- of klantnaam zijn.</p>`
+    : '';
   return section('fleet', 'Vloot — laatste wijziging per track', f.evidence, `
   <p class="lead muted">Commitdatum van het queue-bestand; in CI bestaat geen lokale mtime.</p>
+  ${hidden}
   <div class="scroll"><table><thead><tr><th>Track</th><th>laatst gewijzigd</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 
 function logbook(l) {
   if (!l?.available) return section('logbook', 'Journaal', l?.evidence, unavailable(l?.evidence));
-  return section('logbook', 'Journaal — laatste entries', l.evidence,
-    `<ul class="list">${l.entries.map((e) => `<li>${esc(e.title)}</li>`).join('')}</ul>`);
+  const body = l.textWithheld
+    ? `<p class="lead"><strong>${num(l.entries.length)}</strong> entries in het journaal.</p>${WITHHELD}`
+    : `<ul class="list">${l.entries.map((e) => `<li>${txt(e.title)}</li>`).join('')}</ul>`;
+  return section('logbook', 'Journaal — laatste entries', l.evidence, body);
 }
 
 function ci(c) {
@@ -139,7 +157,10 @@ function ci(c) {
     return `<li><span class="dot ${a.dot}"></span><span class="repo">${esc(l.repository)}</span>
       <span class="muted">${esc(a.label)}${l.at ? ` · ${esc(ago(l.at))}` : ''}</span></li>`;
   }).join('\n');
-  return section('ci', 'CI-ampels', c.evidence, `<ul class="lights">${items}</ul>`);
+  const hidden = c.hiddenCiRepositories
+    ? `<p class="lead muted">${num(c.hiddenCiRepositories)} repo(s) worden niet bij naam getoond.</p>`
+    : '';
+  return section('ci', 'CI-ampels', c.evidence, `${hidden}<ul class="lights">${items}</ul>`);
 }
 
 function workstreams(ws) {
@@ -238,8 +259,9 @@ ${workstreams(s.workstreams)}
 
 <footer>
   Gegenereerd door <code>stack-dashboard</code> (contract ${esc(s.contractVersion)}) uit gecureerde bronnen
-  op GitHub. Wat hier staat is met de hand geselecteerd: koppen, tellingen en statussen — geen
-  documentinhoud, geen tokens, geen secretnamen, geen lokale paden. Elke build passeert een
+  op GitHub. Wat hier staat is met de hand geselecteerd: tellingen, ID's, datums en statussen.
+  De vrije tekst uit de bronnen staat er standaard <strong>niet</strong> in — geen documentinhoud,
+  geen tokens, geen secretnamen, geen lokale paden. Elke build passeert een
   sanitize-gate die fail-closed is, plus een onafhankelijke secretsscan vóór publicatie.
   Bij een onbereikbare bron staat er <em>bron onbereikbaar</em> — geen gecachte groene stand.
 </footer>

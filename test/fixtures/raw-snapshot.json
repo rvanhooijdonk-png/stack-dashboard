@@ -1,17 +1,143 @@
 {
   "generatedAt": "2026-07-23T12:00:00.000Z",
-  "workstreams": [{ "id": "WS01", "title": "T", "estimate": "1w", "internNotitie": "NIET PUBLICEREN" }],
+  "workstreams": [
+    {
+      "id": "WS01",
+      "title": "T",
+      "estimate": "1w",
+      "internNotitie": "NIET PUBLICEREN"
+    }
+  ],
   "pullRequests": {
     "available": true,
-    "repositories": [{ "repository": "r", "open": 1, "draft": 0, "ready": 1, "url": "https://intern/pr/1" }],
+    "repositories": [
+      {
+        "repository": "r",
+        "open": 1,
+        "draft": 0,
+        "ready": 1,
+        "url": "https://intern/pr/1"
+      }
+    ],
     "hiddenRepositories": 3,
-    "totals": { "open": 1, "draft": 0, "ready": 1 },
-    "evidence": { "source": "s", "sourceRef": "INTERN/PAD", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "https://intern", "error": null }
+    "totals": {
+      "open": 1,
+      "draft": 0,
+      "ready": 1
+    },
+    "evidence": {
+      "source": "s",
+      "sourceRef": "INTERN/PAD",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "https://intern",
+      "error": null
+    }
   },
-  "merged": { "available": true, "windowDays": 7, "count": 0, "byRepository": [], "evidence": { "source": "s", "sourceRef": "i", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "p", "error": null } },
-  "tracker": { "available": true, "updates": [], "decisionPoints": [], "evidence": { "source": "s", "sourceRef": "i", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "UNVERIFIED", "proofUrl": "p", "error": null } },
-  "decisions": { "available": true, "entries": [], "evidence": { "source": "s", "sourceRef": "i", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "p", "error": null } },
-  "fleet": { "available": true, "tracks": [], "evidence": { "source": "s", "sourceRef": "i", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "p", "error": null } },
-  "logbook": { "available": true, "entries": [], "evidence": { "source": "s", "sourceRef": "i", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "p", "error": null } },
-  "ci": { "available": true, "lights": [{ "repository": "r", "state": "GROEN", "conclusion": "success", "at": "x", "workflow": "geheime-workflow-naam" }], "evidence": { "source": "s", "sourceRef": "i", "retrievedAt": "2026-07-23T12:00:00.000Z", "trust": "VERIFIED_CURRENT", "proofUrl": "p", "error": null } }
+  "merged": {
+    "available": true,
+    "windowDays": 7,
+    "count": 0,
+    "byRepository": [],
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "p",
+      "error": null
+    }
+  },
+  "tracker": {
+    "available": true,
+    "updates": [
+      {
+        "number": 24,
+        "date": "23/7",
+        "title": "KLANTGEHEIM in de kop"
+      }
+    ],
+    "decisionPoints": [
+      {
+        "id": "24a",
+        "title": "overname van klant Zephyr"
+      }
+    ],
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "UNVERIFIED",
+      "proofUrl": "p",
+      "error": null
+    }
+  },
+  "decisions": {
+    "available": true,
+    "entries": [
+      {
+        "id": "D-0013",
+        "date": "2026-07-23",
+        "decision": "Project Saffier: overname van klant Zephyr gaat vrijdag live"
+      }
+    ],
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "p",
+      "error": null
+    }
+  },
+  "fleet": {
+    "available": true,
+    "tracks": [],
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "p",
+      "error": null
+    },
+    "hiddenTracks": 2
+  },
+  "logbook": {
+    "available": true,
+    "entries": [
+      {
+        "title": "journaalkop met interne duiding"
+      }
+    ],
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "p",
+      "error": null
+    }
+  },
+  "ci": {
+    "available": true,
+    "lights": [
+      {
+        "repository": "r",
+        "state": "GROEN",
+        "conclusion": "success",
+        "at": "x",
+        "workflow": "geheime-workflow-naam"
+      }
+    ],
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "p",
+      "error": null
+    },
+    "hiddenCiRepositories": 1
+  }
 }

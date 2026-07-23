@@ -1,0 +1,7 @@
+{
+  "_toelichting": "Publiceert deze pagina de VRIJE TEKST uit de canon, of alleen de structuur eromheen? Standaard: nee. Reden (probe Codex, 23-07-2026): een tracker-kop of besluitregel is gewone Nederlandse proza uit een privé-control-plane. Geen enkel patroon herkent 'overname van klant X gaat vrijdag live' als gevoelig, dus de sanitize-gate laat zoiets door. Structuur (aantallen, ID's, datums, statussen) draagt de status; de tekst draagt het bedrijfsgeheim. Zet een schakelaar pas op true als iemand de brontekst van die sectie regel voor regel heeft nagelopen en accepteert dat elke toekomstige regel er ook op komt.",
+  "trackerUpdates": false,
+  "trackerDecisionPoints": false,
+  "decisions": false,
+  "logbook": false
+}
