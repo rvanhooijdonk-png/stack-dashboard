@@ -261,11 +261,11 @@ export function renderHtml(snapshot, { refreshSeconds = 900 } = {}) {
 <p class="muted">Weergave van bestaande canon — nooit een tweede waarheid. Alles is read-only en gesaneerd;
 ${stale.length === 0 ? 'alle bronnen zijn geverifieerd.' : `<strong>${num(stale.length)}</strong> van ${num(s.sources.length)} bronnen is niet geverifieerd (zie de badges).`}
 <strong>Lees altijd eerst de stempel hierboven:</strong> deze pagina is statisch en wordt opnieuw gebouwd
-bij elke merge naar main en bij een handmatige run — <strong>niet op een gegarandeerd interval</strong>.
+bij elke push naar main en bij een handmatige run — <strong>niet op een gegarandeerd interval</strong>.
 De geplande kwartierrun staat wel ingesteld, maar GitHub voert die hier niet betrouwbaar uit. Een oude
 stempel betekent dus: er is sindsdien niets gepubliceerd. Dat kan een stukke build zijn, maar net zo goed
-gewoon een periode zonder merges. De stempel is de enige leeftijd die je hebt — vertrouw de cijfers niet
-ouder dan die.</p>
+gewoon een periode zonder pushes. De stempel geeft de leeftijd van déze publicatie; losse brondata kan
+ouder zijn, dus lees ook de badges per bron.</p>
 
 <div class="grid">
   ${pullRequests(s.pullRequests)}

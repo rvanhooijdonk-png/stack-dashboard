@@ -1,0 +1,9 @@
+{
+  "waarom": "Formuleringen die geen enkele publieke pagina mag bevatten. Ze beloven dat de stand zichzelf periodiek vernieuwt, en dat doet ze hier niet: de kwartiercron van publish.yml ging op 2026-07-23 drie slots achter elkaar leeg voorbij. Er zijn twee publieke HTML-paden — de gewone pagina uit render.mjs en de foutpagina in .github/workflows/publish.yml — en beide worden hierop getest. Nieuwe formulering die hetzelfde belooft? Zet hem hier bij, dan bewaken beide tests hem meteen.",
+  "patronen": [
+    "ververst automatisch",
+    "elk kwartier opnieuw",
+    "probeert het elk kwartier",
+    "herstelt vanzelf"
+  ]
+}

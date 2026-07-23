@@ -88,11 +88,12 @@ test('waarschuwt zichtbaar dat een oude stempel betekent dat er niets gepublicee
 test('de pagina belooft geen verversingsinterval dat we niet waarmaken', () => {
   // De stempelregel mag zeggen dat de bróuwser opnieuw ophaalt — dat doet de meta-refresh echt.
   // Ze mag niet suggereren dat de dáta elk kwartier ververst, want dat hangt aan een scheduler
-  // die hier niet betrouwbaar draait.
+  // die hier niet betrouwbaar draait. De lijst met verboden formuleringen staat in
+  // data/verboden-beloftes.json en wordt in publiekepaginas.test.mjs op béide publieke pagina's
+  // toegepast; hier staat alleen wat deze pagina in de plaats zegt.
   const html = renderHtml(fixture);
-  assert.equal(/ververst automatisch/i.test(html), false, 'geen belofte van automatische dataverversing');
   assert.match(html, /niet op een gegarandeerd interval/i);
-  assert.match(html, /bij elke merge naar main en bij een handmatige run/i);
+  assert.match(html, /bij elke push naar main en bij een handmatige run/i);
 });
 
 test('meldt verborgen repo\'s in plaats van ze bij naam te noemen', () => {
