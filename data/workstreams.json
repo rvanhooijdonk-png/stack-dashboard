@@ -1,0 +1,97 @@
+[
+ {
+  "id": "00",
+  "title": "Stack Control(control-plane)",
+  "estimate": "PR#98: uren (wacht op Gemini) · volledige triage: dagen"
+ },
+ {
+  "id": "01",
+  "title": "GitHub Canon & Obsidian Sync",
+  "estimate": "4-7 uur eerste findings · volledige 335-set: dagen"
+ },
+ {
+  "id": "02",
+  "title": "Autopilot / Zero-start Orchestration",
+  "estimate": "1-2 dagen"
+ },
+ {
+  "id": "03",
+  "title": "Command Canon & Model Governance",
+  "estimate": "Besluit eerst · uitvoering 1-2 dagen"
+ },
+ {
+  "id": "04",
+  "title": "Platform Core & Execution Runtime",
+  "estimate": "Her-review: 15-30 min · PAT-check: 5 min zodra gedaan"
+ },
+ {
+  "id": "05",
+  "title": "Claude Ops / Richard Queue",
+  "estimate": "Kanaal: 1-2 dagen — in de wachtrij"
+ },
+ {
+  "id": "06",
+  "title": "CHIEF (COA)",
+  "estimate": "Doc-fix: nu mogelijk · rest 1-1,5 dag"
+ },
+ {
+  "id": "07",
+  "title": "CRM, Mail, Consent & Revenue Ops",
+  "estimate": "Merge: 2 klikken · ALTER: 10 min · Railway-diagnose: klaar, wacht op Richards 2 stappen hierboven"
+ },
+ {
+  "id": "08",
+  "title": "Studio (Content Pipeline)",
+  "estimate": "2-3 uur"
+ },
+ {
+  "id": "09",
+  "title": "Trading Intelligence",
+  "estimate": "2-4 dagen"
+ },
+ {
+  "id": "10",
+  "title": "Web Factory",
+  "estimate": "1-2 dagen (cutover is het risicovolle deel)"
+ },
+ {
+  "id": "11",
+  "title": "Keynote Studio & Media",
+  "estimate": "Blocker 1-3 dagen · opschalen dagen-weken (scope-afhankelijk)"
+ },
+ {
+  "id": "12",
+  "title": "Infra/Security & Backup",
+  "estimate": "2-2,5 uur"
+ },
+ {
+  "id": "13",
+  "title": "Stack Dashboard",
+  "estimate": "Grotendeels afgerond — 1 klein besluit open"
+ },
+ {
+  "id": "14",
+  "title": "Scraper & Lead Intelligence",
+  "estimate": "1-1,5 dag (excl. opportunity-engine)"
+ },
+ {
+  "id": "15",
+  "title": "Health / Wearables",
+  "estimate": "30 min"
+ },
+ {
+  "id": "16",
+  "title": "Knowledge Base",
+  "estimate": "Enkele uren onderzoek — in de wachtrij"
+ },
+ {
+  "id": "17",
+  "title": "Video Automation",
+  "estimate": "2-4 uur voor de cheap fixes"
+ },
+ {
+  "id": "18",
+  "title": "Customer Conversation Intelligence",
+  "estimate": "Statusfix: afgerond · bouw: 2-4 weken (laag vertrouwen)"
+ }
+]

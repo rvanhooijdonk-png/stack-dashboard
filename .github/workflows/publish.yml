@@ -1,0 +1,73 @@
+name: publish
+
+# Elke 15 minuten, bij elke merge naar main, en handmatig.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only op de eigen repo; alle GitHub-lezing loopt via ORG_PR_READ_TOKEN.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Tests
+        run: node --test 'test/*.test.mjs'
+
+      - name: Genereren (read-only aggregatie)
+        env:
+          # Zonder dit token vallen de org-brede PR-secties terug op SOURCE_UNAVAILABLE.
+          # De pagina toont dat zichtbaar; er wordt nooit een oude groene stand hergebruikt.
+          GH_TOKEN: ${{ secrets.ORG_PR_READ_TOKEN || github.token }}
+        run: node scripts/build.mjs
+
+      # SANITIZE-GATE-poort 3: onafhankelijk van onze eigen regexen.
+      # Faalt deze stap, dan wordt er niet gepubliceerd.
+      - name: gitleaks op de output
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_COMMENTS: 'false'
+        with:
+          args: detect --no-git --source public --redact --exit-code 1
+
+      - name: Samenvatting
+        run: |
+          {
+            echo '### stack-dashboard'
+            echo ''
+            echo "status: $(node -p "require('./public/snapshot.json').overallStatus")"
+            echo ''
+            echo 'Onbereikbare bronnen:'
+            node -p "require('./public/snapshot.json').sources.filter(s=>s.trust==='SOURCE_UNAVAILABLE').map(s=>'- '+s.key).join('\n') || '- geen'"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

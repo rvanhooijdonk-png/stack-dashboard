@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rvanhooijdonk-png/stack-dashboard/contracts/dashboard-snapshot.schema.json",
+  "title": "DashboardSnapshotV1",
+  "description": "Contract voor de gesaneerde snapshot die het dashboard rendert. Afgeleid van het Codex-artefact stack-dashboard (contracts/dashboard-snapshot.schema.json), uitgebreid met tracker-, vloot- en workstream-secties. Elke sectie draagt zijn eigen evidence-oordeel; een mislukte bron wordt SOURCE_UNAVAILABLE en nooit een gecachte groene stand.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion", "generatedAt", "overallStatus", "sources", "workstreams",
+    "pullRequests", "merged", "tracker", "decisions", "fleet", "logbook", "ci"
+  ],
+  "properties": {
+    "contractVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "overallStatus": { "enum": ["OK", "DEGRADED"] },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "source", "retrievedAt", "trust"],
+        "properties": {
+          "key": { "type": "string" },
+          "source": { "type": "string" },
+          "sourceRef": { "type": ["string", "null"] },
+          "retrievedAt": { "type": "string", "format": "date-time" },
+          "trust": { "$ref": "#/$defs/trust" },
+          "proofUrl": { "type": ["string", "null"] },
+          "error": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "workstreams": {
+      "type": "array",
+      "description": "Roadmap-formaat, handmatig vastgelegd. Vervangt de losse handmatige refreshes.",
+      "items": {
+        "type": "object",
+        "required": ["id", "title"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "estimate": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "pullRequests": {
+      "type": "object",
+      "required": ["available", "repositories", "totals", "evidence"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "repositories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["repository", "open", "draft", "ready"],
+            "properties": {
+              "repository": { "type": "string" },
+              "open": { "type": "integer", "minimum": 0 },
+              "draft": { "type": "integer", "minimum": 0 },
+              "ready": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "totals": {
+          "type": "object",
+          "required": ["open", "draft", "ready"],
+          "properties": {
+            "open": { "type": "integer" }, "draft": { "type": "integer" }, "ready": { "type": "integer" }
+          }
+        },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "merged": {
+      "type": "object",
+      "required": ["available", "windowDays", "count", "byRepository", "evidence"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "windowDays": { "type": "integer", "minimum": 1 },
+        "count": { "type": "integer", "minimum": 0 },
+        "byRepository": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["repository", "merged"],
+            "properties": { "repository": { "type": "string" }, "merged": { "type": "integer" } }
+          }
+        },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "tracker": {
+      "type": "object",
+      "required": ["available", "updates", "decisionPoints", "evidence"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "updates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["number", "title"],
+            "properties": {
+              "number": { "type": "integer" }, "date": { "type": "string" }, "title": { "type": "string" }
+            }
+          }
+        },
+        "decisionPoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "title"],
+            "properties": { "id": { "type": "string" }, "title": { "type": "string" } }
+          }
+        },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "decisions": {
+      "type": "object",
+      "required": ["available", "entries", "evidence"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "decision"],
+            "properties": {
+              "id": { "type": "string" }, "date": { "type": "string" }, "decision": { "type": "string" }
+            }
+          }
+        },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "fleet": {
+      "type": "object",
+      "required": ["available", "tracks", "evidence"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "tracks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["track", "trust"],
+            "properties": {
+              "track": { "type": "string" },
+              "lastChangeAt": { "type": ["string", "null"] },
+              "trust": { "$ref": "#/$defs/trust" }
+            }
+          }
+        },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "logbook": {
+      "type": "object",
+      "required": ["available", "entries", "evidence"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["title"],
+            "properties": { "title": { "type": "string" } }
+          }
+        },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "ci": {
+      "type": "object",
+      "required": ["available", "lights", "evidence"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "lights": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["repository", "state"],
+            "properties": {
+              "repository": { "type": "string" },
+              "state": { "enum": ["GROEN", "ROOD", "GRIJS", "GEEN_CI"] },
+              "conclusion": { "type": ["string", "null"] },
+              "at": { "type": ["string", "null"] },
+              "workflow": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    }
+  },
+  "$defs": {
+    "trust": {
+      "description": "Vertrouwensoordeel per bron. SOURCE_UNAVAILABLE is een geldige eindstand, geen fout die je wegcachet.",
+      "enum": ["VERIFIED_CURRENT", "STALE", "UNVERIFIED", "SOURCE_UNAVAILABLE", "CONFLICTING_EVIDENCE"]
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["source", "retrievedAt", "trust"],
+      "properties": {
+        "source": { "type": "string" },
+        "sourceRef": { "type": ["string", "null"] },
+        "retrievedAt": { "type": "string", "format": "date-time" },
+        "trust": { "$ref": "#/$defs/trust" },
+        "proofUrl": { "type": ["string", "null"] },
+        "error": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
