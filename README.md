@@ -55,7 +55,7 @@ handmatig via *Run workflow*. De pagina haalt zichzelf opnieuw op met
 workflow (`state=active`). Wat de meting bewijst: déze workflow werd in dat tijdvak niet gestart.
 De oorzaak is niet los aangetoond; GitHub documenteert zelf dat geplande runs vertraagd en bij
 drukte gedropt worden, met het hele uur als expliciet genoemd druk moment — en `*/15` raakt dat
-elke keer. De cron blijft
+eenmaal per uur. De cron blijft
 staan — hij kost hier geen Actions-minuten en levert winst zodra hij wél aanslaat — maar hij telt
 niet als garantie. De trigger die je zelf in de hand hebt:
 

@@ -20,9 +20,12 @@ const publish = await readFile(join(ROOT, '.github/workflows/publish.yml'), 'utf
 // elders in het bestand zou anders stilletjes de verkeerde pagina laten toetsen.
 const OPENER = "cat > public/index.html <<'HTML'";
 const foutpagina = () => {
-  const treffers = [...publish.matchAll(new RegExp(OPENER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))];
+  // Regelankers erbij (m-vlag): de openingsopdracht moet een hele regel zijn, niet toevallig
+  // ergens in een langere regel of in een YAML-commentaar staan.
+  const opener = new RegExp(`^\\s*${OPENER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'gm');
+  const treffers = [...publish.matchAll(opener)];
   assert.equal(treffers.length, 1, `verwacht precies één foutpagina-heredoc, gevonden: ${treffers.length}`);
-  const start = treffers[0].index + OPENER.length;
+  const start = treffers[0].index + treffers[0][0].length;
   const einde = publish.indexOf('\n          HTML\n', start);
   assert.notEqual(einde, -1, 'einde van de foutpagina-heredoc niet gevonden');
   return publish.slice(start, einde);
