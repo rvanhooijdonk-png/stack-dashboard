@@ -2,19 +2,19 @@
   "generatedAt": "2026-07-23T12:00:00.000Z",
   "workstreams": [
     {
-      "id": "WS01",
+      "id": "01",
       "title": "Voorbeeldworkstream",
       "estimate": "1-2 dagen",
       "public": true,
       "internNotitie": "NIET PUBLICEREN"
     },
     {
-      "id": "WS02",
+      "id": "02",
       "title": "Project Saffier: overname klant Zephyr",
       "estimate": "vrijdag live, wacht op Gemini"
     },
     {
-      "id": "WS03",
+      "id": "03",
       "title": "Vrijgegeven maar met statustekst i.p.v. duur",
       "estimate": "Railway-diagnose: klaar, wacht op Richard",
       "public": true
@@ -81,7 +81,7 @@
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "UNVERIFIED",
       "proofUrl": "p",
-      "error": null
+      "error": "Project Saffier staat in CONTROL/KLANTEN/Zephyr.md"
     }
   },
   "decisions": {
@@ -104,7 +104,14 @@
   },
   "fleet": {
     "available": true,
-    "tracks": [],
+    "tracks": [
+      {
+        "track": "VOORBEELD",
+        "lastChangeAt": "2026-07-22T09:00:00Z",
+        "trust": "VERIFIED_CURRENT",
+        "internNotitie": "NIET PUBLICEREN"
+      }
+    ],
     "evidence": {
       "source": "s",
       "sourceRef": "i",

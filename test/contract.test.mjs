@@ -54,3 +54,58 @@ test('de validator weigert een schema met een trefwoord dat hij niet kent', () =
   const fouten = validate({ type: 'object', oneOf: [] }, {});
   assert.match(fouten.join(' '), /niet-ondersteund trefwoord "oneOf"/);
 });
+
+// --- Bevindingen uit de vierde dubbele review van 23-07-2026 (Codex + Gemini) ---
+
+test('een veld met een prototypenaam is óók een onbekend veld', () => {
+  // `!(key in properties)` gaf false voor `toString`: de eigenschap zat op Object.prototype.
+  const vies = { ...toPublicSnapshot(raw), toString: 'PROBE' };
+  assert.match(validate(schema, vies).join(' '), /toString: onbekend veld/);
+});
+
+test('het schema wordt gekeurd, ook waar geen data staat', () => {
+  // Onder een leeg array werd een onbekend trefwoord nooit bereikt: de validator liep mee met
+  // de instance in plaats van met het schema. Een lege lijst betekende dus "contract in orde".
+  const fouten = validate({ type: 'array', items: { type: 'string', maxLength: 3 } }, []);
+  assert.match(fouten.join(' '), /niet-ondersteund trefwoord "maxLength"/);
+});
+
+test('een $ref die nergens heen wijst is een fout, geen leeg schema', () => {
+  const fouten = validate({ $defs: {}, $ref: '#/$defs/toString' }, { wat: 'dan ook' });
+  assert.match(fouten.join(' '), /onbekende \$ref/);
+});
+
+test('een $ref-keten wordt helemaal gevolgd', () => {
+  const ketenSchema = {
+    $defs: { binnen: { type: 'string' }, buiten: { $ref: '#/$defs/binnen' } },
+    $ref: '#/$defs/buiten',
+  };
+  assert.deepEqual(validate(ketenSchema, 'tekst'), []);
+  assert.match(validate(ketenSchema, 42).join(' '), /verwacht string, kreeg number/);
+});
+
+test('naast een $ref blijven de geërfde properties gelden', () => {
+  // Een platte spread liet de lokale `properties` de geërfde overschrijven, waarna geldige
+  // geërfde velden als "onbekend veld" werden afgekeurd.
+  const s = {
+    $defs: { basis: { type: 'object', properties: { a: { type: 'string' } }, additionalProperties: false } },
+    $ref: '#/$defs/basis',
+    properties: { b: { type: 'number' } },
+  };
+  assert.deepEqual(validate(s, { a: 'x', b: 1 }), []);
+  assert.match(validate(s, { c: true }).join(' '), /c: onbekend veld/);
+});
+
+test('additionalProperties:false geldt ook zonder properties-blok', () => {
+  const fouten = validate({ type: 'object', additionalProperties: false }, { wat: 'dan ook' });
+  assert.match(fouten.join(' '), /wat: onbekend veld/);
+});
+
+test('het contract eist de datumvelden die de DTO altijd levert', () => {
+  const zonderDatum = structuredClone(toPublicSnapshot(raw));
+  delete zonderDatum.fleet.tracks[0].lastChangeAt;
+  delete zonderDatum.ci.lights[0].at;
+  const fouten = validate(schema, zonderDatum).join(' ');
+  assert.match(fouten, /lastChangeAt: verplicht veld ontbreekt/);
+  assert.match(fouten, /at: verplicht veld ontbreekt/);
+});

@@ -70,7 +70,9 @@
         ],
         "properties": {
           "id": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^[0-9]{2}$",
+            "description": "Alleen het workstreamnummer. Elke andere waarde breekt de build — een id was een publicatieroute langs public:true heen."
           },
           "title": {
             "type": [
@@ -352,6 +354,7 @@
             "type": "object",
             "required": [
               "track",
+              "lastChangeAt",
               "trust"
             ],
             "properties": {
@@ -440,7 +443,8 @@
             "type": "object",
             "required": [
               "repository",
-              "state"
+              "state",
+              "at"
             ],
             "properties": {
               "repository": {
@@ -493,7 +497,7 @@
       "required": [
         "retrievedAt",
         "trust",
-        "error"
+        "errorCode"
       ],
       "additionalProperties": false,
       "properties": {
@@ -504,10 +508,15 @@
         "trust": {
           "$ref": "#/$defs/trust"
         },
-        "error": {
-          "type": [
-            "string",
-            "null"
+        "errorCode": {
+          "description": "Gesloten codelijst; nooit de fouttekst van een collector. Zie ERROR_CODE_BY_TRUST in scripts/build.mjs.",
+          "enum": [
+            null,
+            "VEROUDERD",
+            "NIET_GEVERIFIEERD",
+            "BRON_ONBEREIKBAAR",
+            "TEGENSTRIJDIG",
+            "ONBEKEND"
           ]
         }
       }

@@ -60,9 +60,24 @@ function badge(ev) {
   return `<span class="badge ${cls}" title="opgehaald ${esc(dt(ev.retrievedAt))}">${esc(TRUST_LABEL[ev.trust] ?? ev.trust)}</span>`;
 }
 
+/**
+ * Vaste publieke teksten bij een gesloten codelijst. De vorige versie rendeerde de fouttekst van
+ * de collector zelf; een uitzondering met een intern pad of een klantnaam kwam daarmee zo op de
+ * pagina (bewezen probe, vierde review). Wat hier staat is door een mens geschreven, niet door
+ * een runtime.
+ */
+const ERROR_TEXT = {
+  BRON_ONBEREIKBAAR: 'de bron kon niet worden opgehaald',
+  NIET_GEVERIFIEERD: 'de bron leverde niets bruikbaars op',
+  VEROUDERD: 'de bron is al geruime tijd niet gewijzigd',
+  TEGENSTRIJDIG: 'de bronnen spreken elkaar tegen',
+  ONBEKEND: 'onbekende toestand',
+};
+
 function unavailable(ev) {
+  const uitleg = ev?.errorCode ? ` — ${esc(ERROR_TEXT[ev.errorCode] ?? ERROR_TEXT.ONBEKEND)}` : '';
   return `<p class="empty">Geen data. <strong>${esc(TRUST_LABEL[ev?.trust] ?? 'bron onbereikbaar')}</strong>${
-    ev?.error ? ` — ${esc(ev.error)}` : ''}<br><span class="muted">Een onbereikbare bron toont hier nooit een oude groene stand.</span></p>`;
+    uitleg}<br><span class="muted">Een onbereikbare bron toont hier nooit een oude groene stand.</span></p>`;
 }
 
 function section(id, title, ev, body) {

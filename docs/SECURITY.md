@@ -64,6 +64,25 @@ dezelfde doctrine:
 Dit bestand staat in een openbare repo en is daarmee zelf de publicatiebeslissing. De regel dat
 er per regel een menselijke `true` bij moet, is er om die beslissing bewust te houden.
 
+**Twee velden bleken daarna nóg tekst te dragen** — de vierde dubbele review (Codex + Gemini,
+23-07-2026) vond ze onafhankelijk van elkaar, allebei met een werkende probe:
+
+- **`evidence.error`.** Een foutmelding is vrije tekst zodra er een uitzondering in belandt, en
+  die kwam ongefilterd op de pagina. De probe `"Project Saffier staat in CONTROL/KLANTEN/Zephyr.md"`
+  passeerde sanitize én contract met nul bevindingen. Er gaat nu geen collectortekst meer naar
+  buiten: de publieke DTO draagt een `errorCode` uit een gesloten lijst, **afgeleid van `trust`**
+  in plaats van gekopieerd, en de renderer zet die code om in een vaste, door een mens geschreven
+  zin. Er bestaat dus geen route meer van een runtime-string naar de pagina. De volledige melding
+  blijft in `.local/snapshot.json`.
+- **`workstream.id`.** Titel en raming werden keurig ingehouden, maar `String(w.id)` publiceerde
+  elke waarde — de probe zette een klantnaam in het id en die stond op de pagina. Een id is nu
+  een tweecijferig nummer of de build stopt. Er is bewust geen terugval: het nummer is waar de
+  regel aan hangt. De foutmelding noemt de afgekeurde waarde niet, want het CI-log van een
+  openbare repo is zelf openbaar.
+
+De les die zich blijft herhalen: **elk veld dat ergens vandaan wordt gekopieerd, is een kandidaat
+om te lekken — ook een technisch veld.** Afleiden is veiliger dan doorgeven.
+
 ## 3b. Eén weg naar `public/`
 
 De vroegere `--fixture`-modus schreef een bestand rechtstreeks naar de publicatiemap, langs
@@ -86,6 +105,14 @@ De validator is met opzet eigen, kleine code: deze repo heeft nul afhankelijkhed
 openbare pagina hoort geen supply-chain-oppervlak te krijgen voor iets wat in CI draait. Hij
 weigert schema-trefwoorden die hij niet kent, zodat een `oneOf` in het contract nooit stilzwijgend
 genegeerd wordt.
+
+Eigen code betekent wel dat hij zelf gereviewd moet worden. De vierde ronde vond drie
+reproduceerbare false negatives met één gemeenschappelijke oorzaak: **hij keek naar de data om te
+bepalen wat hij van het schema moest controleren.** Een leeg array betekende "contract in orde",
+een `$ref`-keten viel na één stap stil, en `key in properties` hield `toString` voor een bekend
+veld. Sindsdien wordt het schema in zijn geheel gekeurd vóór de instance wordt bekeken, worden
+`$ref`-ketens helemaal gevolgd (met `properties` samengevoegd in plaats van overschreven), en gaat
+alles via `Object.hasOwn`. Elk van de drie heeft een eigen regressietest.
 
 ## 4. Namen zijn ook inhoud — twee allowlists
 
@@ -152,6 +179,13 @@ bijna vijftien dagen groen staan. Dezelfde leeftijdsregel geldt sinds de derde r
 vloottrack — een geslaagde API-call zegt alleen dat we het bestand kónden lezen, niet dat de track
 nog leeft.
 
+Twee gaten daarin gedicht in de vierde ronde. **Een datum in de toekomst gaf groen** — dat is geen
+verse bron maar een kapotte klok, en levert nu `UNVERIFIED` op; vijf minuten verschil tussen
+CI-runner en committer blijft toegestaan. En **een `UNVERIFIED` vloottrack telde niet mee** voor het
+oordeel over de sectie: de aggregatie keek alleen naar `SOURCE_UNAVAILABLE` en `STALE`, waardoor
+een geslaagde API-call zónder commitdatum een groene sectie opleverde. Codex bewees dat met een
+nep-`gh`. Nu geldt: elke track die niet groen is, trekt de sectie mee.
+
 `overallStatus` wordt `DEGRADED` zodra één bron niet `VERIFIED_CURRENT` is.
 
 ## 8. Read-only, altijd
@@ -165,8 +199,8 @@ dubbele borging is opzettelijk.
 De canon staat in `stack-control` en in de projectrepo's. Deze pagina toont de stand daarvan met
 tijdstempel en trust-oordeel. Bij twijfel wint de bron, niet de pagina.
 
-Bronpaden en bewijs-URL's staan **niet** in de publieke DTO: een pad naar een privé-bestand is op
-een openbare pagina zelf een aanwijzing. Wie de bron mag zien, weet waar de canon staat; wie hem
+Bronpaden, bewijs-URL's en foutmeldingen staan **niet** in de publieke DTO: een pad naar een
+privé-bestand is op een openbare pagina zelf een aanwijzing. Wie de bron mag zien, weet waar de canon staat; wie hem
 niet mag zien, hoeft het pad niet te leren. De interne snapshot in `.local/snapshot.json` houdt de
 volledige herkomst wél bij, buiten de publicatie en buiten git.
 

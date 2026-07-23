@@ -26,6 +26,8 @@ const GH_TIMEOUT_MS = 60_000;
  * Zonder deze grens toont een stilstaande stack een groene pagina (review Gemini, 23-07-2026).
  */
 const STALE_DAYS = 14;
+/** Toegestane klokafwijking tussen CI-runner en commitdatum. Daarbuiten klopt er iets niet. */
+const CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 /** GitHub-namen zijn alfanumeriek met `-._`. Alles daarbuiten is geen naam maar een poging. */
 function validName(value, label) {
@@ -122,7 +124,12 @@ export function ageTrust(lastChangeAt, now = Date.now()) {
   if (!lastChangeAt) return { trust: 'UNVERIFIED', note: 'Laatste wijzigingsdatum van de bron onbekend.' };
   const ms = now - new Date(lastChangeAt).getTime();
   if (!Number.isFinite(ms)) return { trust: 'UNVERIFIED', note: 'Datum van de bron onleesbaar.' };
-  if (ms > STALE_DAYS * 86400000) {
+  // Een datum in de toekomst is geen verse bron maar een kapotte klok — en die gaf groen.
+  // Een paar minuten speling blijft toegestaan: CI-runner en committer lopen zelden gelijk.
+  if (ms < -CLOCK_SKEW_MS) {
+    return { trust: 'UNVERIFIED', note: 'De bron draagt een datum in de toekomst — klok of bron klopt niet.' };
+  }
+  if (ms >= STALE_DAYS * 86400000) {
     return { trust: 'STALE', note: `Bron ${Math.floor(ms / 86400000)} dagen niet gewijzigd — de pagina is vers, de inhoud niet.` };
   }
   return { trust: 'VERIFIED_CURRENT', note: null };
@@ -294,12 +301,15 @@ export async function collectFleet() {
   const tracks = all.filter((t) => t.named).map(({ named, ...t }) => t);
   const hiddenTracks = all.length - tracks.length;
 
-  // Eén mislukte track maakt de hele sectie onbetrouwbaar — niet stilzwijgend groen.
+  // Eén track die niet groen is, maakt de hele sectie onbetrouwbaar — niet stilzwijgend groen.
   // Een oude track is iets anders dan een onleesbare: die zakt naar STALE, met eigen tekst.
-  const failed = all.filter((t) => t.trust === 'SOURCE_UNAVAILABLE').length;
+  // De vorige telling keek alleen naar SOURCE_UNAVAILABLE en STALE. Codex bewees met een
+  // nep-`gh` dat een geslaagde call zónder commitdatum een UNVERIFIED track opleverde in een
+  // sectie die gewoon groen bleef: precies het gat dat geen enkele categorie mocht hebben.
+  const unverified = all.filter((t) => t.trust === 'SOURCE_UNAVAILABLE' || t.trust === 'UNVERIFIED').length;
   const stale = all.filter((t) => t.trust === 'STALE').length;
-  const trust = failed ? 'UNVERIFIED' : stale ? 'STALE' : trustFor(all.length);
-  const note = failed ? `${failed} van ${all.length} tracks kon niet worden opgehaald.`
+  const trust = unverified ? 'UNVERIFIED' : stale ? 'STALE' : trustFor(all.length);
+  const note = unverified ? `${unverified} van ${all.length} tracks leverde geen bruikbare wijzigingsdatum op.`
     : stale ? `${stale} van ${all.length} tracks is langer dan ${STALE_DAYS} dagen niet gewijzigd.`
       : parserNote(all.length);
   return {

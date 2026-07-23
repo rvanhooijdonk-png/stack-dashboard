@@ -29,7 +29,25 @@ const REFRESH_SECONDS = 900;
 /** Een titel is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
 const MAX_TITLE = 80;
 /** Een raming is een duur. Alles wat daar niet op lijkt is status- of proza-tekst. */
-const ESTIMATE_RE = /^(?:\d{1,3}(?:[.,]\d)?(?:\s*[–-]\s*\d{1,3}(?:[.,]\d)?)?\s*)?(?:minuten|min|uur|uren|dagen|weken)$/i;
+const ESTIMATE_RE = /^(?:\d{1,3}(?:[.,]\d)?(?:\s*[–-]\s*\d{1,3}(?:[.,]\d)?)?\s*)?(?:minuten|minuut|min|uren|uur|dagen|dag|weken|week)$/i;
+/** Een workstreamnummer is een nummer. Zie `publicWorkstream()` — dit was een bewezen lek. */
+const WORKSTREAM_ID_RE = /^\d{2}$/;
+
+/**
+ * De publieke foutmelding is een code uit een gesloten lijst, nooit de tekst van de collector.
+ * Vierde review (Codex + Gemini, 23-07-2026): `evidence.error` ging ongefilterd mee en werd
+ * gerenderd. De probe `"Project Saffier staat in CONTROL/KLANTEN/Zephyr.md"` passeerde sanitize
+ * én contract met nul bevindingen. Een foutmelding is vrije tekst zodra er een uitzondering in
+ * belandt — en vrije tekst gaat er niet in. De code volgt hier uit `trust`, zodat er geen enkele
+ * route van collectortekst naar de pagina overblijft; de volledige melding staat in `.local/`.
+ */
+const ERROR_CODE_BY_TRUST = {
+  VERIFIED_CURRENT: null,
+  STALE: 'VEROUDERD',
+  UNVERIFIED: 'NIET_GEVERIFIEERD',
+  SOURCE_UNAVAILABLE: 'BRON_ONBEREIKBAAR',
+  CONFLICTING_EVIDENCE: 'TEGENSTRIJDIG',
+};
 
 /** Precies deze drie bestanden mogen gepubliceerd worden. Niets anders. */
 const PUBLISH_ALLOWLIST = ['index.html', 'status.json', '.nojekyll'];
@@ -57,10 +75,16 @@ const TEXT_OFF = { trackerUpdates: false, trackerDecisionPoints: false, decision
  * Daarom: alleen bekende sleutels, alleen echte booleans, anders breekt de build af.
  */
 export function readTextPolicy(input = {}) {
+  // Een root die geen object is (`true`, `1`, `null`) werd stilzwijgend als "alles uit" gelezen —
+  // het juiste resultaat om de verkeerde reden, en dus geen strikte parsing. Nu breekt het.
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error(`publish-text.json: verwacht een object, kreeg ${input === null ? 'null' : typeof input}`);
+  }
   const policy = { ...TEXT_OFF };
   for (const [key, value] of Object.entries(input)) {
     if (key.startsWith('_')) continue;
-    if (!(key in TEXT_OFF)) throw new Error(`publish-text.json: onbekende sleutel "${key}"`);
+    // `key in TEXT_OFF` liet `toString`, `constructor` en `__proto__` door als bekende sleutel.
+    if (!Object.hasOwn(TEXT_OFF, key)) throw new Error(`publish-text.json: onbekende sleutel "${key}"`);
     if (typeof value !== 'boolean') throw new Error(`publish-text.json: "${key}" moet true of false zijn, geen ${typeof value}`);
     policy[key] = value;
   }
@@ -70,13 +94,23 @@ export function readTextPolicy(input = {}) {
 /**
  * Roadmapregel: publiceren is een expliciete boolean per regel, de titel is een naam en de
  * raming is een duur. Voldoet iets daar niet aan, dan valt die regel terug op alleen zijn nummer.
+ *
+ * Het nummer zelf was het volgende lek (Codex, vierde review): titel en raming werden keurig
+ * ingehouden, maar `String(w.id)` publiceerde élke waarde — de probe zette een klantnaam in `id`
+ * en die stond op de pagina. Een id is nu een tweecijferig nummer of de build stopt. Terugvallen
+ * op een placeholder kan niet: het nummer is waar de regel aan hangt. De melding noemt de
+ * afgekeurde waarde bewust níét — een CI-log van een openbare repo is zelf openbaar.
  */
-function publicWorkstream(w) {
+function publicWorkstream(w, index) {
+  const id = String(w.id);
+  if (!WORKSTREAM_ID_RE.test(id)) {
+    throw new Error(`workstreams.json: regel ${index + 1} heeft geen tweecijferig nummer als id`);
+  }
   const open = w.public === true;
   const title = open && typeof w.title === 'string' && w.title.length <= MAX_TITLE ? w.title : null;
   const estimate = open && typeof w.estimate === 'string' && ESTIMATE_RE.test(w.estimate.trim())
     ? w.estimate.trim() : null;
-  return { id: String(w.id), title, estimate };
+  return { id, title, estimate };
 }
 
 /**
@@ -89,7 +123,12 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
   const text = (allowed, value) => (allowed ? value : null);
   // `source` is een intern bronpad ("stack-control / AUDIT-INPUT/…") en gaat er niet in:
   // op een openbare pagina is het pad zelf een aanwijzing. De sectiekop zegt genoeg.
-  const ev = (e) => ({ retrievedAt: e.retrievedAt, trust: e.trust, error: e.error ?? null });
+  // `error` gaat er evenmin in — zie ERROR_CODE_BY_TRUST. De code wordt afgeleid, niet gekopieerd.
+  const ev = (e) => ({
+    retrievedAt: e.retrievedAt,
+    trust: e.trust,
+    errorCode: Object.hasOwn(ERROR_CODE_BY_TRUST, e.trust) ? ERROR_CODE_BY_TRUST[e.trust] : 'ONBEKEND',
+  });
 
   const sources = ['pullRequests', 'merged', 'tracker', 'decisions', 'fleet', 'logbook', 'ci']
     .map((key) => ({ key, trust: raw[key].evidence.trust, retrievedAt: raw[key].evidence.retrievedAt }));
@@ -99,7 +138,7 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
     generatedAt: raw.generatedAt,
     overallStatus: sources.every((s) => s.trust === 'VERIFIED_CURRENT') ? 'OK' : 'DEGRADED',
     sources,
-    workstreams: raw.workstreams.map(publicWorkstream),
+    workstreams: raw.workstreams.map((w, i) => publicWorkstream(w, i)),
     pullRequests: {
       available: raw.pullRequests.available,
       repositories: raw.pullRequests.repositories.map((r) => ({

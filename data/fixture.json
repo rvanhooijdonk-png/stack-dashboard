@@ -16,12 +16,12 @@
   ],
   "workstreams": [
     {
-      "id": "WS01",
+      "id": "01",
       "title": "Voorbeeldworkstream",
       "estimate": "2 weken"
     },
     {
-      "id": "WS02",
+      "id": "02",
       "title": null,
       "estimate": null
     }
@@ -44,7 +44,7 @@
     "evidence": {
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
-      "error": null
+      "errorCode": null
     },
     "hiddenRepositories": 2
   },
@@ -61,7 +61,7 @@
     "evidence": {
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
-      "error": null
+      "errorCode": null
     }
   },
   "tracker": {
@@ -82,7 +82,7 @@
     "evidence": {
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
-      "error": null
+      "errorCode": null
     },
     "updatesTextWithheld": true,
     "decisionPointsTextWithheld": true
@@ -99,7 +99,7 @@
     "evidence": {
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
-      "error": null
+      "errorCode": null
     },
     "textWithheld": true
   },
@@ -115,7 +115,7 @@
     "evidence": {
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
-      "error": null
+      "errorCode": null
     },
     "hiddenTracks": 1
   },
@@ -125,7 +125,7 @@
     "evidence": {
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "SOURCE_UNAVAILABLE",
-      "error": "Staat nog niet op main."
+      "errorCode": "BRON_ONBEREIKBAAR"
     },
     "textWithheld": true
   },
@@ -151,7 +151,7 @@
     "evidence": {
       "retrievedAt": "2026-07-23T12:00:00.000Z",
       "trust": "VERIFIED_CURRENT",
-      "error": null
+      "errorCode": null
     },
     "hiddenCiRepositories": 0
   }

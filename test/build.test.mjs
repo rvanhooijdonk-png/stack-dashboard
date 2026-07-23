@@ -83,7 +83,7 @@ test('een raming is een duur, geen statusregel', () => {
 test('een bronpad verlaat de machine niet — evidence draagt geen source meer', () => {
   const pub = toPublicSnapshot(raw);
   assert.equal('source' in pub.tracker.evidence, false);
-  assert.deepEqual(Object.keys(pub.ci.evidence).sort(), ['error', 'retrievedAt', 'trust']);
+  assert.deepEqual(Object.keys(pub.ci.evidence).sort(), ['errorCode', 'retrievedAt', 'trust']);
 });
 
 test('"false" als tekst zet de poort niet open — hij breekt de build', () => {
@@ -98,6 +98,50 @@ test('vrijgeven is een expliciete handeling, per sectie', () => {
   assert.match(pub.decisions.entries[0].decision, /Saffier/);
   assert.equal(pub.decisions.textWithheld, false);
   assert.equal(pub.tracker.updates[0].title, null, 'andere secties blijven dicht');
+});
+
+// --- Bevindingen uit de vierde dubbele review van 23-07-2026 (Codex + Gemini) ---
+
+test('de fouttekst van een collector komt de publieke DTO niet in — beide reviewers, bewezen probe', () => {
+  // "Project Saffier staat in CONTROL/KLANTEN/Zephyr.md" stond via evidence.error op de pagina,
+  // en passeerde sanitize én contract met nul bevindingen. Een uitzonderingstekst is vrije tekst.
+  const json = JSON.stringify(toPublicSnapshot(raw));
+  assert.equal(json.includes('KLANTEN'), false);
+  assert.equal(json.includes('/Users/'), false);
+  assert.equal(json.includes('error"'), false, 'het veld heet errorCode en draagt een code');
+});
+
+test('de foutcode is afgeleid van trust, niet gekopieerd — dus gesloten van vorm', () => {
+  const pub = toPublicSnapshot(raw);
+  assert.equal(pub.tracker.evidence.errorCode, 'NIET_GEVERIFIEERD');
+  assert.equal(pub.ci.evidence.errorCode, null, 'een geverifieerde bron heeft geen foutcode');
+});
+
+test('een klantnaam in het workstream-id breekt de build — hij verschijnt niet op de pagina', () => {
+  // Titel en raming werden ingehouden, maar String(w.id) publiceerde élke waarde. Bewezen probe.
+  const vies = structuredClone(raw);
+  vies.workstreams[1].id = 'PROBE-NIET-VRIJGEGEVEN-KLANT-ORION';
+  assert.throws(() => toPublicSnapshot(vies), /regel 2 heeft geen tweecijferig nummer/);
+  // De melding zelf noemt de waarde niet: een CI-log van een openbare repo is zelf openbaar.
+  assert.throws(() => toPublicSnapshot(vies), (err) => !err.message.includes('ORION'));
+});
+
+test('enkelvoudige duren zijn ook duren', () => {
+  const ws = (estimate) => toPublicSnapshot({
+    ...raw, workstreams: [{ id: '01', title: 'Titel', estimate, public: true }],
+  }).workstreams[0].estimate;
+  assert.equal(ws('1 dag'), '1 dag');
+  assert.equal(ws('1 week'), '1 week');
+  assert.equal(ws('1 minuut'), '1 minuut');
+  assert.equal(ws('vrijdag live'), null, 'proza blijft proza');
+});
+
+test('een tekstbeleid dat geen object is, wordt niet als "alles uit" gelezen', () => {
+  assert.throws(() => readTextPolicy(null), /verwacht een object/);
+  assert.throws(() => readTextPolicy(true), /verwacht een object/);
+  // `key in TEXT_OFF` hield prototypenamen voor bekende sleutels.
+  assert.throws(() => readTextPolicy({ toString: true }), /onbekende sleutel/);
+  assert.throws(() => readTextPolicy({ constructor: true }), /onbekende sleutel/);
 });
 
 test('verborgen tracks en CI-repo\'s worden geteld, niet benoemd', () => {

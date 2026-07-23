@@ -61,7 +61,9 @@ fail-closed **sanitize-gate** als vangnet, plus `gitleaks` op de output vóór e
 
 De volgorde is opzettelijk: de gate herkent patronen, geen bedrijfsinhoud. Een dubbele review
 bewees dat met een besluitregel over een klantovername die elke patroongate passeerde
-(`docs/SECURITY.md` §3).
+(`docs/SECURITY.md` §3). Latere rondes vonden dezelfde probe terug via de roadmap, via een
+foutmelding en via een workstreamnummer — vier keer hetzelfde patroon, elke keer een ander veld
+dat tekst dóórgaf in plaats van afleidde.
 
 Lees `docs/SECURITY.md` vóór je een collector toevoegt. Token-setup: `docs/TOKEN-SETUP.md`
 (machine-recht — Richard voert dat zelf uit).
