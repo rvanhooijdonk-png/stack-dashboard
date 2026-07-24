@@ -21,9 +21,9 @@ export const NAV_STYLE = `
 `;
 
 /**
- * Bouw de tabbalk. `active` is de key van de huidige pagina; die tab krijgt aria-current en is
- * geen link naar zichzelf. Labels zijn vaste, hier vastgelegde teksten — geen brondata, dus geen
- * escaping nodig (er komt niets van buiten binnen).
+ * Bouw de tabbalk. `active` is de key van de huidige pagina; die tab krijgt aria-current maar
+ * houdt bewust zijn eigen href (een klik op de actieve tab herlaadt de pagina). Labels zijn vaste,
+ * hier vastgelegde teksten — geen brondata, dus geen escaping nodig (er komt niets van buiten binnen).
  */
 export function tabNav(active) {
   const items = TABS.map((t) => {

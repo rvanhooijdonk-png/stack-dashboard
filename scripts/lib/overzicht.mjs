@@ -1,8 +1,14 @@
 /**
  * OVERZICHT — de plattegrond van de stack in vier lagen. Dit is een STATISCHE, met de hand
- * onderhouden plaat: er komt geen brondata in, geen collector, geen fetch. Precies daarom lekt
- * hij niets — alles wat hier staat is met de hand geschreven, functioneel, en gaat over hoe de
- * stack in elkaar zit, niet over wat er ín een document staat.
+ * onderhouden plaat: er komt geen brondata in, geen collector, geen fetch. Wat hier staat gaat over
+ * hoe de stack in elkaar zit, niet over wat er ín een document staat.
+ *
+ * Waarom dit veilig is (review Codex, 24-07-2026): NIET "omdat een mens het typte" — dat is geen
+ * grens. De grens is drieledig: (1) er stroomt geen brondata in, dus er is niets om per ongeluk te
+ * kopiëren; (2) de interne woordenschat die hier bewust wél naar buiten mag (kamernamen, topologie
+ * als CHIEF, COA, Trading, Railway) is een expliciet goedgekeurde publieke set, geen toevallige
+ * lekkage; (3) build.mjs scant deze pagina alsnog regel voor regel langs dezelfde patronen en
+ * deny-terms als de rest — een handmatig ingetikte naam of pad breekt de build fail-closed.
  *
  * Doctrine: dit is de plattegrond, niet de meterstand. De kleuren zeggen "bestaat en werkt als
  * ontwerp" (groen), "wordt nog gebouwd" (grijs) of "wacht op een besluit van Richard" (amber) —
@@ -80,25 +86,26 @@ a{color:var(--acc)}
 `;
 
 /**
- * De sanitize-wet, onverkort. Dit is de wet zelf in gewone taal — dezelfde belofte die de
- * Status-pagina in zijn voettekst draagt, hier volledig uitgeschreven zodat een bezoeker van de
- * plattegrond precies weet wat er wél en niet naar buiten gaat.
+ * De sanitize-wet in gewone taal — dezelfde belofte die de Status-pagina in zijn voettekst draagt,
+ * hier uitgeschreven zodat een bezoeker van de plattegrond precies weet wat er wél en niet naar
+ * buiten gaat. Bewust mét de uitzondering erin (per-sectie handmatig vrijgeven), zodat deze tekst
+ * niet strenger klinkt dan de Regels-pagina — één wet, één formulering (review Codex, 24-07-2026).
  */
-const SANITIZE_WET = `De openbare pagina toont <strong>uitsluitend structuur</strong>: aantallen, ID's, datums,
-statussen en afgeleide labels. Brontekst uit de canon gaat er <strong>nooit</strong> in — geen
-documentinhoud, geen titels tenzij per regel expliciet vrijgegeven, geen tokens, geen secretnamen,
-geen lokale paden, geen bestandsnamen. Elke build passeert een <strong>sanitize-gate die
-fail-closed is</strong> (bij twijfel: niets publiceren) plus een onafhankelijke secretsscan vóór
-publicatie. Een afgeleid label lekt zijn bron niet: het zegt wáár iets over gaat, niet wát er
-staat. Deze plattegrond bevat zelf geen brondata — hij is met de hand geschreven.`;
+const SANITIZE_WET = `De openbare pagina toont <strong>alleen bewust samengestelde structuur</strong>: aantallen,
+ID's, datums, statussen en afgeleide labels — en dan uitsluitend in een gesloten, tegen een contract
+gevalideerde vorm, want ook een ID of status kan ongemerkt een naam meedragen. Brontekst uit de canon
+gaat er standaard <strong>niet</strong> in — geen documentinhoud, geen tokens, geen secretnamen, geen
+lokale paden, geen bestandsnamen. De enige uitzondering is tekst die per sectie, met de hand en
+expliciet is vrijgegeven; al het overige blijft binnen. Elke build passeert een <strong>sanitize-gate
+die fail-closed is</strong> (bij twijfel: niets publiceren) plus een onafhankelijke secretsscan vóór
+publicatie — ook deze plattegrond wordt regel voor regel gescand. Een afgeleid label lekt zijn bron
+niet: het zegt wáár iets over gaat, niet wát er staat.`;
 
-/** Bouw de volledige Overzicht-pagina. Geen argumenten: de plaat is statisch. */
-export function renderOverzicht({ generatedAt } = {}) {
-  const stamp = typeof generatedAt === 'string' ? generatedAt.slice(0, 16).replace('T', ' ') : '';
-
+/** Bouw de volledige Overzicht-pagina. Geen argumenten: de plaat is statisch en draagt geen stempel. */
+export function renderOverzicht() {
   const richard = layer('1', 'Richard', 'Waar de mens de stack in gaat. Drie ingangen, meer niet — de rest draait achter deze deuren.', [
     tile(GROEN, 'Telegram / CHIEF', 'Stuurt drops en krijgt zijn dagelijkse briefing via de COA-bot.'),
-    tile(GROEN, 'Dit dashboard', 'Leest de stand van de hele stack. Beslist zelf niets, verandert niets.'),
+    tile(GROEN, 'Dit dashboard', 'Leest de gecureerde, toegestane bronnen. Beslist zelf niets, verandert niets.'),
     tile(AMBER, 'De poorten', 'Waar hij goedkeurt: geld, productie, onomkeerbaar, machtiging, strategie, zijn eigen materiaal.'),
   ]);
 
@@ -131,7 +138,7 @@ export function renderOverzicht({ generatedAt } = {}) {
   <div class="guards">
     <h3>De bewakers — altijd aan, langs de hele lijn</h3>
     <div class="tiles">
-      ${tile(GROEN, 'gitleaks', 'Houdt secrets tegen vóór ze in git belanden.')}
+      ${tile(GROEN, 'gitleaks', 'Scant de output en blokkeert secrets vóór publicatie.')}
       ${tile(GROEN, 'sanitize', 'Houdt brontekst binnen; alleen structuur mag naar buiten.')}
       ${tile(GROEN, 'kostenplafonds', 'Bewaken dat een rekening niet ontspoort.')}
       ${tile(AMBER, 'PIEP', 'Slaat alarm bij twijfel — dan stopt de lijn en beslist Richard.')}
@@ -160,7 +167,7 @@ export function renderOverzicht({ generatedAt } = {}) {
 <div class="wrap">
 <header>
   <h1>Stack-dashboard — Overzicht</h1>
-  ${stamp ? `<p class="stamp">Plaat vastgelegd: <strong>${stamp} UTC</strong></p>` : ''}
+  <p class="stamp">Statische plattegrond — geen live meterstand</p>
 </header>
 ${tabNav('overzicht')}
 <p class="intro">Dit is de <strong>plattegrond</strong> van de stack — hoe alles in elkaar zit, in vier lagen.
@@ -179,7 +186,7 @@ ${fabriek}
 ${waar}
 
 <section class="wet">
-  <h2>Sanitize-wet — onverkort</h2>
+  <h2>Sanitize-wet — wat wél en niet naar buiten gaat</h2>
   <p>${SANITIZE_WET}</p>
 </section>
 

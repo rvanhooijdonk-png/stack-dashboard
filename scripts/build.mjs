@@ -14,7 +14,7 @@ import { mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { assertPublishable, loadDenyTerms } from './lib/sanitize.mjs';
+import { assertPublishable, loadDenyTerms, sanitizeString } from './lib/sanitize.mjs';
 import { renderHtml } from './lib/render.mjs';
 import { renderOverzicht } from './lib/overzicht.mjs';
 import { renderRegels } from './lib/regels.mjs';
@@ -264,6 +264,87 @@ export async function buildSnapshot() {
   };
 }
 
+/**
+ * De twee statische pagina's lopen NIET door assertPublishable() — dat werkt op de DTO-structuur,
+ * niet op willekeurige HTML. Maar "met de hand geschreven" is geen veiligheidsgrens (review Codex,
+ * 24-07-2026): een per ongeluk ingetikte klantnaam, secretnaam of pad zou ongezien passeren, en de
+ * bronrepo is openbaar — een lek staat er al vóór Pages bouwt. Daarom krijgen ze hier hun eigen
+ * scan met dezelfde DENY_PATTERNS én deny-terms als de rest van de pijplijn, fail-closed.
+ *
+ * DOCUMENTBEWUST, niet naïef regel-voor-regel (reviews Codex, 24-07-2026, + Fable-tiebreak): een
+ * naïeve `split('\n')` mist een token/naam die over een regelgrens valt of door markup wordt
+ * onderbroken (`ghp_<span>…`); een naïeve tag-strip-regex `<[^>]*>` mist bovendien een `>` binnen
+ * een attribuutwaarde (`<span title=">">`) én ge-escapete tekst (`ghp_&#65;…`, die in de browser
+ * gewoon een token toont). Twee passes vangen dat:
+ *   1. RUW — de HTML zelf (secrets/paden in attributen, CSS, commentaar).
+ *   2. ZICHTBAAR — tags quote-bewust verwijderd (stripTags, geen regex → geen `>`-in-attribuut-gat),
+ *      HTML-entities gedecodeerd (decodeEntities), witruimte samengevouwen. Zo wordt "Zeph<em>yr</em>"
+ *      weer "Zephyr" en "ghp_&#65;A…" weer "ghp_AA…", zoals een browser het zou tonen.
+ * Beide passes scannen in OVERLAPPENDE vensters onder MAX_STRING (2000): geen truncatie, en elk
+ * token/term (< OVERLAP tekens) valt volledig binnen minstens één venster — ook op een vensterrand.
+ *
+ * Bewust geaccepteerd residu (Fable-tiebreak, bindend): een secret dat in PURE tekst enkel door
+ * witruimte is gesplitst (geen markup, geen entity) tot een geldige tokenvorm, en malformed HTML die
+ * alleen een echte browser-parser exact nabootst. Volledige HTML-conformiteit is hier BEWUST niet het
+ * doel: een kwaadwillende committer valt buiten het threat-model (wie de plaat kan bewerken kan ook
+ * de gate of de CI verwijderen). Dit is het vangnet onder "geen brondata-instroom" tegen ONGELUKKEN
+ * — een per ongeluk geplakte klantnaam of secret in gewone tekst. Over-strippen/over-decoderen is in
+ * een leak-scanner fail-closed-veilig: hooguit een valse blokkade, nooit een gemist lek.
+ */
+const SCAN_WINDOW = 1600;
+const SCAN_OVERLAP = 256;
+
+/** Verwijder HTML-tags quote-bewust, zonder regex: een `>` binnen een attribuutwaarde sluit de tag
+ * niet. Wat tussen de tags staat (tekst, ook CSS-body) blijft over — precies wat een lezer ziet. */
+function stripTags(html) {
+  let out = '';
+  let inTag = false;
+  let quote = null;
+  for (const ch of html) {
+    if (inTag) {
+      if (quote) { if (ch === quote) quote = null; }
+      else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === '>') inTag = false;
+    } else if (ch === '<') {
+      inTag = true;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+/** Decodeer de entities die een token/naam kunnen verbergen. `&amp;` als laatste, zodat een
+ * dubbel-ge-escapete `&amp;#65;` literal blijft. Ongeldige codepoints blijven ongewijzigd —
+ * fail-closed-veilig: een niet-decodeerbare entity is geen token. */
+function decodeEntities(text) {
+  return text
+    .replace(/&#(\d+);/g, (m, d) => { const n = Number(d); return n >= 0 && n <= 0x10FFFF ? String.fromCodePoint(n) : m; })
+    .replace(/&#x([0-9a-fA-F]+);/g, (m, h) => { const n = parseInt(h, 16); return n <= 0x10FFFF ? String.fromCodePoint(n) : m; })
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+function scanWindows(text, name, pass, findings) {
+  const step = SCAN_WINDOW - SCAN_OVERLAP;
+  for (let start = 0; start === 0 || start < text.length; start += step) {
+    findings.push(...sanitizeString(text.slice(start, start + SCAN_WINDOW), { path: `${name}#${pass}@${start}` }).findings);
+    if (start + SCAN_WINDOW >= text.length) break;
+  }
+}
+
+export function assertStaticPagePublishable(html, name) {
+  const findings = [];
+  scanWindows(html, name, 'raw', findings);
+  const visible = decodeEntities(stripTags(html)).replace(/\s+/g, ' ');
+  scanWindows(visible, name, 'visible', findings);
+  if (findings.length) {
+    const summary = findings.map((f) => `${f.id} @ ${f.path}`).join(', ');
+    throw new Error(`statische pagina ${name} geblokkeerd door leak-scan: ${findings.length} bevinding(en) — ${summary}`);
+  }
+}
+
 async function main() {
   const outName = arg('out', 'public');
   const outDir = join(ROOT, outName);
@@ -299,9 +380,15 @@ async function main() {
   await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
   await writeFile(join(outDir, 'index.html'), html, 'utf8');
-  // Statische tabbladen: geen brondata, met de hand onderhouden. De tijdstempel is puur cosmetisch.
-  await writeFile(join(outDir, 'overzicht.html'), renderOverzicht({ generatedAt: snapshot.generatedAt }), 'utf8');
-  await writeFile(join(outDir, 'regels.html'), renderRegels({ generatedAt: snapshot.generatedAt }), 'utf8');
+  // Statische tabbladen: geen brondata, met de hand onderhouden. Ze dragen bewust GEEN generatedAt-
+  // stempel — een verse tijd op met-de-hand-geschreven inhoud zou verouderde tekst vers laten lijken
+  // (review Codex, 24-07-2026). Vóór ze de map in gaan, langs dezelfde leak-scan als de rest.
+  const overzichtHtml = renderOverzicht();
+  const regelsHtml = renderRegels();
+  assertStaticPagePublishable(overzichtHtml, 'overzicht.html');
+  assertStaticPagePublishable(regelsHtml, 'regels.html');
+  await writeFile(join(outDir, 'overzicht.html'), overzichtHtml, 'utf8');
+  await writeFile(join(outDir, 'regels.html'), regelsHtml, 'utf8');
   await writeFile(join(outDir, 'status.json'), `${JSON.stringify(status, null, 2)}\n`, 'utf8');
   await writeFile(join(outDir, '.nojekyll'), '', 'utf8');
 

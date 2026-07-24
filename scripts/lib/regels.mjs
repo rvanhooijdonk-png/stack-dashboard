@@ -15,9 +15,9 @@ const LAWS = [
     uitleg: 'Elke wijziging wordt gelezen door twee onafhankelijke families — Claude én Codex/Gemini. Zo houdt één blinde vlek de hele stack niet voor de gek.',
   },
   {
-    naam: 'Eén schrijver per repo',
-    kern: 'Aan één repo werkt tegelijk maar één schrijver.',
-    uitleg: 'Gasten krijgen een eigen worktree, een aparte werkkopie. Zo overschrijft niemand het werk van een ander.',
+    naam: 'Eén schrijver per werkkopie',
+    kern: 'Aan één werkkopie schrijft tegelijk maar één agent.',
+    uitleg: 'Gasten krijgen een eigen worktree: een aparte werkkopie met een eigen branch. Zo werken twee agents parallel zonder elkaars werk te overschrijven.',
   },
   {
     naam: 'Fail-closed',
@@ -26,8 +26,8 @@ const LAWS = [
   },
   {
     naam: 'Afgeleid lekt niet',
-    kern: 'De openbare kant toont structuur, nooit de brontekst.',
-    uitleg: 'Aantallen, datums, ID\'s en statussen mogen naar buiten; documentinhoud niet. Een label zegt wáár iets over gaat, niet wát er staat.',
+    kern: 'De openbare kant toont structuur, niet de brontekst.',
+    uitleg: 'Aantallen, datums, ID\'s en statussen mogen naar buiten in gesloten, gevalideerde vorm; documentinhoud standaard niet — op wat per sectie met de hand expliciet is vrijgegeven na. Een label zegt wáár iets over gaat, niet wát er staat.',
   },
   {
     naam: 'No-loss',
@@ -84,9 +84,8 @@ footer{margin-top:28px;color:var(--mut);font-size:12.5px;border-top:1px solid va
 a{color:var(--acc)}
 `;
 
-/** Bouw de volledige Regels-pagina. Geen argumenten: de wetten zijn statisch. */
-export function renderRegels({ generatedAt } = {}) {
-  const stamp = typeof generatedAt === 'string' ? generatedAt.slice(0, 16).replace('T', ' ') : '';
+/** Bouw de volledige Regels-pagina. Geen argumenten: de wetten zijn statisch, geen stempel. */
+export function renderRegels() {
   const cards = LAWS.map((l, i) => `<article class="law">
     <div class="n"><span class="num">${i + 1}</span><h2>${l.naam}</h2></div>
     <p class="kern">${l.kern}</p>
@@ -107,7 +106,7 @@ export function renderRegels({ generatedAt } = {}) {
 <div class="wrap">
 <header>
   <h1>Stack-dashboard — Regels</h1>
-  ${stamp ? `<p class="stamp">Vastgelegd: <strong>${stamp} UTC</strong></p>` : ''}
+  <p class="stamp">Statische pagina — verandert alleen mee met de canon</p>
 </header>
 ${tabNav('regels')}
 <p class="intro">De wetten waar de hele stack zich aan houdt, in gewone taal. Ze staan hier niet om indruk te maken
