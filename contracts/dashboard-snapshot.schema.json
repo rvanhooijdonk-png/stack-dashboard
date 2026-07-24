@@ -347,7 +347,7 @@
     },
     "tracks": {
       "type": "object",
-      "description": "v2.1: per allowlist-track de leeftijd van het meest recente klaar-rapport (CONTROL/RAPPORTEN op branch rapporten). Vervangt de oude vloot (commitdatum queue-bestand). Alleen de allowlist-tracks verschijnen; er is geen hiddenTracks-telling omdat we niet over de rapportenmap itereren maar per bekende track tellen. Een track zonder rapport draagt lastReportAt: null en trust UNVERIFIED.",
+      "description": "v2.1: per allowlist-track de leeftijd van het meest recente klaar-rapport (CONTROL/RAPPORTEN op branch rapporten). Vervangt de oude vloot (commitdatum queue-bestand). Alleen de allowlist-tracks verschijnen; er is geen hiddenTracks-telling: de rapporten-listing wordt wél doorlopen, maar er wordt alleen per bekende track geteld en een onbekend rapport wordt nooit geëmit (geen naam, geen telling). Een track zonder rapport draagt lastReportAt: null en trust UNVERIFIED.",
       "required": [
         "available",
         "tracks",

@@ -1,9 +1,12 @@
 {
-  "_toelichting": "Tracks die bij naam op de openbare pagina mogen, met per track de slugs waarmee we hun klaar-rapporten herkennen in CONTROL/RAPPORTEN/ (het onderwerp van YYYY-MM-DD-<onderwerp>.md). Het onderwerp wordt op koppeltekens in segmenten gesplitst; een slug matcht alleen op een HEEL segment (dus 'coa' raakt niet 'charcoal'). Slugs minstens 2 tekens. Alleen tracks die hier staan verschijnen; er wordt niet over de rapportenmap geitereerd, dus een onbekend rapport lekt geen naam. Slug-keuze is een handmatig oordeel (Richard-bewerkbaar): te breed matcht vreemde rapporten, te smal mist echte. Nagelopen 24-07-2026; alleen 'deck' heeft nu matchende rapporten, de overige tracks staan bewust klaar en tonen 'geen rapport' tot er een klaar-rapport met hun slug als segment verschijnt. Vorm per entry: string (naam == slug) of {name, slugs:[...]}.",
+  "_toelichting": "Tracks die bij naam op de openbare pagina mogen, met per track de slugs waarmee we hun klaar-rapporten herkennen in CONTROL/RAPPORTEN/ (het onderwerp van YYYY-MM-DD-<onderwerp>.md). Het onderwerp wordt op koppeltekens in segmenten gesplitst; een slug matcht alleen op een HEEL segment (dus 'coa' raakt niet 'charcoal'). Slugs minstens 2 tekens. Alleen tracks die hier staan verschijnen: de rapporten-listing wordt wél doorlopen, maar er wordt alleen per bekende track geteld en een onbekend rapport wordt nooit geëmit — het lekt dus geen naam. Slug-keuze is een handmatig oordeel (Richard-bewerkbaar): te breed matcht vreemde rapporten, te smal mist echte. Vorm per entry: string (naam == slug) of {name, slugs:[...]}.",
+  "_zeef-24-07-2026": "Empirisch nagelopen tegen de echte rapporten-listing op branch rapporten. DECK: 4 rapporten (VERIFIED_CURRENT). AUTOPILOT: 3 rapporten (VERIFIED_CURRENT) — toegevoegd. COA/MODELLENVLOOT/NQ: 0 matchende rapporten → eerlijk UNVERIFIED, staan bewust klaar. ARCHEOLOGIE: bewust NIET opgenomen — nog geen rapporten (toevoegen zodra die er zijn). CONTROL: toegevoegd met slug 'control', maar matcht nu 0 — CONTROL's rapporten zijn onderwerp-genoemd (akkoorden-*, gate-zeef, merge-trein, nachtbatch, richard-besluiten, ...) en dragen geen 'control'-segment. Elk rapport ligt al ONDER CONTROL/RAPPORTEN/, dus het pad kan de track niet onderscheiden; matching is per ontwerp op het onderwerp. CONTROL toont 'geen rapport' tot control-kanaal-rapporten een 'control-'-onderwerp-prefix krijgen (aanbevolen conventie, Richard-besluit). Geen kunstgreep met losse onderwerp-slugs: dat zou vreemde rapporten misklassificeren.",
   "tracks": [
     { "name": "COA", "slugs": ["coa"] },
     { "name": "DECK", "slugs": ["deck"] },
     { "name": "MODELLENVLOOT", "slugs": ["modellenvloot", "modellen"] },
-    { "name": "NQ", "slugs": ["nq", "trading"] }
+    { "name": "NQ", "slugs": ["nq", "trading"] },
+    { "name": "AUTOPILOT", "slugs": ["autopilot"] },
+    { "name": "CONTROL", "slugs": ["control"] }
   ]
 }
