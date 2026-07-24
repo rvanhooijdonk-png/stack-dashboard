@@ -80,6 +80,208 @@ function unavailable(ev) {
     uitleg}<br><span class="muted">Een onbereikbare bron toont hier nooit een oude groene stand.</span></p>`;
 }
 
+/**
+ * OVERZICHT-PLAAT — rollup.
+ *
+ * Puur afgeleid uit dezelfde snapshot die de secties hieronder voeden; geen extra bron, geen
+ * extra fetch. De enige echte regel hier is fail-closed: een tak waarvan de bron ontbreekt of
+ * onbereikbaar is levert `available: false` met `null`-tellingen op. Niet 0 — nul leest als
+ * "niets aan de hand", en dat is precies wat we in dat geval niet weten.
+ */
+export const VERS_DAGEN = 7;
+const ROOD_NAMEN_MAX = 3;
+
+/**
+ * Alleen deze twee trust-waarden dragen een bruikbaar cijfer. `UNVERIFIED` betekent hier iets
+ * heel concreets: de collector zet die vlag óók bij een telling van nul (`trustFor`) en bij een
+ * datum in de toekomst (`ageTrust`) — precies de gevallen waarin een kaal "0" of "vers" als
+ * geruststelling zou worden gelezen terwijl er niets bewezen is. De plaat mag die nuance niet
+ * wegpoetsen; review Codex 24-07-2026, bevestigd in collect.mjs.
+ */
+const BRUIKBARE_TRUST = new Set(['VERIFIED_CURRENT', 'STALE']);
+const bruikbaar = (sectie) => Boolean(sectie?.available) && BRUIKBARE_TRUST.has(sectie?.evidence?.trust);
+
+/**
+ * Trust-waarden die een sectie hoe dan ook onbruikbaar maken, óók als `available` true is —
+ * een schema-geldige maar tegenstrijdige combinatie. Voor CI gebruiken we deze zwarte lijst in
+ * plaats van de witte lijst hierboven: `UNVERIFIED` moet daar juist wél door (de collector zet
+ * dat al zodra één ampel onbekend is), maar een onbereikbare bron nooit (her-pass Codex).
+ */
+const ONBRUIKBARE_TRUST = new Set(['SOURCE_UNAVAILABLE', 'CONFLICTING_EVIDENCE']);
+
+// Eén referentietijdstip per rollup: anders schuift de klok tijdens het sorteren en is de
+// comparator formeel non-deterministisch (review Gemini).
+const leeftijdDagen = (iso, nu) => {
+  if (!iso) return null;
+  const ms = nu - new Date(iso).getTime();
+  return Number.isFinite(ms) ? ms / 86400000 : null;
+};
+
+function ciRollup(c) {
+  // Bewust géén sectie-brede trust-poort: de collector zet CI op UNVERIFIED zodra één ampel
+  // ONBEKEND is (collect.mjs, `unknown ? 'UNVERIFIED'`). Die poort zou dus precies het geval
+  // {ROOD, ONBEKEND} volledig wegdrukken tot "onbekend" — beide signalen kwijt, terwijl juist
+  // die stand het hardst gezien moet worden. De toets zit daarom per ampel (her-pass Codex).
+  if (!c?.available || ONBRUIKBARE_TRUST.has(c?.evidence?.trust) || !Array.isArray(c.lights)) {
+    return { available: false, groen: null, rood: null, onbekend: null, totaal: null, verborgen: null, roodRepos: null };
+  }
+  const tel = (st) => c.lights.filter((l) => l?.state === st);
+  const rood = tel('ROOD');
+  // Verborgen repo's tellen mee in de noemer: hun ampel staat niet op deze pagina, dus "1/1 groen"
+  // terwijl er twee verzwegen zijn is een te mooie voorstelling (review Codex).
+  const verborgen = Number.isFinite(Number(c.hiddenCiRepositories)) ? Math.trunc(Number(c.hiddenCiRepositories)) : 0;
+  return {
+    available: true,
+    groen: tel('GROEN').length,
+    rood: rood.length,
+    onbekend: tel('ONBEKEND').length,
+    totaal: c.lights.length + verborgen,
+    verborgen,
+    // Tot en met drie bij naam: anders is het cijfer een raadsel dat je moet gaan zoeken.
+    // Daarboven zou de plaat een muur van namen worden en verliest hij zijn functie.
+    roodRepos: rood.length > 0 && rood.length <= ROOD_NAMEN_MAX ? rood.map((l) => l.repository) : null,
+  };
+}
+
+function tracksRollup(tr, nu) {
+  if (!tr?.available || !Array.isArray(tr.tracks)) {
+    return { available: false, vers: null, verouderd: null, zonder: null, totaal: null, koudste: null };
+  }
+  // Let op: hier bewust géén sectie-brede trust-poort. De collector zet de tracks-sectie al op
+  // UNVERIFIED zodra één track geen rapport heeft — dat is juist de stand die deze plaat moet
+  // tónen, niet verbergen. De trust-toets zit daarom per track.
+  const lijst = tr.tracks;
+  const bruikbaarRapport = (t) => BRUIKBARE_TRUST.has(t?.trust) && leeftijdDagen(t?.lastReportAt, nu) !== null;
+  const met = lijst.filter(bruikbaarRapport);
+  // Geen rapport, een onleesbare datum én een niet te vertrouwen datum vallen samen: er is geen
+  // bruikbaar bewijs van werk. Een toekomstdatum (kapotte klok) mag nooit als "vers" tellen.
+  const zonder = lijst.filter((t) => !bruikbaarRapport(t));
+  const koudsteMet = met
+    .slice()
+    .sort((a, b) => leeftijdDagen(b.lastReportAt, nu) - leeftijdDagen(a.lastReportAt, nu))[0] ?? null;
+  return {
+    available: true,
+    vers: met.filter((t) => leeftijdDagen(t.lastReportAt, nu) < VERS_DAGEN).length,
+    verouderd: met.filter((t) => leeftijdDagen(t.lastReportAt, nu) >= VERS_DAGEN).length,
+    zonder: zonder.length,
+    totaal: lijst.length,
+    // Een track zonder bruikbaar rapport is kouder dan welke leeftijd ook — die wint altijd.
+    koudste: zonder[0] ?? koudsteMet,
+  };
+}
+
+export function rollup(snapshot, nu = Date.now()) {
+  const s = snapshot ?? {};
+  const pr = s.pullRequests;
+  const tk = s.tracker;
+  return {
+    ci: ciRollup(s.ci),
+    tracks: tracksRollup(s.tracks, nu),
+    // num(null) rendert als "0" (Number(null) === 0), dus een ontbrekend totaal zou alsnog een
+    // gezaghebbende nul worden. Alleen een écht eindig getal telt (her-pass Codex).
+    // Strikt op type: Number(null), Number('') en Number(false) zijn allemaal 0, dus een
+    // coercie-controle laat een lege of ontbrekende waarde alsnog als nul door. En een telling
+    // is een geheel getal dat niet negatief kan zijn — het contract zegt alleen "integer", dus
+    // een -1 uit een kapotte bron zou hier anders als echte stand op de plaat komen (her-pass Codex).
+    prs: bruikbaar(pr) && Number.isInteger(pr.totals?.open) && pr.totals.open >= 0
+      ? { available: true, open: pr.totals.open }
+      : { available: false, open: null },
+    beslispunten: bruikbaar(tk) && Array.isArray(tk.decisionPoints)
+      ? { available: true, open: tk.decisionPoints.length }
+      : { available: false, open: null },
+  };
+}
+
+const ONBEKEND_WAARDE = '<span class="unknown">onbekend</span>';
+const ONBEKEND_DETAIL = '<span class="muted">bron niet beschikbaar — geen stand af te leiden</span>';
+
+/** Eén tegel. `waarde` en `detail` zijn al-geëscapete fragmenten, nooit rauwe brontekst. */
+function stat(label, waarde, detail, cls) {
+  return `<li class="stat${cls ? ` ${cls}` : ''}">
+    <span class="stat-label">${esc(label)}</span>
+    <span class="stat-value">${waarde}</span>
+    <span class="stat-detail">${detail}</span>
+  </li>`;
+}
+
+/** Een koude hoek zonder bruikbaar rapport is rood; verder telt de echte leeftijd. */
+function koudsteKlasse(k) {
+  const d = BRUIKBARE_TRUST.has(k?.trust) ? leeftijdDagen(k?.lastReportAt, Date.now()) : null;
+  if (d === null) return 'bad';
+  return d >= VERS_DAGEN ? 'warn' : 'ok';
+}
+
+function koudsteDetail(k) {
+  if (!BRUIKBARE_TRUST.has(k?.trust) || !k?.lastReportAt) {
+    return '<span class="rood">geen bruikbaar klaar-rapport</span>';
+  }
+  return `<span class="muted">laatste rapport ${esc(ago(k.lastReportAt))}</span>`;
+}
+
+function overzicht(s) {
+  const r = rollup(s);
+
+  // Rood én onbekend naast elkaar tonen: bij {ROOD, ONBEKEND} verdween de onbereikbare repo
+  // eerder volledig uit beeld (review Codex). Alles wat de stand vertroebelt hoort zichtbaar.
+  const ciDelen = [];
+  if (r.ci.available) {
+    if (r.ci.rood > 0) {
+      ciDelen.push(r.ci.roodRepos
+        ? `<span class="rood">rood: ${r.ci.roodRepos.map((x) => esc(x)).join(', ')}</span>`
+        : `<span class="rood">${num(r.ci.rood)} repo's rood</span>`);
+    }
+    if (r.ci.onbekend > 0) ciDelen.push(`<span class="unknown">${num(r.ci.onbekend)} niet op te halen</span>`);
+    if (r.ci.verborgen > 0) ciDelen.push(`<span class="muted">${num(r.ci.verborgen)} niet bij naam getoond</span>`);
+    if (ciDelen.length === 0) ciDelen.push('<span class="muted">geen rood</span>');
+  }
+  // `ok` alleen als élke gevolgde repo daadwerkelijk groen is. Grijs, "geen CI" en verzwegen
+  // repo's zijn geen bewijs van "alles in orde" — hooguit afwezigheid van bewijs (review Codex).
+  const ciKlasse = r.ci.rood > 0 ? 'bad'
+    : r.ci.onbekend > 0 ? 'warn'
+      : (r.ci.totaal > 0 && r.ci.groen === r.ci.totaal ? 'ok' : '');
+
+  const ciTegel = r.ci.available
+    ? stat('CI-ampels', `${num(r.ci.groen)}/${num(r.ci.totaal)} groen`, ciDelen.join(' · '), ciKlasse)
+    : stat('CI-ampels', ONBEKEND_WAARDE, ONBEKEND_DETAIL);
+
+  const trackTegel = r.tracks.available
+    ? stat('Tracks', `${num(r.tracks.vers)}/${num(r.tracks.totaal)} vers`,
+      `<span class="muted">${num(r.tracks.verouderd)} verouderd · ${num(r.tracks.zonder)} zonder bruikbaar rapport</span>`,
+      // Een lege tracklijst is geen prestatie: "0/0 vers" in het groen zou een gezonde stand
+      // suggereren waar simpelweg niets gevolgd wordt (her-pass Codex).
+      r.tracks.totaal === 0 ? '' : (r.tracks.zonder > 0 || r.tracks.verouderd > 0 ? 'warn' : 'ok'))
+    : stat('Tracks', ONBEKEND_WAARDE, ONBEKEND_DETAIL);
+
+  // De koudste hoek draagt de NAAM, niet alleen een cijfer: anders moet je gaan zoeken welke
+  // hoek koud is (aanscherping Richard, 24-07-2026).
+  const koudsteTegel = !r.tracks.available
+    ? stat('Koudste hoek', ONBEKEND_WAARDE, ONBEKEND_DETAIL)
+    : (r.tracks.koudste
+      ? stat('Koudste hoek', esc(r.tracks.koudste.track),
+        koudsteDetail(r.tracks.koudste),
+        // Op werkelijke leeftijd, niet op "heeft een rapport": als de koudste hoek zelf nog vers
+        // is, is er niets te waarschuwen en zou oranje alert-moeheid kweken (review Gemini).
+        koudsteKlasse(r.tracks.koudste))
+      : stat('Koudste hoek', '<span class="muted">—</span>', '<span class="muted">geen tracks gevolgd</span>'));
+
+  const prTegel = r.prs.available
+    ? stat('Open PR\'s', num(r.prs.open), '<span class="muted">over alle gevolgde repo\'s</span>')
+    : stat('Open PR\'s', ONBEKEND_WAARDE, ONBEKEND_DETAIL);
+
+  const bpTegel = r.beslispunten.available
+    ? stat('Open beslispunten', num(r.beslispunten.open), '<span class="muted">wachten op een besluit</span>')
+    : stat('Open beslispunten', ONBEKEND_WAARDE, ONBEKEND_DETAIL);
+
+  return `<section id="overzicht" class="card plaat">
+  <h2>Overzicht</h2>
+  <p class="lead muted">Samenvatting van de secties hieronder, afgeleid uit dezelfde build — geen aparte bron.
+  <em>Vers</em> betekent hier: een klaar-rapport jonger dan ${num(VERS_DAGEN)} dagen. Voor de ouderdom van
+  deze weergave geldt de stempel bovenaan; een tak zonder bruikbare bron staat op <em>onbekend</em> en
+  wordt nooit als in orde geteld.</p>
+  <ul class="stats">${ciTegel}${trackTegel}${koudsteTegel}${prTegel}${bpTegel}</ul>
+</section>`;
+}
+
 function section(id, title, ev, body) {
   return `<section id="${esc(id)}" class="card">
   <h2>${esc(title)} ${badge(ev)}</h2>
@@ -235,6 +437,15 @@ tr:last-child td{border-bottom:0}
 .repo{flex:0 1 auto}
 .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;background:var(--mut)}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}.dot.none{background:var(--line);border:1px solid var(--mut)}
+.plaat{margin-bottom:18px}
+.stats{margin:12px 0 0;padding:0;list-style:none;display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.stat{border:1px solid var(--line);border-left:3px solid var(--mut);border-radius:6px;padding:9px 11px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.stat.ok{border-left-color:var(--ok)}.stat.warn{border-left-color:var(--warn)}.stat.bad{border-left-color:var(--bad)}
+.stat-label{font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
+.stat-value{font-size:19px;font-weight:600;overflow-wrap:anywhere}
+.stat-detail{font-size:12.5px;overflow-wrap:anywhere}
+.unknown{color:var(--warn)}
+.rood{color:var(--bad)}
 footer{margin-top:28px;color:var(--mut);font-size:12.5px;border-top:1px solid var(--line);padding-top:14px}
 a{color:var(--acc)}
 `;
@@ -278,6 +489,8 @@ De geplande kwartierrun staat wel ingesteld, maar GitHub voert die hier niet bet
 stempel betekent dat déze pagina-kopie oud is — niet per se dat er niets is gepubliceerd: een verse
 publicatie kan door browser- of CDN-cache tot tien minuten later pas zichtbaar worden. De stempel geeft
 de leeftijd van déze kopie; losse brondata kan ouder zijn, dus lees ook de badges per bron.</p>
+
+${overzicht(s)}
 
 <div class="grid">
   ${pullRequests(s.pullRequests)}
