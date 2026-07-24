@@ -3,6 +3,7 @@
  * geen inline data die niet al door de sanitize-gate is gegaan. De pagina ververst zichzelf
  * via <meta http-equiv="refresh">; er draait geen JavaScript dat iets ophaalt.
  */
+import { NAV_STYLE, tabNav } from './nav.mjs';
 
 const AMBER = {
   GROEN: { dot: 'ok', label: 'groen' },
@@ -237,7 +238,7 @@ tr:last-child td{border-bottom:0}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}.dot.none{background:var(--line);border:1px solid var(--mut)}
 footer{margin-top:28px;color:var(--mut);font-size:12.5px;border-top:1px solid var(--line);padding-top:14px}
 a{color:var(--acc)}
-`;
+${NAV_STYLE}`;
 
 /** Bouw de volledige pagina. `snapshot` moet al door assertPublishable zijn gegaan. */
 export function renderHtml(snapshot, { refreshSeconds = 900 } = {}) {
@@ -263,6 +264,7 @@ export function renderHtml(snapshot, { refreshSeconds = 900 } = {}) {
   <h1>Stack-dashboard</h1>
   <p class="stamp">Laatst bijgewerkt: <strong>${esc(dt(s.generatedAt))}</strong> · deze pagina haalt zichzelf elke ${num(refresh / 60)} min opnieuw op</p>
 </header>
+${tabNav('status')}
 <p class="muted">Weergave van bestaande canon — nooit een tweede waarheid. Alles is read-only en gesaneerd;
 ${stale.length === 0 ? 'alle bronnen zijn geverifieerd.' : `<strong>${num(stale.length)}</strong> van ${num(s.sources.length)} bronnen is niet geverifieerd (zie de badges).`}
 <strong>Lees altijd eerst de stempel hierboven:</strong> deze pagina is statisch en wordt opnieuw gebouwd

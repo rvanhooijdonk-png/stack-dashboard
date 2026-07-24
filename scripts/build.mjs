@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 
 import { assertPublishable, loadDenyTerms } from './lib/sanitize.mjs';
 import { renderHtml } from './lib/render.mjs';
+import { renderOverzicht } from './lib/overzicht.mjs';
+import { renderRegels } from './lib/regels.mjs';
 import { validate } from './lib/validate.mjs';
 import {
   collectPullRequests, collectMergedRecent, collectTracker,
@@ -53,8 +55,12 @@ const ERROR_CODE_BY_TRUST = {
   CONFLICTING_EVIDENCE: 'TEGENSTRIJDIG',
 };
 
-/** Precies deze drie bestanden mogen gepubliceerd worden. Niets anders. */
-const PUBLISH_ALLOWLIST = ['index.html', 'status.json', '.nojekyll'];
+/**
+ * Precies deze bestanden mogen gepubliceerd worden. Niets anders. De twee statische pagina's
+ * (overzicht/regels) dragen geen brondata — ze zijn met de hand geschreven — maar staan hier
+ * expliciet, zodat een tab die naar een bestand wijst ook echt een gepubliceerd bestand heeft.
+ */
+export const PUBLISH_ALLOWLIST = ['index.html', 'overzicht.html', 'regels.html', 'status.json', '.nojekyll'];
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -293,6 +299,9 @@ async function main() {
   await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
   await writeFile(join(outDir, 'index.html'), html, 'utf8');
+  // Statische tabbladen: geen brondata, met de hand onderhouden. De tijdstempel is puur cosmetisch.
+  await writeFile(join(outDir, 'overzicht.html'), renderOverzicht({ generatedAt: snapshot.generatedAt }), 'utf8');
+  await writeFile(join(outDir, 'regels.html'), renderRegels({ generatedAt: snapshot.generatedAt }), 'utf8');
   await writeFile(join(outDir, 'status.json'), `${JSON.stringify(status, null, 2)}\n`, 'utf8');
   await writeFile(join(outDir, '.nojekyll'), '', 'utf8');
 

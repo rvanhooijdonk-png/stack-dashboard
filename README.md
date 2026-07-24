@@ -21,6 +21,24 @@ Live: **https://rvanhooijdonk-png.github.io/stack-dashboard/**
 
 De roadmapsectie vervangt de losse handmatige roadmap-refreshes.
 
+### Drie tabbladen
+
+De pagina heeft een tabbalk met drie tabbladen:
+
+- **Status** (`index.html`) — de live stand, uit de canon gelezen en gesaneerd (het bovenstaande).
+- **Overzicht** (`overzicht.html`) — een **statische plattegrond** van de stack in vier lagen
+  (Richard · Kamers · De fabriek · Waar het draait). Geen brondata, geen collector: met de hand
+  geschreven in `scripts/lib/overzicht.mjs`. De kleuren zijn functioneel (groen = in gebruik,
+  grijs = in aanbouw, amber = wacht op Richard) en zeggen "bestaat en werkt zoals bedoeld", niet
+  "is nu aan" — de live stand staat op Status.
+- **Regels** (`regels.html`) — de wetten van de stack in gewone taal, statisch in
+  `scripts/lib/regels.mjs`.
+
+Beide statische pagina's zijn **handmatig onderhoud**: ze wijzigen alleen mee wanneer de canon
+verandert (een kamer erbij, een wet aangepast). Ze dragen geen brondata en zijn dus geen leklek —
+de sanitize-wet staat er zelfs onverkort op. De tabbalk zit in `scripts/lib/nav.mjs`; een tab
+toevoegen is één regel daar plus het bestand op de `PUBLISH_ALLOWLIST` in `scripts/build.mjs`.
+
 **Wat je er níét op ziet: de tekst zelf.** De pagina toont de structuur van de canon — nummers,
 ID's, datums, statussen, aantallen — en houdt kopregels, besluitregels en journaalkoppen in. Dat is
 geen omissie maar het ontwerp: dit is een openbare pagina en de canon is intern. Per sectie
@@ -32,7 +50,7 @@ vrijgeven kan, met de hand, in `data/publish-text.json`; de reden en de voorwaar
 
 ```sh
 node --test 'test/*.test.mjs'   # tests
-node scripts/build.mjs          # bouwt public/index.html + public/status.json
+node scripts/build.mjs          # bouwt public/index.html + overzicht.html + regels.html + status.json
 open public/index.html
 ```
 

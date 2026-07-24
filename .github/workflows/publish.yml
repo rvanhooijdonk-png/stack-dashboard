@@ -99,8 +99,11 @@ jobs:
       - name: Alleen toegestane bestanden in de publicatiemap
         run: |
           set -euo pipefail
+          # Deze lijst MOET gelijk zijn aan PUBLISH_ALLOWLIST in scripts/build.mjs.
+          # test/allowlist-sync.test.mjs bewaakt dat de twee niet uit elkaar lopen.
           onverwacht=$(find public -mindepth 1 \
-            ! -name 'index.html' ! -name 'status.json' ! -name '.nojekyll' -printf '%P\n')
+            ! -name 'index.html' ! -name 'overzicht.html' ! -name 'regels.html' \
+            ! -name 'status.json' ! -name '.nojekyll' -printf '%P\n')
           if [ -n "$onverwacht" ]; then
             echo "::error::onverwachte bestanden in public: $onverwacht"
             exit 1
