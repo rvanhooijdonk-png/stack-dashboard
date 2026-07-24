@@ -114,7 +114,28 @@ test('een ingehouden titel wordt een streepje, geen "null"', () => {
   assert.equal(/>\s*null\s*</.test(html), false, 'null mag nooit als tekst op de pagina staan');
 });
 
-test('meldt verborgen vloottracks', () => {
+// --- v2.1 (24-07-2026): tracks-blok (klaar-rapport-leeftijd) + categoriechips ---
+
+test('het tracks-blok toont leeftijd en telling, en "geen rapport" als eerlijke leegte', () => {
   const html = renderHtml(fixture);
-  assert.match(html, /1 track\(s\) worden niet bij naam getoond/);
+  assert.match(html, /Tracks — leeftijd laatste klaar-rapport/);
+  assert.match(html, /VOORBEELD/);
+  assert.match(html, /ZONDER-RAPPORT/);
+  // De track zonder rapport toont geen groen en geen datum, maar een expliciete leegte.
+  assert.match(html, /geen rapport/);
+});
+
+test('rendert het afgeleide categorielabel als chip, ook bij ingehouden tekst', () => {
+  const html = renderHtml(fixture);
+  // fixture: beslispunt-categorie 'merge-beleid', besluit-categorie 'security'.
+  assert.match(html, /tag cat">merge-beleid</);
+  assert.match(html, /tag cat">security</);
+});
+
+test('een categorielabel wordt geëscaped als tekst, nooit als markup uitgevoerd', () => {
+  const evil = structuredClone(fixture);
+  evil.decisions.entries[0].category = '<b>x</b>';
+  const html = renderHtml(evil);
+  assert.equal(html.includes('<b>x</b>'), false);
+  assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/);
 });

@@ -72,7 +72,8 @@
     "decisionPoints": [
       {
         "id": "24a",
-        "title": "overname van klant Zephyr"
+        "title": "overname van klant Zephyr",
+        "category": "accounts"
       }
     ],
     "evidence": {
@@ -90,7 +91,8 @@
       {
         "id": "D-0013",
         "date": "2026-07-23",
-        "decision": "Project Saffier: overname van klant Zephyr gaat vrijdag live"
+        "decision": "Project Saffier: overname van klant Zephyr gaat vrijdag live",
+        "category": "planning"
       }
     ],
     "evidence": {
@@ -102,12 +104,13 @@
       "error": null
     }
   },
-  "fleet": {
+  "tracks": {
     "available": true,
     "tracks": [
       {
         "track": "VOORBEELD",
-        "lastChangeAt": "2026-07-22T09:00:00Z",
+        "lastReportAt": "2026-07-22T00:00:00Z",
+        "reportCount": 2,
         "trust": "VERIFIED_CURRENT",
         "internNotitie": "NIET PUBLICEREN"
       }
@@ -119,8 +122,7 @@
       "trust": "VERIFIED_CURRENT",
       "proofUrl": "p",
       "error": null
-    },
-    "hiddenTracks": 2
+    }
   },
   "logbook": {
     "available": true,

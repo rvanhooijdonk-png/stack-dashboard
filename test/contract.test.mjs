@@ -124,9 +124,25 @@ test('naast een $ref blijven ook de geërfde required-velden gelden', () => {
 
 test('het contract eist de datumvelden die de DTO altijd levert', () => {
   const zonderDatum = structuredClone(toPublicSnapshot(raw));
-  delete zonderDatum.fleet.tracks[0].lastChangeAt;
+  delete zonderDatum.tracks.tracks[0].lastReportAt;
   delete zonderDatum.ci.lights[0].at;
   const fouten = validate(schema, zonderDatum).join(' ');
-  assert.match(fouten, /lastChangeAt: verplicht veld ontbreekt/);
+  assert.match(fouten, /lastReportAt: verplicht veld ontbreekt/);
   assert.match(fouten, /at: verplicht veld ontbreekt/);
+});
+
+// --- v2.1 (24-07-2026): categorie-enum en tracks-vorm zijn nu contractueel afgedwongen ---
+
+test('een categorie buiten de gesloten enum valt door de contractcontrole', () => {
+  const vies = structuredClone(toPublicSnapshot(raw));
+  vies.decisions.entries[0].category = 'klant-geheim';
+  assert.match(validate(schema, vies).join(' '), /category/);
+});
+
+test('het contract eist het afgeleide categorielabel op besluiten én beslispunten', () => {
+  const zonder = structuredClone(toPublicSnapshot(raw));
+  delete zonder.decisions.entries[0].category;
+  delete zonder.tracker.decisionPoints[0].category;
+  const fouten = validate(schema, zonder).join(' ');
+  assert.match(fouten, /category: verplicht veld ontbreekt/);
 });

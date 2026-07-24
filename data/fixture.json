@@ -1,5 +1,5 @@
 {
-  "contractVersion": "2.0.0",
+  "contractVersion": "2.1.0",
   "generatedAt": "2026-07-23T12:00:00.000Z",
   "overallStatus": "DEGRADED",
   "sources": [
@@ -76,7 +76,8 @@
     "decisionPoints": [
       {
         "id": "23a",
-        "title": null
+        "title": null,
+        "category": "merge-beleid"
       }
     ],
     "evidence": {
@@ -93,7 +94,8 @@
       {
         "id": "D-0001",
         "date": "2026-07-15",
-        "decision": null
+        "decision": null,
+        "category": "security"
       }
     ],
     "evidence": {
@@ -103,21 +105,27 @@
     },
     "textWithheld": true
   },
-  "fleet": {
+  "tracks": {
     "available": true,
     "tracks": [
       {
         "track": "VOORBEELD",
-        "lastChangeAt": "2026-07-22T09:00:00Z",
+        "lastReportAt": "2026-07-22T00:00:00Z",
+        "reportCount": 3,
         "trust": "VERIFIED_CURRENT"
+      },
+      {
+        "track": "ZONDER-RAPPORT",
+        "lastReportAt": null,
+        "reportCount": 0,
+        "trust": "UNVERIFIED"
       }
     ],
     "evidence": {
       "retrievedAt": "2026-07-23T12:00:00.000Z",
-      "trust": "VERIFIED_CURRENT",
-      "errorCode": null
-    },
-    "hiddenTracks": 1
+      "trust": "UNVERIFIED",
+      "errorCode": "NIET_GEVERIFIEERD"
+    }
   },
   "logbook": {
     "available": false,

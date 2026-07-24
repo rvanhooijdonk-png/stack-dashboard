@@ -19,12 +19,16 @@ import { renderHtml } from './lib/render.mjs';
 import { validate } from './lib/validate.mjs';
 import {
   collectPullRequests, collectMergedRecent, collectTracker,
-  collectDecisions, collectFleet, collectLogbook, collectCi, setPublicRepos, setPublicTracks,
+  collectDecisions, collectTracks, collectLogbook, collectCi, setPublicRepos, setPublicTracks,
+  CATEGORIEEN,
 } from './lib/collect.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-/** 2.0.0: de derde review sloopte velden uit het contract (evidence.source, vrije tekst). */
-const CONTRACT_VERSION = '2.0.0';
+/**
+ * 2.0.0: de derde review sloopte velden uit het contract (evidence.source, vrije tekst).
+ * 2.1.0: vloot → tracks (klaar-rapport-leeftijd) + afgeleid categorielabel op besluiten/beslispunten.
+ */
+const CONTRACT_VERSION = '2.1.0';
 const REFRESH_SECONDS = 900;
 /** Een titel is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
 const MAX_TITLE = 80;
@@ -133,13 +137,33 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
     }
     return e.trust;
   };
+  // Het categorielabel is afgeleid (nooit brontekst), maar hetzelfde gesloten-lijst-principe geldt:
+  // een categorie buiten de vaste woordenschat is een categorie waar niemand naar keek. Die breekt
+  // de build hier al, net als een onbekende trust-waarde — één losse waarde is geen gate.
+  const categoryOf = (item) => {
+    if (!CATEGORIEEN.includes(item.category)) {
+      throw new Error('een bron leverde een categorie die niet in de gesloten lijst staat');
+    }
+    return item.category;
+  };
+  // Een track-telling en zijn datum moeten samen kloppen: geen rapport ⇒ geen datum, en omgekeerd.
+  // Zo kan een bron geen "0 rapporten" met tóch een (groene) datum de pagina op sturen — fail-closed
+  // op dezelfde manier als de trust- en categorie-poort. De sectie-rollup zelf blijft, net als bij
+  // álle andere bronnen, het oordeel van de collector (evidence.trust); tracks krijgen geen aparte
+  // herberekening die de overige zes secties niet ook hebben.
+  const trackOf = (x) => {
+    if ((x.reportCount === 0) !== (x.lastReportAt === null)) {
+      throw new Error('een track meldt een rapporttelling die niet strookt met de rapportdatum');
+    }
+    return { track: x.track, lastReportAt: x.lastReportAt, reportCount: x.reportCount, trust: trustOf(x) };
+  };
   const ev = (e) => ({
     retrievedAt: e.retrievedAt,
     trust: trustOf(e),
     errorCode: ERROR_CODE_BY_TRUST[e.trust],
   });
 
-  const sources = ['pullRequests', 'merged', 'tracker', 'decisions', 'fleet', 'logbook', 'ci']
+  const sources = ['pullRequests', 'merged', 'tracker', 'decisions', 'tracks', 'logbook', 'ci']
     .map((key) => ({ key, trust: trustOf(raw[key].evidence), retrievedAt: raw[key].evidence.retrievedAt }));
 
   return {
@@ -173,8 +197,10 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
       updates: raw.tracker.updates.map((u) => ({
         number: u.number, date: u.date, title: text(t.trackerUpdates, u.title),
       })),
+      // Het categorielabel is afgeleid uit de interne tekst en mag wél mee — het is geen brontekst
+      // maar een gesloten-lijst-classificatie. De titel blijft achter de tekst-schakelaar.
       decisionPoints: raw.tracker.decisionPoints.map((d) => ({
-        id: d.id, title: text(t.trackerDecisionPoints, d.title),
+        id: d.id, title: text(t.trackerDecisionPoints, d.title), category: categoryOf(d),
       })),
       evidence: ev(raw.tracker.evidence),
     },
@@ -182,15 +208,17 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
       available: raw.decisions.available,
       textWithheld: !t.decisions,
       entries: raw.decisions.entries.map((e) => ({
-        id: e.id, date: e.date, decision: text(t.decisions, e.decision),
+        id: e.id, date: e.date, decision: text(t.decisions, e.decision), category: categoryOf(e),
       })),
       evidence: ev(raw.decisions.evidence),
     },
-    fleet: {
-      available: raw.fleet.available,
-      tracks: raw.fleet.tracks.map((x) => ({ track: x.track, lastChangeAt: x.lastChangeAt, trust: trustOf(x) })),
-      hiddenTracks: raw.fleet.hiddenTracks ?? 0,
-      evidence: ev(raw.fleet.evidence),
+    tracks: {
+      available: raw.tracks.available,
+      // Geen bestandsnaam, alleen de afgeleide rapport-leeftijd per track. `trackOf` valideert de
+      // gesloten trust-lijst én de telling↔datum-samenhang; een track kan `lastReportAt: null` hebben
+      // (geen bewijs = geen vers), maar dan móét de telling 0 zijn.
+      tracks: raw.tracks.tracks.map(trackOf),
+      evidence: ev(raw.tracks.evidence),
     },
     logbook: {
       available: raw.logbook.available,
@@ -218,15 +246,15 @@ export async function buildSnapshot() {
   const workstreams = (await readJson('data/workstreams.json', {})).workstreams ?? [];
   const ciRepos = await readJson('data/ci-repos.json', ['stack-control']);
 
-  const [pullRequests, merged, tracker, decisions, fleet, logbook, ci] = await Promise.all([
+  const [pullRequests, merged, tracker, decisions, tracks, logbook, ci] = await Promise.all([
     collectPullRequests(), collectMergedRecent(7), collectTracker(),
-    collectDecisions(), collectFleet(), collectLogbook(), collectCi(ciRepos),
+    collectDecisions(), collectTracks(), collectLogbook(), collectCi(ciRepos),
   ]);
 
   return {
     generatedAt: new Date().toISOString(),
     workstreams,
-    pullRequests, merged, tracker, decisions, fleet, logbook, ci,
+    pullRequests, merged, tracker, decisions, tracks, logbook, ci,
   };
 }
 
