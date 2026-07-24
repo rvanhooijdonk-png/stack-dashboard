@@ -200,7 +200,14 @@ jobs:
   # naar een query-cachebuster-poll — die premisse is weerlegd.
   verify:
     needs: [build, deploy]
-    if: needs.build.result == 'success' && needs.deploy.result == 'success'
+    # !cancelled() is hier geen sierlijkheid maar de reden dat deze job überhaupt draait. Zonder
+    # die statusfunctie geldt de impliciete success()-poort, en die erft de skip van de
+    # overgeslagen `failure-page` transitief via `deploy` — ook al slaagde deploy zelf. Gemeten
+    # gevolg: tien opeenvolgende runs (2026-07-24 11:47 t/m 13:37) met build success + deploy
+    # success en verify SKIPPED. De poort stond er wel, maar heeft nooit gedraaid. Bewezen in een
+    # wegwerp-probe die dezelfde jobgrafiek nabouwde: beide varianten naast elkaar in één run
+    # gaven kaal=SKIPPED en met-!cancelled()=SUCCESS.
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.deploy.result == 'success' }}
     runs-on: ubuntu-latest
     permissions: {}
     steps:
