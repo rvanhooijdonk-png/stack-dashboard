@@ -101,6 +101,14 @@ const ROOD_NAMEN_MAX = 3;
 const BRUIKBARE_TRUST = new Set(['VERIFIED_CURRENT', 'STALE']);
 const bruikbaar = (sectie) => Boolean(sectie?.available) && BRUIKBARE_TRUST.has(sectie?.evidence?.trust);
 
+/**
+ * Trust-waarden die een sectie hoe dan ook onbruikbaar maken, óók als `available` true is —
+ * een schema-geldige maar tegenstrijdige combinatie. Voor CI gebruiken we deze zwarte lijst in
+ * plaats van de witte lijst hierboven: `UNVERIFIED` moet daar juist wél door (de collector zet
+ * dat al zodra één ampel onbekend is), maar een onbereikbare bron nooit (her-pass Codex).
+ */
+const ONBRUIKBARE_TRUST = new Set(['SOURCE_UNAVAILABLE', 'CONFLICTING_EVIDENCE']);
+
 // Eén referentietijdstip per rollup: anders schuift de klok tijdens het sorteren en is de
 // comparator formeel non-deterministisch (review Gemini).
 const leeftijdDagen = (iso, nu) => {
@@ -114,7 +122,7 @@ function ciRollup(c) {
   // ONBEKEND is (collect.mjs, `unknown ? 'UNVERIFIED'`). Die poort zou dus precies het geval
   // {ROOD, ONBEKEND} volledig wegdrukken tot "onbekend" — beide signalen kwijt, terwijl juist
   // die stand het hardst gezien moet worden. De toets zit daarom per ampel (her-pass Codex).
-  if (!c?.available || !Array.isArray(c.lights)) {
+  if (!c?.available || ONBRUIKBARE_TRUST.has(c?.evidence?.trust) || !Array.isArray(c.lights)) {
     return { available: false, groen: null, rood: null, onbekend: null, totaal: null, verborgen: null, roodRepos: null };
   }
   const tel = (st) => c.lights.filter((l) => l?.state === st);
@@ -171,8 +179,10 @@ export function rollup(snapshot, nu = Date.now()) {
     tracks: tracksRollup(s.tracks, nu),
     // num(null) rendert als "0" (Number(null) === 0), dus een ontbrekend totaal zou alsnog een
     // gezaghebbende nul worden. Alleen een écht eindig getal telt (her-pass Codex).
-    prs: bruikbaar(pr) && Number.isFinite(Number(pr.totals?.open))
-      ? { available: true, open: Number(pr.totals.open) }
+    // Strikt op type: Number(null), Number('') en Number(false) zijn allemaal 0, dus een
+    // coercie-controle laat een lege of ontbrekende waarde alsnog als nul door (her-pass Codex).
+    prs: bruikbaar(pr) && typeof pr.totals?.open === 'number' && Number.isFinite(pr.totals.open)
+      ? { available: true, open: pr.totals.open }
       : { available: false, open: null },
     beslispunten: bruikbaar(tk) && Array.isArray(tk.decisionPoints)
       ? { available: true, open: tk.decisionPoints.length }

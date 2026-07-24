@@ -313,6 +313,45 @@ test('PROBE — CI blijft per ampel beoordeeld, ook als de sectie UNVERIFIED hee
   assert.match(tegel, /niet op te halen/);
 });
 
+test('PROBE — CI met een onbereikbare bron is fail-closed, ook als available true blijft staan', () => {
+  // `available: true` naast `trust: SOURCE_UNAVAILABLE` is schema-geldig; zonder zwarte lijst
+  // zou die combinatie de oude ampels gewoon als geldig doortellen en groen kunnen tonen.
+  const s = structuredClone(fixture);
+  s.ci.available = true;
+  s.ci.lights = [{ repository: 'alfa', state: 'GROEN', at: null }];
+  s.ci.evidence.trust = 'SOURCE_UNAVAILABLE';
+  const r = rollup(s);
+  assert.equal(r.ci.available, false);
+  assert.equal(r.ci.groen, null);
+  assert.equal(r.ci.totaal, null);
+  const tegel = tegelVan(plaatVan(renderHtml(s)), 'CI-ampels');
+  assert.match(tegel, /onbekend/i);
+  assert.equal(/class="stat ok"/.test(tegel), false, 'een onbereikbare bron toont nooit groen');
+});
+
+test('PROBE — een lege PR-telling wordt "onbekend", een echte nul blijft een nul', () => {
+  // Number(null), Number('') en Number(false) zijn alle drie 0: een coercie-controle zou een
+  // ontbrekende waarde als gezaghebbende nul publiceren (her-pass Codex).
+  for (const leeg of [null, '', false, undefined, '0']) {
+    const s = structuredClone(fixture);
+    s.pullRequests.available = true;
+    s.pullRequests.evidence.trust = 'VERIFIED_CURRENT';
+    s.pullRequests.totals.open = leeg;
+    const r = rollup(s);
+    assert.equal(r.prs.available, false, `open=${JSON.stringify(leeg)} mag niet als telling gelden`);
+    assert.equal(r.prs.open, null);
+    assert.match(tegelVan(plaatVan(renderHtml(s)), "Open PR's"), /onbekend/i);
+  }
+  const echt = structuredClone(fixture);
+  echt.pullRequests.available = true;
+  echt.pullRequests.evidence.trust = 'VERIFIED_CURRENT';
+  echt.pullRequests.totals.open = 0;
+  const r = rollup(echt);
+  assert.equal(r.prs.available, true, 'een echte nul met bruikbare trust blijft zichtbaar');
+  assert.equal(r.prs.open, 0);
+  assert.match(tegelVan(plaatVan(renderHtml(echt)), "Open PR's"), />0</);
+});
+
 // --- publicatiedoctrine: escaping en geen valse beloftes ---
 
 test('de plaat escapet een tracknaam die stiekem HTML is', () => {
