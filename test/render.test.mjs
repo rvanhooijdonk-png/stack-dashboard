@@ -12,7 +12,7 @@ const fixture = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8
 test('rendert een volledige pagina met verversing en tijdstempel', () => {
   const html = renderHtml(fixture, { refreshSeconds: 900 });
   assert.match(html, /^<!doctype html>/);
-  assert.match(html, /<meta http-equiv="refresh" content="900">/);
+  assert.match(html, /<meta http-equiv="refresh" content="900; url=\.\/\?v=\d+">/);
   assert.match(html, /Laatst bijgewerkt/);
   assert.match(html, /2026-07-23 12:00 UTC/);
 });
@@ -68,7 +68,24 @@ test('een "getal" dat stiekem HTML is, komt er niet in — bewezen probe van Cod
 test('refreshSeconds kan geen meta-tag-injectie worden', () => {
   const html = renderHtml(fixture, { refreshSeconds: '0; url=javascript:alert(1)' });
   assert.equal(html.includes('javascript:'), false);
-  assert.match(html, /<meta http-equiv="refresh" content="900">/);
+  // De refresh wordt teruggeklampt op de veilige integer + onze eigen same-origin cache-buster;
+  // de meegegeven `url=javascript:` haalt het nooit tot in de tag.
+  assert.match(html, /<meta http-equiv="refresh" content="900; url=\.\/\?v=\d+">/);
+});
+
+test('de zelf-refresh draagt een per-build cache-buster zodat de browser vers trekt', () => {
+  // GitHub Pages serveert met max-age=600 en die header kunnen wij niet zetten; zonder buster kan
+  // de browser bij de meta-refresh zijn eigen `./`-kopie blijven serveren. Door de refresh naar
+  // ./?v=<stempel> te sturen krijgt elke publicatie een eigen URL — same-origin, alleen cijfers.
+  const html = renderHtml(fixture, { refreshSeconds: 900 });
+  const verwacht = String(fixture.generatedAt).replace(/[^0-9]/g, '');
+  assert.match(html, new RegExp(`<meta http-equiv="refresh" content="900; url=\\./\\?v=${verwacht}">`));
+  // Een andere publicatie ⇒ een andere URL ⇒ geen oude cache-kopie kan blijven hangen.
+  const later = structuredClone(fixture);
+  later.generatedAt = '2099-01-02T03:04:05.678Z';
+  const htmlLater = renderHtml(later);
+  assert.match(htmlLater, /url=\.\/\?v=20990102030405678"/);
+  assert.equal(htmlLater.includes(`v=${verwacht}"`), false, 'de buster verandert mee met de stempel');
 });
 
 test('draagt een restrictieve CSP', () => {

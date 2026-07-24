@@ -30,6 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      # De zojuist gebouwde stempel, zodat de post-deploy zelftest kan bewijzen dat de origin
+      # deze ook echt serveert. Leeg bij een gefaalde build (dan draait `verify` sowieso niet).
+      stamp: ${{ steps.stamp.outputs.value }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -109,6 +113,10 @@ jobs:
       - name: gitleaks op de output
         run: ./gitleaks dir public --redact --exit-code 1 --no-banner
 
+      - name: Stempel als job-output (voor de post-deploy zelftest)
+        id: stamp
+        run: echo "value=$(node -p "require('./public/status.json').generatedAt")" >> "$GITHUB_OUTPUT"
+
       - name: Samenvatting
         run: |
           {
@@ -174,3 +182,43 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+
+  # Gepusht is niet live. Deze poort bewijst dat de origin de zojuist gebouwde stempel ook echt
+  # serveert — zelfde eerlijkheidspatroon als de gitleaks-zelftest. Faalt hij, dan is er wél
+  # gebouwd maar NIET gepubliceerd, en dat hoort een rode run te zijn, geen stille groene.
+  # Draait alleen op het succespad (de foutpagina heeft geen status.json/stempel).
+  verify:
+    needs: [build, deploy]
+    if: needs.build.result == 'success' && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Live-stempel is minstens zo vers als gebouwd (binnen ~2 min, CDN-cache omzeild)
+        shell: bash
+        env:
+          GEBOUWD: ${{ needs.build.outputs.stamp }}
+        run: |
+          set -uo pipefail
+          export LC_ALL=C
+          if [ -z "${GEBOUWD:-}" ]; then
+            echo "::error::geen gebouwde stempel doorgekregen — kan publicatie niet verifiëren."
+            exit 1
+          fi
+          url="https://rvanhooijdonk-png.github.io/stack-dashboard/status.json"
+          echo "gebouwde stempel: $GEBOUWD"
+          for poging in $(seq 1 10); do
+            # Unieke query per poll → koude Fastly-cachesleutel → altijd de origin, nooit een oude
+            # edge-kopie. Zo meet deze poort de publicatie zelf, niet een gecachte tussenlaag.
+            live=$(curl -sS "${url}?cb=${GITHUB_RUN_ID}-${poging}-$RANDOM" 2>/dev/null \
+              | node -pe 'try{JSON.parse(require("fs").readFileSync(0,"utf8")).generatedAt||""}catch(e){""}' 2>/dev/null || true)
+            echo "poging $poging → live: ${live:-<geen>}"
+            # ISO-8601-UTC vergelijkt onder LC_ALL=C lexicografisch == chronologisch. Live ouder dan
+            # gebouwd = stuk; gelijk of nieuwer (een latere run haalde ons in) = goed.
+            if [ -n "$live" ] && [[ "$live" == "$GEBOUWD" || "$live" > "$GEBOUWD" ]]; then
+              echo "✓ origin serveert een stempel ≥ gebouwd na ~$(( (poging-1) * 15 ))s"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::origin serveert na ~135s nog een oudere stempel dan zojuist gebouwd — build slaagde maar de publicatie kwam niet live."
+          exit 1
