@@ -153,14 +153,59 @@ test('een trust-waarde buiten de gesloten lijst breekt de build, niet pas het co
   assert.throws(() => toPublicSnapshot(vies), (err) => !err.message.includes('Orion'));
 });
 
-test('ook de trust van een losse vloottrack wordt gekeurd', () => {
+test('ook de trust van een losse track wordt gekeurd', () => {
   const vies = structuredClone(raw);
-  vies.fleet.tracks[0].trust = 'GROEN-GENOEG';
+  vies.tracks.tracks[0].trust = 'GROEN-GENOEG';
   assert.throws(() => toPublicSnapshot(vies), /gesloten lijst/);
 });
 
-test('verborgen tracks en CI-repo\'s worden geteld, niet benoemd', () => {
+test('verborgen CI-repo\'s worden geteld, niet benoemd', () => {
   const pub = toPublicSnapshot(raw);
-  assert.equal(pub.fleet.hiddenTracks, 2);
   assert.equal(pub.ci.hiddenCiRepositories, 1);
+});
+
+// --- v2.1 (24-07-2026): tracks (klaar-rapport-leeftijd) + afgeleid categorielabel ---
+
+test('het tracks-blok draagt alleen afgeleide leeftijd, nooit een rapport-bestandsnaam', () => {
+  const pub = toPublicSnapshot(raw);
+  const t = pub.tracks.tracks[0];
+  assert.equal(t.track, 'VOORBEELD');
+  assert.equal(t.lastReportAt, '2026-07-22T00:00:00Z');
+  assert.equal(t.reportCount, 2);
+  assert.equal(t.trust, 'VERIFIED_CURRENT');
+  // De collector hing er een interne notitie aan; de handgebouwde DTO kopieert die niet mee.
+  assert.equal('internNotitie' in t, false);
+  assert.equal(JSON.stringify(pub.tracks).includes('internNotitie'), false);
+  // Geen hiddenTracks meer: we itereren niet over de rapportenmap, we tellen per bekende track.
+  assert.equal('hiddenTracks' in pub.tracks, false);
+});
+
+test('het afgeleide categorielabel gaat mee — ook als de titel is ingehouden', () => {
+  const pub = toPublicSnapshot(raw);
+  // Titel/besluit blijven null (tekst ingehouden), maar de categorie is een gesloten-lijst-label
+  // en zegt "waar het over gaat" zonder de inhoud prijs te geven.
+  assert.equal(pub.tracker.decisionPoints[0].title, null);
+  assert.equal(pub.tracker.decisionPoints[0].category, 'accounts');
+  assert.equal(pub.decisions.entries[0].decision, null);
+  assert.equal(pub.decisions.entries[0].category, 'planning');
+});
+
+test('een categorie buiten de gesloten woordenschat breekt de build, niet pas het contract', () => {
+  const vies = structuredClone(raw);
+  vies.decisions.entries[0].category = 'klant-Zephyr-geheim';
+  assert.throws(() => toPublicSnapshot(vies), /gesloten lijst/);
+  assert.throws(() => toPublicSnapshot(vies), (err) => !err.message.includes('Zephyr'));
+  const vies2 = structuredClone(raw);
+  vies2.tracker.decisionPoints[0].category = 'iets-nieuws';
+  assert.throws(() => toPublicSnapshot(vies2), /gesloten lijst/);
+});
+
+test('een track met een telling die niet strookt met zijn datum breekt de build (fail-closed)', () => {
+  // "0 rapporten" met tóch een (groene) datum, of andersom, mag niet stil de pagina op.
+  const vies = structuredClone(raw);
+  vies.tracks.tracks[0] = { track: 'X', lastReportAt: '2026-07-22T00:00:00Z', reportCount: 0, trust: 'VERIFIED_CURRENT' };
+  assert.throws(() => toPublicSnapshot(vies), /strookt niet|niet strookt/);
+  const vies2 = structuredClone(raw);
+  vies2.tracks.tracks[0] = { track: 'X', lastReportAt: null, reportCount: 3, trust: 'UNVERIFIED' };
+  assert.throws(() => toPublicSnapshot(vies2), /strookt niet|niet strookt/);
 });

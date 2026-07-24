@@ -1,4 +1,9 @@
 {
-  "_toelichting": "Vloottracks die bij naam op de openbare pagina mogen. Een bestandsnaam uit CONTROL/TASK-QUEUE/ kan een project-, klant- of branchnaam zijn; wat hier niet staat wordt alleen geteld, niet benoemd. Deze vier zijn met de hand nagelopen op 23-07-2026: interne codenamen zonder klant- of omzetinformatie. README is geen track en staat er daarom niet in. Een nieuw queue-bestand verschijnt dus NIET vanzelf op de pagina — dat is de bedoeling.",
-  "tracks": ["COA", "DECK", "MODELLENVLOOT", "NQ"]
+  "_toelichting": "Tracks die bij naam op de openbare pagina mogen, met per track de slugs waarmee we hun klaar-rapporten herkennen in CONTROL/RAPPORTEN/ (het onderwerp van YYYY-MM-DD-<onderwerp>.md). Het onderwerp wordt op koppeltekens in segmenten gesplitst; een slug matcht alleen op een HEEL segment (dus 'coa' raakt niet 'charcoal'). Slugs minstens 2 tekens. Alleen tracks die hier staan verschijnen; er wordt niet over de rapportenmap geitereerd, dus een onbekend rapport lekt geen naam. Slug-keuze is een handmatig oordeel (Richard-bewerkbaar): te breed matcht vreemde rapporten, te smal mist echte. Nagelopen 24-07-2026; alleen 'deck' heeft nu matchende rapporten, de overige tracks staan bewust klaar en tonen 'geen rapport' tot er een klaar-rapport met hun slug als segment verschijnt. Vorm per entry: string (naam == slug) of {name, slugs:[...]}.",
+  "tracks": [
+    { "name": "COA", "slugs": ["coa"] },
+    { "name": "DECK", "slugs": ["deck"] },
+    { "name": "MODELLENVLOOT", "slugs": ["modellenvloot", "modellen"] },
+    { "name": "NQ", "slugs": ["nq", "trading"] }
+  ]
 }

@@ -47,13 +47,55 @@ export function setPublicRepos(names) {
 const shown = (name) => (publicRepos.has(name) ? name : null);
 
 /**
- * Hetzelfde principe voor vloottracks. Een bestandsnaam in de queue-map kan een project-,
- * klant- of branchnaam bevatten; zonder allowlist lekt die naam zo naar buiten
- * (review Gemini, 23-07-2026). Niet-genoemde tracks worden geteld, niet benoemd.
+ * Hetzelfde principe voor tracks. Een track wordt bij naam getoond (uit de allowlist), maar wat
+ * de pagina toont is alleen de leeftijd van zijn klaar-rapport — nooit de rapport-bestandsnaam,
+ * want de onderwerptekst daarin kan een project- of klantnaam dragen. Een track koppelt aan zijn
+ * rapporten via één of meer `slugs`: het onderwerp-deel van `YYYY-MM-DD-<onderwerp>.md` moet zo'n
+ * slug bevatten. Stringvorm blijft toegestaan (slug = kleine-letter-naam) voor achterwaartse
+ * compatibiliteit met de oude allowlist.
+ *
+ * De slug-lengtegrens (>= 2) geldt op ÉLKE route — string, object-fallback én expliciete slugs.
+ * Beide reviewers (Codex + Gemini, 24-07-2026) wezen op hetzelfde gat: een track `"C"` of
+ * `{name:"C"}` leverde de slug `"c"`, en `onderwerp.includes("c")` matcht dan bijna elk rapport.
+ * Een slug van één teken is geen koppeling maar een zeef die alles doorlaat, dus die telt niet mee.
  */
-let publicTracks = new Set();
-export function setPublicTracks(names) {
-  publicTracks = new Set((names ?? []).filter((n) => typeof n === 'string' && n.length <= 100));
+let publicTrackDefs = [];
+export function parseTrackDefs(entries) {
+  const cleanSlugs = (raw) => raw.map((s) => String(s).toLowerCase()).filter((s) => s.length >= 2);
+  return (entries ?? [])
+    .map((e) => {
+      if (typeof e === 'string') return { name: e, slugs: cleanSlugs([e]) };
+      if (e && typeof e === 'object' && typeof e.name === 'string') {
+        const slugs = Array.isArray(e.slugs) && e.slugs.length ? cleanSlugs(e.slugs) : cleanSlugs([e.name]);
+        return { name: e.name, slugs };
+      }
+      return null;
+    })
+    .filter((d) => d && /^[A-Za-z0-9._ -]{1,100}$/.test(d.name) && d.slugs.length > 0);
+}
+export function setPublicTracks(entries) {
+  publicTrackDefs = parseTrackDefs(entries);
+}
+
+/**
+ * Afgeleid categorielabel uit de interne titel-/besluittekst. Alleen dit label — één waarde uit
+ * een gesloten lijst — verlaat de machine; de brontekst zelf blijft binnen. Dat is precies de
+ * sanitize-wet: nooit brontekst, wél afgeleide labels. Trefwoord-classificatie, geen begrip: bij
+ * geen enkele match "overig". De volgorde is bewust — `security` wint, want een merge- of
+ * planningsbesluit dát over een secret/auth gaat hoort thuis bij security.
+ */
+export const CATEGORIEEN = ['security', 'accounts', 'kosten', 'merge-beleid', 'planning', 'overig'];
+const CATEGORIE_REGELS = [
+  ['security', /(secret|token|security|\brls\b|\bauth|pentest|leak|gitleaks|kwetsbaar|\bcve\b|ssrf|hmac|containment|sanitize)/i],
+  ['accounts', /(account|oauth|inlog|\blogin\b|\bseat\b|workspace|credential|abonnement|\bmax-abo\b)/i],
+  ['kosten', /(kost|prijs|budget|credit|betaal|euro|\bmeter|quota|usage|tarief)/i],
+  ['merge-beleid', /(merge|mergen|pull request|\bpr\b|\bbranch|rebase|squash|review-?regime|goedkeur)/i],
+  ['planning', /(planning|deadline|roadmap|mijlpaal|sprint|volgorde|prioriteit|\bplan\b|fasering|tranche|pilot)/i],
+];
+export function categoriseer(text) {
+  const s = String(text ?? '');
+  for (const [cat, re] of CATEGORIE_REGELS) { re.lastIndex = 0; if (re.test(s)) return cat; }
+  return 'overig';
 }
 
 /** `gh` aanroepen. Onderscheidt expliciet "mislukt" van "geslaagd maar leeg". */
@@ -228,7 +270,7 @@ export async function collectTracker() {
   // Beslispunten, twee schrijfwijzen: "BESLISPUNT 23a — titel" en "BESLISPUNT (9a) — titel".
   const seen = new Set();
   const decisionPoints = [...text.matchAll(/BESLISPUNT\s*\(?([0-9]{1,3}[a-z]?)\)?\s*[—-]\s*([^.*\n]{3,110})/g)]
-    .map((m) => ({ id: m[1], title: m[2].trim() }))
+    .map((m) => ({ id: m[1], title: m[2].trim(), category: categoriseer(m[2]) }))
     .filter((d) => (seen.has(d.id) ? false : seen.add(d.id)))
     .slice(0, 12);
 
@@ -252,7 +294,7 @@ export async function collectDecisions() {
     };
   }
   const entries = [...text.matchAll(/^\|\s*(D-\d{4})\s*\|\s*([\d-]{4,12})\s*\|\s*([^|]{3,160}?)\s*\|/gm)]
-    .map((m) => ({ id: m[1], date: m[2], decision: m[3].trim() }))
+    .map((m) => ({ id: m[1], date: m[2], decision: m[3].trim(), category: categoriseer(m[3]) }))
     .sort((a, b) => b.id.localeCompare(a.id))
     .slice(0, 10);
   const { trust, note } = trustWithAge(entries.length, await lastCommitDate(CONTROL_REPO, 'CONTROL/DECISIONS.md'));
@@ -262,61 +304,91 @@ export async function collectDecisions() {
   };
 }
 
+/** Klaar-rapporten staan als `YYYY-MM-DD-<onderwerp>.md` op deze branch van de control-repo. */
+const RAPPORTEN_PATH = 'CONTROL/RAPPORTEN';
+const RAPPORTEN_REF = 'rapporten';
+
 /**
- * Vlootbestand: per track de laatste wijzigingsdatum van zijn queue-bestand.
- * "track-klaar-mtimes" op GitHub is de commitdatum — een lokale mtime bestaat in CI niet.
+ * `YYYY-MM-DD` is pas een echte datum als hij een UTC-round-trip overleeft. `2026-02-30` past op de
+ * regex maar rolt via `Date` door naar 2 maart; die stille verschuiving mag geen leeftijd voeden.
  */
-export async function collectFleet() {
-  const listing = await gh(['api', `repos/${OWNER}/${CONTROL_REPO}/contents/CONTROL/TASK-QUEUE`]);
-  const proof = `${repoUrl(CONTROL_REPO)}/tree/main/CONTROL/TASK-QUEUE`;
-  const src = `${CONTROL_REPO} / task-queue`;
+export function isEchteDatum(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const t = new Date(Date.UTC(y, mo - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d;
+}
+
+/**
+ * Pure koppeling track ↔ rapporten, los van de `gh`-call zodat de segment-match, de datumkeuring
+ * en de type-filter getest kunnen worden zonder netwerk. `listing` is de contents-API-uitvoer
+ * (`[{name, type}]`). Geeft per track `{track, lastReportAt, reportCount, trust}` — nooit een naam.
+ */
+export function tracksFromListing(defs, listing) {
+  const rapporten = (Array.isArray(listing) ? listing : [])
+    .filter((f) => (f?.type === undefined || f.type === 'file')
+      && typeof f.name === 'string' && /^\d{4}-\d{2}-\d{2}-.+\.md$/.test(f.name)
+      && isEchteDatum(f.name.slice(0, 10)))
+    .map((f) => ({
+      datum: f.name.slice(0, 10),
+      segmenten: new Set(f.name.slice(11, -3).toLowerCase().split('-').filter(Boolean)),
+    }));
+  return defs.map((def) => {
+    const matches = rapporten.filter((r) => def.slugs.some((s) => r.segmenten.has(s)));
+    matches.sort((a, b) => b.datum.localeCompare(a.datum));
+    // Rapporten dragen een dagdatum, geen tijd; middernacht-UTC is de eerlijke ondergrens.
+    const lastReportAt = matches.length ? `${matches[0].datum}T00:00:00Z` : null;
+    return {
+      track: def.name,
+      lastReportAt,
+      reportCount: matches.length,
+      // Geen rapport = geen bewijs, geen groen. Wél of niet vers volgt daarna uit de leeftijd.
+      trust: matches.length ? ageTrust(lastReportAt).trust : 'UNVERIFIED',
+    };
+  });
+}
+
+/**
+ * TRACKS-blok (v2): per track de leeftijd van zijn meest recente klaar-rapport. Vervangt de oude
+ * vloot (commitdatum van het queue-bestand) door de vraag die er echt toe doet — wanneer leverde
+ * deze track voor het laatst bewijsbaar werk op. We tonen per allowlist-track alleen de afgeleide
+ * datum en een telling; nooit de rapport-bestandsnaam, want de onderwerptekst kan een project- of
+ * klantnaam dragen (dezelfde regel als bij de oude vloot). Een track zonder rapport is geen fout
+ * maar een eerlijke leegte: `lastReportAt=null`, trust `UNVERIFIED` ("geen bewijs van werk"),
+ * geen gecachte groene stand.
+ */
+export async function collectTracks() {
+  const listing = await gh([
+    'api', `repos/${OWNER}/${CONTROL_REPO}/contents/${RAPPORTEN_PATH}?ref=${seg(RAPPORTEN_REF)}`,
+  ]);
+  const proof = `${repoUrl(CONTROL_REPO)}/tree/${RAPPORTEN_REF}/${RAPPORTEN_PATH}`;
+  const src = `${CONTROL_REPO} / klaar-rapporten`;
 
   if (!listing.ok || !Array.isArray(listing.data)) {
     return {
       available: false, tracks: [],
-      evidence: evidence(src, 'main', 'SOURCE_UNAVAILABLE', proof, 'Map niet leesbaar.'),
+      evidence: evidence(src, RAPPORTEN_REF, 'SOURCE_UNAVAILABLE', proof, 'Rapportenmap niet leesbaar.'),
     };
   }
 
-  const files = listing.data.filter((f) => typeof f.name === 'string' && f.name.endsWith('.md'));
-  const all = await Promise.all(files.map(async (file) => {
-    const name = file.name.replace(/\.md$/, '');
-    const res = await gh([
-      'api', `repos/${OWNER}/${CONTROL_REPO}/commits?path=CONTROL/TASK-QUEUE/${seg(file.name)}&per_page=1`,
-      '-q', '.[0].commit.committer.date',
-    ], { json: false });
-    const date = res.ok ? (res.data ?? '').trim() : '';
-    const lastChangeAt = date && date !== 'null' ? date : null;
-    return {
-      track: name,
-      named: publicTracks.has(name),
-      lastChangeAt,
-      // Een geslaagde API-call zegt alleen dat we het konden lézen. Of de track nog leeft,
-      // zegt de datum — dezelfde leeftijdsregel als bij de documentbronnen.
-      trust: res.ok ? ageTrust(lastChangeAt).trust : 'SOURCE_UNAVAILABLE',
-    };
-  }));
+  // De koppeling (segment-match, datumkeuring, type-filter) zit in `tracksFromListing` — puur en
+  // los van de `gh`-call, zodat de reviewbevindingen (segment i.p.v. substring, kalenderdatum,
+  // alleen echte bestanden; Codex + Gemini 24-07-2026) een eigen regressietest hebben.
+  const tracks = tracksFromListing(publicTrackDefs, listing.data);
 
-  // Niet-genoemde tracks tellen mee voor het beeld, maar hun naam blijft binnen.
-  const tracks = all.filter((t) => t.named).map(({ named, ...t }) => t);
-  const hiddenTracks = all.length - tracks.length;
-
-  // Eén track die niet groen is, maakt de hele sectie onbetrouwbaar — niet stilzwijgend groen.
-  // Een oude track is iets anders dan een onleesbare: die zakt naar STALE, met eigen tekst.
-  // De vorige telling keek alleen naar SOURCE_UNAVAILABLE en STALE. Codex bewees met een
-  // nep-`gh` dat een geslaagde call zónder commitdatum een UNVERIFIED track opleverde in een
-  // sectie die gewoon groen bleef: precies het gat dat geen enkele categorie mocht hebben.
-  const unverified = all.filter((t) => t.trust === 'SOURCE_UNAVAILABLE' || t.trust === 'UNVERIFIED').length;
-  const stale = all.filter((t) => t.trust === 'STALE').length;
-  const trust = unverified ? 'UNVERIFIED' : stale ? 'STALE' : trustFor(all.length);
-  const note = unverified ? `${unverified} van ${all.length} tracks leverde geen bruikbare wijzigingsdatum op.`
-    : stale ? `${stale} van ${all.length} tracks is langer dan ${STALE_DAYS} dagen niet gewijzigd.`
-      : parserNote(all.length);
+  // Eén track zonder recent bewijs maakt de sectie niet groen — zelfde eerlijkheidsregel als de
+  // documentbronnen. "geen rapport" en "verouderd rapport" zijn allebei geen VERIFIED_CURRENT.
+  const unverified = tracks.filter((t) => t.trust === 'UNVERIFIED' || t.trust === 'SOURCE_UNAVAILABLE').length;
+  const stale = tracks.filter((t) => t.trust === 'STALE').length;
+  const trust = unverified ? 'UNVERIFIED' : stale ? 'STALE' : trustFor(tracks.length);
+  const note = unverified ? `${unverified} van ${tracks.length} tracks heeft (nog) geen recent klaar-rapport.`
+    : stale ? `${stale} van ${tracks.length} tracks leverde langer dan ${STALE_DAYS} dagen geen klaar-rapport op.`
+      : parserNote(tracks.length);
   return {
     available: true,
-    tracks: tracks.sort((a, b) => (b.lastChangeAt ?? '').localeCompare(a.lastChangeAt ?? '')),
-    hiddenTracks,
-    evidence: evidence(src, 'main', trust, proof, note),
+    tracks: tracks.sort((a, b) => (b.lastReportAt ?? '').localeCompare(a.lastReportAt ?? '')),
+    evidence: evidence(src, RAPPORTEN_REF, trust, proof, note),
   };
 }
 

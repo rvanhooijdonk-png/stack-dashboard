@@ -123,11 +123,18 @@ const WITHHELD = '<p class="lead muted">Titels worden hier niet getoond: dit is 
 /** Toon een titel, of een streepje als de tekst is ingehouden. */
 const txt = (value) => (value == null ? '<span class="muted">—</span>' : esc(value));
 
+/**
+ * Afgeleid categorielabel als chip. Dit is géén brontekst maar een gesloten-lijst-classificatie
+ * (categoriseer() in collect.mjs). Het label mag daarom mee, ook als de titel is ingehouden —
+ * het zegt "waar dit besluit over gaat" zonder de inhoud prijs te geven.
+ */
+const catChip = (c) => `<span class="tag cat">${esc(c)}</span>`;
+
 function tracker(t) {
   if (!t?.available) return section('tracker', 'Tracker', t?.evidence, unavailable(t?.evidence));
   const updates = t.updates.map((u) => `<li><span class="tag">${num(u.number)}</span> ${txt(u.title)} <span class="muted">${esc(u.date)}</span></li>`).join('\n');
   const points = t.decisionPoints.length
-    ? `<ul class="chips">${t.decisionPoints.map((d) => `<li><span class="tag warn">${esc(d.id)}</span> ${txt(d.title)}</li>`).join('')}</ul>`
+    ? `<ul class="chips">${t.decisionPoints.map((d) => `<li><span class="tag warn">${esc(d.id)}</span> ${catChip(d.category)} ${txt(d.title)}</li>`).join('')}</ul>`
     : '<p class="empty">Geen open beslispunten in de tracker.</p>';
   return section('tracker', 'Tracker — laatste updates', t.evidence, `
   ${t.updatesTextWithheld ? WITHHELD : ''}
@@ -138,25 +145,22 @@ function tracker(t) {
 
 function decisions(d) {
   if (!d?.available) return section('decisions', 'Besluiten', d?.evidence, unavailable(d?.evidence));
-  const rows = d.entries.map((e) => `<tr><td class="nowrap">${esc(e.id)}</td><td class="nowrap muted">${esc(e.date)}</td><td>${txt(e.decision)}</td></tr>`).join('\n');
+  const rows = d.entries.map((e) => `<tr><td class="nowrap">${esc(e.id)}</td><td class="nowrap muted">${esc(e.date)}</td><td class="nowrap">${catChip(e.category)}</td><td>${txt(e.decision)}</td></tr>`).join('\n');
   return section('decisions', 'Besluitenregister', d.evidence,
     `${d.textWithheld ? WITHHELD : ''}
-  <div class="scroll"><table><thead><tr><th>ID</th><th>datum</th><th>besluit</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+  <div class="scroll"><table><thead><tr><th>ID</th><th>datum</th><th>categorie</th><th>besluit</th></tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 
-function fleet(f) {
-  if (!f?.available) return section('fleet', 'Vloot', f?.evidence, unavailable(f?.evidence));
-  const rows = f.tracks.map((t) => `<tr>
+function tracks(tr) {
+  if (!tr?.available) return section('tracks', 'Tracks', tr?.evidence, unavailable(tr?.evidence));
+  const rows = tr.tracks.map((t) => `<tr>
       <td>${esc(t.track)}</td>
-      <td class="nowrap">${esc(dt(t.lastChangeAt))}</td>
-      <td class="muted nowrap">${esc(ago(t.lastChangeAt))}</td></tr>`).join('\n');
-  const hidden = f.hiddenTracks
-    ? `<p class="lead muted">${num(f.hiddenTracks)} track(s) worden niet bij naam getoond; een queue-bestandsnaam kan een project- of klantnaam zijn.</p>`
-    : '';
-  return section('fleet', 'Vloot — laatste wijziging per track', f.evidence, `
-  <p class="lead muted">Commitdatum van het queue-bestand; in CI bestaat geen lokale mtime.</p>
-  ${hidden}
-  <div class="scroll"><table><thead><tr><th>Track</th><th>laatst gewijzigd</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`);
+      <td class="num">${num(t.reportCount)}</td>
+      <td class="nowrap">${t.lastReportAt ? esc(dt(t.lastReportAt)) : '<span class="muted">—</span>'}</td>
+      <td class="muted nowrap">${t.lastReportAt ? esc(ago(t.lastReportAt)) : 'geen rapport'}</td></tr>`).join('\n');
+  return section('tracks', 'Tracks — leeftijd laatste klaar-rapport', tr.evidence, `
+  <p class="lead muted">Per track de datum van het meest recente klaar-rapport (CONTROL/RAPPORTEN). Geen bestandsnaam — die kan een project- of klantnaam dragen. Een track zonder rapport is geen groen: er is geen bewijs van werk.</p>
+  <div class="scroll"><table><thead><tr><th>Track</th><th class="num">rapporten</th><th>laatste</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 
 function logbook(l) {
@@ -222,6 +226,7 @@ tr:last-child td{border-bottom:0}
 .chips{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
 .tag{display:inline-block;min-width:22px;text-align:center;background:var(--line);border-radius:5px;padding:1px 6px;font-size:12px;font-variant-numeric:tabular-nums}
 .tag.warn{background:color-mix(in srgb,var(--warn) 22%,transparent);color:var(--warn)}
+.tag.cat{min-width:0;background:color-mix(in srgb,var(--acc) 16%,transparent);color:var(--acc);text-transform:uppercase;letter-spacing:.04em;font-size:11px}
 .badge{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;padding:2px 7px;border-radius:20px;border:1px solid currentColor}
 .badge.ok{color:var(--ok)}.badge.warn{color:var(--warn)}.badge.bad{color:var(--bad)}
 .empty{color:var(--mut);margin:0}
@@ -272,7 +277,7 @@ ouder zijn, dus lees ook de badges per bron.</p>
   ${ci(s.ci)}
   ${tracker(s.tracker)}
   ${decisions(s.decisions)}
-  ${fleet(s.fleet)}
+  ${tracks(s.tracks)}
   ${merged(s.merged)}
   ${logbook(s.logbook)}
 </div>

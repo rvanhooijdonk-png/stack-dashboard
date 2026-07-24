@@ -15,14 +15,15 @@
     "merged",
     "tracker",
     "decisions",
-    "fleet",
+    "tracks",
     "logbook",
     "ci"
   ],
   "properties": {
     "contractVersion": {
       "type": "string",
-      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+      "const": "2.1.0",
+      "description": "Vastgepind: een DTO die zich niet als exact deze contractversie meldt, hoort niet bij dit schema. Bump dit samen met CONTRACT_VERSION in scripts/build.mjs."
     },
     "generatedAt": {
       "type": "string",
@@ -259,7 +260,8 @@
             "type": "object",
             "required": [
               "id",
-              "title"
+              "title",
+              "category"
             ],
             "properties": {
               "id": {
@@ -271,6 +273,9 @@
                   "null"
                 ],
                 "description": "null = tekst ingehouden (data/publish-text.json)."
+              },
+              "category": {
+                "$ref": "#/$defs/category"
               }
             },
             "additionalProperties": false
@@ -307,7 +312,8 @@
             "required": [
               "id",
               "date",
-              "decision"
+              "decision",
+              "category"
             ],
             "properties": {
               "id": {
@@ -322,6 +328,9 @@
                   "null"
                 ],
                 "description": "null = tekst ingehouden (data/publish-text.json)."
+              },
+              "category": {
+                "$ref": "#/$defs/category"
               }
             },
             "additionalProperties": false
@@ -336,13 +345,13 @@
       },
       "additionalProperties": false
     },
-    "fleet": {
+    "tracks": {
       "type": "object",
+      "description": "v2.1: per allowlist-track de leeftijd van het meest recente klaar-rapport (CONTROL/RAPPORTEN op branch rapporten). Vervangt de oude vloot (commitdatum queue-bestand). Alleen de allowlist-tracks verschijnen; er is geen hiddenTracks-telling omdat we niet over de rapportenmap itereren maar per bekende track tellen. Een track zonder rapport draagt lastReportAt: null en trust UNVERIFIED.",
       "required": [
         "available",
         "tracks",
-        "evidence",
-        "hiddenTracks"
+        "evidence"
       ],
       "properties": {
         "available": {
@@ -354,19 +363,25 @@
             "type": "object",
             "required": [
               "track",
-              "lastChangeAt",
+              "lastReportAt",
+              "reportCount",
               "trust"
             ],
             "properties": {
               "track": {
                 "type": "string"
               },
-              "lastChangeAt": {
+              "lastReportAt": {
                 "type": [
                   "string",
                   "null"
                 ],
+                "description": "null = geen klaar-rapport gevonden voor deze track (geen bewijs van werk).",
                 "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})$"
+              },
+              "reportCount": {
+                "type": "integer",
+                "minimum": 0
               },
               "trust": {
                 "$ref": "#/$defs/trust"
@@ -377,11 +392,6 @@
         },
         "evidence": {
           "$ref": "#/$defs/evidence"
-        },
-        "hiddenTracks": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Aantal tracks dat niet bij naam getoond wordt (allowlist data/public-tracks.json)."
         }
       },
       "additionalProperties": false
@@ -492,6 +502,17 @@
         "UNVERIFIED",
         "SOURCE_UNAVAILABLE",
         "CONFLICTING_EVIDENCE"
+      ]
+    },
+    "category": {
+      "description": "Afgeleid categorielabel op een besluit of beslispunt (categoriseer() in scripts/lib/collect.mjs). Gesloten woordenschat; nooit brontekst. 'overig' is de expliciete restklasse, geen fout.",
+      "enum": [
+        "security",
+        "accounts",
+        "kosten",
+        "merge-beleid",
+        "planning",
+        "overig"
       ]
     },
     "evidence": {
