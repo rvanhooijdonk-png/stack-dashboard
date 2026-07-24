@@ -30,7 +30,8 @@ const plaatVan = (html) => {
 
 /** Eén tegel op zijn label — anders lekt de klasse van een buurtegel in de assertion. */
 const tegelVan = (plaat, label) => {
-  const l = plaat.indexOf(`>${label}<`);
+  // Labels staan geëscaped in de HTML ("Open PR&#39;s"), dus zoek op dezelfde vorm.
+  const l = plaat.indexOf(`>${label.replace(/'/g, '&#39;')}<`);
   assert.notEqual(l, -1, `tegel "${label}" ontbreekt`);
   return plaat.slice(plaat.lastIndexOf('<li class="stat', l), plaat.indexOf('</li>', l));
 };
@@ -207,11 +208,15 @@ test('PROBE — een nul uit een onbetrouwbare bron is "onbekend", geen gezaghebb
 
 test('PROBE — bij rood én onbekend blijven beide zichtbaar', () => {
   // Eerder toonde {ROOD, ONBEKEND} alleen de rode repo; de onbereikbare verdween (Codex, hoog).
+  // De sectietrust staat hier op UNVERIFIED omdat de collector dat óók doet zodra één ampel
+  // ONBEKEND is. Een sectie-brede trust-poort zou dus juist dit geval wegdrukken — de eerste
+  // versie van deze test liet trust op VERIFIED_CURRENT staan en miste dat (her-pass Codex).
   const s = structuredClone(fixture);
   s.ci.lights = [
     { repository: 'stuk-repo', state: 'ROOD', at: null },
     { repository: 'stille-repo', state: 'ONBEKEND', at: null },
   ];
+  s.ci.evidence.trust = 'UNVERIFIED';
   const plaat = plaatVan(renderHtml(s));
   assert.match(plaat, /stuk-repo/, 'de rode repo bij naam');
   assert.match(plaat, /niet op te halen/, 'de onbekende ampel blijft zichtbaar naast het rood');
@@ -264,6 +269,48 @@ test('rollup is deterministisch bij een vast referentietijdstip', () => {
   const nu = Date.parse('2026-07-24T12:00:00.000Z');
   assert.deepEqual(rollup(s, nu), rollup(s, nu));
   assert.equal(rollup(s, nu).tracks.koudste.track, 'B');
+});
+
+// --- her-pass 24-07-2026 (Codex, over alleen de fix-diff) ---
+
+test('PROBE — een ontbrekend PR-totaal wordt onbekend, niet stilletjes 0', () => {
+  // num(null) rendert als "0" omdat Number(null) === 0: de tak leek fail-closed maar was het niet.
+  const s = structuredClone(fixture);
+  delete s.pullRequests.totals.open;
+  const r = rollup(s);
+  assert.equal(r.prs.available, false);
+  assert.equal(r.prs.open, null);
+  const tegel = tegelVan(plaatVan(renderHtml(s)), 'Open PR\'s');
+  assert.match(tegel, /onbekend/i);
+  assert.equal(/>0</.test(tegel), false, 'geen kale nul bij een ontbrekend totaal');
+});
+
+test('PROBE — een lege tracklijst wordt nooit groen', () => {
+  // "0/0 vers" in het groen suggereert een gezonde stand waar niets gevolgd wordt.
+  const s = structuredClone(fixture);
+  s.tracks.tracks = [];
+  const tegel = tegelVan(plaatVan(renderHtml(s)), 'Tracks');
+  assert.equal(/class="stat ok"/.test(tegel), false);
+  assert.match(tegel, /0\/0 vers/);
+});
+
+test('PROBE — CI blijft per ampel beoordeeld, ook als de sectie UNVERIFIED heet', () => {
+  // De collector zet de CI-sectie op UNVERIFIED zodra één ampel onbekend is. Een sectie-brede
+  // poort zou dan élk signaal wegdrukken, inclusief een echte rode ampel.
+  const s = structuredClone(fixture);
+  s.ci.lights = [
+    { repository: 'kapot', state: 'ROOD', at: null },
+    { repository: 'stil', state: 'ONBEKEND', at: null },
+  ];
+  s.ci.evidence.trust = 'UNVERIFIED';
+  const r = rollup(s);
+  assert.equal(r.ci.available, true, 'de ampels blijven beoordeelbaar');
+  assert.equal(r.ci.rood, 1);
+  assert.equal(r.ci.onbekend, 1);
+  const tegel = tegelVan(plaatVan(renderHtml(s)), 'CI-ampels');
+  assert.match(tegel, /class="stat bad"/, 'rood weegt het zwaarst');
+  assert.match(tegel, /kapot/);
+  assert.match(tegel, /niet op te halen/);
 });
 
 // --- publicatiedoctrine: escaping en geen valse beloftes ---

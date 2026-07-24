@@ -110,7 +110,11 @@ const leeftijdDagen = (iso, nu) => {
 };
 
 function ciRollup(c) {
-  if (!bruikbaar(c) || !Array.isArray(c.lights)) {
+  // Bewust géén sectie-brede trust-poort: de collector zet CI op UNVERIFIED zodra één ampel
+  // ONBEKEND is (collect.mjs, `unknown ? 'UNVERIFIED'`). Die poort zou dus precies het geval
+  // {ROOD, ONBEKEND} volledig wegdrukken tot "onbekend" — beide signalen kwijt, terwijl juist
+  // die stand het hardst gezien moet worden. De toets zit daarom per ampel (her-pass Codex).
+  if (!c?.available || !Array.isArray(c.lights)) {
     return { available: false, groen: null, rood: null, onbekend: null, totaal: null, verborgen: null, roodRepos: null };
   }
   const tel = (st) => c.lights.filter((l) => l?.state === st);
@@ -165,7 +169,11 @@ export function rollup(snapshot, nu = Date.now()) {
   return {
     ci: ciRollup(s.ci),
     tracks: tracksRollup(s.tracks, nu),
-    prs: bruikbaar(pr) ? { available: true, open: pr.totals?.open ?? null } : { available: false, open: null },
+    // num(null) rendert als "0" (Number(null) === 0), dus een ontbrekend totaal zou alsnog een
+    // gezaghebbende nul worden. Alleen een écht eindig getal telt (her-pass Codex).
+    prs: bruikbaar(pr) && Number.isFinite(Number(pr.totals?.open))
+      ? { available: true, open: Number(pr.totals.open) }
+      : { available: false, open: null },
     beslispunten: bruikbaar(tk) && Array.isArray(tk.decisionPoints)
       ? { available: true, open: tk.decisionPoints.length }
       : { available: false, open: null },
@@ -227,7 +235,9 @@ function overzicht(s) {
   const trackTegel = r.tracks.available
     ? stat('Tracks', `${num(r.tracks.vers)}/${num(r.tracks.totaal)} vers`,
       `<span class="muted">${num(r.tracks.verouderd)} verouderd · ${num(r.tracks.zonder)} zonder bruikbaar rapport</span>`,
-      r.tracks.zonder > 0 || r.tracks.verouderd > 0 ? 'warn' : 'ok')
+      // Een lege tracklijst is geen prestatie: "0/0 vers" in het groen zou een gezonde stand
+      // suggereren waar simpelweg niets gevolgd wordt (her-pass Codex).
+      r.tracks.totaal === 0 ? '' : (r.tracks.zonder > 0 || r.tracks.verouderd > 0 ? 'warn' : 'ok'))
     : stat('Tracks', ONBEKEND_WAARDE, ONBEKEND_DETAIL);
 
   // De koudste hoek draagt de NAAM, niet alleen een cijfer: anders moet je gaan zoeken welke
