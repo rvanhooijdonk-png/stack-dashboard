@@ -13,30 +13,31 @@
 # draaien náást elkaar in één run, zodat oud en nieuw onder identieke omstandigheden meten.
 name: verify-skip-probe
 
+# Push-trigger op de probe-branch zelf: workflow_dispatch kan hier niet, want GitHub accepteert
+# dat alleen voor workflows die al op de default branch staan (gemeten: HTTP 404 "not found on the
+# default branch"). Het scenario wordt daarom gestuurd via het bestand `probe-stempel.txt`.
 on:
-  workflow_dispatch:
-    inputs:
-      stempel_fout:
-        description: 'true = build levert een ongeldige stempel; de poort hoort dan ROOD te worden'
-        type: boolean
-        default: false
+  push:
+    branches: [fix/verify-skip]
 
 permissions: {}
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      contents: read
     outputs:
       stamp: ${{ steps.stamp.outputs.value }}
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
       - id: stamp
         shell: bash
-        env:
-          FOUT: ${{ inputs.stempel_fout }}
         run: |
           set -euo pipefail
-          if [ "$FOUT" = "true" ]; then
+          FOUT=$(cat probe-stempel.txt 2>/dev/null || echo geldig)
+          if [ "$FOUT" = "fout" ]; then
             # Zelfde vorm als een echte stempel, maar een onmogelijke datum: dit is precies wat de
             # parse-plus-roundtrip in publish.yml hoort af te vangen.
             echo "value=2026-02-31T25:99:99.999Z" >> "$GITHUB_OUTPUT"
