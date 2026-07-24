@@ -316,23 +316,28 @@ test('PROBE — CI blijft per ampel beoordeeld, ook als de sectie UNVERIFIED hee
 test('PROBE — CI met een onbereikbare bron is fail-closed, ook als available true blijft staan', () => {
   // `available: true` naast `trust: SOURCE_UNAVAILABLE` is schema-geldig; zonder zwarte lijst
   // zou die combinatie de oude ampels gewoon als geldig doortellen en groen kunnen tonen.
-  const s = structuredClone(fixture);
-  s.ci.available = true;
-  s.ci.lights = [{ repository: 'alfa', state: 'GROEN', at: null }];
-  s.ci.evidence.trust = 'SOURCE_UNAVAILABLE';
-  const r = rollup(s);
-  assert.equal(r.ci.available, false);
-  assert.equal(r.ci.groen, null);
-  assert.equal(r.ci.totaal, null);
-  const tegel = tegelVan(plaatVan(renderHtml(s)), 'CI-ampels');
-  assert.match(tegel, /onbekend/i);
-  assert.equal(/class="stat ok"/.test(tegel), false, 'een onbereikbare bron toont nooit groen');
+  // Beide takken van de zwarte lijst apart bewijzen: dat de ene werkt zegt niets over de andere.
+  for (const trust of ['SOURCE_UNAVAILABLE', 'CONFLICTING_EVIDENCE']) {
+    const s = structuredClone(fixture);
+    s.ci.available = true;
+    s.ci.lights = [{ repository: 'alfa', state: 'GROEN', at: null }];
+    s.ci.evidence.trust = trust;
+    const r = rollup(s);
+    assert.equal(r.ci.available, false, `${trust} moet de sectie sluiten`);
+    assert.equal(r.ci.groen, null);
+    assert.equal(r.ci.totaal, null);
+    const tegel = tegelVan(plaatVan(renderHtml(s)), 'CI-ampels');
+    assert.match(tegel, /onbekend/i);
+    assert.equal(/class="stat ok"/.test(tegel), false, `${trust} mag nooit groen tonen`);
+  }
 });
 
 test('PROBE — een lege PR-telling wordt "onbekend", een echte nul blijft een nul', () => {
   // Number(null), Number('') en Number(false) zijn alle drie 0: een coercie-controle zou een
   // ontbrekende waarde als gezaghebbende nul publiceren (her-pass Codex).
-  for (const leeg of [null, '', false, undefined, '0']) {
+  // -1 en 1.5 zijn eindige getallen en (voor -1) zelfs contractgeldig — `totals.open` kent geen
+  // ondergrens — maar geen van beide is een telling die je op een plaat mag zetten.
+  for (const leeg of [null, '', false, undefined, '0', -1, 1.5, NaN]) {
     const s = structuredClone(fixture);
     s.pullRequests.available = true;
     s.pullRequests.evidence.trust = 'VERIFIED_CURRENT';

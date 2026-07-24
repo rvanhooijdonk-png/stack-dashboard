@@ -180,8 +180,10 @@ export function rollup(snapshot, nu = Date.now()) {
     // num(null) rendert als "0" (Number(null) === 0), dus een ontbrekend totaal zou alsnog een
     // gezaghebbende nul worden. Alleen een écht eindig getal telt (her-pass Codex).
     // Strikt op type: Number(null), Number('') en Number(false) zijn allemaal 0, dus een
-    // coercie-controle laat een lege of ontbrekende waarde alsnog als nul door (her-pass Codex).
-    prs: bruikbaar(pr) && typeof pr.totals?.open === 'number' && Number.isFinite(pr.totals.open)
+    // coercie-controle laat een lege of ontbrekende waarde alsnog als nul door. En een telling
+    // is een geheel getal dat niet negatief kan zijn — het contract zegt alleen "integer", dus
+    // een -1 uit een kapotte bron zou hier anders als echte stand op de plaat komen (her-pass Codex).
+    prs: bruikbaar(pr) && Number.isInteger(pr.totals?.open) && pr.totals.open >= 0
       ? { available: true, open: pr.totals.open }
       : { available: false, open: null },
     beslispunten: bruikbaar(tk) && Array.isArray(tk.decisionPoints)
