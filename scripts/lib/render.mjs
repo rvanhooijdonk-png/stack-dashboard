@@ -245,13 +245,20 @@ export function renderHtml(snapshot, { refreshSeconds = 900 } = {}) {
   const stale = s.sources.filter((x) => x.trust !== 'VERIFIED_CURRENT');
   // Harde integer: deze waarde staat in een meta-tag en mag daar niets anders kunnen worden.
   const refresh = Math.min(3600, Math.max(60, Math.trunc(Number(refreshSeconds)) || 900));
+  // Cache-buster voor de zelf-refresh. GitHub Pages serveert met cache-control: max-age=600 en
+  // wij kunnen die header niet zetten; zonder buster kan een browser bij de meta-refresh dezelfde
+  // `./` uit zijn eigen cache serveren i.p.v. de verse publicatie op te halen. Door de refresh naar
+  // `./?v=<stempel>` te sturen krijgt elke nieuwe publicatie een eigen URL: de browser heeft daar nog
+  // geen cache-kopie van en trekt vers. Alleen cijfers uit generatedAt — dezelfde tuchtregel als bij
+  // `refresh`: wat in een meta-tag staat mag niets anders kunnen worden dan bedoeld.
+  const cacheBust = String(s.generatedAt).replace(/[^0-9]/g, '') || '0';
 
   return `<!doctype html>
 <html lang="nl">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="${refresh}">
+<meta http-equiv="refresh" content="${refresh}; url=./?v=${cacheBust}">
 <meta name="robots" content="noindex,nofollow">
 <meta http-equiv="content-security-policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
 <title>Stack-dashboard — ${esc(s.generatedAt.slice(0, 16).replace('T', ' '))} UTC</title>
@@ -268,9 +275,9 @@ ${stale.length === 0 ? 'alle bronnen zijn geverifieerd.' : `<strong>${num(stale.
 <strong>Lees altijd eerst de stempel hierboven:</strong> deze pagina is statisch en wordt opnieuw gebouwd
 bij elke push naar main en bij een handmatige run — <strong>niet op een gegarandeerd interval</strong>.
 De geplande kwartierrun staat wel ingesteld, maar GitHub voert die hier niet betrouwbaar uit. Een oude
-stempel betekent dus: er is sindsdien niets gepubliceerd. Dat kan een stukke build zijn, maar net zo goed
-gewoon een periode zonder pushes. De stempel geeft de leeftijd van déze publicatie; losse brondata kan
-ouder zijn, dus lees ook de badges per bron.</p>
+stempel betekent dat déze pagina-kopie oud is — niet per se dat er niets is gepubliceerd: een verse
+publicatie kan door browser- of CDN-cache tot tien minuten later pas zichtbaar worden. De stempel geeft
+de leeftijd van déze kopie; losse brondata kan ouder zijn, dus lees ook de badges per bron.</p>
 
 <div class="grid">
   ${pullRequests(s.pullRequests)}

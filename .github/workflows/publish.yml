@@ -30,6 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      # De zojuist gebouwde stempel, zodat de post-deploy zelftest kan bewijzen dat de origin
+      # deze ook echt serveert. Leeg bij een gefaalde build (dan draait `verify` sowieso niet).
+      stamp: ${{ steps.stamp.outputs.value }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -109,6 +113,10 @@ jobs:
       - name: gitleaks op de output
         run: ./gitleaks dir public --redact --exit-code 1 --no-banner
 
+      - name: Stempel als job-output (voor de post-deploy zelftest)
+        id: stamp
+        run: echo "value=$(node -p "require('./public/status.json').generatedAt")" >> "$GITHUB_OUTPUT"
+
       - name: Samenvatting
         run: |
           {
@@ -163,7 +171,11 @@ jobs:
 
   deploy:
     needs: [build, failure-page]
-    if: always() && (needs.build.result == 'success' || needs.failure-page.result == 'success')
+    # !cancelled() i.p.v. always(): bij cancel-in-progress (group: pages) mag een ingehaalde,
+    # geannuleerde run NIET alsnog publiceren en zo een nieuwere deploy inhalen. always() zou dat
+    # wél doen (het negeert annulering); !cancelled() laat de annulering echt stoppen en dicht die
+    # race. (Codex-review 24-07-2026.)
+    if: ${{ !cancelled() && (needs.build.result == 'success' || needs.failure-page.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       pages: write
@@ -171,6 +183,72 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      # De echte, dynamische Pages-URL (geen hardcoded host) — de zachte live-check hangt hieraan,
+      # zodat een fork of custom domain niet per ongeluk de upstream pollt. (Gemini-review 24-07.)
+      page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+
+  # Gepusht is niet live — maar "live" toetsen we hier NIET via de publieke URL. Gemeten op
+  # 2026-07-24: GitHub Pages/Fastly gebruikt de query-string niet als aparte cachesleutel
+  # (status.json?cb=a en ?cb=b gaven dezelfde x-github-request-id en oplopende age), en ook
+  # client-side no-cache-headers forceren geen verse read. Een live-URL-poll meet dus de
+  # CDN-cache, niet de publicatie. Daarom is het publicatiebewijs: build geslaagd (artefact met
+  # deze stempel) + deploy geslaagd (dat artefact atomisch gepubliceerd). Bouw dit NIET terug
+  # naar een query-cachebuster-poll — die premisse is weerlegd.
+  verify:
+    needs: [build, deploy]
+    if: needs.build.result == 'success' && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Gepubliceerd artefact draagt de gebouwde stempel (geen live-URL, geen CDN)
+        shell: bash
+        env:
+          GEBOUWD: ${{ needs.build.outputs.stamp }}
+        run: |
+          set -uo pipefail
+          # Fail-closed: alleen een ECHTE canonieke ISO-8601-UTC-stempel mag slagen — niet slechts de
+          # vorm. Een onmogelijke datum als 2026-02-31T25:99:99.999Z heeft de juiste vorm maar bestaat
+          # niet; daarom een parse-plus-roundtrip: uitsluitend new Date(x).toISOString() === x slaagt.
+          # Zo vallen "zzzz", "true", leeg én onmogelijke datums allemaal af (Codex-her-pass 24-07).
+          node -e '
+            const s = process.env.GEBOUWD || "";
+            const d = new Date(s);
+            if (Number.isNaN(d.getTime()) || d.toISOString() !== s) {
+              console.error(`::error::gebouwde stempel is geen geldige canonieke ISO-8601-UTC ("${s || "<leeg>"}") — publicatie niet te verifiëren.`);
+              process.exit(1);
+            }
+          '
+          # De build maakte public/status.json met deze stempel en uploadde exact die map als
+          # Pages-artefact; deploy publiceerde datzelfde artefact atomisch. Deploy geslaagd + deze
+          # stempel in dat artefact ⇒ de gepubliceerde stand draagt stempel $GEBOUWD.
+          echo "✓ deploy geslaagd; gepubliceerd artefact draagt stempel $GEBOUWD"
+
+      - name: Zachte live-check — waarschuwt, faalt nooit (CDN cachet tot ~10 min)
+        continue-on-error: true
+        shell: bash
+        env:
+          GEBOUWD: ${{ needs.build.outputs.stamp }}
+          BASE_URL: ${{ needs.deploy.outputs.page_url }}
+        run: |
+          set -uo pipefail
+          if [ -z "${BASE_URL:-}" ]; then
+            echo "::warning::geen page_url van de deploy-job — live-check overgeslagen (publicatiebewijs blijft de deploy zelf)."
+            exit 0
+          fi
+          # Eén poll, met tijdsbudget. --fail zodat een HTTP-fout niet stil als lege body doorgaat;
+          # curl-stderr blijft zichtbaar in de log (geen 2>/dev/null — Gemini-review). Bewust géén
+          # query-buster: die busts de CDN toch niet. BASE_URL zonder afsluitende slash aangevuld
+          # (het action-outputcontract garandeert die niet — Codex-her-pass). Echte JSON-parse via
+          # node zodat alleen het topniveau-veld telt, geen grep-false-match. Een oudere waarde is
+          # GEEN fout — de CDN mag tot ~10 min lopen; deze stap waarschuwt hooguit, nooit rood.
+          live=$(curl -fsS --connect-timeout 5 --max-time 15 "${BASE_URL%/}/status.json" \
+            | node -pe 'try { JSON.parse(require("fs").readFileSync(0, "utf8")).generatedAt || "" } catch (e) { "" }') || live=""
+          if [ "$live" = "$GEBOUWD" ]; then
+            echo "live-URL toont al de nieuwe stempel ($live)."
+          else
+            echo "::warning::live-URL toont nog '${live:-<geen>}' i.p.v. '$GEBOUWD' — normaal: GitHub Pages/Fastly cachet tot ~10 min. Geen fout."
+          fi

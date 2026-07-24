@@ -12,7 +12,7 @@ const fixture = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8
 test('rendert een volledige pagina met verversing en tijdstempel', () => {
   const html = renderHtml(fixture, { refreshSeconds: 900 });
   assert.match(html, /^<!doctype html>/);
-  assert.match(html, /<meta http-equiv="refresh" content="900">/);
+  assert.match(html, /<meta http-equiv="refresh" content="900; url=\.\/\?v=\d+">/);
   assert.match(html, /Laatst bijgewerkt/);
   assert.match(html, /2026-07-23 12:00 UTC/);
 });
@@ -68,7 +68,24 @@ test('een "getal" dat stiekem HTML is, komt er niet in — bewezen probe van Cod
 test('refreshSeconds kan geen meta-tag-injectie worden', () => {
   const html = renderHtml(fixture, { refreshSeconds: '0; url=javascript:alert(1)' });
   assert.equal(html.includes('javascript:'), false);
-  assert.match(html, /<meta http-equiv="refresh" content="900">/);
+  // De refresh wordt teruggeklampt op de veilige integer + onze eigen same-origin cache-buster;
+  // de meegegeven `url=javascript:` haalt het nooit tot in de tag.
+  assert.match(html, /<meta http-equiv="refresh" content="900; url=\.\/\?v=\d+">/);
+});
+
+test('de zelf-refresh draagt een per-build cache-buster zodat de browser vers trekt', () => {
+  // GitHub Pages serveert met max-age=600 en die header kunnen wij niet zetten; zonder buster kan
+  // de browser bij de meta-refresh zijn eigen `./`-kopie blijven serveren. Door de refresh naar
+  // ./?v=<stempel> te sturen krijgt elke publicatie een eigen URL — same-origin, alleen cijfers.
+  const html = renderHtml(fixture, { refreshSeconds: 900 });
+  const verwacht = String(fixture.generatedAt).replace(/[^0-9]/g, '');
+  assert.match(html, new RegExp(`<meta http-equiv="refresh" content="900; url=\\./\\?v=${verwacht}">`));
+  // Een andere publicatie ⇒ een andere URL ⇒ geen oude cache-kopie kan blijven hangen.
+  const later = structuredClone(fixture);
+  later.generatedAt = '2099-01-02T03:04:05.678Z';
+  const htmlLater = renderHtml(later);
+  assert.match(htmlLater, /url=\.\/\?v=20990102030405678"/);
+  assert.equal(htmlLater.includes(`v=${verwacht}"`), false, 'de buster verandert mee met de stempel');
 });
 
 test('draagt een restrictieve CSP', () => {
@@ -77,12 +94,16 @@ test('draagt een restrictieve CSP', () => {
   assert.match(html, /default-src 'none'/);
 });
 
-test('waarschuwt zichtbaar dat een oude stempel betekent dat er niets gepubliceerd is', () => {
-  // Stond hier eerst als "ouder dan een uur betekent dat de build stukstaat". Dat is gemeten
-  // onwaar: de geplande kwartierrun van GitHub vuurt hier niet (drie slots achter elkaar
-  // overgeslagen), dus een oude stempel zegt alleen dat er sindsdien niet gepubliceerd is.
+test('een oude stempel wordt eerlijk geduid: déze kopie is oud, niet per se "niets gepubliceerd"', () => {
+  // Stond hier eerst als "ouder dan een uur = build stuk", daarna als "er is sindsdien niets
+  // gepubliceerd". Beide zijn gemeten onwaar: de query-cachebuster busts de Fastly-CDN niet
+  // (zelfde x-github-request-id over verschillende ?v=-waarden, gemeten 24-07-2026), dus een verse
+  // publicatie kan tot ~10 min door browser/CDN-cache verborgen blijven. De pagina claimt daarom
+  // niet langer dat een oude stempel betekent dat er niets is gepubliceerd.
   const html = renderHtml(fixture);
-  assert.match(html, /er is sindsdien niets gepubliceerd/i);
+  assert.match(html, /déze pagina-kopie oud is/i);
+  assert.match(html, /niet per se dat er niets is gepubliceerd/i);
+  assert.equal(/er is sindsdien niets gepubliceerd/i.test(html), false);
 });
 
 test('de pagina belooft geen verversingsinterval dat we niet waarmaken', () => {
