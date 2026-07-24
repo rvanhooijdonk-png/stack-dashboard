@@ -80,6 +80,142 @@ function unavailable(ev) {
     uitleg}<br><span class="muted">Een onbereikbare bron toont hier nooit een oude groene stand.</span></p>`;
 }
 
+/**
+ * OVERZICHT-PLAAT — rollup.
+ *
+ * Puur afgeleid uit dezelfde snapshot die de secties hieronder voeden; geen extra bron, geen
+ * extra fetch. De enige echte regel hier is fail-closed: een tak waarvan de bron ontbreekt of
+ * onbereikbaar is levert `available: false` met `null`-tellingen op. Niet 0 — nul leest als
+ * "niets aan de hand", en dat is precies wat we in dat geval niet weten.
+ */
+export const VERS_DAGEN = 7;
+const ROOD_NAMEN_MAX = 3;
+
+const leeftijdDagen = (iso) => {
+  if (!iso) return null;
+  const ms = Date.now() - new Date(iso).getTime();
+  return Number.isFinite(ms) ? ms / 86400000 : null;
+};
+
+function ciRollup(c) {
+  if (!c?.available || !Array.isArray(c.lights)) {
+    return { available: false, groen: null, rood: null, onbekend: null, totaal: null, roodRepos: null };
+  }
+  const tel = (st) => c.lights.filter((l) => l?.state === st);
+  const rood = tel('ROOD');
+  return {
+    available: true,
+    groen: tel('GROEN').length,
+    rood: rood.length,
+    onbekend: tel('ONBEKEND').length,
+    totaal: c.lights.length,
+    // Tot en met drie bij naam: anders is het cijfer een raadsel dat je moet gaan zoeken.
+    // Daarboven zou de plaat een muur van namen worden en verliest hij zijn functie.
+    roodRepos: rood.length > 0 && rood.length <= ROOD_NAMEN_MAX ? rood.map((l) => l.repository) : null,
+  };
+}
+
+function tracksRollup(tr) {
+  if (!tr?.available || !Array.isArray(tr.tracks)) {
+    return { available: false, vers: null, verouderd: null, zonder: null, totaal: null, koudste: null };
+  }
+  const lijst = tr.tracks;
+  // Een onleesbare datum telt als "zonder rapport": geen bewijs van werk is geen groen.
+  const metRapport = lijst.filter((t) => leeftijdDagen(t?.lastReportAt) !== null);
+  const zonder = lijst.filter((t) => leeftijdDagen(t?.lastReportAt) === null);
+  const koudsteMetRapport = metRapport
+    .slice()
+    .sort((a, b) => leeftijdDagen(b.lastReportAt) - leeftijdDagen(a.lastReportAt))[0] ?? null;
+  return {
+    available: true,
+    vers: metRapport.filter((t) => leeftijdDagen(t.lastReportAt) < VERS_DAGEN).length,
+    verouderd: metRapport.filter((t) => leeftijdDagen(t.lastReportAt) >= VERS_DAGEN).length,
+    zonder: zonder.length,
+    totaal: lijst.length,
+    // Een track zonder énig rapport is kouder dan welke leeftijd ook — die wint altijd.
+    koudste: zonder[0] ?? koudsteMetRapport,
+  };
+}
+
+export function rollup(snapshot) {
+  const s = snapshot ?? {};
+  const pr = s.pullRequests;
+  const tk = s.tracker;
+  return {
+    ci: ciRollup(s.ci),
+    tracks: tracksRollup(s.tracks),
+    prs: pr?.available ? { available: true, open: pr.totals?.open } : { available: false, open: null },
+    beslispunten: tk?.available && Array.isArray(tk.decisionPoints)
+      ? { available: true, open: tk.decisionPoints.length }
+      : { available: false, open: null },
+  };
+}
+
+const ONBEKEND_WAARDE = '<span class="unknown">onbekend</span>';
+const ONBEKEND_DETAIL = '<span class="muted">bron niet beschikbaar — geen stand af te leiden</span>';
+
+/** Eén tegel. `waarde` en `detail` zijn al-geëscapete fragmenten, nooit rauwe brontekst. */
+function stat(label, waarde, detail, cls) {
+  return `<li class="stat${cls ? ` ${cls}` : ''}">
+    <span class="stat-label">${esc(label)}</span>
+    <span class="stat-value">${waarde}</span>
+    <span class="stat-detail">${detail}</span>
+  </li>`;
+}
+
+function overzicht(s) {
+  const r = rollup(s);
+
+  const ciTegel = r.ci.available
+    ? stat('CI-ampels', `${num(r.ci.groen)}/${num(r.ci.totaal)} groen`,
+      r.ci.rood > 0
+        ? (r.ci.roodRepos
+          ? `<span class="rood">rood: ${r.ci.roodRepos.map((x) => esc(x)).join(', ')}</span>`
+          : `<span class="rood">${num(r.ci.rood)} repo's rood</span>`)
+        : (r.ci.onbekend > 0
+          ? `<span class="muted">${num(r.ci.onbekend)} niet op te halen</span>`
+          : '<span class="muted">geen rood</span>'),
+      // Rood wint; daarna telt onbekend als waarschuwing. Een ampel die niet op te halen was
+      // mag de tegel nooit groen maken — "geen rood" is dan geen bewijs van "alles in orde".
+      r.ci.rood > 0 ? 'bad' : (r.ci.onbekend > 0 ? 'warn' : 'ok'))
+    : stat('CI-ampels', ONBEKEND_WAARDE, ONBEKEND_DETAIL);
+
+  const trackTegel = r.tracks.available
+    ? stat('Tracks', `${num(r.tracks.vers)}/${num(r.tracks.totaal)} vers`,
+      `<span class="muted">${num(r.tracks.verouderd)} verouderd · ${num(r.tracks.zonder)} zonder rapport</span>`,
+      r.tracks.zonder > 0 || r.tracks.verouderd > 0 ? 'warn' : 'ok')
+    : stat('Tracks', ONBEKEND_WAARDE, ONBEKEND_DETAIL);
+
+  // De koudste hoek draagt de NAAM, niet alleen een cijfer: anders moet je gaan zoeken welke
+  // hoek koud is (aanscherping Richard, 24-07-2026).
+  const koudsteTegel = !r.tracks.available
+    ? stat('Koudste hoek', ONBEKEND_WAARDE, ONBEKEND_DETAIL)
+    : (r.tracks.koudste
+      ? stat('Koudste hoek', esc(r.tracks.koudste.track),
+        r.tracks.koudste.lastReportAt
+          ? `<span class="muted">laatste rapport ${esc(ago(r.tracks.koudste.lastReportAt))}</span>`
+          : '<span class="rood">nog geen enkel klaar-rapport</span>',
+        r.tracks.koudste.lastReportAt ? 'warn' : 'bad')
+      : stat('Koudste hoek', '<span class="muted">—</span>', '<span class="muted">geen tracks gevolgd</span>'));
+
+  const prTegel = r.prs.available
+    ? stat('Open PR\'s', num(r.prs.open), '<span class="muted">over alle gevolgde repo\'s</span>')
+    : stat('Open PR\'s', ONBEKEND_WAARDE, ONBEKEND_DETAIL);
+
+  const bpTegel = r.beslispunten.available
+    ? stat('Open beslispunten', num(r.beslispunten.open), '<span class="muted">wachten op een besluit</span>')
+    : stat('Open beslispunten', ONBEKEND_WAARDE, ONBEKEND_DETAIL);
+
+  return `<section id="overzicht" class="card plaat">
+  <h2>Overzicht</h2>
+  <p class="lead muted">Samenvatting van de secties hieronder, afgeleid uit dezelfde build — geen aparte bron.
+  <em>Vers</em> betekent hier: een klaar-rapport jonger dan ${num(VERS_DAGEN)} dagen. Voor de ouderdom van
+  deze weergave geldt de stempel bovenaan; een tak zonder bruikbare bron staat op <em>onbekend</em> en
+  wordt nooit als in orde geteld.</p>
+  <ul class="stats">${ciTegel}${trackTegel}${koudsteTegel}${prTegel}${bpTegel}</ul>
+</section>`;
+}
+
 function section(id, title, ev, body) {
   return `<section id="${esc(id)}" class="card">
   <h2>${esc(title)} ${badge(ev)}</h2>
@@ -235,6 +371,15 @@ tr:last-child td{border-bottom:0}
 .repo{flex:0 1 auto}
 .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;background:var(--mut)}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}.dot.none{background:var(--line);border:1px solid var(--mut)}
+.plaat{margin-bottom:18px}
+.stats{margin:12px 0 0;padding:0;list-style:none;display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.stat{border:1px solid var(--line);border-left:3px solid var(--mut);border-radius:6px;padding:9px 11px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.stat.ok{border-left-color:var(--ok)}.stat.warn{border-left-color:var(--warn)}.stat.bad{border-left-color:var(--bad)}
+.stat-label{font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
+.stat-value{font-size:19px;font-weight:600;overflow-wrap:anywhere}
+.stat-detail{font-size:12.5px;overflow-wrap:anywhere}
+.unknown{color:var(--warn)}
+.rood{color:var(--bad)}
 footer{margin-top:28px;color:var(--mut);font-size:12.5px;border-top:1px solid var(--line);padding-top:14px}
 a{color:var(--acc)}
 `;
@@ -278,6 +423,8 @@ De geplande kwartierrun staat wel ingesteld, maar GitHub voert die hier niet bet
 stempel betekent dat déze pagina-kopie oud is — niet per se dat er niets is gepubliceerd: een verse
 publicatie kan door browser- of CDN-cache tot tien minuten later pas zichtbaar worden. De stempel geeft
 de leeftijd van déze kopie; losse brondata kan ouder zijn, dus lees ook de badges per bron.</p>
+
+${overzicht(s)}
 
 <div class="grid">
   ${pullRequests(s.pullRequests)}
