@@ -94,12 +94,16 @@ test('draagt een restrictieve CSP', () => {
   assert.match(html, /default-src 'none'/);
 });
 
-test('waarschuwt zichtbaar dat een oude stempel betekent dat er niets gepubliceerd is', () => {
-  // Stond hier eerst als "ouder dan een uur betekent dat de build stukstaat". Dat is gemeten
-  // onwaar: de geplande kwartierrun van GitHub vuurt hier niet (drie slots achter elkaar
-  // overgeslagen), dus een oude stempel zegt alleen dat er sindsdien niet gepubliceerd is.
+test('een oude stempel wordt eerlijk geduid: déze kopie is oud, niet per se "niets gepubliceerd"', () => {
+  // Stond hier eerst als "ouder dan een uur = build stuk", daarna als "er is sindsdien niets
+  // gepubliceerd". Beide zijn gemeten onwaar: de query-cachebuster busts de Fastly-CDN niet
+  // (zelfde x-github-request-id over verschillende ?v=-waarden, gemeten 24-07-2026), dus een verse
+  // publicatie kan tot ~10 min door browser/CDN-cache verborgen blijven. De pagina claimt daarom
+  // niet langer dat een oude stempel betekent dat er niets is gepubliceerd.
   const html = renderHtml(fixture);
-  assert.match(html, /er is sindsdien niets gepubliceerd/i);
+  assert.match(html, /déze pagina-kopie oud is/i);
+  assert.match(html, /niet per se dat er niets is gepubliceerd/i);
+  assert.equal(/er is sindsdien niets gepubliceerd/i.test(html), false);
 });
 
 test('de pagina belooft geen verversingsinterval dat we niet waarmaken', () => {

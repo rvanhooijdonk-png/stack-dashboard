@@ -275,9 +275,9 @@ ${stale.length === 0 ? 'alle bronnen zijn geverifieerd.' : `<strong>${num(stale.
 <strong>Lees altijd eerst de stempel hierboven:</strong> deze pagina is statisch en wordt opnieuw gebouwd
 bij elke push naar main en bij een handmatige run — <strong>niet op een gegarandeerd interval</strong>.
 De geplande kwartierrun staat wel ingesteld, maar GitHub voert die hier niet betrouwbaar uit. Een oude
-stempel betekent dus: er is sindsdien niets gepubliceerd. Dat kan een stukke build zijn, maar net zo goed
-gewoon een periode zonder pushes. De stempel geeft de leeftijd van déze publicatie; losse brondata kan
-ouder zijn, dus lees ook de badges per bron.</p>
+stempel betekent dat déze pagina-kopie oud is — niet per se dat er niets is gepubliceerd: een verse
+publicatie kan door browser- of CDN-cache tot tien minuten later pas zichtbaar worden. De stempel geeft
+de leeftijd van déze kopie; losse brondata kan ouder zijn, dus lees ook de badges per bron.</p>
 
 <div class="grid">
   ${pullRequests(s.pullRequests)}
