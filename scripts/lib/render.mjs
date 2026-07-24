@@ -91,61 +91,82 @@ function unavailable(ev) {
 export const VERS_DAGEN = 7;
 const ROOD_NAMEN_MAX = 3;
 
-const leeftijdDagen = (iso) => {
+/**
+ * Alleen deze twee trust-waarden dragen een bruikbaar cijfer. `UNVERIFIED` betekent hier iets
+ * heel concreets: de collector zet die vlag óók bij een telling van nul (`trustFor`) en bij een
+ * datum in de toekomst (`ageTrust`) — precies de gevallen waarin een kaal "0" of "vers" als
+ * geruststelling zou worden gelezen terwijl er niets bewezen is. De plaat mag die nuance niet
+ * wegpoetsen; review Codex 24-07-2026, bevestigd in collect.mjs.
+ */
+const BRUIKBARE_TRUST = new Set(['VERIFIED_CURRENT', 'STALE']);
+const bruikbaar = (sectie) => Boolean(sectie?.available) && BRUIKBARE_TRUST.has(sectie?.evidence?.trust);
+
+// Eén referentietijdstip per rollup: anders schuift de klok tijdens het sorteren en is de
+// comparator formeel non-deterministisch (review Gemini).
+const leeftijdDagen = (iso, nu) => {
   if (!iso) return null;
-  const ms = Date.now() - new Date(iso).getTime();
+  const ms = nu - new Date(iso).getTime();
   return Number.isFinite(ms) ? ms / 86400000 : null;
 };
 
 function ciRollup(c) {
-  if (!c?.available || !Array.isArray(c.lights)) {
-    return { available: false, groen: null, rood: null, onbekend: null, totaal: null, roodRepos: null };
+  if (!bruikbaar(c) || !Array.isArray(c.lights)) {
+    return { available: false, groen: null, rood: null, onbekend: null, totaal: null, verborgen: null, roodRepos: null };
   }
   const tel = (st) => c.lights.filter((l) => l?.state === st);
   const rood = tel('ROOD');
+  // Verborgen repo's tellen mee in de noemer: hun ampel staat niet op deze pagina, dus "1/1 groen"
+  // terwijl er twee verzwegen zijn is een te mooie voorstelling (review Codex).
+  const verborgen = Number.isFinite(Number(c.hiddenCiRepositories)) ? Math.trunc(Number(c.hiddenCiRepositories)) : 0;
   return {
     available: true,
     groen: tel('GROEN').length,
     rood: rood.length,
     onbekend: tel('ONBEKEND').length,
-    totaal: c.lights.length,
+    totaal: c.lights.length + verborgen,
+    verborgen,
     // Tot en met drie bij naam: anders is het cijfer een raadsel dat je moet gaan zoeken.
     // Daarboven zou de plaat een muur van namen worden en verliest hij zijn functie.
     roodRepos: rood.length > 0 && rood.length <= ROOD_NAMEN_MAX ? rood.map((l) => l.repository) : null,
   };
 }
 
-function tracksRollup(tr) {
+function tracksRollup(tr, nu) {
   if (!tr?.available || !Array.isArray(tr.tracks)) {
     return { available: false, vers: null, verouderd: null, zonder: null, totaal: null, koudste: null };
   }
+  // Let op: hier bewust géén sectie-brede trust-poort. De collector zet de tracks-sectie al op
+  // UNVERIFIED zodra één track geen rapport heeft — dat is juist de stand die deze plaat moet
+  // tónen, niet verbergen. De trust-toets zit daarom per track.
   const lijst = tr.tracks;
-  // Een onleesbare datum telt als "zonder rapport": geen bewijs van werk is geen groen.
-  const metRapport = lijst.filter((t) => leeftijdDagen(t?.lastReportAt) !== null);
-  const zonder = lijst.filter((t) => leeftijdDagen(t?.lastReportAt) === null);
-  const koudsteMetRapport = metRapport
+  const bruikbaarRapport = (t) => BRUIKBARE_TRUST.has(t?.trust) && leeftijdDagen(t?.lastReportAt, nu) !== null;
+  const met = lijst.filter(bruikbaarRapport);
+  // Geen rapport, een onleesbare datum én een niet te vertrouwen datum vallen samen: er is geen
+  // bruikbaar bewijs van werk. Een toekomstdatum (kapotte klok) mag nooit als "vers" tellen.
+  const zonder = lijst.filter((t) => !bruikbaarRapport(t));
+  const koudsteMet = met
     .slice()
-    .sort((a, b) => leeftijdDagen(b.lastReportAt) - leeftijdDagen(a.lastReportAt))[0] ?? null;
+    .sort((a, b) => leeftijdDagen(b.lastReportAt, nu) - leeftijdDagen(a.lastReportAt, nu))[0] ?? null;
   return {
     available: true,
-    vers: metRapport.filter((t) => leeftijdDagen(t.lastReportAt) < VERS_DAGEN).length,
-    verouderd: metRapport.filter((t) => leeftijdDagen(t.lastReportAt) >= VERS_DAGEN).length,
+    vers: met.filter((t) => leeftijdDagen(t.lastReportAt, nu) < VERS_DAGEN).length,
+    verouderd: met.filter((t) => leeftijdDagen(t.lastReportAt, nu) >= VERS_DAGEN).length,
     zonder: zonder.length,
     totaal: lijst.length,
-    // Een track zonder énig rapport is kouder dan welke leeftijd ook — die wint altijd.
-    koudste: zonder[0] ?? koudsteMetRapport,
+    // Een track zonder bruikbaar rapport is kouder dan welke leeftijd ook — die wint altijd.
+    koudste: zonder[0] ?? koudsteMet,
   };
 }
 
-export function rollup(snapshot) {
+export function rollup(snapshot, nu = Date.now()) {
   const s = snapshot ?? {};
   const pr = s.pullRequests;
   const tk = s.tracker;
   return {
     ci: ciRollup(s.ci),
-    tracks: tracksRollup(s.tracks),
-    prs: pr?.available ? { available: true, open: pr.totals?.open } : { available: false, open: null },
-    beslispunten: tk?.available && Array.isArray(tk.decisionPoints)
+    tracks: tracksRollup(s.tracks, nu),
+    prs: bruikbaar(pr) ? { available: true, open: pr.totals?.open ?? null } : { available: false, open: null },
+    beslispunten: bruikbaar(tk) && Array.isArray(tk.decisionPoints)
       ? { available: true, open: tk.decisionPoints.length }
       : { available: false, open: null },
   };
@@ -163,26 +184,49 @@ function stat(label, waarde, detail, cls) {
   </li>`;
 }
 
+/** Een koude hoek zonder bruikbaar rapport is rood; verder telt de echte leeftijd. */
+function koudsteKlasse(k) {
+  const d = BRUIKBARE_TRUST.has(k?.trust) ? leeftijdDagen(k?.lastReportAt, Date.now()) : null;
+  if (d === null) return 'bad';
+  return d >= VERS_DAGEN ? 'warn' : 'ok';
+}
+
+function koudsteDetail(k) {
+  if (!BRUIKBARE_TRUST.has(k?.trust) || !k?.lastReportAt) {
+    return '<span class="rood">geen bruikbaar klaar-rapport</span>';
+  }
+  return `<span class="muted">laatste rapport ${esc(ago(k.lastReportAt))}</span>`;
+}
+
 function overzicht(s) {
   const r = rollup(s);
 
+  // Rood én onbekend naast elkaar tonen: bij {ROOD, ONBEKEND} verdween de onbereikbare repo
+  // eerder volledig uit beeld (review Codex). Alles wat de stand vertroebelt hoort zichtbaar.
+  const ciDelen = [];
+  if (r.ci.available) {
+    if (r.ci.rood > 0) {
+      ciDelen.push(r.ci.roodRepos
+        ? `<span class="rood">rood: ${r.ci.roodRepos.map((x) => esc(x)).join(', ')}</span>`
+        : `<span class="rood">${num(r.ci.rood)} repo's rood</span>`);
+    }
+    if (r.ci.onbekend > 0) ciDelen.push(`<span class="unknown">${num(r.ci.onbekend)} niet op te halen</span>`);
+    if (r.ci.verborgen > 0) ciDelen.push(`<span class="muted">${num(r.ci.verborgen)} niet bij naam getoond</span>`);
+    if (ciDelen.length === 0) ciDelen.push('<span class="muted">geen rood</span>');
+  }
+  // `ok` alleen als élke gevolgde repo daadwerkelijk groen is. Grijs, "geen CI" en verzwegen
+  // repo's zijn geen bewijs van "alles in orde" — hooguit afwezigheid van bewijs (review Codex).
+  const ciKlasse = r.ci.rood > 0 ? 'bad'
+    : r.ci.onbekend > 0 ? 'warn'
+      : (r.ci.totaal > 0 && r.ci.groen === r.ci.totaal ? 'ok' : '');
+
   const ciTegel = r.ci.available
-    ? stat('CI-ampels', `${num(r.ci.groen)}/${num(r.ci.totaal)} groen`,
-      r.ci.rood > 0
-        ? (r.ci.roodRepos
-          ? `<span class="rood">rood: ${r.ci.roodRepos.map((x) => esc(x)).join(', ')}</span>`
-          : `<span class="rood">${num(r.ci.rood)} repo's rood</span>`)
-        : (r.ci.onbekend > 0
-          ? `<span class="muted">${num(r.ci.onbekend)} niet op te halen</span>`
-          : '<span class="muted">geen rood</span>'),
-      // Rood wint; daarna telt onbekend als waarschuwing. Een ampel die niet op te halen was
-      // mag de tegel nooit groen maken — "geen rood" is dan geen bewijs van "alles in orde".
-      r.ci.rood > 0 ? 'bad' : (r.ci.onbekend > 0 ? 'warn' : 'ok'))
+    ? stat('CI-ampels', `${num(r.ci.groen)}/${num(r.ci.totaal)} groen`, ciDelen.join(' · '), ciKlasse)
     : stat('CI-ampels', ONBEKEND_WAARDE, ONBEKEND_DETAIL);
 
   const trackTegel = r.tracks.available
     ? stat('Tracks', `${num(r.tracks.vers)}/${num(r.tracks.totaal)} vers`,
-      `<span class="muted">${num(r.tracks.verouderd)} verouderd · ${num(r.tracks.zonder)} zonder rapport</span>`,
+      `<span class="muted">${num(r.tracks.verouderd)} verouderd · ${num(r.tracks.zonder)} zonder bruikbaar rapport</span>`,
       r.tracks.zonder > 0 || r.tracks.verouderd > 0 ? 'warn' : 'ok')
     : stat('Tracks', ONBEKEND_WAARDE, ONBEKEND_DETAIL);
 
@@ -192,10 +236,10 @@ function overzicht(s) {
     ? stat('Koudste hoek', ONBEKEND_WAARDE, ONBEKEND_DETAIL)
     : (r.tracks.koudste
       ? stat('Koudste hoek', esc(r.tracks.koudste.track),
-        r.tracks.koudste.lastReportAt
-          ? `<span class="muted">laatste rapport ${esc(ago(r.tracks.koudste.lastReportAt))}</span>`
-          : '<span class="rood">nog geen enkel klaar-rapport</span>',
-        r.tracks.koudste.lastReportAt ? 'warn' : 'bad')
+        koudsteDetail(r.tracks.koudste),
+        // Op werkelijke leeftijd, niet op "heeft een rapport": als de koudste hoek zelf nog vers
+        // is, is er niets te waarschuwen en zou oranje alert-moeheid kweken (review Gemini).
+        koudsteKlasse(r.tracks.koudste))
       : stat('Koudste hoek', '<span class="muted">—</span>', '<span class="muted">geen tracks gevolgd</span>'));
 
   const prTegel = r.prs.available

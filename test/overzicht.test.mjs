@@ -21,6 +21,20 @@ const verbodenBeloftes = JSON.parse(await readFile(join(ROOT, 'data/verboden-bel
 
 const dagenGeleden = (n) => new Date(Date.now() - n * 86400000).toISOString();
 
+/** Alleen de overzicht-sectie: assertions over "nergens groen" mogen niet de rest van de pagina meenemen. */
+const plaatVan = (html) => {
+  const i = html.indexOf('id="overzicht"');
+  assert.notEqual(i, -1, 'de plaat hoort op de pagina te staan');
+  return html.slice(i, html.indexOf('</section>', i));
+};
+
+/** Eén tegel op zijn label — anders lekt de klasse van een buurtegel in de assertion. */
+const tegelVan = (plaat, label) => {
+  const l = plaat.indexOf(`>${label}<`);
+  assert.notEqual(l, -1, `tegel "${label}" ontbreekt`);
+  return plaat.slice(plaat.lastIndexOf('<li class="stat', l), plaat.indexOf('</li>', l));
+};
+
 // --- rollup-telling ---
 
 test('rollup telt de CI-ampels: groen, rood en totaal', () => {
@@ -150,6 +164,106 @@ test('PROBE — een half-lege bron maakt alleen díé tak onbekend, niet de hele
   const r = rollup(s);
   assert.equal(r.ci.available, false);
   assert.equal(r.prs.available, true, 'de PR-tak blijft gewoon geldig');
+});
+
+// --- fail-open-gaten uit de dubbele review van 24-07-2026 (Codex + Gemini) ---
+
+test('PROBE — een rapport met een datum in de toekomst telt nooit als vers', () => {
+  // collect.mjs/ageTrust() zet zo'n track bewust op UNVERIFIED: een toekomstdatum is geen verse
+  // bron maar een kapotte klok. De plaat mag die nuance niet wegpoetsen (Codex, hoog).
+  const s = structuredClone(fixture);
+  s.tracks.tracks = [{
+    track: 'KAPOTTE-KLOK',
+    lastReportAt: new Date(Date.now() + 5 * 86400000).toISOString(),
+    reportCount: 1,
+    trust: 'UNVERIFIED',
+  }];
+  const r = rollup(s);
+  assert.equal(r.tracks.vers, 0, 'een onbetrouwbare datum is geen vers rapport');
+  assert.equal(r.tracks.zonder, 1);
+  assert.equal(r.tracks.koudste.track, 'KAPOTTE-KLOK');
+
+  const plaat = plaatVan(renderHtml(s));
+  assert.equal(/class="stat ok"/.test(plaat), false, 'niets groens bij een kapotte klok');
+  assert.match(plaat, /geen bruikbaar klaar-rapport/);
+});
+
+test('PROBE — een nul uit een onbetrouwbare bron is "onbekend", geen gezaghebbende 0', () => {
+  // trustFor(count) in collect.mjs markeert elke telling van nul als UNVERIFIED: een kapot token
+  // of een stukke parser levert óók nul op. "0 open PR's" leest als "niets te doen" (Codex, hoog).
+  const s = structuredClone(fixture);
+  s.pullRequests.totals.open = 0;
+  s.pullRequests.evidence.trust = 'UNVERIFIED';
+  s.tracker.decisionPoints = [];
+  s.tracker.evidence.trust = 'UNVERIFIED';
+
+  const r = rollup(s);
+  assert.equal(r.prs.available, false);
+  assert.equal(r.prs.open, null, 'geen kale 0 uit een onbetrouwbare bron');
+  assert.equal(r.beslispunten.available, false);
+  assert.equal(r.beslispunten.open, null);
+  assert.match(plaatVan(renderHtml(s)), /onbekend/i);
+});
+
+test('PROBE — bij rood én onbekend blijven beide zichtbaar', () => {
+  // Eerder toonde {ROOD, ONBEKEND} alleen de rode repo; de onbereikbare verdween (Codex, hoog).
+  const s = structuredClone(fixture);
+  s.ci.lights = [
+    { repository: 'stuk-repo', state: 'ROOD', at: null },
+    { repository: 'stille-repo', state: 'ONBEKEND', at: null },
+  ];
+  const plaat = plaatVan(renderHtml(s));
+  assert.match(plaat, /stuk-repo/, 'de rode repo bij naam');
+  assert.match(plaat, /niet op te halen/, 'de onbekende ampel blijft zichtbaar naast het rood');
+});
+
+test('PROBE — alleen grijs of "geen CI" levert nooit een groene tegel op', () => {
+  // 0/2 groen met een groene rand was de oude uitkomst (Codex, hoog).
+  const s = structuredClone(fixture);
+  s.ci.lights = [
+    { repository: 'a', state: 'GEEN_CI', at: null },
+    { repository: 'b', state: 'GRIJS', at: null },
+  ];
+  const plaat = plaatVan(renderHtml(s));
+  assert.equal(/class="stat ok"/.test(plaat), false, 'geen groen zonder één groene ampel');
+  assert.match(plaat, /0\/2 groen/);
+});
+
+test('PROBE — verborgen repo\'s tellen mee in de noemer', () => {
+  // "1/1 groen" terwijl er twee verzwegen zijn is een te mooie voorstelling (Codex, middel).
+  const s = structuredClone(fixture);
+  s.ci.lights = [{ repository: 'zichtbaar', state: 'GROEN', at: null }];
+  s.ci.hiddenCiRepositories = 2;
+  const r = rollup(s);
+  assert.equal(r.ci.totaal, 3);
+  const plaat = plaatVan(renderHtml(s));
+  assert.match(plaat, /1\/3 groen/);
+  assert.match(plaat, /niet bij naam getoond/);
+  assert.equal(/class="stat ok"/.test(plaat), false, 'onbekende verborgen ampels maken het niet groen');
+});
+
+test('een koudste hoek die zelf nog vers is, waarschuwt niet', () => {
+  // Anders staat er een oranje rand op een volledig gezond overzicht: alert-moeheid (Gemini).
+  const s = structuredClone(fixture);
+  s.tracks.tracks = [
+    { track: 'A', lastReportAt: dagenGeleden(1), reportCount: 3, trust: 'VERIFIED_CURRENT' },
+    { track: 'B', lastReportAt: dagenGeleden(2), reportCount: 3, trust: 'VERIFIED_CURRENT' },
+  ];
+  const tegel = tegelVan(plaatVan(renderHtml(s)), 'Koudste hoek');
+  assert.match(tegel, /class="stat ok"/, 'een verse koudste hoek is groen, geen waarschuwing');
+  assert.match(tegel, /laatste rapport/);
+});
+
+test('rollup is deterministisch bij een vast referentietijdstip', () => {
+  // De comparator gebruikte Date.now() per vergelijking (Gemini): formeel non-deterministisch.
+  const s = structuredClone(fixture);
+  s.tracks.tracks = [
+    { track: 'A', lastReportAt: dagenGeleden(3), reportCount: 1, trust: 'VERIFIED_CURRENT' },
+    { track: 'B', lastReportAt: dagenGeleden(30), reportCount: 1, trust: 'VERIFIED_CURRENT' },
+  ];
+  const nu = Date.parse('2026-07-24T12:00:00.000Z');
+  assert.deepEqual(rollup(s, nu), rollup(s, nu));
+  assert.equal(rollup(s, nu).tracks.koudste.track, 'B');
 });
 
 // --- publicatiedoctrine: escaping en geen valse beloftes ---
