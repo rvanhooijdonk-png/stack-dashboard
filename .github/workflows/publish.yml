@@ -163,32 +163,26 @@ jobs:
     needs: build
     if: failure()
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      # Checkout heeft leesrechten nodig. De foutpagina komt nu uit één getest bestand
+      # (scripts/failure-page.mjs) i.p.v. een ongeteste heredoc, zodat wat we tonen exact is wat de
+      # test bewaakt. Kosten: deze job hangt nu ook aan checkout+node — bewust geaccepteerd, want de
+      # generator is puur en zonder deps, en single-sourcing weegt zwaarder dan die kleine extra stap.
+      contents: read
     steps:
-      - name: Foutpagina genereren (geen enkele brondata)
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+      - name: Foutpagina genereren (geen enkele brondata, uit één getest bestand)
         run: |
           set -euo pipefail
           mkdir -p public
           : > public/.nojekyll
-          cat > public/index.html <<'HTML'
-          <!doctype html>
-          <html lang="nl"><head><meta charset="utf-8">
-          <meta name="viewport" content="width=device-width,initial-scale=1">
-          <meta http-equiv="refresh" content="900">
-          <meta name="robots" content="noindex,nofollow">
-          <title>Stack-dashboard — build gefaald</title>
-          <style>body{margin:0;background:#0f1115;color:#e6e8ec;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-          .w{max-width:640px;margin:0 auto;padding:64px 20px}h1{font-size:22px}p{color:#9aa3b2}</style>
-          </head><body><div class="w">
-          <h1>Geen actuele stand beschikbaar</h1>
-          <p>De generator is afgebroken: een test, de sanitize-gate of de secretsscan gaf een fout.
-          Er wordt met opzet géén oudere stand getoond — een verouderde groene pagina is misleidender
-          dan deze melding.</p>
-          <p>Een nieuwe build start bij een push naar main, bij een handmatige run, of bij een geplande
-          run (05:45/15:45 UTC) — op die laatste kun je hier niet vertrouwen. Deze melding verdwijnt pas nadat
-          build én publicatie slagen. De browser herlaadt deze pagina wel periodiek, maar dat start geen build.</p>
-          </div></body></html>
-          HTML
+          node scripts/failure-page.mjs > public/index.html
+          # Fail-closed sanity: wat we net schreven MOET de bedoelde noodpagina zijn (marker aanwezig),
+          # anders publiceren we liever niets dan een lege/kapotte foutpagina.
+          test "$(node scripts/failure-page.mjs --classify < public/index.html)" = "noodpagina"
 
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         with:
@@ -284,3 +278,56 @@ jobs:
           else
             echo "::warning::live-URL toont nog '${live:-<geen>}' i.p.v. '$GEBOUWD' — normaal: GitHub Pages/Fastly cachet tot ~10 min. Geen fout."
           fi
+
+  # Het tweede structurele gat: de SUCCESS-route werd bewaakt (verify), de FAILURE-route niet. Als de
+  # build faalt en de noodpagina wordt gepubliceerd, controleerde niets dat de live-URL daarna ook echt
+  # de bedoelde noodpagina serveert — en niet de GitHub-Pages-404 (route stuk / nooit gepubliceerd). Deze
+  # job dicht dat gat. Onderscheid t.o.v. de success-verify: een 404 op de Pages-root is GEEN CDN-artefact
+  # van een eerdere goede stand — het betekent dat er niets gepubliceerd staat. Dat is een harde fout. Een
+  # nog-gecachte oudere datastand is dat NIET (CDN-lag) → waarschuwing. De classificatie komt uit dezelfde
+  # bron als de test (scripts/failure-page.mjs --classify), zodat CI en test niet kunnen divergeren.
+  verify-failure:
+    needs: [build, failure-page, deploy]
+    if: ${{ !cancelled() && needs.build.result == 'failure' && needs.failure-page.result == 'success' && needs.deploy.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+      - name: Live-route serveert de noodpagina, niet de GitHub-404
+        shell: bash
+        env:
+          BASE_URL: ${{ needs.deploy.outputs.page_url }}
+        run: |
+          set -uo pipefail
+          if [ -z "${BASE_URL:-}" ]; then
+            echo "::warning::geen page_url van de deploy-job — live-route-check overgeslagen."
+            exit 0
+          fi
+          # Meerdere pogingen met budget: vlak na de deploy kan de CDN nog een oudere stand serveren
+          # (dat is 'anders' → geen fout). Maar een GitHub-404 op de root is de gat-toestand die we
+          # hard afvangen. We pollen tot de noodpagina zichtbaar is, of tot het budget op is.
+          gezien_404=0
+          klasse="anders"
+          for poging in 1 2 3 4 5 6; do
+            body="$(curl -sS --connect-timeout 5 --max-time 15 "${BASE_URL%/}/" || true)"
+            klasse="$(printf '%s' "$body" | node scripts/failure-page.mjs --classify)"
+            echo "poging ${poging}: live-route classificeert als '${klasse}'"
+            if [ "$klasse" = "noodpagina" ]; then
+              echo "✓ de live-route serveert de bedoelde noodpagina."
+              exit 0
+            fi
+            [ "$klasse" = "github-404" ] && gezien_404=1
+            sleep 15
+          done
+          # Budget op. Zag de route in elke poging de GitHub-404, dan staat er niets gepubliceerd:
+          # harde fout (precies het gat dat deze job dicht). Zag hij een oudere stand ('anders'), dan
+          # is dat CDN-lag — waarschuwen, niet falen (consistent met de zachte success-live-check).
+          if [ "$gezien_404" -eq 1 ] && [ "$klasse" = "github-404" ]; then
+            echo "::error::live-route serveert de GitHub-Pages-404 — de noodpagina staat niet gepubliceerd."
+            exit 1
+          fi
+          echo "::warning::live-route toont nog geen noodpagina maar ook geen 404 ('${klasse}') — waarschijnlijk CDN-lag (~10 min). Geen fout."
