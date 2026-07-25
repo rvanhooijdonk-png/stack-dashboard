@@ -5,6 +5,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { renderHtml } from '../scripts/lib/render.mjs';
+import { failurePageHtml } from '../scripts/failure-page.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8'));
@@ -12,29 +13,24 @@ const verboden = JSON.parse(await readFile(join(ROOT, 'data/verboden-beloftes.js
 const publish = await readFile(join(ROOT, '.github/workflows/publish.yml'), 'utf8');
 
 // Er gaan twee verschillende HTML-pagina's naar buiten: de gewone, en de foutpagina die de
-// workflow zelf schrijft als de build afbreekt. De tweede werd hier eerst niet getest, en juist
-// dáár stond de belofte nog dat de pagina "het elk kwartier opnieuw probeert en vanzelf herstelt"
-// — op precies het moment dat een lezer op betrouwbaarheid moet kunnen rekenen. Gevonden door
-// Codex in de review van deze PR. Beide paden lopen nu langs dezelfde lijst.
-// Anker op de hele regel, niet op de losse delimiter: een tweede heredoc met dezelfde naam
-// elders in het bestand zou anders stilletjes de verkeerde pagina laten toetsen.
-const OPENER = "cat > public/index.html <<'HTML'";
-const foutpagina = () => {
-  // Regelankers erbij (m-vlag): de openingsopdracht moet een hele regel zijn, niet toevallig
-  // ergens in een langere regel of in een YAML-commentaar staan.
-  const opener = new RegExp(`^\\s*${OPENER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'gm');
-  const treffers = [...publish.matchAll(opener)];
-  assert.equal(treffers.length, 1, `verwacht precies één foutpagina-heredoc, gevonden: ${treffers.length}`);
-  const start = treffers[0].index + treffers[0][0].length;
-  const einde = publish.indexOf('\n          HTML\n', start);
-  assert.notEqual(einde, -1, 'einde van de foutpagina-heredoc niet gevonden');
-  return publish.slice(start, einde);
-};
+// workflow schrijft als de build afbreekt. De tweede werd hier eerst niet getest, en juist dáár
+// stond de belofte nog dat de pagina "het elk kwartier opnieuw probeert en vanzelf herstelt" — op
+// precies het moment dat een lezer op betrouwbaarheid moet kunnen rekenen (Codex-review). De
+// foutpagina staat nu in één getest bestand (scripts/failure-page.mjs) i.p.v. een heredoc; beide
+// paden lopen nog steeds langs dezelfde verboden-belofte-lijst.
+const foutpagina = () => failurePageHtml();
 
 const paginas = [
   ['de gewone pagina', () => renderHtml(fixture)],
-  ['de foutpagina uit publish.yml', foutpagina],
+  ['de foutpagina (scripts/failure-page.mjs)', foutpagina],
 ];
+
+test('publish.yml genereert de foutpagina uit het geteste bestand (geen losse heredoc-kopie)', () => {
+  // Bewaakt de koppeling CI ↔ bron: zou iemand teruggaan naar een inline heredoc, dan test deze
+  // suite de ene pagina terwijl de workflow een andere publiceert. Dat mag niet stil kunnen.
+  assert.match(publish, /node scripts\/failure-page\.mjs > public\/index\.html/,
+    'de failure-page-job hoort de noodpagina uit scripts/failure-page.mjs te genereren');
+});
 
 // De patronen zijn letterlijke formuleringen, geen regexen. Zonder escapen zou een punt of
 // haakje in een later toegevoegde zin stilletjes iets anders gaan betekenen dan bedoeld.
