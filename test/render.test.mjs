@@ -66,6 +66,24 @@ test('de stempel hangt niet van de runner-locale of -timezone af', () => {
   assert.match(renderHtml(s), /gebouwd om 00:45 NL-tijd \(22:45 UTC\)/);
 });
 
+test('de tabtitel toont dezelfde NL-tijd, niet kale UTC', () => {
+  // De titel is de tweede plek waar de versheid gelezen wordt (tabbalk, bladwijzer, zoekgeschiedenis).
+  // Stond die op kale UTC, dan las een verse plaat daar alsnog als twee uur oud.
+  const s = structuredClone(fixture);
+  s.generatedAt = '2026-07-25T19:53:00.000Z';
+  const html = renderHtml(s);
+  assert.match(html, /<title>Stack-dashboard — 21:53 NL-tijd \(19:53 UTC\)<\/title>/);
+  assert.doesNotMatch(html, /<title>[^<]*2026-07-25 19:53 UTC<\/title>/);
+});
+
+test('een ontbrekend bouwmoment breekt de titel niet', () => {
+  // Eerder deed de titel `s.generatedAt.slice(...)` rechtstreeks: zonder bouwmoment was dat een throw
+  // midden in de render. Nu valt hij, net als de kop, terug op een streepje.
+  const s = structuredClone(fixture);
+  s.generatedAt = null;
+  assert.match(renderHtml(s), /<title>Stack-dashboard — —<\/title>/);
+});
+
 test('toont een onbereikbare bron als zodanig, niet als groen', () => {
   const html = renderHtml(fixture);
   assert.match(html, /bron onbereikbaar/);
