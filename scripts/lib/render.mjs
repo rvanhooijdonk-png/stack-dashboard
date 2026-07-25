@@ -427,21 +427,37 @@ const DAG_MS = 86400000;
  * regel zou een verouderde spiegel als actuele stand lezen — precies de misleiding die de plaat
  * hoort te voorkomen. Leeftijd in hele DAGEN: een backlog-spiegel meet je niet in minuten, en een
  * kale klok op de pagina is al eens voor "oud" aangezien.
+ *
+ * Woordkeus bewust precies (review Codex, 25-07-2026): `sha` is de MEETLAT-commit uit de feed zelf, niet
+ * aantoonbaar de commit waarin de bouwlijst is gegenereerd; en `spiegelAt` is het moment van de laatste
+ * INHOUDELIJKE wijziging van het spiegelbestand, niet van de laatste geslaagde spiegelrun. Een spiegel die
+ * ongewijzigd opnieuw wordt geplaatst schuift die datum dus niet op — de pagina belooft daarom niet meer
+ * dan dat.
  */
+
+/** Kalenderdagen in UTC, niet blokken van 24 uur: 23 uur over een dagovergang is "1 dag oud". */
+const utcDagStart = (d) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+
 function bronTekst(b, buildIso) {
   if (!b) return '';
   const delen = [];
   delen.push(b.sha
-    ? `Bron: TRECHTER-bouwlijst, commit <code>${esc(b.sha)}</code>`
-    : 'Bron: TRECHTER-bouwlijst, commit <em>onbekend</em>');
+    ? `Bron: TRECHTER-bouwlijst, meetlat-commit <code>${esc(b.sha)}</code>`
+    : 'Bron: TRECHTER-bouwlijst, meetlat-commit <em>onbekend</em>');
   const base = new Date(buildIso);
   const sp = b.spiegelAt ? new Date(b.spiegelAt) : null;
-  if (sp && !Number.isNaN(sp.getTime()) && !Number.isNaN(base.getTime())) {
-    const dagen = Math.floor((base.getTime() - sp.getTime()) / DAG_MS);
-    const leeftijd = dagen <= 0 ? 'vandaag gespiegeld' : dagen === 1 ? 'spiegel 1 dag oud' : `spiegel ${num(dagen)} dagen oud`;
-    delen.push(`gespiegeld op de rapporten-branch van stack-control (${esc(b.spiegelAt.slice(0, 10))}, ${leeftijd})`);
+  const dagen = sp && !Number.isNaN(sp.getTime()) && !Number.isNaN(base.getTime())
+    ? Math.round((utcDagStart(base) - utcDagStart(sp)) / DAG_MS)
+    : null;
+  if (dagen === null) {
+    delen.push('spiegel op de rapporten-branch van stack-control (<em>spiegelmoment onbekend</em>)');
+  } else if (dagen < 0) {
+    // Een spiegelmoment ná de build kan niet kloppen (scheve klok of verkeerde bron). Dan géén
+    // geruststellende "vandaag gespiegeld" tonen, maar zeggen dat het moment niet te plaatsen is.
+    delen.push(`spiegel op de rapporten-branch van stack-control (${esc(b.spiegelAt.slice(0, 10))}, <em>spiegelmoment ligt ná deze build — niet te plaatsen</em>)`);
   } else {
-    delen.push('gespiegeld op de rapporten-branch van stack-control (<em>spiegelmoment onbekend</em>)');
+    const leeftijd = dagen === 0 ? 'vandaag bijgewerkt' : dagen === 1 ? 'spiegel 1 dag oud' : `spiegel ${num(dagen)} dagen oud`;
+    delen.push(`spiegel laatst bijgewerkt op de rapporten-branch van stack-control (${esc(b.spiegelAt.slice(0, 10))}, ${leeftijd})`);
   }
   if (b.bouwbaar !== null) {
     delen.push(b.publishVeilig !== null && b.publishVeilig !== b.bouwbaar

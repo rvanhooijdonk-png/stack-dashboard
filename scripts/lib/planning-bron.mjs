@@ -36,7 +36,7 @@
  * op een streepje valt (review Codex, 25-07-2026).
  */
 
-import { DUUR_INDICATIES, MAX_LABEL } from './planning.mjs';
+import { DUUR_INDICATIES } from './planning.mjs';
 import { sanitizeString } from './sanitize.mjs';
 
 /** De enige status die de backlog-feed kent. Iets anders = de feed betekent iets anders dan we denken. */
@@ -51,8 +51,16 @@ function onbeschikbaar(reason, note) {
   return { available: false, reason, note, generatedAt: null, features: [], throughput: {}, kanaalpost: [] };
 }
 
-/** Een sha-achtige verwijzing is hex; alles anders laten we vallen i.p.v. door te geven. */
-const korteSha = (v) => (typeof v === 'string' && /^[0-9a-f]{7,40}$/.test(v.trim()) ? v.trim().slice(0, 12) : null);
+/**
+ * Een sha-achtige verwijzing is hex; alles anders laten we vallen i.p.v. door te geven.
+ * Hoofdletters zijn geldige hex: eerst normaliseren naar kleine letters, dan toetsen — anders valt een
+ * `E0049DC` stil weg naar `null` terwijl het een correcte sha is (review Gemini, 25-07-2026).
+ */
+const korteSha = (v) => {
+  if (typeof v !== 'string') return null;
+  const s = v.trim().toLowerCase();
+  return /^[0-9a-f]{7,40}$/.test(s) ? s.slice(0, 12) : null;
+};
 
 /**
  * Vertaal één bouwlijst-taak naar een §B-feature. GOOIT bij een harde poort-schending; de caller keurt
@@ -122,12 +130,35 @@ export function vertaalBouwlijst(rawText) {
   if (!isObject(data)) {
     return onbeschikbaar('CORRUPT', 'Bouwlijst-bestand heeft niet de verwachte vorm.');
   }
+  // Een `taken` van het verkeerde TYPE is geen leegte maar een schema-afwijking: de feed is iets anders
+  // geworden dan we denken. Dat als LEEG tonen zou het maskeren (review Codex, 25-07-2026). Alleen een
+  // ontbrekende of lege lijst is echte leegte.
+  if (data.taken !== undefined && !Array.isArray(data.taken)) {
+    return onbeschikbaar('CORRUPT', 'Bouwlijst heeft geen taken-lijst maar een andere vorm.');
+  }
   if (!Array.isArray(data.taken) || data.taken.length === 0) {
     return onbeschikbaar('LEEG', 'Bouwlijst bevat nog geen taken.');
   }
+  const nat = (v) => (Number.isInteger(v) && v >= 0 ? v : null);
+  const bouwbaar = nat(data.totaal_bouwbaar);
+  const publishVeilig = nat(data.publish_veilig);
   let features;
   let weggelaten = 0;
   try {
+    // De bron doet zelf een publiceerbaarheids-oordeel per taak en houdt het aantal bij. Dat oordeel is
+    // onze belangrijkste bescherming tegen semantisch lekken (een klantnaam matcht geen enkel patroon),
+    // dus toetsen we of zijn boekhouding klopt met wat hij aflevert (review Codex, 25-07-2026).
+    // Bewust ASYMMETRISCH: minder afgeleverd dan veilig-geacht mag (de bron is dan conservatiever dan
+    // zijn eigen teller), MEER afgeleverd dan veilig-geacht mag niet — dan zou het surplus ongetoetst
+    // op een publieke pagina komen.
+    if (publishVeilig !== null && bouwbaar !== null && publishVeilig > bouwbaar) {
+      throw new Error('planning-bron: publish_veilig is groter dan totaal_bouwbaar');
+    }
+    if (publishVeilig !== null && publishVeilig < data.taken.length) {
+      throw new Error(
+        `planning-bron: bron levert ${data.taken.length} taken maar acht er maar ${publishVeilig} publiceerbaar`,
+      );
+    }
     // Bouwvolgorde van de bron blijft staan: TRECHTER zet spoedspoor eerst, dan de rest. Zelf
     // hersorteren zou een tweede prioritering introduceren.
     features = data.taken.map((t, i) => vertaalTaak(t, i));
@@ -148,7 +179,11 @@ export function vertaalBouwlijst(rawText) {
     // meer gepubliceerd wordt. Zo'n regel valt hier weg en wordt GETELD, nooit stil weggelaten:
     // dezelfde keuze die de bron zelf maakt (3 geblokkeerde labels weggelaten, niet geraden).
     // Gemeten op de echte feed van 25-07-2026: 0 van 693 labels raakt een patroon.
-    const schoon = features.filter((f) => sanitizeString(f.feature_label.trim().slice(0, MAX_LABEL)).findings.length === 0);
+    // Toets het VOLLEDIGE label, niet de afgekapte versie: kapt de cap (MAX_LABEL) een mailadres of
+    // token middendoor, dan matcht het patroon niet meer en zou het verminkte restant alsnog op de
+    // pagina komen — sanitize vóór afkappen, afkappen pas in `publicFeature` (review Codex + Gemini,
+    // 25-07-2026).
+    const schoon = features.filter((f) => sanitizeString(f.feature_label).findings.length === 0);
     weggelaten = features.length - schoon.length;
     features = schoon;
     if (features.length === 0) {
@@ -170,8 +205,8 @@ export function vertaalBouwlijst(rawText) {
     kanaalpost: [],
     bron: {
       sha: korteSha(isObject(data.meetlat) ? data.meetlat.sha : null),
-      bouwbaar: Number.isInteger(data.totaal_bouwbaar) && data.totaal_bouwbaar >= 0 ? data.totaal_bouwbaar : null,
-      publishVeilig: Number.isInteger(data.publish_veilig) && data.publish_veilig >= 0 ? data.publish_veilig : null,
+      bouwbaar,
+      publishVeilig,
       weggelaten,
     },
   };

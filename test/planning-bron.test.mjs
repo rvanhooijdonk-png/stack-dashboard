@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 import { vertaalTaak, vertaalBouwlijst, BRON_STATUS_READY, PLAAT_STATUS_GEPLAND } from '../scripts/lib/planning-bron.mjs';
 import { toPublicPlanning } from '../scripts/lib/planning.mjs';
+import { loadDenyTerms } from '../scripts/lib/sanitize.mjs';
 import { validate } from '../scripts/lib/validate.mjs';
 import { renderHtml } from '../scripts/lib/render.mjs';
 
@@ -104,7 +105,31 @@ test('een lege of onleesbare feed levert LEEG/CORRUPT, nooit een throw naar de b
 
 test('een feed zonder taken is LEEG, niet corrupt', () => {
   assert.equal(vertaalBouwlijst(feed([])).reason, 'LEEG');
-  assert.equal(vertaalBouwlijst(JSON.stringify({ taken: 'geen array' })).reason, 'LEEG');
+  assert.equal(vertaalBouwlijst(JSON.stringify({ meetlat: {} })).reason, 'LEEG');
+});
+
+test('een taken-veld van het verkeerde TYPE is CORRUPT, geen leegte', () => {
+  // Leegte maskeren zou een schema-afwijking als "nog niets geleverd" laten lezen (review Codex).
+  assert.equal(vertaalBouwlijst(JSON.stringify({ taken: 'geen array' })).reason, 'CORRUPT');
+  assert.equal(vertaalBouwlijst(JSON.stringify({ taken: { 1: 'taak' } })).reason, 'CORRUPT');
+});
+
+test('de bron mag niet MEER taken leveren dan hij zelf publiceerbaar acht', () => {
+  // Het publish_veilig-oordeel van de bron is onze enige bescherming tegen semantische lekken die geen
+  // patroon kan raden. Levert hij drie taken maar acht hij er twee veilig, dan is de derde ongetoetst.
+  const teveel = vertaalBouwlijst(feed([taak(), taak({ task_id: 'T-2' }), taak({ task_id: 'T-3' })], { publish_veilig: 2 }));
+  assert.equal(teveel.available, false);
+  assert.equal(teveel.reason, 'CORRUPT');
+  assert.match(teveel.note, /3 taken maar acht er maar 2 publiceerbaar/);
+  // Andersom mag wél: minder afleveren dan veilig-geacht is conservatief, niet gevaarlijk.
+  const minder = vertaalBouwlijst(feed([taak()], { publish_veilig: 5, totaal_bouwbaar: 9 }));
+  assert.equal(minder.available, true);
+});
+
+test('een publish_veilig groter dan totaal_bouwbaar is een tegenspraak (CORRUPT)', () => {
+  const res = vertaalBouwlijst(feed([taak()], { publish_veilig: 9, totaal_bouwbaar: 4 }));
+  assert.equal(res.reason, 'CORRUPT');
+  assert.match(res.note, /groter dan totaal_bouwbaar/);
 });
 
 test('één afgekeurde regel keurt de HELE feed af — geen half-gevulde lijst', () => {
@@ -138,6 +163,14 @@ test('een niet-hexadecimale sha wordt niet doorgegeven maar null', () => {
   assert.equal(res.bron.sha, null);
 });
 
+test('een sha in hoofdletters is geldige hex en valt niet stil weg', () => {
+  // Hex is niet case-sensitief; een strikt-kleine-letters-regex zou een correcte sha op null zetten.
+  const res = vertaalBouwlijst(feed([taak()], { meetlat: { sha: 'E0049DCABC123DEF456' } }));
+  assert.equal(res.bron.sha, 'e0049dcabc12');
+  res.bron.sha = 'E0049DC';
+  assert.equal(toPublicPlanning(res, BUILD).bron.sha, 'e0049dc', 'ook de DTO-grens normaliseert i.p.v. weggooien');
+});
+
 // --- de per-regel schoon-poort: geteld, nooit stil ---
 
 test('een label dat een deny-patroon raakt valt weg en wordt GETELD, de rest blijft', () => {
@@ -152,6 +185,38 @@ test('een label dat een deny-patroon raakt valt weg en wordt GETELD, de rest bli
   assert.equal(res.features.length, 2);
   assert.equal(res.bron.weggelaten, 1);
   assert.equal(JSON.stringify(res).includes('example.com'), false);
+});
+
+test('de schoon-poort toetst het VOLLEDIGE label, niet de afgekapte versie', () => {
+  // Grens-bypass: een mailadres dat pas ná de label-cap (120 tekens) begint. Wie eerst afkapt en dán
+  // saneert, ziet 'iemand@ex' — geen patroon — en zet het verminkte restant alsnog op de pagina.
+  const lang = `${'x'.repeat(112)} iemand@example.com`;
+  const res = vertaalBouwlijst(feed([taak(), taak({ task_id: 'T-0002', feature_label: lang })]));
+  assert.equal(res.available, true);
+  assert.equal(res.features.length, 1, 'de regel met het mailadres voorbij de cap valt weg');
+  assert.equal(res.bron.weggelaten, 1);
+  assert.equal(JSON.stringify(res).includes('iemand@'), false);
+});
+
+test('de schoon-poort van de vertaler gooit ook eigennamen uit deny-terms weg', async () => {
+  // Patroon-gates kunnen een klant- of projectnaam niet raden; deny-terms is daarvoor het instrument.
+  // Zonder deze test was nergens bewezen dat de VERTALER (en niet alleen sanitizeString) die lijst volgt.
+  const { writeFile, mkdtemp } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(join(tmpdir(), 'dash-bron-'));
+  const file = join(dir, 'deny.json');
+  await writeFile(file, JSON.stringify({ terms: ['Acme Holding'] }));
+  assert.equal(loadDenyTerms(file), 1);
+  try {
+    const res = vertaalBouwlijst(feed([taak(), taak({ task_id: 'T-0002', feature_label: 'Migratie voor Acme Holding' })]));
+    assert.equal(res.available, true);
+    assert.equal(res.features.length, 1);
+    assert.equal(res.bron.weggelaten, 1);
+    assert.equal(JSON.stringify(res).includes('Acme'), false);
+  } finally {
+    // Terug naar geen termen, zodat de volgende tests in dit bestand niet op deze lijst draaien.
+    loadDenyTerms(join(dir, 'bestaat-niet.json'));
+  }
 });
 
 test('valt ALLES weg door de schoon-poort, dan is de plaat CORRUPT, niet stil leeg', () => {
@@ -205,12 +270,14 @@ test('de plaat toont de vierde tegel, het spoedspoor-badge en de duur-kolom', ()
   assert.match(html, /2-4 uur/);
 });
 
-test('de plaat noemt zijn herkomst: bron-commit, spiegelleeftijd en de aantallen', () => {
+test('de plaat noemt zijn herkomst: meetlat-commit, spiegelleeftijd en de aantallen', () => {
   const html = renderHtml(fixture);
-  assert.match(html, /Bron: TRECHTER-bouwlijst, commit <code>e0049dc<\/code>/);
-  assert.match(html, /gespiegeld op de rapporten-branch van stack-control/);
-  // fixture: bouwmoment 2026-07-23T12:00Z, spiegel 2026-07-23T11:00Z ⇒ zelfde dag.
-  assert.match(html, /2026-07-23, vandaag gespiegeld/);
+  // "meetlat-commit", niet "commit": de sha komt uit het meetlat-veld van de feed en is niet
+  // aantoonbaar de commit waarin de bouwlijst is gegenereerd (review Codex, 25-07-2026).
+  assert.match(html, /Bron: TRECHTER-bouwlijst, meetlat-commit <code>e0049dc<\/code>/);
+  assert.match(html, /spiegel laatst bijgewerkt op de rapporten-branch van stack-control/);
+  // fixture: bouwmoment 2026-07-23T12:00Z, spiegel 2026-07-23T11:00Z ⇒ zelfde kalenderdag.
+  assert.match(html, /2026-07-23, vandaag bijgewerkt/);
   assert.match(html, /696 bouwbaar, waarvan 693 publiceerbaar/);
   assert.match(html, /Dit is de <strong>backlog<\/strong>, niet de/);
 });
@@ -225,6 +292,24 @@ test('een oude spiegel leest als oud, geen groen vinkje op een verouderde kopie'
   const onbekend = structuredClone(fixture);
   onbekend.planning.bron.spiegelAt = null;
   assert.match(renderHtml(onbekend), /spiegelmoment onbekend/);
+});
+
+test('de leeftijd rekent in KALENDERDAGEN, niet in blokken van 24 uur', () => {
+  // Spiegel gisteren 13:00, build vandaag 12:00 = 23 uur: dat is "1 dag oud", niet "vandaag".
+  const bijna = structuredClone(fixture);
+  bijna.planning.bron.spiegelAt = '2026-07-22T13:00:00.000Z';
+  const html = renderHtml(bijna);
+  assert.match(html, /2026-07-22, spiegel 1 dag oud/);
+  assert.equal(html.includes('vandaag bijgewerkt'), false);
+});
+
+test('een spiegelmoment ná de build leest niet als "vandaag", maar als niet te plaatsen', () => {
+  // Scheve klok of verkeerde bron: geen geruststellende tekst op iets dat niet kan kloppen.
+  const toekomst = structuredClone(fixture);
+  toekomst.planning.bron.spiegelAt = '2026-07-24T11:00:00.000Z';
+  const html = renderHtml(toekomst);
+  assert.match(html, /spiegelmoment ligt ná deze build — niet te plaatsen/);
+  assert.equal(html.includes('vandaag bijgewerkt'), false);
 });
 
 test('zonder herkomst (§B-bron) blijft de plaat gewoon staan, zonder herkomst-regel', () => {

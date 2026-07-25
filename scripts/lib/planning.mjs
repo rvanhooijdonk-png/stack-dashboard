@@ -226,7 +226,9 @@ function publicBron(b) {
   if (!isObject(b)) return null;
   const nat = (v) => (Number.isInteger(v) && v >= 0 ? v : null);
   return {
-    sha: typeof b.sha === 'string' && /^[0-9a-f]{7,40}$/.test(b.sha) ? b.sha : null,
+    // Hex is niet case-sensitief: normaliseren naar kleine letters i.p.v. een hoofdletter-sha wegvalt.
+    sha: typeof b.sha === 'string' && /^[0-9a-f]{7,40}$/i.test(b.sha.trim())
+      ? b.sha.trim().toLowerCase() : null,
     bouwbaar: nat(b.bouwbaar),
     publishVeilig: nat(b.publishVeilig),
     weggelaten: nat(b.weggelaten) ?? 0,
