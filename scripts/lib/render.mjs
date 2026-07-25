@@ -46,19 +46,20 @@ const dt = (iso) => {
 // locale/timezone van de build-runner (die draait UTC): expliciete timeZone + hourCycle 'h23',
 // geassembleerd uit formatToParts zodat er geen locale-afhankelijke interpunctie insluipt. Statisch
 // per build — no-JS blijft, dus geen live-verouderende "x min geleden"; de vorm "gebouwd om …" maakt
-// dat expliciet. Datum bewust behouden náást de tijd: zonder datum zou een dag-oude plaat als vers
-// lezen — precies de freshness-verwarring die we hier juist wegnemen. UTC blijft tussen haakjes staan.
+// dat expliciet. Vorm: "gebouwd om HH:MM NL-tijd (HH:MM UTC)" — alleen het tijdstip, geen datum
+// (mandaat 25-07-2026, vierde herhaling; de eerdere datum-náást-tijd is op expliciet herhaald verzoek
+// teruggedraaid). De NL-tijd staat vooraan, zodat een verse plaat niet meer als oud leest; UTC blijft
+// tussen haakjes als tweede referentie.
 const buildStamp = (iso) => {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
   const p = Object.fromEntries(
     new Intl.DateTimeFormat('en-GB', {
-      timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit',
-      day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+      timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
     }).formatToParts(d).map((x) => [x.type, x.value]),
   );
-  const nl = `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+  const nl = `${p.hour}:${p.minute}`;
   const utc = d.toISOString().slice(11, 16);
   return `gebouwd om ${nl} NL-tijd (${utc} UTC)`;
 };
