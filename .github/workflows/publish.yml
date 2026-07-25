@@ -47,9 +47,29 @@ jobs:
       # 20 wél, maar laat node 24 crashen ("Cannot find module") omdat die een map als te draaien
       # module leest — gemeten op 20.19.0 en 24.14.1; ertussenin niet nagemeten. Een expliciete
       # bestandslijst zou op beide werken, maar slaat een later toegevoegde test stil over. Kaal
-      # `node --test` doet de ontdekking zelf en vond op beide versies dezelfde 69 tests.
+      # `node --test` doet de ontdekking zelf.
+      #
+      # Maar kaal `node --test` heeft één stille faalwijze (SLOTREGEL-bevinding B-1, megabatch
+      # 24-07, gemeten op node 24.14.1): een map zónder testbestanden geeft `# tests 0` en exit 0
+      # — groen. Verplaatst of hernoemt iemand ooit de tests zodat de ontdekking niets vindt, dan
+      # blijft deze stap groen en publiceert de build alsnog. De poort die de andere poorten
+      # bewaakt zou zelf onzichtbaar leeglopen. Daarom een ondergrens: valt de ontdekte telling
+      # onder de vloer, dan faalt de stap fail-closed. De vloer is een instortdetector, geen
+      # exact-aantal-eis — hij staat ruim onder het echte aantal (117 op 24-07) zodat normaal
+      # snoeien niet vals alarmeert, maar een leeggelopen ontdekking wél.
       - name: Tests
-        run: node --test
+        env:
+          TESTS_ONDERGRENS: "50"
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=tap 2>&1 | tee /tmp/tests.tap
+          # pipefail hierboven laat een echte testfout (node exit != 0) de stap al rood maken.
+          total="$(grep -E '^# tests [0-9]+' /tmp/tests.tap | tail -1 | grep -oE '[0-9]+' || echo 0)"
+          echo "Ontdekte tests: ${total} (ondergrens ${TESTS_ONDERGRENS})"
+          if [ "${total:-0}" -lt "${TESTS_ONDERGRENS}" ]; then
+            echo "::error title=Testontdekking leeggelopen::${total} tests < ondergrens ${TESTS_ONDERGRENS}. Kaal node --test geeft exit 0 bij nul tests; deze poort maakt dat fail-closed." >&2
+            exit 1
+          fi
 
       # Poort 3 komt van buiten onze eigen regexen. Vaste versie, geverifieerde checksum:
       # een secretsscanner die je niet kunt vertrouwen, is geen poort.
