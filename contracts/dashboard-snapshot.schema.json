@@ -23,7 +23,7 @@
   "properties": {
     "contractVersion": {
       "type": "string",
-      "const": "2.2.0",
+      "const": "2.3.0",
       "description": "Vastgepind: een DTO die zich niet als exact deze contractversie meldt, hoort niet bij dit schema. Bump dit samen met CONTRACT_VERSION in scripts/build.mjs."
     },
     "generatedAt": {
@@ -62,13 +62,14 @@
     },
     "planning": {
       "type": "object",
-      "description": "v2.2: de planning-plaat. Gereduceerde, schoon-gepoorte bouwlijst (TRECHTER levert de rauwe machine-leesbare vorm). `available: false` met reason LEEG/CORRUPT is een geldige fail-closed eindstand — de plaat toont dan een melding en de rest van de pagina blijft staan. Planning staat bewust niet in `sources`: een lege of corrupte bouwlijst degradeert de overall-status niet.",
+      "description": "v2.3: de planning-plaat. Gereduceerde, schoon-gepoorte bouwlijst (TRECHTER levert de rauwe machine-leesbare vorm). `available: false` met reason LEEG/CORRUPT is een geldige fail-closed eindstand — de plaat toont dan een melding en de rest van de pagina blijft staan. Planning staat bewust niet in `sources`: een lege of corrupte bouwlijst degradeert de overall-status niet. v2.3 voegt de overbrugging toe die TRECHTER's BACKLOG-feed via een vertaler in dit schema laat lopen: `bron` (herkomst van de spiegel), `counters.gepland` en per feature `tier0` + `duurIndicatie`.",
       "required": [
         "available",
         "reason",
         "features",
         "counters",
-        "kanaalpost"
+        "kanaalpost",
+        "bron"
       ],
       "additionalProperties": false,
       "properties": {
@@ -85,17 +86,19 @@
         },
         "counters": {
           "type": "object",
-          "description": "Kop-band: af-sinds-gisteren · draait-nu · wacht-op-Richard. Puur afgeleid uit de features.",
+          "description": "Kop-band: af-sinds-gisteren · draait-nu · wacht-op-Richard · gepland. Puur afgeleid uit de features. `gepland` hoort erbij omdat de eerste drie met een backlog-bron alle drie 0 zijn terwijl er honderden regels wachten — waar, en toch een verkeerd beeld.",
           "required": [
             "afSindsGisteren",
             "draaitNu",
-            "wachtOpRichard"
+            "wachtOpRichard",
+            "gepland"
           ],
           "additionalProperties": false,
           "properties": {
             "afSindsGisteren": { "type": "integer", "minimum": 0 },
             "draaitNu": { "type": "integer", "minimum": 0 },
-            "wachtOpRichard": { "type": "integer", "minimum": 0 }
+            "wachtOpRichard": { "type": "integer", "minimum": 0 },
+            "gepland": { "type": "integer", "minimum": 0 }
           }
         },
         "features": {
@@ -107,7 +110,9 @@
               "status",
               "worker",
               "oplevering",
-              "afhankelijkheid"
+              "afhankelijkheid",
+              "tier0",
+              "duurIndicatie"
             ],
             "additionalProperties": false,
             "properties": {
@@ -167,6 +172,20 @@
                   "null"
                 ],
                 "description": "null = geen afhankelijkheid vermeld."
+              },
+              "tier0": {
+                "type": "boolean",
+                "description": "Spoedspoor-markering van de bron (`prioriteit_tier === 0`). Alleen een echte `true` markeert; alles anders is geen spoedspoor."
+              },
+              "duurIndicatie": {
+                "enum": [
+                  null,
+                  "2-4 uur",
+                  "1-2 dagen",
+                  "3-5 dagen",
+                  "1-2 weken"
+                ],
+                "description": "Eigen startschatting van de bron uit een GESLOTEN lijst. Expliciet géén tweede meetsysteem: wordt nergens naar een datum herrekend en raakt het THROUGHPUT-LOG niet. null = de bron leverde geen indicatie."
               }
             }
           }
@@ -210,6 +229,45 @@
                   "null"
                 ]
               }
+            }
+          }
+        },
+        "bron": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Herkomst van de bouwlijst. De plaat leest niet de bron zelf maar een SPIEGEL op de rapporten-branch van stack-control (het bewezen-leesbare afleverkanaal), dus de pagina moet dat zichtbaar zeggen — anders leest een verouderde spiegel als actuele stand. null = een §B-bron zonder spiegel-provenance.",
+          "required": [
+            "sha",
+            "bouwbaar",
+            "publishVeilig",
+            "weggelaten",
+            "spiegelAt"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "sha": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Korte commit-sha van de bron-meetlat; null als de bron er geen leverde.",
+              "pattern": "^[0-9a-f]{7,40}$"
+            },
+            "bouwbaar": { "type": ["integer", "null"], "minimum": 0 },
+            "publishVeilig": { "type": ["integer", "null"], "minimum": 0 },
+            "weggelaten": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Aantal regels dat de per-regel schoon-poort van de vertaler liet vallen. Geteld, nooit stil weggelaten."
+            },
+            "spiegelAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "ISO-tijdstempel van de laatste wijziging van de spiegel; null = onbekend, en onbekend is niet vers."
             }
           }
         }

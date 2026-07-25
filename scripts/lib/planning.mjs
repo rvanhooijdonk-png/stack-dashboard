@@ -29,8 +29,15 @@ export const WORKER_ROLES = ['worker', 'control', 'review', 'richard'];
 /** Een oplevering is een gemeten verwachting, geen belofte: drie eerlijke uitkomsten. */
 export const OPLEVERING_KIND = ['opgeleverd', 'verwacht', 'onbekend'];
 
+/**
+ * Gesloten woordenschat voor de duur-indicatie die de bron zelf meelevert. Alleen deze waarden mogen
+ * naar buiten. Dit is expliciet GEEN meetsysteem: de waarde wordt nergens naar een datum herrekend en
+ * raakt het THROUGHPUT-LOG niet — hij staat op de plaat als startschatting van de bron.
+ */
+export const DUUR_INDICATIES = ['2-4 uur', '1-2 dagen', '3-5 dagen', '1-2 weken'];
+
 /** Een naam is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
-const MAX_LABEL = 120;
+export const MAX_LABEL = 120;
 /** Een kanaalpost-onderwerp is een korte regel; de vrije tekst blijft door de sanitize-gate gaan. */
 const MAX_KANAAL = 200;
 const DAG_MS = 86400000;
@@ -139,7 +146,23 @@ export function publicFeature(f, index, throughput, buildIso) {
   if (label === null) throw new Error(`planning: feature ${nr} mist een leesbare naam`);
   const afhankelijkheid = typeof f.afhankelijkheid === 'string' && f.afhankelijkheid.trim()
     ? f.afhankelijkheid.trim().slice(0, MAX_LABEL) : null;
-  return { label, status: f.status, worker, oplevering: verwachteOplevering(f, throughput, buildIso), afhankelijkheid };
+  // Spoedspoor-markering (bron: `prioriteit_tier === 0`). Alleen een echte `true` markeert; alles anders
+  // — ontbrekend, null, "ja", 1 — is geen spoedspoor. Zo kan een slordige bron nooit per ongeluk 693
+  // regels als spoedeisend laten oplichten.
+  const tier0 = f.tier0 === true;
+  // Duur-indicatie van de BRON, geen tweede meetsysteem: hij wordt nergens naar een datum herrekend en
+  // raakt het throughput-log niet. Alleen een waarde uit de gesloten lijst komt hier binnen (de vertaler
+  // keurt de rest hard af); een §B-bestand zónder dit veld levert simpelweg null.
+  const duurIndicatie = DUUR_INDICATIES.includes(f.duur_indicatie) ? f.duur_indicatie : null;
+  return {
+    label,
+    status: f.status,
+    worker,
+    oplevering: verwachteOplevering(f, throughput, buildIso),
+    afhankelijkheid,
+    tier0,
+    duurIndicatie,
+  };
 }
 
 /** Eén kanaalpost-rij, gestructureerd en gecapt. Vrije `onderwerp`-tekst blijft langs de sanitize-gate gaan. */
@@ -166,7 +189,12 @@ export function planningCounters(features, buildIso) {
   let afSindsGisteren = 0;
   let draaitNu = 0;
   let wachtOpRichard = 0;
+  // Vierde tegel. Met de backlog-bron staan af/draait/wacht alle drie op 0 — waar en toch misleidend,
+  // want er wachten wél honderden regels. `gepland` maakt de band inhoudelijk eerlijk zolang de
+  // uitvoerings-stand nog uit een andere bron moet komen (review Codex, 25-07-2026).
+  let gepland = 0;
   for (const f of features) {
+    if (f.status === 'gepland') gepland += 1;
     if (f.status === 'in-bouw') draaitNu += 1;
     if (f.status === 'wacht-op-Richard') wachtOpRichard += 1;
     if (f.status === 'live' && gisteren !== null && f.oplevering && f.oplevering.date
@@ -174,7 +202,7 @@ export function planningCounters(features, buildIso) {
       afSindsGisteren += 1;
     }
   }
-  return { afSindsGisteren, draaitNu, wachtOpRichard };
+  return { afSindsGisteren, draaitNu, wachtOpRichard, gepland };
 }
 
 function unavailableDto(reason) {
@@ -182,8 +210,29 @@ function unavailableDto(reason) {
     available: false,
     reason,
     features: [],
-    counters: { afSindsGisteren: 0, draaitNu: 0, wachtOpRichard: 0 },
+    counters: { afSindsGisteren: 0, draaitNu: 0, wachtOpRichard: 0, gepland: 0 },
     kanaalpost: [],
+    bron: null,
+  };
+}
+
+/**
+ * Herkomst van de bouwlijst, opnieuw getoetst op de grens naar de publieke DTO. De plaat toont deze
+ * regel zodat niemand een gespiegelde backlog voor de operationele waarheid houdt: welke bron-commit,
+ * hoe oud de spiegel is, en hoeveel regels de bron zelf al had weggelaten. Alles wat niet de verwachte
+ * vorm heeft valt weg — een provenance-regel mag zelf nooit iets doorlaten.
+ */
+function publicBron(b) {
+  if (!isObject(b)) return null;
+  const nat = (v) => (Number.isInteger(v) && v >= 0 ? v : null);
+  return {
+    sha: typeof b.sha === 'string' && /^[0-9a-f]{7,40}$/.test(b.sha) ? b.sha : null,
+    bouwbaar: nat(b.bouwbaar),
+    publishVeilig: nat(b.publishVeilig),
+    weggelaten: nat(b.weggelaten) ?? 0,
+    // ISO-tijdstempel van de laatste wijziging van de spiegel; null = onbekend, en onbekend is niet vers.
+    spiegelAt: typeof b.spiegelAt === 'string' && !Number.isNaN(new Date(b.spiegelAt).getTime())
+      ? new Date(b.spiegelAt).toISOString() : null,
   };
 }
 
@@ -207,6 +256,8 @@ export function toPublicPlanning(parsed, buildIso) {
       features,
       counters: planningCounters(features, buildIso),
       kanaalpost,
+      // Herkomst; `null` voor een §B-bron die geen spiegel-provenance meelevert (het voorbeeldbestand).
+      bron: publicBron(parsed.bron),
     };
   } catch {
     return unavailableDto('CORRUPT');

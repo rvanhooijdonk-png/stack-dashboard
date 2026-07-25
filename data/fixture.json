@@ -1,5 +1,5 @@
 {
-  "contractVersion": "2.2.0",
+  "contractVersion": "2.3.0",
   "generatedAt": "2026-07-23T12:00:00.000Z",
   "overallStatus": "DEGRADED",
   "sources": [
@@ -20,35 +20,58 @@
     "counters": {
       "afSindsGisteren": 1,
       "draaitNu": 1,
-      "wachtOpRichard": 1
+      "wachtOpRichard": 1,
+      "gepland": 1
     },
     "features": [
+      {
+        "label": "Spoedspoor: bouwlijst-vertaler",
+        "status": "gepland",
+        "worker": null,
+        "oplevering": { "kind": "onbekend", "date": null },
+        "afhankelijkheid": null,
+        "tier0": true,
+        "duurIndicatie": "2-4 uur"
+      },
       {
         "label": "Planning-plaat op het dashboard",
         "status": "in-bouw",
         "worker": "worker",
         "oplevering": { "kind": "verwacht", "date": "2026-07-26" },
-        "afhankelijkheid": null
+        "afhankelijkheid": null,
+        "tier0": false,
+        "duurIndicatie": "1-2 dagen"
       },
       {
         "label": "Tijdstempel in Nederlandse tijd",
         "status": "wacht-op-Richard",
         "worker": "richard",
         "oplevering": { "kind": "verwacht", "date": "2026-07-24" },
-        "afhankelijkheid": "wacht op merge-akkoord"
+        "afhankelijkheid": "wacht op merge-akkoord",
+        "tier0": false,
+        "duurIndicatie": null
       },
       {
         "label": "Noodpagina bij een afgebroken build",
         "status": "live",
         "worker": "worker",
         "oplevering": { "kind": "opgeleverd", "date": "2026-07-23" },
-        "afhankelijkheid": null
+        "afhankelijkheid": null,
+        "tier0": false,
+        "duurIndicatie": null
       }
     ],
     "kanaalpost": [
       { "datum": "2026-07-23", "doelchat": "02", "onderwerp": "Kwartierrun ingesteld", "status": "gemerged" },
       { "datum": "2026-07-25", "doelchat": "02", "onderwerp": "Tijdstempel in NL-tijd", "status": "mergeable" }
-    ]
+    ],
+    "bron": {
+      "sha": "e0049dc",
+      "bouwbaar": 696,
+      "publishVeilig": 693,
+      "weggelaten": 0,
+      "spiegelAt": "2026-07-23T11:00:00.000Z"
+    }
   },
   "workstreams": [
     {
