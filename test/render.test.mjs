@@ -14,7 +14,52 @@ test('rendert een volledige pagina met verversing en tijdstempel', () => {
   assert.match(html, /^<!doctype html>/);
   assert.match(html, /<meta http-equiv="refresh" content="900; url=\.\/\?v=\d+">/);
   assert.match(html, /Laatst bijgewerkt/);
-  assert.match(html, /2026-07-23 12:00 UTC/);
+  // Hoofdweergave in NL-tijd (fixture is 12:00Z in juli = 14:00 CEST), met UTC tussen haakjes.
+  assert.match(html, /Laatst bijgewerkt: <strong>gebouwd om 2026-07-23 14:00 NL-tijd \(12:00 UTC\)<\/strong>/);
+});
+
+// --- Tijdstempel in Richards tijd (Europe/Amsterdam, DST-correct) ---
+
+test('de stempel toont NL-tijd als hoofdweergave met UTC tussen haakjes', () => {
+  const zomer = structuredClone(fixture);
+  zomer.generatedAt = '2026-07-25T12:30:00.000Z'; // CEST = UTC+2
+  assert.match(renderHtml(zomer), /gebouwd om 2026-07-25 14:30 NL-tijd \(12:30 UTC\)/);
+});
+
+test('de NL-omzetting klopt in de winter (CET = UTC+1)', () => {
+  const winter = structuredClone(fixture);
+  winter.generatedAt = '2026-01-15T12:00:00.000Z';
+  assert.match(renderHtml(winter), /gebouwd om 2026-01-15 13:00 NL-tijd \(12:00 UTC\)/);
+});
+
+test('de DST-overgang wordt correct verwerkt, niet met een vaste offset', () => {
+  // De klok springt in NL van winter- naar zomertijd op de laatste zondag van maart om 02:00 lokaal.
+  // Een vaste +1 zou hierna een uur mis zitten; de expliciete Europe/Amsterdam-zone vangt het.
+  const voorSprong = structuredClone(fixture);
+  voorSprong.generatedAt = '2026-03-29T00:30:00.000Z'; // nog CET → 01:30
+  assert.match(renderHtml(voorSprong), /gebouwd om 2026-03-29 01:30 NL-tijd \(00:30 UTC\)/);
+  const naSprong = structuredClone(fixture);
+  naSprong.generatedAt = '2026-03-29T01:30:00.000Z'; // klok is 02→03 gesprongen → 03:30 CEST
+  assert.match(renderHtml(naSprong), /gebouwd om 2026-03-29 03:30 NL-tijd \(01:30 UTC\)/);
+});
+
+test('de DST-overgang in de herfst (terugval) wordt correct verwerkt', () => {
+  // Laatste zondag oktober: de klok valt om 03:00 lokaal terug naar 02:00. Het uur 02:00–03:00 komt
+  // dus twee keer voor. Omdat de input een eenduidige UTC-instant is, blijft elk moment ondubbelzinnig:
+  // 00:30Z is nog CEST (02:30), 01:30Z is al CET (óók 02:30) — beide NL 02:30, verschillende UTC.
+  const voorTerugval = structuredClone(fixture);
+  voorTerugval.generatedAt = '2026-10-25T00:30:00.000Z';
+  assert.match(renderHtml(voorTerugval), /gebouwd om 2026-10-25 02:30 NL-tijd \(00:30 UTC\)/);
+  const naTerugval = structuredClone(fixture);
+  naTerugval.generatedAt = '2026-10-25T01:30:00.000Z';
+  assert.match(renderHtml(naTerugval), /gebouwd om 2026-10-25 02:30 NL-tijd \(01:30 UTC\)/);
+});
+
+test('de stempel hangt niet van de runner-locale of -timezone af', () => {
+  // Zelfde moment, of de runner nu in UTC of elders staat: de expliciete timeZone dwingt NL af.
+  const s = structuredClone(fixture);
+  s.generatedAt = '2026-07-25T22:45:00.000Z'; // 00:45 NL de volgende dag — datum schuift mee, UTC niet
+  assert.match(renderHtml(s), /gebouwd om 2026-07-26 00:45 NL-tijd \(22:45 UTC\)/);
 });
 
 test('toont een onbereikbare bron als zodanig, niet als groen', () => {

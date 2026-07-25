@@ -42,6 +42,27 @@ const dt = (iso) => {
   return Number.isNaN(d.getTime()) ? '—' : d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
 };
 
+// De hoofdstempel in Richards tijd. Europe/Amsterdam met correcte zomertijd, onafhankelijk van de
+// locale/timezone van de build-runner (die draait UTC): expliciete timeZone + hourCycle 'h23',
+// geassembleerd uit formatToParts zodat er geen locale-afhankelijke interpunctie insluipt. Statisch
+// per build — no-JS blijft, dus geen live-verouderende "x min geleden"; de vorm "gebouwd om …" maakt
+// dat expliciet. Datum bewust behouden náást de tijd: zonder datum zou een dag-oude plaat als vers
+// lezen — precies de freshness-verwarring die we hier juist wegnemen. UTC blijft tussen haakjes staan.
+const buildStamp = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit',
+      day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(d).map((x) => [x.type, x.value]),
+  );
+  const nl = `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+  const utc = d.toISOString().slice(11, 16);
+  return `gebouwd om ${nl} NL-tijd (${utc} UTC)`;
+};
+
 const ago = (iso) => {
   if (!iso) return '';
   const ms = Date.now() - new Date(iso).getTime();
@@ -479,7 +500,7 @@ export function renderHtml(snapshot, { refreshSeconds = 900 } = {}) {
 <div class="wrap">
 <header>
   <h1>Stack-dashboard</h1>
-  <p class="stamp">Laatst bijgewerkt: <strong>${esc(dt(s.generatedAt))}</strong> · deze pagina haalt zichzelf elke ${num(refresh / 60)} min opnieuw op</p>
+  <p class="stamp">Laatst bijgewerkt: <strong>${esc(buildStamp(s.generatedAt))}</strong> · deze pagina haalt zichzelf elke ${num(refresh / 60)} min opnieuw op</p>
 </header>
 <p class="muted">Weergave van bestaande canon — nooit een tweede waarheid. Alles is read-only en gesaneerd;
 ${stale.length === 0 ? 'alle bronnen zijn geverifieerd.' : `<strong>${num(stale.length)}</strong> van ${num(s.sources.length)} bronnen is niet geverifieerd (zie de badges).`}
