@@ -68,10 +68,12 @@ test('de lijst met verboden beloftes is niet stilletjes uitgekleed', () => {
 test('beide pagina\'s zeggen wél wat er dan wel gebeurt', () => {
   assert.match(renderHtml(fixture), /bij elke push naar main en bij een handmatige run/i);
   const fout = foutpagina();
-  assert.match(fout, /push naar main, bij een handmatige run, of bij de ingestelde/i);
-  // De foutpagina mag de kwartierrun noemen — hij bestáát — maar moet er in dezelfde adem bij
+  assert.match(fout, /push\s+naar\s+main,\s+bij\s+een\s+handmatige\s+run,\s+of\s+bij\s+een\s+geplande/i);
+  // De foutpagina mag de geplande run noemen — hij bestáát — maar moet er in dezelfde adem bij
   // zeggen dat je er niet op kunt rekenen. Codex' punt: onbetrouwbaar is niet hetzelfde als
   // afwezig, en "geen geplande run" zou net zo onwaar zijn als de belofte die we net weghaalden.
   assert.match(fout, /kun je hier niet vertrouwen/i);
-  assert.match(fout, /pas nadat build\s+én publicatie slagen/i);
+  // Whitespace-tolerant per woordgrens: dit toetst de inhoud, niet waar de regelafbreking van de
+  // heredoc toevallig valt — een herformattering van de <p> mag deze bewaking niet stil breken.
+  assert.match(fout, /pas nadat\s+build\s+én\s+publicatie\s+slagen/i);
 });
