@@ -7,7 +7,7 @@
   "additionalProperties": false,
   "required": ["contractVersion", "generatedAt", "overallStatus", "sources"],
   "properties": {
-    "contractVersion": { "type": "string", "const": "2.1.0" },
+    "contractVersion": { "type": "string", "const": "2.2.0" },
     "generatedAt": { "type": "string", "format": "date-time" },
     "overallStatus": { "enum": ["OK", "DEGRADED"] },
     "sources": {

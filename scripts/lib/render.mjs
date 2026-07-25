@@ -399,6 +399,83 @@ function workstreams(ws) {
 </section>`;
 }
 
+/**
+ * PLANNING-PLAAT — de bouwlijst. Kop-band (af-sinds-gisteren · draait-nu · wacht-op-Richard),
+ * daaronder per feature de naam, status, de op het THROUGHPUT-LOG herrekende oplevering en de
+ * afhankelijkheid, en tot slot de laatste tien kanaalpost-rijen. Fail-closed: een lege of afgekeurde
+ * bouwlijst toont hier een nette melding, nooit een lege of kapotte pagina.
+ */
+const PLANNING_STATUS_KLASSE = {
+  gepland: '',
+  'in-bouw': 'ok',
+  'in-review': 'warn',
+  'wacht-op-Richard': 'warn',
+  live: 'ok',
+};
+
+const PLANNING_REDEN = {
+  LEEG: 'Er is nog geen bouwlijst geleverd. Zodra TRECHTER de machine-leesbare bouwlijst plaatst, verschijnt hier de planning.',
+  CORRUPT: 'De geleverde bouwlijst kon niet veilig worden gelezen en wordt daarom niet getoond — liever een lege plaat dan een onbetrouwbare.',
+};
+
+/** De oplevering als tekst — eerlijk over wat gemeten is en wat niet. */
+function opleveringTekst(o) {
+  if (!o) return '<span class="muted">—</span>';
+  if (o.kind === 'opgeleverd') return o.date ? `opgeleverd · ${esc(o.date)}` : 'opgeleverd';
+  if (o.kind === 'verwacht' && o.date) return `verwacht ${esc(o.date)}`;
+  return `${ONBEKEND_WAARDE}`;
+}
+
+function planning(p) {
+  if (!p?.available) {
+    const reden = PLANNING_REDEN[p?.reason] ?? PLANNING_REDEN.LEEG;
+    return `<section id="planning" class="card plaat">
+  <h2>Planning-plaat</h2>
+  <p class="empty">${esc(reden)}</p>
+</section>`;
+  }
+  const c = p.counters ?? { afSindsGisteren: 0, draaitNu: 0, wachtOpRichard: 0 };
+  const band = [
+    stat('Af sinds gisteren', num(c.afSindsGisteren), '<span class="muted">live gegaan sinds gisteren</span>',
+      c.afSindsGisteren > 0 ? 'ok' : ''),
+    stat('Draait nu', num(c.draaitNu), '<span class="muted">features in aanbouw</span>',
+      c.draaitNu > 0 ? 'ok' : ''),
+    stat('Wacht op Richard', num(c.wachtOpRichard), '<span class="muted">features die op een akkoord staan</span>',
+      c.wachtOpRichard > 0 ? 'warn' : ''),
+  ].join('');
+
+  const rows = p.features.map((f) => `<tr>
+      <td>${esc(f.label)}</td>
+      <td class="nowrap"><span class="tag ${PLANNING_STATUS_KLASSE[f.status] ?? ''}">${esc(f.status)}</span></td>
+      <td class="nowrap muted">${f.worker ? esc(f.worker) : '<span class="muted">—</span>'}</td>
+      <td class="nowrap">${opleveringTekst(f.oplevering)}</td>
+      <td>${f.afhankelijkheid ? esc(f.afhankelijkheid) : '<span class="muted">—</span>'}</td></tr>`).join('\n');
+
+  const kanaalRows = p.kanaalpost.length
+    ? p.kanaalpost.map((k) => `<tr>
+      <td class="nowrap muted">${k.datum ? esc(k.datum) : '—'}</td>
+      <td class="nowrap"><span class="tag">${k.doelchat ? esc(k.doelchat) : '—'}</span></td>
+      <td>${k.onderwerp ? esc(k.onderwerp) : '<span class="muted">—</span>'}</td>
+      <td class="nowrap muted">${k.status ? esc(k.status) : '—'}</td></tr>`).join('\n')
+    : '';
+
+  return `<section id="planning" class="card plaat">
+  <h2>Planning-plaat</h2>
+  <p class="lead muted">De bouwlijst: wat gepland staat, wat nu draait en wat op een akkoord wacht. De
+  verwachte oplevering is herrekend op de gemeten doorlooptijd uit het throughput-log — geen tweede
+  meetsysteem, en een klasse zonder gemeten doorlooptijd staat op <em>onbekend</em>, nooit een verzonnen datum.</p>
+  <ul class="stats">${band}</ul>
+  <div class="scroll"><table>
+    <thead><tr><th>Feature</th><th>status</th><th>rol</th><th>oplevering</th><th>afhankelijkheid</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>
+  <h3>Kanaalpost — laatste ${num(p.kanaalpost.length)}</h3>
+  ${kanaalRows
+    ? `<div class="scroll"><table><thead><tr><th>datum</th><th>chat</th><th>onderwerp</th><th>status</th></tr></thead><tbody>${kanaalRows}</tbody></table></div>`
+    : '<p class="empty">Nog geen kanaalpost-rijen.</p>'}
+</section>`;
+}
+
 const STYLE = `
 :root{--bg:#0f1115;--card:#171a21;--line:#252a34;--fg:#e6e8ec;--mut:#9aa3b2;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#58a6ff}
 @media (prefers-color-scheme:light){:root{--bg:#f6f7f9;--card:#fff;--line:#e3e6ea;--fg:#1c2027;--mut:#5c6470;--acc:#0969da}}
@@ -428,6 +505,7 @@ tr:last-child td{border-bottom:0}
 .chips{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
 .tag{display:inline-block;min-width:22px;text-align:center;background:var(--line);border-radius:5px;padding:1px 6px;font-size:12px;font-variant-numeric:tabular-nums}
 .tag.warn{background:color-mix(in srgb,var(--warn) 22%,transparent);color:var(--warn)}
+.tag.ok{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}
 .tag.cat{min-width:0;background:color-mix(in srgb,var(--acc) 16%,transparent);color:var(--acc);text-transform:uppercase;letter-spacing:.04em;font-size:11px}
 .badge{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;padding:2px 7px;border-radius:20px;border:1px solid currentColor}
 .badge.ok{color:var(--ok)}.badge.warn{color:var(--warn)}.badge.bad{color:var(--bad)}
@@ -491,6 +569,8 @@ publicatie kan door browser- of CDN-cache tot tien minuten later pas zichtbaar w
 de leeftijd van déze kopie; losse brondata kan ouder zijn, dus lees ook de badges per bron.</p>
 
 ${overzicht(s)}
+
+${planning(s.planning)}
 
 <div class="grid">
   ${pullRequests(s.pullRequests)}

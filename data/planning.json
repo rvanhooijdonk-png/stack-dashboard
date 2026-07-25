@@ -1,0 +1,67 @@
+{
+  "_bron": "VOORBEELDBESTAND in het afgesproken TRECHTER-formaat. Wordt vervangen zodra de echte machine-leesbare bouwlijst op de rapporten-branch staat (CONTROL/RAPPORTEN/bouwlijst.json). De plaat leest exact deze vorm; alleen de bron wisselt.",
+  "_formaat": "generatedAt (ISO) · throughput.leadDagenPerKlasse (gemeten doorlooptijd per klasse, uit D-0023 THROUGHPUT-LOG) · features[] (feature_label, status, worker-rol, throughput_klasse, af_sinds, afhankelijkheid) · kanaalpost[] (datum, doelchat, onderwerp, status)",
+  "generatedAt": "2026-07-25T02:00:00.000Z",
+  "throughput": {
+    "_bron": "D-0023 THROUGHPUT-LOG — gemeten doorlooptijd per klasse. TRECHTER kopieert deze uit het log; de plaat rekent er alleen mee (bouwmoment + dagen). Geen tweede meetsysteem.",
+    "leadDagenPerKlasse": {
+      "render-fix": 1,
+      "nieuwe-sectie": 3,
+      "contract": 2,
+      "pipeline": 4
+    }
+  },
+  "features": [
+    {
+      "id": "F-01",
+      "feature_label": "Planning-plaat op het dashboard",
+      "status": "in-bouw",
+      "worker": "worker",
+      "throughput_klasse": "nieuwe-sectie",
+      "af_sinds": null,
+      "afhankelijkheid": null
+    },
+    {
+      "id": "F-02",
+      "feature_label": "Tijdstempel in Nederlandse tijd",
+      "status": "wacht-op-Richard",
+      "worker": "richard",
+      "throughput_klasse": "render-fix",
+      "af_sinds": null,
+      "afhankelijkheid": "wacht op merge-akkoord"
+    },
+    {
+      "id": "F-03",
+      "feature_label": "Foutpagina-route ook door verify bewaakt",
+      "status": "in-review",
+      "worker": "review",
+      "throughput_klasse": "pipeline",
+      "af_sinds": null,
+      "afhankelijkheid": "planning-plaat"
+    },
+    {
+      "id": "F-04",
+      "feature_label": "Dagstaat-overzicht op de plaat",
+      "status": "gepland",
+      "worker": null,
+      "throughput_klasse": "contract",
+      "af_sinds": null,
+      "afhankelijkheid": "vier CHIEF-takken op rapporten"
+    },
+    {
+      "id": "F-05",
+      "feature_label": "Noodpagina bij een afgebroken build",
+      "status": "live",
+      "worker": "worker",
+      "throughput_klasse": "render-fix",
+      "af_sinds": "2026-07-25",
+      "afhankelijkheid": null
+    }
+  ],
+  "kanaalpost": [
+    { "datum": "2026-07-23", "doelchat": "02", "onderwerp": "Kwartierrun ingesteld (05:45/15:45 UTC)", "status": "gemerged" },
+    { "datum": "2026-07-25", "doelchat": "02", "onderwerp": "Noodpagina-assert uitgelijnd met geplande-run tekst", "status": "gemerged" },
+    { "datum": "2026-07-25", "doelchat": "02", "onderwerp": "Tijdstempel voortaan in NL-tijd (DST-correct)", "status": "mergeable" },
+    { "datum": "2026-07-25", "doelchat": "02", "onderwerp": "Planning-plaat v1 in aanbouw", "status": "in-bouw" }
+  ]
+}

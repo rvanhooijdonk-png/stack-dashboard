@@ -10,6 +10,7 @@
     "generatedAt",
     "overallStatus",
     "sources",
+    "planning",
     "workstreams",
     "pullRequests",
     "merged",
@@ -22,7 +23,7 @@
   "properties": {
     "contractVersion": {
       "type": "string",
-      "const": "2.1.0",
+      "const": "2.2.0",
       "description": "Vastgepind: een DTO die zich niet als exact deze contractversie meldt, hoort niet bij dit schema. Bump dit samen met CONTRACT_VERSION in scripts/build.mjs."
     },
     "generatedAt": {
@@ -55,6 +56,161 @@
           "retrievedAt": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      }
+    },
+    "planning": {
+      "type": "object",
+      "description": "v2.2: de planning-plaat. Gereduceerde, schoon-gepoorte bouwlijst (TRECHTER levert de rauwe machine-leesbare vorm). `available: false` met reason LEEG/CORRUPT is een geldige fail-closed eindstand — de plaat toont dan een melding en de rest van de pagina blijft staan. Planning staat bewust niet in `sources`: een lege of corrupte bouwlijst degradeert de overall-status niet.",
+      "required": [
+        "available",
+        "reason",
+        "features",
+        "counters",
+        "kanaalpost"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Waarom de plaat leeg is; null als hij gevuld is. Gesloten lijst, nooit vrije tekst.",
+          "enum": [
+            null,
+            "LEEG",
+            "CORRUPT"
+          ]
+        },
+        "counters": {
+          "type": "object",
+          "description": "Kop-band: af-sinds-gisteren · draait-nu · wacht-op-Richard. Puur afgeleid uit de features.",
+          "required": [
+            "afSindsGisteren",
+            "draaitNu",
+            "wachtOpRichard"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "afSindsGisteren": { "type": "integer", "minimum": 0 },
+            "draaitNu": { "type": "integer", "minimum": 0 },
+            "wachtOpRichard": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "label",
+              "status",
+              "worker",
+              "oplevering",
+              "afhankelijkheid"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "label": {
+                "type": "string",
+                "description": "Publiceerbare naam in gewone taal (gecapt op 120 tekens)."
+              },
+              "status": {
+                "enum": [
+                  "gepland",
+                  "in-bouw",
+                  "in-review",
+                  "wacht-op-Richard",
+                  "live"
+                ],
+                "description": "Gesloten woordenschat; een waarde daarbuiten keurt de hele plaat af (harde schoon-poort)."
+              },
+              "worker": {
+                "enum": [
+                  null,
+                  "worker",
+                  "control",
+                  "review",
+                  "richard"
+                ],
+                "description": "Neutrale ROL, nooit een account/mail/id (F5 §C). null = nog niet toegewezen."
+              },
+              "oplevering": {
+                "type": "object",
+                "description": "Verwachte oplevering, herrekend op het THROUGHPUT-LOG. Geen tweede meetsysteem.",
+                "required": [
+                  "kind",
+                  "date"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "opgeleverd",
+                      "verwacht",
+                      "onbekend"
+                    ]
+                  },
+                  "date": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "null bij `onbekend`, of een opleverdatum die niet als echte datum kon worden geverifieerd.",
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                  }
+                }
+              },
+              "afhankelijkheid": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "null = geen afhankelijkheid vermeld."
+              }
+            }
+          }
+        },
+        "kanaalpost": {
+          "type": "array",
+          "description": "De laatste tien logboek-rijen. Vrije `onderwerp`-tekst gaat langs de sanitize-gate.",
+          "items": {
+            "type": "object",
+            "required": [
+              "datum",
+              "doelchat",
+              "onderwerp",
+              "status"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "datum": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "doelchat": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[0-9]{2}$"
+              },
+              "onderwerp": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
           }
         }
       }

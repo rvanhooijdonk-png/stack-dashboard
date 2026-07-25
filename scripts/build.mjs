@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { assertPublishable, loadDenyTerms } from './lib/sanitize.mjs';
 import { renderHtml } from './lib/render.mjs';
 import { validate } from './lib/validate.mjs';
+import { parsePlanning, toPublicPlanning } from './lib/planning.mjs';
 import {
   collectPullRequests, collectMergedRecent, collectTracker,
   collectDecisions, collectTracks, collectLogbook, collectCi, setPublicRepos, setPublicTracks,
@@ -27,8 +28,11 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 /**
  * 2.0.0: de derde review sloopte velden uit het contract (evidence.source, vrije tekst).
  * 2.1.0: vloot → tracks (klaar-rapport-leeftijd) + afgeleid categorielabel op besluiten/beslispunten.
+ * 2.2.0: planning-plaat (bouwlijst met status + op throughput herrekende oplevering + kanaalpost).
+ *        Planning staat bewust NIET in `sources`: een lege/corrupte bouwlijst degradeert de hele
+ *        pagina niet, hij toont zijn eigen nette melding (fail-closed per sectie).
  */
-const CONTRACT_VERSION = '2.1.0';
+const CONTRACT_VERSION = '2.2.0';
 const REFRESH_SECONDS = 900;
 /** Een titel is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
 const MAX_TITLE = 80;
@@ -63,6 +67,11 @@ function arg(name, fallback = null) {
 
 const readJson = async (p, fallback) => {
   try { return JSON.parse(await readFile(join(ROOT, p), 'utf8')); } catch { return fallback; }
+};
+
+/** Rúwe tekst lezen (voor bestanden die hun eigen fail-closed parser hebben, zoals de bouwlijst). */
+const readText = async (p) => {
+  try { return await readFile(join(ROOT, p), 'utf8'); } catch { return ''; }
 };
 
 /**
@@ -171,6 +180,10 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
     generatedAt: raw.generatedAt,
     overallStatus: sources.every((s) => s.trust === 'VERIFIED_CURRENT') ? 'OK' : 'DEGRADED',
     sources,
+    // De oplevering wordt herrekend op het bouwmoment (`raw.generatedAt`) + de gemeten doorlooptijd
+    // uit het THROUGHPUT-LOG dat in de bouwlijst zit — geen tweede meetsysteem. Planning is geen
+    // `sources`-bron: fail-closed op deze sectie neemt de rest van de pagina niet mee.
+    planning: toPublicPlanning(raw.planning, raw.generatedAt),
     workstreams: raw.workstreams.map((w, i) => publicWorkstream(w, i)),
     pullRequests: {
       available: raw.pullRequests.available,
@@ -245,6 +258,10 @@ export async function buildSnapshot() {
   setPublicTracks((await readJson('data/public-tracks.json', {})).tracks ?? []);
   const workstreams = (await readJson('data/workstreams.json', {})).workstreams ?? [];
   const ciRepos = await readJson('data/ci-repos.json', ['stack-control']);
+  // De bouwlijst als rúwe tekst lezen en fail-closed parsen: een ontbrekend of onleesbaar bestand
+  // wordt LEEG/CORRUPT (nette melding op de plaat), nooit een throw die de hele build sloopt.
+  // Bron wisselt naar de rapporten-branch zodra TRECHTER's echte bestand er staat.
+  const planning = parsePlanning(await readText('data/planning.json'));
 
   const [pullRequests, merged, tracker, decisions, tracks, logbook, ci] = await Promise.all([
     collectPullRequests(), collectMergedRecent(7), collectTracker(),
@@ -254,6 +271,7 @@ export async function buildSnapshot() {
   return {
     generatedAt: new Date().toISOString(),
     workstreams,
+    planning,
     pullRequests, merged, tracker, decisions, tracks, logbook, ci,
   };
 }

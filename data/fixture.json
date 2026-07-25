@@ -1,5 +1,5 @@
 {
-  "contractVersion": "2.1.0",
+  "contractVersion": "2.2.0",
   "generatedAt": "2026-07-23T12:00:00.000Z",
   "overallStatus": "DEGRADED",
   "sources": [
@@ -14,6 +14,42 @@
       "trust": "SOURCE_UNAVAILABLE"
     }
   ],
+  "planning": {
+    "available": true,
+    "reason": null,
+    "counters": {
+      "afSindsGisteren": 1,
+      "draaitNu": 1,
+      "wachtOpRichard": 1
+    },
+    "features": [
+      {
+        "label": "Planning-plaat op het dashboard",
+        "status": "in-bouw",
+        "worker": "worker",
+        "oplevering": { "kind": "verwacht", "date": "2026-07-26" },
+        "afhankelijkheid": null
+      },
+      {
+        "label": "Tijdstempel in Nederlandse tijd",
+        "status": "wacht-op-Richard",
+        "worker": "richard",
+        "oplevering": { "kind": "verwacht", "date": "2026-07-24" },
+        "afhankelijkheid": "wacht op merge-akkoord"
+      },
+      {
+        "label": "Noodpagina bij een afgebroken build",
+        "status": "live",
+        "worker": "worker",
+        "oplevering": { "kind": "opgeleverd", "date": "2026-07-23" },
+        "afhankelijkheid": null
+      }
+    ],
+    "kanaalpost": [
+      { "datum": "2026-07-23", "doelchat": "02", "onderwerp": "Kwartierrun ingesteld", "status": "gemerged" },
+      { "datum": "2026-07-25", "doelchat": "02", "onderwerp": "Tijdstempel in NL-tijd", "status": "mergeable" }
+    ]
+  },
   "workstreams": [
     {
       "id": "01",
