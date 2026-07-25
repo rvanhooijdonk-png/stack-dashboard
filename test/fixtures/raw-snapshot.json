@@ -20,6 +20,55 @@
       "public": true
     }
   ],
+  "planning": {
+    "available": true,
+    "reason": null,
+    "note": null,
+    "generatedAt": "2026-07-23T02:00:00.000Z",
+    "throughput": {
+      "leadDagenPerKlasse": {
+        "render-fix": 1,
+        "nieuwe-sectie": 3
+      }
+    },
+    "features": [
+      {
+        "id": "F-01",
+        "feature_label": "Publieke plaat op het dashboard",
+        "status": "in-bouw",
+        "worker": "worker",
+        "throughput_klasse": "nieuwe-sectie",
+        "af_sinds": null,
+        "afhankelijkheid": null,
+        "internNotitie": "NIET PUBLICEREN — klant Zephyr",
+        "secretRef": "CONTROL/KLANTEN/Zephyr.md"
+      },
+      {
+        "id": "F-02",
+        "feature_label": "Naam met <script>alert(1)</script>",
+        "status": "live",
+        "worker": "worker",
+        "throughput_klasse": "render-fix",
+        "af_sinds": "2026-07-22",
+        "afhankelijkheid": null
+      }
+    ],
+    "kanaalpost": [
+      {
+        "datum": "2026-07-23",
+        "doelchat": "02",
+        "onderwerp": "Kwartierrun ingesteld",
+        "status": "gemerged",
+        "internPad": "CONTROL/RAPPORTEN/geheim.md"
+      },
+      {
+        "datum": "niet-een-datum",
+        "doelchat": "kwaad",
+        "onderwerp": "Regel met ongeldige datum en doelchat",
+        "status": "in-bouw"
+      }
+    ]
+  },
   "pullRequests": {
     "available": true,
     "repositories": [
