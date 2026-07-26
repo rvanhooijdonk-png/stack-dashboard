@@ -5,8 +5,14 @@
   "_toelichting_auditvormen_sha256": "SHA-256 over de tabel met de negen gemeten AUD-002-vormen in test/spiegel-catalogus.test.mjs. Zonder deze binding kon iemand de negen aanvalsteksten vervangen door negen onschuldige strings terwijl de proefnamen en de asserties gelijk bleven: achttien verklaarde namen bleven groen, het register zag niets, en er was geen enkele wijziging in dit bestand (bevinding review Codex, 26-07-2026). Nu vraagt zo'n wijziging om een nieuwe hash hier, en dat is een regel in de diff. Bewust een hash van de TEKSTEN en niet van het hele bestand: commentaar en nieuwe proeven mogen vrij bijkomen.",
   "auditvormen_sha256": "ba04413a0c5e2cce34adb8dde5906799b6649e577557a469eb5f0916cfb12dcc",
   "bestanden": {
-    "build.test.mjs": { "minimaal": 20, "moetBevatten": [] },
-    "collect.test.mjs": { "minimaal": 10, "moetBevatten": [] },
+    "build.test.mjs": {
+      "minimaal": 20,
+      "moetBevatten": []
+    },
+    "collect.test.mjs": {
+      "minimaal": 10,
+      "moetBevatten": []
+    },
     "contract.test.mjs": {
       "minimaal": 14,
       "moetBevatten": [
@@ -14,7 +20,10 @@
         "status.json heeft zijn eigen contract — en voldoet eraan"
       ]
     },
-    "failure-page.test.mjs": { "minimaal": 4, "moetBevatten": [] },
+    "failure-page.test.mjs": {
+      "minimaal": 4,
+      "moetBevatten": []
+    },
     "kanaalpost.test.mjs": {
       "minimaal": 28,
       "moetBevatten": [
@@ -25,17 +34,41 @@
         "de meegeleverde spiegel levert rijen op — de plaat leest een bestaand bestand"
       ]
     },
-    "labeltoets.test.mjs": { "minimaal": 17, "moetBevatten": [] },
-    "overzicht.test.mjs": { "minimaal": 22, "moetBevatten": [] },
-    "planning-bron.test.mjs": { "minimaal": 28, "moetBevatten": [] },
-    "planning.test.mjs": { "minimaal": 20, "moetBevatten": [] },
-    "publiekepaginas.test.mjs": { "minimaal": 4, "moetBevatten": [] },
-    "register.test.mjs": {
-      "minimaal": 5,
-      "moetBevatten": ["elk testbestand op schijf staat in het register, en omgekeerd"]
+    "labeltoets.test.mjs": {
+      "minimaal": 17,
+      "moetBevatten": []
     },
-    "render.test.mjs": { "minimaal": 23, "moetBevatten": [] },
-    "sanitize.test.mjs": { "minimaal": 18, "moetBevatten": [] },
+    "overzicht.test.mjs": {
+      "minimaal": 22,
+      "moetBevatten": []
+    },
+    "planning-bron.test.mjs": {
+      "minimaal": 28,
+      "moetBevatten": []
+    },
+    "planning.test.mjs": {
+      "minimaal": 20,
+      "moetBevatten": []
+    },
+    "publiekepaginas.test.mjs": {
+      "minimaal": 4,
+      "moetBevatten": []
+    },
+    "register.test.mjs": {
+      "minimaal": 9,
+      "moetBevatten": [
+        "elk testbestand op schijf staat in het register, en omgekeerd",
+        "het register wordt vóór het mergen gedraaid, niet pas erna"
+      ]
+    },
+    "render.test.mjs": {
+      "minimaal": 23,
+      "moetBevatten": []
+    },
+    "sanitize.test.mjs": {
+      "minimaal": 18,
+      "moetBevatten": []
+    },
     "spiegel-catalogus.test.mjs": {
       "minimaal": 42,
       "moetBevatten": [

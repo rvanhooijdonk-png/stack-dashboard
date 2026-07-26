@@ -9,11 +9,12 @@
  *
  * Het register wordt hier NIET uitgevoerd (geen `node --test` in een `node --test`): dat kost een
  * proces per bestand en zou zichzelf recursief aanroepen. De uitvoerende kant draait als eigen stap
- * in publish.yml — juist omdat die stap niet mag afhangen van het slagen van de suite die hij bewaakt.
+ * in proeven.yml (op elke pull request) en in publish.yml (op main) — juist omdat die stap niet mag
+ * afhangen van het slagen van de suite die hij bewaakt.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -89,6 +90,25 @@ test('een lege of onbekende TAP-tekst geeft geen stilzwijgend geslaagde telling'
   const tap = leesTap('');
   assert.equal(tap.pass, null, 'geen telling gevonden hoort null te zijn, niet 0-als-in-orde');
   assert.equal(tap.geslaagd.size, 0);
+});
+
+test('het register wordt vóór het mergen gedraaid, niet pas erna', () => {
+  // ROOD tot 26-07-2026: de registerstap stond alleen in publish.yml, en die draait op push naar
+  // main, op de klok en met de hand. De poort oordeelde dus pas NA de merge — dus na publicatie.
+  // Gemeten: de push van feat/spiegel-catalogus gaf nul runs (`gh run list --branch feat/...` leeg).
+  // Deze proef houdt vast dat er een workflow is die op een pull request draait én het register
+  // aanroept. Er wordt op de aanroep gezocht, niet op een stapnaam: een hernoemde stap is geen
+  // verzwakking, een verdwenen aanroep wel.
+  const map = join(ROOT, '.github/workflows');
+  const opPullRequest = readdirSync(map)
+    .filter((n) => /\.ya?ml$/.test(n))
+    .map((n) => readFileSync(join(map, n), 'utf8'))
+    .filter((t) => /^on:/m.test(t) && /^\s{2}pull_request:/m.test(t));
+  assert.ok(opPullRequest.length > 0, 'geen enkele workflow draait op een pull request');
+  assert.ok(
+    opPullRequest.some((t) => t.includes('scripts/testregister.mjs')),
+    'geen enkele pull-request-workflow draait scripts/testregister.mjs — de poort oordeelt dan pas na de merge',
+  );
 });
 
 test('de verklaarde minima liggen niet boven wat de bestanden nu leveren', () => {

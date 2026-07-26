@@ -1,0 +1,56 @@
+name: proeven
+
+# Waarom een tweede workflow naast publish.yml.
+#
+# publish.yml draait op push naar main, op de klok en met de hand. Dat betekende dat de proeven
+# en het testregister pas oordeelden NA het mergen — dus na publicatie. Een poort die pas
+# dichtgaat als het paard al buiten staat, is geen poort. Gemeten: de push van
+# feat/spiegel-catalogus leverde nul workflow-runs op (`gh run list --branch feat/...` was leeg).
+#
+# Deze workflow doet alleen de twee poorten en raakt Pages niet aan: geen build, geen snapshot,
+# geen deploy, geen pages-permissie. Daarom mag hij wél op elke branch en op elke PR draaien.
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+
+permissions: {}
+
+concurrency:
+  group: proeven-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proeven:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+
+      # Kaal `node --test` — zelfde reden als in publish.yml (een pad-argument werkt niet op
+      # beide node-versies). De ondergrens vangt de stille faalwijze: een ontdekking die niets
+      # vindt geeft `# tests 0` en exit 0.
+      - name: Tests
+        env:
+          TESTS_ONDERGRENS: "50"
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=tap 2>&1 | tee /tmp/tests.tap
+          gedraaid=$(grep -c '^ok \|^not ok ' /tmp/tests.tap || true)
+          echo "ontdekte proeven: ${gedraaid}"
+          if [ "${gedraaid}" -lt "${TESTS_ONDERGRENS}" ]; then
+            echo "::error title=Testontdekking::${gedraaid} proeven gevonden, ondergrens is ${TESTS_ONDERGRENS} — de ontdekking is leeggelopen"
+            exit 1
+          fi
+
+      # `always()`: juist op een rode dag moet blijken WELK bestand stil viel. Zou deze stap
+      # overslaan zodra de vorige faalt, dan zag je bij een verdwenen testbestand alleen de
+      # gewone rode suite en niet de reden.
+      - name: Testregister — niet-gedraaid is rood
+        if: always()
+        run: node scripts/testregister.mjs
