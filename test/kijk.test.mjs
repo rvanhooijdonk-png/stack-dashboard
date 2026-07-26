@@ -1078,6 +1078,55 @@ test('reviewgat 25 — een gooiende ophaler levert een uitkomst op, geen uitzond
   }));
 });
 
+test('reviewgat 26 — een voorbeeldtabel in een codeblok is uitleg, geen toestand', () => {
+  // GEMETEN VÓÓR DE FIX, op kop 9f413d8, met een spiegeltabel binnen ```markdown … ```:
+  //   {"sporen":["CONTROL","MINI"],"telling":2,"verworpen":0}
+  // Een rij die in de uitleg stond als vóórbeeld werd dus echt gemeten toestand, met nul afkeuringen.
+  // Dat is niet theoretisch: het bestand is een handgeschreven auditlogboek en een uitleg-met-voorbeeld
+  // is er de gewoonste toevoeging van.
+  //
+  // Waarom de pagina dit niet vangt, en dat is het hele punt: de pagina wordt door DEZELFDE lezer
+  // gebouwd. Beide kanten lezen de voorbeeldrij mee, hun toestandshash is identiek, en de uitkomst is
+  // GROEN. Een parserverschil is onzichtbaar voor een vergelijking die beide kanten uit één parser
+  // haalt — precies de reden dat deze route niet is weggeredeneerd maar nagemeten.
+  const na = (tekst) => {
+    const { state } = kijkStateUitSpiegel(tekst, { commitSha: KOP_A });
+    return { sporen: Object.keys(state.lanes).sort(), telling: state.eventCount, verworpen: state.verworpenRijen };
+  };
+
+  const voorbeeld = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'De echte rij.'), '',
+    '```markdown', KOPREGELS, rij('2026-07-26 17:50', 'MINI', 'Alleen een voorbeeld in de uitleg.'), '```'].join('\n');
+  assert.deepEqual(na(voorbeeld), { sporen: ['CONTROL'], telling: 2, verworpen: 1 },
+    'MINI mag geen spoor worden; de voorbeeldrij telt als afkeuring');
+
+  // Andersom net zo belangrijk: het hek mag geen verstopplaats worden. Drie backticks om bestaande
+  // rijen zetten laat ze NIET stil verdwijnen — ze worden afkeuringen, en afkeuringen maken rood.
+  const verstopt = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '```', rij('2026-07-26 17:10', 'MINI', 'Weggemoffeld.'), '```',
+    rij('2026-07-26 17:20', 'CHIEF', 'Erna.')].join('\n');
+  assert.deepEqual(na(verstopt), { sporen: ['CONTROL'], telling: 3, verworpen: 2 });
+  const o = opstelling(verstopt);
+  assert.equal(o.kijk().uitkomst, 'ROOD');
+  assert.ok(o.kijk().redenen.includes('VELD_NIET_GESLOTEN'));
+
+  // Een niet-gesloten hek aan het eind van het bestand slikt de rest niet stil op: alles erna is
+  // afkeuring. Kost zichtbaarheid, levert geen valse toestand.
+  const open = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '```', rij('2026-07-26 17:10', 'MINI', 'Rest van het bestand.')].join('\n');
+  assert.deepEqual(na(open), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
+
+  // Tildes zijn in markdown een even geldig hek als backticks; wie alleen op ``` toetst laat de helft open.
+  const tilde = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '~~~', KOPREGELS, rij('2026-07-26 17:10', 'MINI', 'Voorbeeld.'), '~~~'].join('\n');
+  assert.deepEqual(na(tilde), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
+
+  // En de twee scopes bijten elkaar niet: een hek binnen commentaar wisselt de hekstand niet, anders
+  // zou één backtickregel in een commentaarblok de rest van het bestand van soort laten veranderen.
+  const gemengd = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '<!--', '```', '-->', rij('2026-07-26 17:20', 'CHIEF', 'Erna.')].join('\n');
+  assert.deepEqual(na(gemengd), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
+});
+
 test('weerlegging — AFGEROND wordt LEEG, en dat is de bedoeling, geen fout', () => {
   // Dit is de ACHTSTE bevinding van de vierde ronde, en de enige die is afgewezen. Codex las het zo:
   // een spiegelrij met status AFGEROND komt als toestand LEEG in de kijk-state, LEEG is de toestand

@@ -159,6 +159,14 @@ const isKop = (c) => c.length === KOPNAMEN.length
   && c.every((cel, i) => kaal(cel).toLowerCase() === KOPNAMEN[i]);
 const isScheiding = (c) => c.length > 0 && c.every((cel) => /^:?-{3,}:?$/.test(cel));
 
+/**
+ * Een markdown-codehek: drie of meer backticks of tildes, hoogstens drie spaties ingesprongen. Er
+ * wordt niet gekeken of het openende en sluitende hek dezelfde soort of lengte hebben — elk hek
+ * wisselt de stand. Dat is grover dan de markdown-regels, en met opzet: een hek te veel maakt een
+ * rij hoogstens AFGEKEURD, terwijl een hek te weinig hem als echte toestand binnenlaat.
+ */
+const HEK = /^ {0,3}(?:`{3,}|~{3,})/;
+
 /** Vorm-toets op één datarij. Geen oordeel over publiceerbaarheid — dat doet de DTO. */
 function rijUitCellen(c) {
   const d = DATUM.exec(ontdaan(c[0]));
@@ -202,6 +210,7 @@ export function spiegelScan(tekst) {
   const kandidaten = [];
   let inTabel = false;
   let inCommentaar = false;
+  let inCode = false;
   for (let i = 0; i < regels.length; i += 1) {
     // HTML-commentaar is GEEN gegeven. Zonder deze scope werd een volledige tabel tussen `<!--` en
     // `-->` gewoon meegelezen: de commentaaropener sloot de tabel, maar de exacte kop op de regel
@@ -211,6 +220,28 @@ export function spiegelScan(tekst) {
     if (inCommentaar) {
       if (regels[i].includes('-->')) inCommentaar = false;
       inTabel = false;
+      continue;
+    }
+    // Een markdown-codehek is de tweede vorm van "dit is geen gegeven", en hij ontbrak. Gemeten op kop
+    // 9f413d8: een voorbeeldtabel in een ```-blok — kop, scheiding, één MINI-rij — leverde
+    // `{"sporen":["CONTROL","MINI"],"telling":2,"verworpen":0}`. Een rij die in de uitleg staat als
+    // vóórbeeld werd dus gemeten toestand, met nul afkeuringen. De pagina zou dat niet vangen: die
+    // wordt door dezelfde lezer gebouwd, dus beide kanten zijn het eens en de uitkomst is GROEN.
+    // De naam van de bestaande toets (`… of codeblok telt niet mee`) beloofde dit al; alleen het
+    // commentaargeval stond erin.
+    if (HEK.test(regels[i])) {
+      inCode = !inCode;
+      inTabel = false;
+      continue;
+    }
+    // Binnen het hek opent geen kop een tabel — maar een regel die eruitziet als een spiegelrij wordt
+    // wél als AFGEKEURD geteld en niet stil overgeslagen. Anders is het hek zelf een verstopplaats:
+    // drie backticks om bestaande rijen zetten zou ze spoorloos laten verdwijnen, en dat is dezelfde
+    // fout in spiegelbeeld. Zo kost verstoppen zichtbaarheid in plaats van dat het hem oplevert.
+    if (inCode) {
+      inTabel = false;
+      const cc = cellenVan(regels[i]);
+      if (cc && cc.length === KOPNAMEN.length && !isKop(cc) && !isScheiding(cc)) kandidaten.push(null);
       continue;
     }
     if (regels[i].includes('<!--') && !regels[i].includes('-->')) {

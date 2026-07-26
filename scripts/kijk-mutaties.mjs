@@ -312,6 +312,22 @@ const MUTATIES = [
     van: '    const kop = await veilig(() => kopVan(), \'KOP_ONBEPAALBAAR\');',
     naar: '    const kop = await kopVan(); // mutatie: geen vangnet om de ophaal',
   },
+  {
+    proef: '26a (reviewgat)',
+    raakt: 'reviewgat 26 —',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'het codehek wisselt de stand niet meer, dus een voorbeeldtabel wordt weer echte toestand',
+    van: '    if (HEK.test(regels[i])) {',
+    naar: '    if (false) { // mutatie: een ```-hek is weer een gewone regel',
+  },
+  {
+    proef: '26b (reviewgat)',
+    raakt: 'reviewgat 26 —',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'wat binnen het hek staat wordt stil overgeslagen in plaats van afgekeurd — verstoppen wordt gratis',
+    van: '      if (cc && cc.length === KOPNAMEN.length && !isKop(cc) && !isScheiding(cc)) kandidaten.push(null);',
+    naar: '      // mutatie: binnen het hek verdwijnt alles spoorloos',
+  },
 ];
 
 /** Draai de suite en geef terug welke proeven faalden. */
