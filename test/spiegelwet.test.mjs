@@ -376,3 +376,45 @@ test('achteraan aanvullen laat de volgorde met rust', () => {
   assert.equal(p.volgordeOk, true);
   assert.equal(p.ok, true);
 });
+
+// --- het vangnet tegen een stille meetfout -------------------------------------------------------
+
+test('een tabel die de publieke lezing niet meer herkent is rood, niet groen', () => {
+  // Bevinding Gemini (26-07-2026): raakt de parser stuk, dan leest hij BEIDE kanten leeg en komt de
+  // toets op verdwenen 0 / dubbel 0 / volgorde in orde uit — een lege spiegel zou dan groen zijn.
+  // Nagebootst door de kolomkop te slopen zodat er geen rij meer uit komt terwijl de regels er staan.
+  const stuk = '| a | b | c | d | e |\n|---|---|---|---|---|\n' + rij(1) + rij(2) + rij(3);
+  const p = publiekeAfwijkingen(stuk, stuk);
+  assert.equal(p.onleesbaar, true, 'de toets moet zeggen dat hij niets gemeten heeft');
+  assert.equal(p.ok, false, 'en dat is rood, ook al is er niets veranderd');
+});
+
+test('een spiegel met alleen een kop is geen meetfout — daar valt niets te lezen', () => {
+  // De grens de andere kant op: geen rijen én geen rijregels is gewoon een lege spiegel.
+  const p = publiekeAfwijkingen(KOP, KOP + rij(1));
+  assert.equal(p.onleesbaar, false);
+  assert.equal(p.ok, true);
+});
+
+test('een verwisseling van twee buren wordt gezien, en het gemelde rijnummer klopt met wat het zegt', () => {
+  // Codex (26-07-2026, laag): `eerste` is NIET de eerste fysieke afwijking in het nieuwe bestand.
+  // Oud 1,2,3 → nieuw 1,3,2 levert eerste=3. Dat is de hoeveelste rij van de VÓRIGE stand niet meer
+  // op zijn plaats terugkomt (rij 3, want de gulzige matcher paste 1 en 2 nog in), en zo staat het
+  // ook in de melding. De oude tekst "gewijzigd vanaf de 3e" suggereerde een positie in het nieuwe
+  // bestand en was daarmee onjuist.
+  const p = publiekeAfwijkingen(KOP + rij(1) + rij(2) + rij(3), KOP + rij(1) + rij(3) + rij(2));
+  assert.equal(p.volgordeOk, false);
+  assert.equal(p.eerste, 3);
+  assert.equal(p.verdwenen, 0, 'er is niets verdwenen — de melding mag dus alleen over volgorde gaan');
+});
+
+test('verdwijnen sleept de volgordetoets mee — daarom noemt de melding de volgorde dan niet', () => {
+  // Codex (26-07-2026, laag): oud 1,2,3 → nieuw 1,3. Rij 2 is weg; 1 en 3 staan nog gewoon in
+  // dezelfde onderlinge volgorde. Toch kan `volgordeOk` niet anders dan false zijn, want de oude
+  // reeks past niet meer in de nieuwe. De poortmelding leest daarom alleen de volgorde voor als er
+  // niets verdwenen is.
+  const p = publiekeAfwijkingen(KOP + rij(1) + rij(2) + rij(3), KOP + rij(1) + rij(3));
+  assert.equal(p.verdwenen, 1);
+  assert.equal(p.volgordeOk, false, 'meegesleept, niet zelfstandig gemeten');
+  assert.equal(p.ok, false);
+});

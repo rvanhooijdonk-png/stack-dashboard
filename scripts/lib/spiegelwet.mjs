@@ -241,8 +241,21 @@ export function publiekeAfwijkingen(oud, nieuw) {
     for (const r of rijen) m.set(sleutel(r), (m.get(sleutel(r)) ?? 0) + 1);
     return m;
   };
-  const oude = publiekeRijenUitTekst(oud).rijen;
-  const nieuwe = publiekeRijenUitTekst(nieuw).rijen;
+  const oudLezing = publiekeRijenUitTekst(oud);
+  const nieuwLezing = publiekeRijenUitTekst(nieuw);
+  const oude = oudLezing.rijen;
+  const nieuwe = nieuwLezing.rijen;
+
+  // Vangnet tegen een stille meetfout: raakt de parser stuk, dan leest hij BEIDE kanten leeg en komt
+  // deze toets vrolijk op ok=true uit — een lege spiegel zou dan groen zijn (bevinding Gemini,
+  // 26-07-2026). Daarom: staan er meer tabelregels dan alleen kop en scheiding, terwijl de publieke
+  // lezing niets oplevert en ook niets tegenhoudt, dan heeft de toets niets gemeten en is dat rood.
+  const onleesbaar = (tekst, lezing) =>
+    regels(tekst).filter(isTabelregel).length > 2 && lezing.rijen.length === 0 && lezing.ingehouden === 0;
+  if (onleesbaar(oud, oudLezing) || onleesbaar(nieuw, nieuwLezing)) {
+    return { ok: false, onleesbaar: true, verdwenen: 0, dubbel: [], volgordeOk: true, eerste: null, aantal: 0 };
+  }
+
   const oudeTelling = tel(oude);
   const nieuweTelling = tel(nieuwe);
 
@@ -269,10 +282,14 @@ export function publiekeAfwijkingen(oud, nieuw) {
     if (i < oude.length && sleutel(r) === sleutel(oude[i])) i += 1;
   }
   const volgordeOk = i === oude.length;
+  // `eerste` telt in de VORIGE stand, niet in de nieuwe: het is de hoeveelste oude rij niet meer op
+  // zijn plaats in de reeks terugkomt. De fysieke regel in het nieuwe bestand kan een andere zijn
+  // (bevinding Gemini, 26-07-2026) — de meldingen zeggen daarom "van de vorige stand" en niets anders.
   if (!volgordeOk) eerste = i + 1;
 
   return {
     ok: verdwenen === 0 && dubbel.length === 0 && volgordeOk,
+    onleesbaar: false,
     verdwenen,
     dubbel,
     volgordeOk,

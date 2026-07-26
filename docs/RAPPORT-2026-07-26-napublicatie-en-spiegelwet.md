@@ -572,13 +572,68 @@ Drie andere punten van Codex zijn nagelopen en **als grens gedocumenteerd, niet 
   wel niet langer weggemoffeld: de meldingen spreken nu over de **publieke lezing**, niet over "de
   publieke stand".
 
+### §6f. Zesde ronde — twee reviewers, dezelfde drie punten
+
+Deze keer wezen Codex en Gemini **onafhankelijk naar dezelfde drie dingen**, wat het makkelijk maakt: er
+viel niets te wegen. Gemini's oordeel was *aannemen met verfijningen*, dat van Codex *niet aannemen*; op
+de inhoud verschillen ze niet.
+
+1. **De volgordetoets kon zichzelf stilzetten (het zwaarste punt).** Raakt de parser stuk zónder te
+   crashen, dan leest hij *beide* kanten leeg en komt de toets uit op "niets verdwenen, niets dubbel,
+   volgorde in orde" — groen, terwijl er niets gemeten is. Nulmeting met een opzettelijk gesloopte
+   parser op de echte spiegel: `{"ok":true,"verdwenen":0,"dubbel":[],"volgordeOk":true,"aantal":0}`. Er
+   staat nu een vangnet: bevat de tekst meer tabelregels dan kop en scheiding, terwijl de publieke
+   lezing niets oplevert én niets tegenhoudt, dan heeft de toets niets gemeten en is dat rood. Dezelfde
+   meting na de reparatie, met de letterlijke poortcode:
+
+   ```
+   ::error::t.o.v. de vorige stand van deze tak levert de publieke lezing geen enkele rij op terwijl de
+   spiegel wel rijen bevat — een toets die niets meet is rood.  → exit=1
+   ```
+
+   Dit moest via een gesloopte parser gemeten worden en niet via het bestand: elke bewerking van de
+   spiegel die de lezing breekt, laat óók een bronregel verdwijnen en wordt dan al door de eerste laag
+   gepakt (gemeten: het slopen van de kolomkop geeft `append-only overtreden … 1 regel(s) verdwenen`).
+2. **Het gemelde rijnummer beweerde iets anders dan het was.** `eerste` is de hoeveelste rij van de
+   *vorige* stand niet meer op zijn plaats terugkomt — niet de eerste regel in het nieuwe bestand waar
+   het misgaat. Codex' voorbeeld: `1,2,3 → 1,3,2` meldt `eerste: 3`, terwijl de eerste zichtbare
+   afwijking rij 2 is. Het getal is niet veranderd, de zin eromheen wel: de melding zegt nu "de 3e rij
+   van de vorige stand komt niet meer op zijn plaats in de reeks terug". Met een test die dat vastlegt.
+3. **Bij een verdwenen rij werd er ten onrechte óók herordening gemeld.** Verdwijnt er een rij, dan kan
+   de deelrij-toets per definitie niet meer slagen; de schrijfpoort van de bot plakte er dan een tweede
+   bewering achteraan die niet apart gemeten was. Die zin verschijnt nu alleen nog als er niets
+   verdwenen is. In de `spiegelwet`-job stond die volgorde al goed.
+
+Codex noemde daarnaast één passerend geval dat **bewust** passeert: rijen die er tússen komen verschuiven
+de zichtbare plaat wel degelijk (`1,2,3` + `9,8` toont `8,3,2,9,1`), en dat blijft groen. Dat is precies
+de merge-bestendigheid waarvoor de deelrij-eis gekozen is; een strengere eis zou elke samenvoeging van
+twee takken rood maken. Genoteerd als grens, niet als gat. De vier randen die hij als ongetest aanwees,
+zijn nu getest.
+
+### §6g. De basis omgehangen naar main (opdracht Fable)
+
+#24 is gemerged (`1852c9c`, 12:20:39Z) en main is daarna doorgelopen naar `3a72950`. Volgens de bindende
+ordening is de basis van #27 direct omgehangen. Daarbij botste de spiegel écht — main en deze tak hadden
+allebei onderaan een rij geschreven. **Beide rijen zijn blijven staan**, die van main eerst, de eigen rij
+van 10:21 erachter; de tabel is append-volgorde en geen sortering (er staat al langer een rij van 08:25
+vóór een van 08:02), dus dat is de eerlijke oplossing en geen herschikking. Daarna hermeten:
+
+```
+basis: 3a72950 (= main)      merge-tree tegen main: schoon, geen conflict
+alle twaalf commits: verdwenen 0, duplicaten 0, publiek -0/dubbel 0
+eindtoestand t.o.v. origin/main — verdwenen 0, ok true, opOrde true
+publieke rijen t.o.v. origin/main — verdwenen 0, dubbel 0, in beeld 48, ok true
+```
+
 ## AFSLUITING
 
-- Tests groen: `npm test` → `tests 336 / pass 336 / fail 0` (na §6e; na §6d 333, na §6c 328,
+- Tests groen: `npm test` → `tests 340 / pass 340 / fail 0` (na §6f; na §6e 336, na §6d 333, na §6c 328,
   daarvóór 321). Nulmeting vóór de bouw: `pass 276 / fail 1`. De vijf tests van §6d zijn de twee
   tegenvoorbeelden van Codex, het bewijs dat de publieke telling níét op vijftien knipt, en de correctie
   op de regeleinde-bewering; de drie van §6e zijn de herschikking (rood), de merge die rijen tussenvoegt
-  (groen) en het gewone aanvullen (groen).
+  (groen) en het gewone aanvullen (groen); de vier van §6f zijn de onleesbare meting (rood), de
+  kop-zonder-rijen als grens de andere kant op (groen), de burenverwisseling met het rijnummer, en het
+  meegesleepte volgorde-oordeel bij een verdwenen rij.
   Nulmeting van de rondgang-tests tegen de ongerepareerde waarnemer: `pass 6 / fail 1` op de `<br>`-fix,
   en eerder `2 van 5 rood` op de twee productiefouten.
 - Rollback/additief geborgd: alles nieuwe bestanden plus één job en één trigger-pad in `waarnemer.yml`;
@@ -609,14 +664,16 @@ Drie andere punten van Codex zijn nagelopen en **als grens gedocumenteerd, niet 
   gerepareerd (§6d); de derde hoge bevinding is een systeemgrens die alleen takbescherming oplost en
   gaat naar het GitHub-plan-besluit. Vijfde ronde (op de nieuwe laag zelf): één hoge bevinding — de
   publieke telling zag geen volgorde — gerepareerd en gemeten; drie punten nagelopen en als grens
-  gedocumenteerd (§6e).
-- Gemini: ja — vier ronden. Eerste ronde: vier punten, één overgenomen (force-push op main), één weerlegd
+  gedocumenteerd (§6e). Zesde ronde: nogmaals *niet aannemen* — drie bevindingen, alle drie identiek
+  aan die van Gemini en alle drie gerepareerd, plus vier ontbrekende tests toegevoegd (§6f).
+- Gemini: ja — vijf ronden. Eerste ronde: vier punten, één overgenomen (force-push op main), één weerlegd
   (typo). Fixronde: vier punten, waarvan drie samenvallen met Codex en overgenomen zijn; E1 weerlegd door
   meting. Besluitenronde: vier punten, waarvan er drie samenvallen met Codex (tekenverzameling te
   kort, hele-bestandscontrole, `fetch-depth`) en zijn overgenomen; het punt over rijen zonder
   beginpipe is weerlegd door meting. Vierde ronde: geen echte bevinding; het ene punt (identieke
   meldingen worden geblokkeerd) is nagemeten als bestaand gedrag van de bronlaag, geen regressie.
-  Geen onenigheid tussen de twee, dus geen escalatie.
+  Vijfde ronde: *aannemen met verfijningen* — drie punten, alle drie overgenomen, en op de inhoud
+  gelijk aan die van Codex. Geen onenigheid tussen de twee in enige ronde, dus geen escalatie.
 - Fable: ja — het besluit over ritme, "nooit onbekend" en het uitgestelde publieke alarm komt van
   Fable; de twee beslispunten hierboven gaan terug naar Fable.
 

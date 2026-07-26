@@ -229,8 +229,17 @@ jobs:
                   // rij-identiteit en hun onderlinge volgorde — niet elke denkbare verandering aan de
                   // publieke uitkomst; zie de begrenzing in het rapport.
                   const p = publiekeAfwijkingen(oud, nu);
+                  if (p.onleesbaar) {
+                    console.error(`::error::t.o.v. ${wat} levert de publieke lezing geen enkele rij op terwijl de spiegel wel rijen bevat — de toets heeft niets gemeten en dat is rood.`);
+                    process.exit(1);
+                  }
                   if (!p.ok) {
-                    console.error(`::error::t.o.v. ${wat} verandert de publieke lezing van de spiegel: ${p.verdwenen} rij(en) komen er niet meer uit${p.dubbel.length ? `, ${p.dubbel.length} rij(en) dubbel` : ""}${p.volgordeOk ? "" : `, onderlinge volgorde gewijzigd vanaf de ${p.eerste}e`} — de waarnemer publiceert dat niet.`);
+                    // Alleen de volgorde noemen als er niets verdwijnt: een verdwenen rij laat de
+                    // deelrij-toets per definitie ook vallen, en dan zou de melding twee dingen
+                    // beweren waarvan er één niet gemeten is (bevinding Gemini, 26-07-2026).
+                    const volgorde = p.verdwenen === 0 && !p.volgordeOk
+                      ? `, de onderlinge volgorde is gewijzigd (de ${p.eerste}e rij van ${wat} komt niet meer op zijn plaats terug)` : "";
+                    console.error(`::error::t.o.v. ${wat} verandert de publieke lezing van de spiegel: ${p.verdwenen} rij(en) komen er niet meer uit${p.dubbel.length ? `, ${p.dubbel.length} rij(en) dubbel` : ""}${volgorde} — de waarnemer publiceert dat niet.`);
                     process.exit(1);
                   }
                 }
@@ -355,10 +364,16 @@ jobs:
                 // één lege regel middenin de tabel laat geen enkele regel verdwijnen en sluit toch de
                 // tabel, waarna alles eronder ongepubliceerd blijft; en een rij die alleen in celopvulling
                 // verschilt is als brontekst nieuw maar als publieke rij een duplicaat (bevinding Codex,
-                // 26-07-2026, hoog, met twee tegenvoorbeelden). Dubbel is hier ALTIJD hard — ook op een
-                // herschreven tak is er geen enkele reden waarom dezelfde publieke rij twee keer hoort.
+                // 26-07-2026, hoog, met twee tegenvoorbeelden). Een NIEUW dubbel exemplaar is hier altijd
+                // hard, ook op een herschreven tak; wat er al dubbel stond blijft toegestaan.
                 const p = publiekeAfwijkingen(oud, nu);
                 const hardP = process.env.ZACHT !== "zacht";
+                // Leest de parser niets terwijl er wel rijen staan, dan heeft deze hele laag niets
+                // gemeten. Altijd hard, ook op een herschreven tak: dit is een meetfout, geen afwijking.
+                if (p.onleesbaar) {
+                  console.error(`::error::t.o.v. ${process.env.WAT} levert de publieke lezing geen enkele rij op terwijl de spiegel wel rijen bevat — een toets die niets meet is rood.`);
+                  process.exit(1);
+                }
                 if (p.dubbel.length) {
                   // "In de publieke lezing", niet "op de plaat": de telling loopt over ALLE herkende
                   // rijen, ook die door aangroei buiten het venster van vijftien zijn geschoven. Dat is
@@ -377,7 +392,7 @@ jobs:
                 // De eis is de merge-bestendige variant: oude rijen mogen uit elkaar geschoven worden,
                 // niet door elkaar gehusseld.
                 else if (!p.volgordeOk) {
-                  console[hardP ? "error" : "log"](`::${hardP ? "error" : "warning"}::${process.env.WAT}: er is publiek niets verdwenen, maar de onderlinge VOLGORDE van de bestaande rijen is veranderd (vanaf de ${p.eerste}e). De plaat toont de laatste vijftien omgedraaid, dus dit verandert wat er in beeld staat.`);
+                  console[hardP ? "error" : "log"](`::${hardP ? "error" : "warning"}::${process.env.WAT}: er is publiek niets verdwenen, maar de onderlinge VOLGORDE van de bestaande rijen is veranderd: de ${p.eerste}e rij van ${process.env.WAT} komt niet meer op zijn plaats in de reeks terug. De plaat toont de laatste vijftien omgedraaid, dus dit verandert wat er in beeld staat.`);
                   if (hardP) process.exit(1);
                 }
                 // Deze twee slotregels alleen als er ook niets verdwenen is. Anders sloot een zachte
