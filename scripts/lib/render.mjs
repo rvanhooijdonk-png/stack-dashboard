@@ -42,6 +42,40 @@ const dt = (iso) => {
   return Number.isNaN(d.getTime()) ? '—' : d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
 };
 
+// De hoofdstempel in Richards tijd. Europe/Amsterdam met correcte zomertijd, onafhankelijk van de
+// locale/timezone van de build-runner (die draait UTC): expliciete timeZone + hourCycle 'h23',
+// geassembleerd uit formatToParts zodat er geen locale-afhankelijke interpunctie insluipt. Statisch
+// per build — no-JS blijft, dus geen live-verouderende "x min geleden"; de vorm "gebouwd om …" maakt
+// dat expliciet. Vorm: "gebouwd om HH:MM NL-tijd (HH:MM UTC)" — alleen het tijdstip, geen datum
+// (mandaat 25-07-2026, vierde herhaling; de eerdere datum-náást-tijd is op expliciet herhaald verzoek
+// teruggedraaid). De NL-tijd staat vooraan, zodat een verse plaat niet meer als oud leest; UTC blijft
+// tussen haakjes als tweede referentie.
+const klokTijden = (iso) => {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(d).map((x) => [x.type, x.value]),
+  );
+  return { nl: `${p.hour}:${p.minute}`, utc: d.toISOString().slice(11, 16) };
+};
+
+const buildStamp = (iso) => {
+  const k = klokTijden(iso);
+  return k ? `gebouwd om ${k.nl} NL-tijd (${k.utc} UTC)` : '—';
+};
+
+// Dezelfde twee tijden in de tabtitel. Die stond nog op kale UTC ("Stack-dashboard — 2026-07-25
+// 19:53 UTC") en is een tweede plek waar Richard de versheid leest: met een NL-klok van 21:53 leest
+// die titel net zo hard als twee uur oud, ook als de kop in de pagina inmiddels klopt. Zelfde defect,
+// zelfde bestand, dus mee in deze fix in plaats van als vijfde misleesbeurt blijven staan.
+const titelStamp = (iso) => {
+  const k = klokTijden(iso);
+  return k ? `${k.nl} NL-tijd (${k.utc} UTC)` : '—';
+};
+
 const ago = (iso) => {
   if (!iso) return '';
   const ms = Date.now() - new Date(iso).getTime();
@@ -550,14 +584,14 @@ export function renderHtml(snapshot, { refreshSeconds = 900 } = {}) {
 <meta http-equiv="refresh" content="${refresh}; url=./?v=${cacheBust}">
 <meta name="robots" content="noindex,nofollow">
 <meta http-equiv="content-security-policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
-<title>Stack-dashboard — ${esc(s.generatedAt.slice(0, 16).replace('T', ' '))} UTC</title>
+<title>Stack-dashboard — ${esc(titelStamp(s.generatedAt))}</title>
 <style>${STYLE}</style>
 </head>
 <body>
 <div class="wrap">
 <header>
   <h1>Stack-dashboard</h1>
-  <p class="stamp">Laatst bijgewerkt: <strong>${esc(dt(s.generatedAt))}</strong> · deze pagina haalt zichzelf elke ${num(refresh / 60)} min opnieuw op</p>
+  <p class="stamp">Laatst bijgewerkt: <strong>${esc(buildStamp(s.generatedAt))}</strong> · deze pagina haalt zichzelf elke ${num(refresh / 60)} min opnieuw op</p>
 </header>
 <p class="muted">Weergave van bestaande canon — nooit een tweede waarheid. Alles is read-only en gesaneerd;
 ${stale.length === 0 ? 'alle bronnen zijn geverifieerd.' : `<strong>${num(stale.length)}</strong> van ${num(s.sources.length)} bronnen is niet geverifieerd (zie de badges).`}
