@@ -27,7 +27,7 @@
 
 import { createHash } from 'node:crypto';
 
-import { kanaalpostUitTekst, ontdaan } from './kanaalpost.mjs';
+import { kanaalpostUitTekst, spiegelScan, ontdaan } from './kanaalpost.mjs';
 
 /** De zes canonieke toestanden van een WERKOBJECT. Gesloten lijst; een zevende waarde is een fout. */
 export const TOESTANDEN = ['MERGEABLE', 'WACHT OP AKKOORD', 'GEBLOKKEERD', 'MERGED', 'EFFECT-BEWEZEN', 'LEEG'];
@@ -69,6 +69,8 @@ export const REDENEN = {
   GEEN_SPOREN: 'de bron leverde geen enkel spoor op',
   TOESTAND_NIET_BIJ_BYTES: 'de aangeleverde toestand hoort niet bij de aangeleverde bytes',
   ALLES_STIL: 'alle sporen zwijgen al langer dan afgesproken',
+  TOESTAND_NIET_BIJ_BRON: 'de aangeleverde toestand hoort niet bij de bron die is gelezen',
+  TIJD_UIT_DE_TOEKOMST: 'de bron draagt een tijdstip dat nog niet geweest is',
   TOESTAND_ONBEKEND: 'de bron noemt een toestand die niet in de vastgelegde lijst staat',
   HASHFOUT: 'de meegeleverde controlesom hoort niet bij de inhoud',
 };
@@ -96,6 +98,14 @@ const UUR = 3600 * 1000;
  * voorwaarde betekent stilte alleen iets wanneer aantoonbaar iemand anders wél doorwerkte.
  */
 export const LANE_STIL_UREN = 6;
+
+/**
+ * Hoeveel een bronmoment vóór mag lopen op de klok van de lezer zonder dat het een bevinding is. Vijf
+ * minuten dekt de gewone speling tussen twee machines; alles daarboven is geen speling meer maar een
+ * tijd die nog niet geweest is — en juist die zet de stiltemeting uit, want één rij van volgende week
+ * maakt elk werkelijk stilstaand spoor "recent".
+ */
+export const TOEKOMST_MARGE = 5 * 60 * 1000;
 
 /**
  * Het korte operationele venster van de "kijk", STRENG GESCHEIDEN van de vijftien uur waarmee
@@ -296,14 +306,25 @@ export function kijkStateUitSpiegel(tekst, { commitSha = null } = {}) {
     };
   }
 
-  for (const r of raw.rows) {
+  // Tellen gebeurt over de KANDIDATEN en niet over de geaccepteerde rijen. Het verschil is niet
+  // theoretisch: de vormtoets van de spiegel gooit een rij met een niet-bestaande datum (`2026-02-30`)
+  // weg vóórdat deze lus hem ooit ziet, dus zonder deze lezing verdween zo'n rij ongeteld én schoof
+  // elke positie erna een plaats op. Twee bronrijen leverden dan één spoor met teller 1, en niets in
+  // de toestand verried dat er iets weg was. Dat is dezelfde stille verdwijning als de 41 van de 54.
+  for (const r of spiegelScan(String(tekst ?? '')).kandidaten) {
     teller += 1;
+    if (r === null) { fouten.push('VELD_NIET_GESLOTEN'); continue; }
     const laneId = ontdaan(r.tab ?? '');
     const status = ontdaan(r.status ?? '');
     if (!LANES.includes(laneId)) { fouten.push('VELD_NIET_GESLOTEN'); continue; }
     const toestand = OVERGANG_TOESTAND[status];
     if (toestand === undefined) { fouten.push('TOESTAND_ONBEKEND'); continue; }
     const moment = momentUitNlTijd(ontdaan(r.datum ?? ''));
+    // De vormtoets van de spiegel liet deze rij door, maar de tijdlezing hier komt er niet uit. Dat is
+    // onenigheid tussen twee lezers over dezelfde bytes, en dan is de rij niet vast te stellen. Zonder
+    // deze regel belandde er een spoor met een lege tijd in de toestand, en een toestand waarin geen
+    // enkele tijd staat glipt langs élke stiltemeting — die meet immers niets als er niets te meten is.
+    if (moment === null) { fouten.push('VELD_NIET_GESLOTEN'); continue; }
     lanes[laneId] = {
       laneId,
       sequence: teller,
@@ -314,7 +335,7 @@ export function kijkStateUitSpiegel(tekst, { commitSha = null } = {}) {
       // Event-uitkomst en werkobjecttoestand zijn gescheiden velden. De overgang kan de uitkomst niet
       // uit de spiegel afleiden, dus die is expliciet GEEN in plaats van stilzwijgend afwezig.
       eventUitkomst: 'GEEN',
-      momentUtc: moment === null ? null : new Date(moment).toISOString(),
+      momentUtc: new Date(moment).toISOString(),
     };
   }
 
@@ -360,6 +381,14 @@ export function keurState(state) {
   // dragen, niet de ene functie die hem nu toevallig invult.
   if (Object.keys(state).some((k) => !STATE_SLEUTELS.includes(k))) fouten.push('VELD_NIET_GESLOTEN');
 
+  // Een gesloten SLEUTELlijst is niet hetzelfde als een gesloten WAARDEdomein, en dat verschil was een
+  // gat: een toestand met `bronSoort: "klant Van der Berg"` en `bronCommitSha: "/Users/…/geheim"`
+  // haalde de keuring, werd gehasht en kwam als groen naar buiten. De sleutels waren immers precies de
+  // afgesproken zeven. Elk van deze drie velden gaat de publieke kant op, dus elk heeft een domein.
+  if (state.bronSoort !== OVERGANG_MERK) fouten.push('VELD_NIET_GESLOTEN');
+  if (state.bronCommitSha !== null && !volledigeSha(state.bronCommitSha)) fouten.push('VELD_NIET_GESLOTEN');
+  if (!Number.isInteger(state.eventCount) || state.eventCount < 0) fouten.push('VELD_NIET_GESLOTEN');
+
   // Een toestand zonder enig spoor is geen gezonde toestand maar een mislukte lezing. Er valt niets te
   // vergelijken, dus er valt niets goed te keuren.
   if (!state.lanes || typeof state.lanes !== 'object' || Object.keys(state.lanes).length === 0) {
@@ -379,7 +408,13 @@ export function keurState(state) {
     // De objectaanduiding moet uit gesloten delen zijn opgebouwd. Zonder deze toets zou hier alsnog
     // vrije tekst binnenkomen langs een veld dat "technisch" heet.
     if (lane.objectId !== `${sleutel}#${lane.sequence}`) fouten.push('VELD_NIET_GESLOTEN');
-    if (lane.momentUtc !== null && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(String(lane.momentUtc))) {
+    // Een spoor MOET een tijd dragen; `null` was hier toegestaan en dat was de laatste fail-open route
+    // van de tweede review. Elke stiltemeting rekent over de tijden die er zijn, dus een toestand
+    // waarin ze allemaal ontbreken meet niets en komt als GROEN naar buiten — gemeten: twee sporen van
+    // een halfjaar oud, `momentUtc` op null, uitkomst GROEN met een lege redenenlijst. De vorm alléén
+    // controleren volstond niet, want de afwezigheid glipte langs de vormtoets heen.
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(String(lane.momentUtc))
+      || Number.isNaN(Date.parse(lane.momentUtc))) {
       fouten.push('VELD_NIET_GESLOTEN');
     }
   }
@@ -461,7 +496,8 @@ export function oordeel({
   const redenen = [];
   const gemeten = {
     kopSha: null, paginaCommitSha: null, stateSha256: null, watermerk: null,
-    getuigeAanwezig: getuigenis !== null, verouderdeLanes: [], pogingen: lezing?.pogingen ?? null,
+    getuigeAanwezig: getuigenis !== null, klokAanwezig: nu !== null,
+    verouderdeLanes: [], pogingen: lezing?.pogingen ?? null,
   };
   const uit = (uitkomst) => ({ uitkomst, redenen: [...new Set(redenen)], gemeten });
 
@@ -500,6 +536,18 @@ export function oordeel({
     redenen.push('TOESTAND_NIET_BIJ_BYTES');
     return uit('GEEN OORDEEL');
   }
+
+  // ── 2d. en horen toestand én manifest bij de BRON die zojuist gelezen is?
+  //
+  // Tot hier sloot de ketting op zichzelf: manifest ↔ bytes ↔ toestand. Wat nergens vastlag, is dat
+  // die ketting iets zegt over de lezing die ernaast lag. Aangetoond: lezing op kop A, toestand plus
+  // bytes plus manifest van kop B, pagina die netjes A als commit en B als hash noemt — en dat kwam er
+  // als GROEN uit, want elke schakel klopte met de volgende. Een bewijs dat niet aan de bron vastzit
+  // bewijst alleen zichzelf.
+  if (state.bronCommitSha !== lezing.sha || manifest.bronCommitSha !== lezing.sha) {
+    redenen.push('TOESTAND_NIET_BIJ_BRON');
+    return uit('GEEN OORDEEL');
+  }
   gemeten.stateSha256 = manifest?.stateSha256 ?? null;
   gemeten.watermerk = state?.eventHighWatermark ?? null;
 
@@ -535,32 +583,37 @@ export function oordeel({
     }
   }
 
-  if (redenen.length) return uit('ROOD');
-
-  // ── 5b. staat ALLES stil?
-  //
-  // De onderlinge meting hieronder heeft een blinde vlek waar beide reviewers onafhankelijk op wezen:
-  // stoppen alle sporen tegelijk — de orchestrator valt om, de stroom valt weg — dan is hun onderlinge
-  // afstand nul en is er dus geen enkel verouderd spoor. Precies de totale uitval kwam er zo als GROEN
-  // uit. Daarom is er één absolute vloer, en die geldt alleen als de aanroeper een moment meegeeft:
-  // zonder klok wordt er geen uitspraak over de klok gedaan.
+  // ── 5c. draagt de bron een tijdstip dat nog niet geweest is? Dat is geen stilte maar een onmogelijke
+  // meting, en zonder deze toets is het bovendien de goedkoopste manier om de stiltemeting uit te
+  // zetten: één rij met een tijd van volgende maand maakt elk werkelijk stilstaand spoor "recent".
   const momenten = Object.values(state.lanes)
     .map((l) => (l.momentUtc ? Date.parse(l.momentUtc) : null))
     .filter((t) => t !== null && !Number.isNaN(t));
-  if (nu !== null && momenten.length && nu - Math.max(...momenten) > stilMs) {
-    redenen.push('ALLES_STIL');
-    gemeten.verouderdeLanes = Object.keys(state.lanes).sort();
-    return uit('PARTIAL');
-  }
+  if (nu !== null && momenten.some((t) => t > nu + TOEKOMST_MARGE)) redenen.push('TIJD_UIT_DE_TOEKOMST');
 
-  // ── 6. pas als alles hierboven klopt is een stil spoor het onderwerp. Eerder zou het een bijzaak
-  // zijn naast een echte fout, en dan verdwijnt het uit beeld.
+  if (redenen.length) return uit('ROOD');
+
+  // ── 6. de twee stiltevragen, en ze worden SAMEN beantwoord.
+  //
+  // (a) Staat alles stil? De onderlinge meting hieronder heeft een blinde vlek waar beide reviewers
+  //     onafhankelijk op wezen: stoppen alle sporen tegelijk — de orchestrator valt om, de stroom valt
+  //     weg — dan is hun onderlinge afstand nul en is er dus geen enkel verouderd spoor. Precies de
+  //     totale uitval kwam er zo als GROEN uit. Vandaar één absolute vloer, en die geldt alleen als de
+  //     aanroeper een moment meegeeft; zonder klok wordt er geen uitspraak over de klok gedaan, en dát
+  //     staat in `gemeten.klokAanwezig` in plaats van dat het nergens blijkt.
+  // (b) Zwijgt één spoor terwijl de rest doormeldt?
+  //
+  // Eerst stond (a) vóór (b) met een eigen `return`, en dat maskeerde (b): bij totale uitval verdween
+  // de bevinding dat MINI daarbovenop al acht uur langer zweeg dan de rest. Twee verschillende
+  // waarnemingen horen niet om voorrang te strijden; ze horen allebei in dezelfde uitkomst te staan.
+  const allesStil = nu !== null && momenten.length > 0 && nu - Math.max(...momenten) > stilMs;
   const stil = verouderdeLanes(state, stilMs);
-  gemeten.verouderdeLanes = stil;
-  if (stil.length) {
-    redenen.push('LANE_VEROUDERD');
-    return uit('PARTIAL');
-  }
+  gemeten.verouderdeLanes = allesStil
+    ? [...new Set([...Object.keys(state.lanes), ...stil])].sort()
+    : stil;
+  if (allesStil) redenen.push('ALLES_STIL');
+  if (stil.length) redenen.push('LANE_VEROUDERD');
+  if (redenen.length) return uit('PARTIAL');
   return uit('GROEN');
 }
 

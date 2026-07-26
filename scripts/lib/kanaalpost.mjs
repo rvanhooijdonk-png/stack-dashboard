@@ -185,8 +185,21 @@ function rijUitCellen(c) {
  * bestand (twee kolommen) en elke andere tabel blijven daardoor buiten beeld.
  */
 export function spiegelUitTekst(tekst) {
+  return spiegelScan(tekst).kandidaten.filter(Boolean);
+}
+
+/**
+ * Dezelfde lezing, maar mét de afgekeurde rijen op hun plek.
+ *
+ * `spiegelUitTekst` gooit een rij die de vormtoets niet haalt weg, en dat is voor de publicatiekant
+ * precies goed: die rij hoort niet naar buiten. Voor een TELLENDE lezer is het een gat — een rij die
+ * stil verdwijnt schuift bovendien elke positie erna op, zodat de zoveelste rij ineens iets anders
+ * aanwijst. `kandidaten` houdt de bronvolgorde intact en zet `null` waar de vormtoets afketste, zodat
+ * een lezer zowel kan tellen als kan zien dát er iets is afgekeurd.
+ */
+export function spiegelScan(tekst) {
   const regels = String(tekst ?? '').split('\n');
-  const rijen = [];
+  const kandidaten = [];
   let inTabel = false;
   for (let i = 0; i < regels.length; i += 1) {
     const c = cellenVan(regels[i]);
@@ -202,12 +215,11 @@ export function spiegelUitTekst(tekst) {
     }
     if (!inTabel) continue;
     // Een afwijkend kolomaantal of een tweede scheidingsregel is een andere tabel: sluiten, niet
-    // raden welke cel welk veld is.
+    // raden welke cel welk veld is. Dit is géén afgekeurde rij maar het einde van deze tabel.
     if (isScheiding(c) || c.length !== KOPNAMEN.length) { inTabel = false; continue; }
-    const rij = rijUitCellen(c);
-    if (rij) rijen.push(rij);
+    kandidaten.push(rijUitCellen(c));
   }
-  return rijen;
+  return { kandidaten, afgekeurd: kandidaten.filter((r) => r === null).length };
 }
 
 /**
