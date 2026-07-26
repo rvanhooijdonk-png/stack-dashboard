@@ -342,3 +342,37 @@ test('een regel die wordt vastgeplakt aan de vorige wordt wél gezien — door b
   assert.equal(r.verdwenen, 1);
   assert.equal(publiekeAfwijkingen(SPIEGEL, vastgeplakt).ok, false);
 });
+
+// --- de volgorde van de publieke rijen, hier wél hard --------------------------------------------
+
+test('rijen herschikken haalt de bovenste melding van de plaat — en dat is een overtreding', () => {
+  // Codex, tegenvoorbeeld 3 (26-07-2026, hoog). Zestien rijen, herschikt van 1…16 naar 16,2…15,1.
+  // Er verdwijnt niets en er komt niets dubbel bij; de plaat toont de laatste vijftien omgedraaid,
+  // dus melding 16 valt eraf en melding 1 komt terug. Nagemeten vóór de reparatie: ok=true.
+  let oud = KOP;
+  const rijen = [];
+  for (let i = 1; i <= 16; i += 1) { rijen.push(rij(i)); oud += rij(i); }
+  const herschikt = KOP + [rijen[15], ...rijen.slice(1, 15), rijen[0]].join('');
+
+  const p = publiekeAfwijkingen(oud, herschikt);
+  assert.equal(p.verdwenen, 0, 'er verdwijnt inderdaad geen enkele rij');
+  assert.deepEqual(p.dubbel, [], 'en er komt niets dubbel bij');
+  assert.equal(p.volgordeOk, false, 'maar de onderlinge volgorde is wel gehusseld');
+  assert.equal(p.ok, false);
+});
+
+test('een samenvoeging die rijen ertussen zet blijft groen — anders piept de bewaker vals', () => {
+  // De reden dat de eis "onderlinge volgorde" is en niet "de oude rijen staan vooraan": twee takken
+  // die elk aanvullen schuiven elkaars rijen uit elkaar. Dat moet gewoon mogen.
+  const oud = KOP + rij(1) + rij(2) + rij(3);
+  const samen = KOP + rij(1) + rij(9) + rij(2) + rij(3) + rij(8);
+  const p = publiekeAfwijkingen(oud, samen);
+  assert.equal(p.ok, true);
+  assert.equal(p.volgordeOk, true);
+});
+
+test('achteraan aanvullen laat de volgorde met rust', () => {
+  const p = publiekeAfwijkingen(KOP + rij(1) + rij(2), KOP + rij(1) + rij(2) + rij(3));
+  assert.equal(p.volgordeOk, true);
+  assert.equal(p.ok, true);
+});

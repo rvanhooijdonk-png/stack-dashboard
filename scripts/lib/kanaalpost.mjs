@@ -258,7 +258,10 @@ function publiekeVorm(r) {
 
 /**
  * Reduceer de spiegel tot de publieke plaat-DTO: elke rij eerst door vorm- en publicatiepoort,
- * daarna de laatste vijftien die overbleven, nieuwste boven, en pas als laatste stap afgekapt.
+ * daarna de laatste vijftien die overbleven, nieuwste boven. Afkappen gebeurt sinds de spiegelwet de
+ * publieke rijen telt in `veiligePubliekeRijen`, dus vóór het knippen op vijftien in plaats van erna;
+ * dat verandert de uitkomst niet (`slice` telt posities, geen tekens) en houdt één definitie van "de
+ * publieke rij" over voor beide gebruikers.
  *
  * ÁLLE rijen worden getoetst, niet alleen de vijftien die in beeld komen. Andersom zou de teller
  * `ingehouden: 0` melden terwijl een oudere rij nooit langs de poort is geweest — een geruststelling

@@ -225,10 +225,12 @@ jobs:
                   // bot lost een botsing op met `git pull --rebase`; komt daar een lege regel of een
                   // tweede kop middenin de tabel uit, dan is er geen brontekstregel verdwenen en toch
                   // de halve plaat (bevinding Codex, 26-07-2026, hoog). Hier geen zachte variant: deze
-                  // job schrijft naar de tak die gepubliceerd wordt.
+                  // job schrijft naar de tak die gepubliceerd wordt. Wat hier bewaakt wordt is de
+                  // rij-identiteit en hun onderlinge volgorde — niet elke denkbare verandering aan de
+                  // publieke uitkomst; zie de begrenzing in het rapport.
                   const p = publiekeAfwijkingen(oud, nu);
                   if (!p.ok) {
-                    console.error(`::error::t.o.v. ${wat} verandert de PUBLIEKE stand: ${p.verdwenen} rij(en) komen er niet meer uit${p.dubbel.length ? `, ${p.dubbel.length} rij(en) dubbel` : ""} — de waarnemer publiceert dat niet.`);
+                    console.error(`::error::t.o.v. ${wat} verandert de publieke lezing van de spiegel: ${p.verdwenen} rij(en) komen er niet meer uit${p.dubbel.length ? `, ${p.dubbel.length} rij(en) dubbel` : ""}${p.volgordeOk ? "" : `, onderlinge volgorde gewijzigd vanaf de ${p.eerste}e`} — de waarnemer publiceert dat niet.`);
                     process.exit(1);
                   }
                 }
@@ -356,13 +358,26 @@ jobs:
                 // 26-07-2026, hoog, met twee tegenvoorbeelden). Dubbel is hier ALTIJD hard — ook op een
                 // herschreven tak is er geen enkele reden waarom dezelfde publieke rij twee keer hoort.
                 const p = publiekeAfwijkingen(oud, nu);
+                const hardP = process.env.ZACHT !== "zacht";
                 if (p.dubbel.length) {
-                  console.error(`::error::t.o.v. ${process.env.WAT} verschijnt/verschijnen ${p.dubbel.length} PUBLIEKE rij(en) dubbel op de plaat: ${p.dubbel.map((d) => `publieke rij ${d.rij} (${d.aantal}x, mocht ${d.toegestaan}x)`).join("; ")}. Twee brontekstregels kunnen dezelfde publieke rij worden.`);
+                  // "In de publieke lezing", niet "op de plaat": de telling loopt over ALLE herkende
+                  // rijen, ook die door aangroei buiten het venster van vijftien zijn geschoven. Dat is
+                  // bewust — het bestand is het verslag, de plaat is er het venster op — maar dan moet
+                  // de melding dat ook zeggen (preciezering Codex, 26-07-2026).
+                  console.error(`::error::t.o.v. ${process.env.WAT} komt/komen ${p.dubbel.length} PUBLIEKE rij(en) dubbel in de publieke lezing van de spiegel: ${p.dubbel.map((d) => `de ${d.rij}e herkende rij (${d.aantal}x, mocht ${d.toegestaan}x)`).join("; ")}. Twee brontekstregels kunnen tot dezelfde publieke rij normaliseren.`);
                   process.exit(1);
                 }
                 if (p.verdwenen > 0) {
-                  const hardP = process.env.ZACHT !== "zacht";
-                  console[hardP ? "error" : "log"](`::${hardP ? "error" : "warning"}::${hardP ? "de plaat verliest rijen t.o.v." : "afwijking t.o.v."} ${process.env.WAT}: ${p.verdwenen} rij(en) die de publieke kant eerder toonde komen er niet meer uit, terwijl de brontekst ${r.ok ? "compleet is" : "ook al afwijkt"}. Kijk naar lege regels, koppen of scheidingsregels middenin de tabel.`);
+                  console[hardP ? "error" : "log"](`::${hardP ? "error" : "warning"}::${hardP ? "de publieke lezing verliest rijen t.o.v." : "afwijking t.o.v."} ${process.env.WAT}: ${p.verdwenen} rij(en) die de publieke kant eerder herkende komen er niet meer uit, terwijl de brontekst ${r.ok ? "compleet is" : "ook al afwijkt"}. Kijk naar lege regels, koppen of scheidingsregels middenin de tabel.`);
+                  if (hardP) process.exit(1);
+                }
+                // En de volgorde, hier wél hard. De plaat toont de laatste vijftien rijen omgedraaid, dus
+                // herschikken zonder iets weg te halen haalt de bovenste melding van de plaat af en zet
+                // een oude terug — zonder dat een telling iets ziet (bevinding Codex, met tegenvoorbeeld).
+                // De eis is de merge-bestendige variant: oude rijen mogen uit elkaar geschoven worden,
+                // niet door elkaar gehusseld.
+                else if (!p.volgordeOk) {
+                  console[hardP ? "error" : "log"](`::${hardP ? "error" : "warning"}::${process.env.WAT}: er is publiek niets verdwenen, maar de onderlinge VOLGORDE van de bestaande rijen is veranderd (vanaf de ${p.eerste}e). De plaat toont de laatste vijftien omgedraaid, dus dit verandert wat er in beeld staat.`);
                   if (hardP) process.exit(1);
                 }
                 // Deze twee slotregels alleen als er ook niets verdwenen is. Anders sloot een zachte
@@ -372,7 +387,10 @@ jobs:
                 // Bij een zachte melding NIET beweren dat de regels "herschreven" zijn: gemeten is dat ze
                 // niet meer voorkomen, niet dat er een vervanger voor in de plaats kwam (preciezering
                 // Codex, 26-07-2026). De meting benoemen, niet de vermoedelijke oorzaak.
-                console.log(`${process.env.WAT}: ${r.ok ? "geen regel verdwenen" : `${r.verdwenen} regel(s) niet teruggevonden, toegelaten omdat de tak herschreven is`}, geen regel dubbel, ${p.aantal} publieke rij(en) in beeld.`);
+                // `p.aantal` is het aantal HERKENDE rijen over het hele bestand, niet wat er in beeld
+                // staat: de plaat toont er hoogstens vijftien. Dat stond er eerst wel, en was onwaar
+                // (preciezering Codex, 26-07-2026).
+                console.log(`${process.env.WAT}: ${r.ok ? "geen regel verdwenen" : `${r.verdwenen} regel(s) niet teruggevonden, toegelaten omdat de tak herschreven is`}, geen regel dubbel, ${p.aantal} rij(en) publiek herkend (de plaat toont er hoogstens 15).`);
                 process.exit(0);
               }).catch(() => { console.error("::error::spiegelwet niet te laden — dat is rood."); process.exit(1); });
             '

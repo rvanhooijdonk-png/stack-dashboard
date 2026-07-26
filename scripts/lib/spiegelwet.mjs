@@ -222,8 +222,17 @@ export function nieuweDuplicaten(oud, nieuw) {
  * vorm die op de plaat verschijnt — en BEWUST zonder de limiet van vijftien zichtbare rijen. Met die
  * limiet zou elke rij die door normale aangroei uit beeld schuift als verdwenen gelden.
  *
- * Uitkomst: `{ ok, verdwenen, dubbel }`. `dubbel` bevat per overtreding de POSITIE onder de publieke
- * rijen plus de aantallen — geen inhoud, want dit oordeel belandt in een logregel.
+ * EN DE VOLGORDE, hard — anders dan bij de brontekst, waar `opOrde` bewust een waarschuwing is.
+ * Reden: de plaat toont de LAATSTE vijftien rijen, omgedraaid. Een multiset-telling ziet volgorde niet,
+ * dus wie zestien rijen herschikt van `1…16` naar `16,2…15,1` laat geen rij verdwijnen en geen duplicaat
+ * ontstaan — en toch valt melding 16 van de plaat en komt melding 1 terug (bevinding Codex, 26-07-2026,
+ * hoog, hier nagemeten). Bij de brontekst kon dat niet hard, want twee takken die elk aanvullen
+ * verschuiven elkaars regels; daarom is de eis hier niet "de oude rijen staan vooraan" maar de zwakkere,
+ * merge-bestendige "de oude rijen staan nog in dezelfde onderlinge volgorde" — een samenvoeging voegt
+ * rijen tússen, en dat blijft toegestaan.
+ *
+ * Uitkomst: `{ ok, verdwenen, dubbel, volgordeOk, eerste }`. `dubbel` bevat per overtreding de POSITIE
+ * onder de publieke rijen plus de aantallen — geen inhoud, want dit oordeel belandt in een logregel.
  */
 export function publiekeAfwijkingen(oud, nieuw) {
   const sleutel = (r) => JSON.stringify([r.tab, r.onderwerp, r.status, r.actie, r.datum]);
@@ -251,7 +260,25 @@ export function publiekeAfwijkingen(oud, nieuw) {
     nieuwe.forEach((r, i) => { if (sleutel(r) === s) laatste = i + 1; });
     dubbel.push({ rij: laatste, aantal, toegestaan });
   }
-  return { ok: verdwenen === 0 && dubbel.length === 0, verdwenen, dubbel, aantal: nieuwe.length };
+
+  // De onderlinge volgorde van de OUDE rijen: komt de oude reeks nog in dezelfde volgorde voor in de
+  // nieuwe? Twee wijzers, gulzig — precies wat "er mag tussen, er mag niet door elkaar" betekent.
+  let i = 0;
+  let eerste = null;
+  for (const r of nieuwe) {
+    if (i < oude.length && sleutel(r) === sleutel(oude[i])) i += 1;
+  }
+  const volgordeOk = i === oude.length;
+  if (!volgordeOk) eerste = i + 1;
+
+  return {
+    ok: verdwenen === 0 && dubbel.length === 0 && volgordeOk,
+    verdwenen,
+    dubbel,
+    volgordeOk,
+    eerste,
+    aantal: nieuwe.length,
+  };
 }
 
 export function nieuweNietCanoniekeRegels(oud, nieuw) {

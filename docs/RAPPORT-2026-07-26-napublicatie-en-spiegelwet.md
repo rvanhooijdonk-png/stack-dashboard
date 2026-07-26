@@ -490,8 +490,10 @@ Daarvoor is `publiekeRijenUitTekst` uit `kanaalpost.mjs` losgetrokken; `toPublic
 diezelfde functie, zodat er één definitie van "de publieke rij" is en niet twee.
 
 De laag hangt hard in **beide** poorten — de `spiegelwet`-job én de schrijfactie van de bot zelf, want
-de spiegelwet geldt ook voor de waarnemer (jouw punt 2). Dubbele publieke rijen zijn er **altijd** hard,
-ook op een herschreven tak: er bestaat geen goede reden waarom dezelfde melding twee keer hoort.
+de spiegelwet geldt ook voor de waarnemer (jouw punt 2). Een **nieuw** dubbel exemplaar van een publieke
+rij is er hard, ook op een herschreven tak: er bestaat geen goede reden waarom dezelfde melding er nog
+een keer bij komt. Dubbels die er al stonden blijven toegestaan — de toets vergelijkt per rij het aantal
+in de nieuwe stand met het aantal in de oude, dus hij verbiedt alleen de toename.
 
 Meting op het echte bestand, met de letterlijke code uit `waarnemer.yml`, aanval 1 ingevoegd:
 
@@ -528,12 +530,55 @@ netjes en ze zijn te omzeilen door wie pushrecht heeft. Dat repareert alleen tak
 verplichte controles — precies het punt dat jij naar de GitHub-plan-beslissessie hebt gestuurd. Ik meld
 het hier als *bekend en aanvaard*, niet als opgelost.
 
+### §6e. Vijfde ronde — en het derde gat, in de laag die net gebouwd was
+
+De nieuwe laag is meteen opnieuw langs beide reviewers gegaan. **Gemini: één punt, en het was geen
+regressie.** Twee volstrekt identieke meldingen achter elkaar worden hard geblokkeerd; nagemeten dat dat
+gedrag van de bestaande bronlaag `nieuweDuplicaten` komt en al vóór deze ronde bestond
+(`[{"regel":4,…}]` op de oude code), en dat een herhaling op een andere minuut gewoon doorgaat
+(`dubbel []`, `verdwenen 0`). Geen wijziging aangebracht.
+
+**Codex vond een derde hoog punt, en het zat in de laag van §6d zelf.** Zijn formulering:
+*"`publiekeAfwijkingen` reduceert alles tot een `Map` met aantallen. Daarmee verdwijnt de bronvolgorde… Concreet met
+16 rijen: herschik `1…16` naar `16,2…15,1`. Geen bronregel verdwijnt, er ontstaat geen duplicaat en
+`publiekeAfwijkingen` geeft `ok: true`. De zichtbare plaat verandert echter van `16…2` naar `1,15…2`."*
+Nagebouwd en bevestigd vóór de reparatie: `{"ok":true,"verdwenen":0,"dubbel":0}` terwijl de plaat
+kantelt. Tellen is niet hetzelfde als ordenen.
+
+Daar staat nu een **volgorde-eis** bij: de oude publieke rijen moeten in de nieuwe stand nog in dezelfde
+onderlinge volgorde voorkomen. Bewust als *deelrij* en niet als *begin* — een prefix-eis zou twee takken
+die elk onderaan iets toevoegen tegen elkaar in laten lopen bij de merge, en dat is legitiem verkeer. Er
+staat een test die precies dat bewijst: een merge die rijen tussenvoegt blijft groen, een herschikking
+niet. Gemeten met de letterlijke poortcode op het echte bestand, eerste en laatste van 47 rijen verwisseld:
+
+```
+::error::de vorige stand van deze tak: er is publiek niets verdwenen, maar de onderlinge VOLGORDE van
+de bestaande rijen is veranderd (vanaf de 2e). De plaat toont de laatste vijftien omgedraaid, dus dit
+verandert wat er in beeld staat.
+::error::het aftakpunt met main: … (idem)
+→ exit=1
+```
+
+Drie andere punten van Codex zijn nagelopen en **als grens gedocumenteerd, niet gerepareerd**:
+
+- Een wijziging aan de **parser zelf** kan rijen laten verdwijnen zonder dat deze wet iets ziet, want
+  beide kanten van de vergelijking worden met de nieuwe parser gelezen. Dat is dezelfde klasse als de
+  systeemgrens hierboven: poortcode die van de beoordeelde tak komt. Hoort bij jouw punt 4.
+- Het dubbel-tellen kijkt over het **hele** verslag, niet alleen over de vijftien zichtbare rijen. Dat is
+  beleid, geen omissie: publieke identiteit hoort uniek te zijn over het hele bestand. Het risico op vals
+  alarm is te verwaarlozen — twee rijen zijn pas identiek bij gelijke datum-tijd tot op de minuut, tab,
+  onderwerp, status én actie.
+- `ingehouden` (wat de publicatiepoort tegenhoudt) wordt niet vergeleken. Dat is niet gerepareerd maar
+  wel niet langer weggemoffeld: de meldingen spreken nu over de **publieke lezing**, niet over "de
+  publieke stand".
+
 ## AFSLUITING
 
-- Tests groen: `npm test` → `tests 333 / pass 333 / fail 0` (na §6d; na §6c 328, daarvóór 321).
-  Nulmeting vóór de bouw: `pass 276 / fail 1`. De vijf nieuwe tests zijn de twee tegenvoorbeelden van
-  Codex, het bewijs dat de publieke telling níét op vijftien knipt, en de correctie op de
-  regeleinde-bewering.
+- Tests groen: `npm test` → `tests 336 / pass 336 / fail 0` (na §6e; na §6d 333, na §6c 328,
+  daarvóór 321). Nulmeting vóór de bouw: `pass 276 / fail 1`. De vijf tests van §6d zijn de twee
+  tegenvoorbeelden van Codex, het bewijs dat de publieke telling níét op vijftien knipt, en de correctie
+  op de regeleinde-bewering; de drie van §6e zijn de herschikking (rood), de merge die rijen tussenvoegt
+  (groen) en het gewone aanvullen (groen).
   Nulmeting van de rondgang-tests tegen de ongerepareerde waarnemer: `pass 6 / fail 1` op de `<br>`-fix,
   en eerder `2 van 5 rood` op de twee productiefouten.
 - Rollback/additief geborgd: alles nieuwe bestanden plus één job en één trigger-pad in `waarnemer.yml`;
@@ -554,7 +599,7 @@ het hier als *bekend en aanvaard*, niet als opgelost.
   (job + trigger-pad erbij), `data/kanaalpost-publiek.md` (drie regels aangevuld, door de
   publicatiepoort gehaald: 277/519/532 tekens, geen afkapping), `lib/kanaalpost.mjs` (ongewijzigd,
   alleen gelezen).
-- Codex: ja — drie ronden. Eerste ronde: afwijzen tot herstel, negen punten verwerkt, twee als beslispunt
+- Codex: ja — vijf ronden. Eerste ronde: afwijzen tot herstel, negen punten verwerkt, twee als beslispunt
   doorgezet. Fixronde (A–E): vijf punten overgenomen, één erkend-maar-niet-gerepareerd met reden, één
   weerlegd (§5b). Besluitenronde: oordeel *niet aannemen*; de hoge bevinding (rebase bewaakte de
   verkeerde basis) is gemeten, gerepareerd en met vijf scenario's bewezen, plus vier kleinere; één
@@ -562,12 +607,16 @@ het hier als *bekend en aanvaard*, niet als opgelost.
   opnieuw *niet aannemen* — twee hoge bevindingen op dezelfde blinde vlek (de wet telde brontekstregels
   in plaats van publieke rijen), beide met een werkend tegenvoorbeeld. Alle vijf punten overgenomen en
   gerepareerd (§6d); de derde hoge bevinding is een systeemgrens die alleen takbescherming oplost en
-  gaat naar het GitHub-plan-besluit.
-- Gemini: ja — drie ronden. Eerste ronde: vier punten, één overgenomen (force-push op main), één weerlegd
+  gaat naar het GitHub-plan-besluit. Vijfde ronde (op de nieuwe laag zelf): één hoge bevinding — de
+  publieke telling zag geen volgorde — gerepareerd en gemeten; drie punten nagelopen en als grens
+  gedocumenteerd (§6e).
+- Gemini: ja — vier ronden. Eerste ronde: vier punten, één overgenomen (force-push op main), één weerlegd
   (typo). Fixronde: vier punten, waarvan drie samenvallen met Codex en overgenomen zijn; E1 weerlegd door
   meting. Besluitenronde: vier punten, waarvan er drie samenvallen met Codex (tekenverzameling te
   kort, hele-bestandscontrole, `fetch-depth`) en zijn overgenomen; het punt over rijen zonder
-  beginpipe is weerlegd door meting. Geen onenigheid tussen de twee, dus geen escalatie.
+  beginpipe is weerlegd door meting. Vierde ronde: geen echte bevinding; het ene punt (identieke
+  meldingen worden geblokkeerd) is nagemeten als bestaand gedrag van de bronlaag, geen regressie.
+  Geen onenigheid tussen de twee, dus geen escalatie.
 - Fable: ja — het besluit over ritme, "nooit onbekend" en het uitgestelde publieke alarm komt van
   Fable; de twee beslispunten hierboven gaan terug naar Fable.
 
