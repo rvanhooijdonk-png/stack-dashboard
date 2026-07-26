@@ -90,12 +90,23 @@ const TAB_PUBLIEK = /^[A-Z][A-Z0-9]*(?:[ -][A-Z0-9]+)*$/;
  * 26-07-2026). Ze worden daarom verwijderd vóór er gescand én vóór er getoond wordt: gescand
  * wordt precies wat er op de plaat komt.
  */
-const ONZICHTBAAR = new RegExp(
-  '[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u115F\\u1160'
+export const ONZICHTBARE_KLASSE = '[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u115F\\u1160'
   + '\\u17B4\\u17B5\\u180B-\\u180E\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u206F'
-  + '\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0]',
-  'g',
-);
+  + '\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0]';
+
+const ONZICHTBAAR = new RegExp(ONZICHTBARE_KLASSE, 'g');
+
+/**
+ * Dezelfde verzameling, als vraag in plaats van als schrapper — voor de schrijfkant (`spiegelwet.mjs`).
+ * Bewust hier en niet daar: de eerste versie van de spiegelwet had zijn eigen, veel kortere lijstje, en
+ * twee definities van "onzichtbaar" betekent dat de ene poort doorlaat wat de andere verwijdert
+ * (bevinding Codex, 26-07-2026). Eén bron, twee gebruiken.
+ *
+ * GEEN gedeelde regex met `g`: die onthoudt `lastIndex` tussen aanroepen en geeft dan om en om
+ * true en false op dezelfde invoer.
+ */
+const ONZICHTBAAR_EEN = new RegExp(ONZICHTBARE_KLASSE);
+export const bevatOnzichtbaar = (tekst) => ONZICHTBAAR_EEN.test(String(tekst ?? ''));
 
 /**
  * Normaliseer vrije tekst tot de vorm waarop we oordelen: NFKC (zodat breedbeeld-varianten van
@@ -247,7 +258,10 @@ function publiekeVorm(r) {
 
 /**
  * Reduceer de spiegel tot de publieke plaat-DTO: elke rij eerst door vorm- en publicatiepoort,
- * daarna de laatste vijftien die overbleven, nieuwste boven, en pas als laatste stap afgekapt.
+ * daarna de laatste vijftien die overbleven, nieuwste boven. Afkappen gebeurt sinds de spiegelwet de
+ * publieke rijen telt in `veiligePubliekeRijen`, dus vóór het knippen op vijftien in plaats van erna;
+ * dat verandert de uitkomst niet (`slice` telt posities, geen tekens) en houdt één definitie van "de
+ * publieke rij" over voor beide gebruikers.
  *
  * ÁLLE rijen worden getoetst, niet alleen de vijftien die in beeld komen. Andersom zou de teller
  * `ingehouden: 0` melden terwijl een oudere rij nooit langs de poort is geweest — een geruststelling
@@ -259,12 +273,18 @@ function publiekeVorm(r) {
  * toevoegen is), dus de laatste vijftien regels zijn per afspraak de laatste vijftien meldingen;
  * een venster dat een rij met een oudere tijd aanvult, hoort niet ineens bovenaan te springen.
  */
-export function toPublicKanaalpost(raw) {
-  const leeg = (reason, ingehouden = 0) => ({ available: false, reason, rows: [], ingehouden });
-  if (!raw || raw.available !== true || !Array.isArray(raw.rows)) {
-    return leeg(raw?.reason === 'LEEG' ? 'LEEG' : 'BRON_ONBEREIKBAAR');
-  }
-  const cap = (v, max) => (v.length > max ? `${v.slice(0, max - 1).trimEnd()}…` : v);
+const cap = (v, max) => (v.length > max ? `${v.slice(0, max - 1).trimEnd()}…` : v);
+
+/**
+ * Alle rijen die de publieke kant HERKENT, in bronvolgorde en zonder de limiet van vijftien: elke rij
+ * door vorm- en publicatiepoort, daarna afgekapt zoals hij op de plaat komt te staan.
+ *
+ * Apart van `toPublicKanaalpost`, en dat is de hele reden dat deze functie bestaat. De spiegelwet moet
+ * kunnen tellen wat de LEZER ziet, niet wat er in de brontekst staat, en zij mag daarbij niet op de
+ * laatste vijftien knippen — dan zou een rij die door normale veroudering uit beeld schuift als
+ * "verdwenen" gelden en de poort permanent rood staan.
+ */
+function veiligePubliekeRijen(raw) {
   const veilig = [];
   let ingehouden = 0;
   for (const r of raw.rows) {
@@ -273,15 +293,45 @@ export function toPublicKanaalpost(raw) {
       ingehouden += 1;
       continue;
     }
-    veilig.push(rij);
+    veilig.push({
+      tab: cap(rij.tab, MAX_TAB),
+      onderwerp: cap(rij.onderwerp, MAX_ONDERWERP),
+      status: cap(rij.status, MAX_STATUS),
+      actie: cap(rij.actie, MAX_ACTIE),
+      datum: cap(rij.datum, MAX_DATUM),
+    });
   }
-  const rows = veilig.slice(-KANAAL_RIJEN).reverse().map((rij) => ({
-    tab: cap(rij.tab, MAX_TAB),
-    onderwerp: cap(rij.onderwerp, MAX_ONDERWERP),
-    status: cap(rij.status, MAX_STATUS),
-    actie: cap(rij.actie, MAX_ACTIE),
-    datum: cap(rij.datum, MAX_DATUM),
-  }));
+  return { veilig, ingehouden };
+}
+
+/**
+ * De publieke rijen van een spiegelBESTAND, in bronvolgorde, ongelimiteerd. Dit is de vorm waarop de
+ * spiegelwet zijn oordeel baseert (zie `publiekeAfwijkingen` in `spiegelwet.mjs`).
+ *
+ * Waarom dit er is, met het tegenvoorbeeld erbij (bevinding Codex, 26-07-2026, hoog): de wet telde
+ * letterlijke brontekstregels. Zet iemand één LEGE regel vóór een bestaande rij, dan is er geen enkele
+ * regel verdwenen — en toch sluit die lege regel de tabel, waarna alles eronder niet meer gepubliceerd
+ * wordt. Andersom kan een rij die textueel verschilt (dubbele spatie, andere celopvulling) na
+ * normalisatie dezelfde publieke rij worden, en dan staat die rij twee keer op de plaat terwijl de
+ * duplicatentelling op brontekst niets ziet. Beide gaten sluiten alleen door te tellen wat hier
+ * uitkomt.
+ */
+export function publiekeRijenUitTekst(tekst) {
+  const raw = kanaalpostUitTekst(tekst);
+  if (raw.available !== true || !Array.isArray(raw.rows)) return { rijen: [], ingehouden: 0 };
+  const { veilig, ingehouden } = veiligePubliekeRijen(raw);
+  return { rijen: veilig, ingehouden };
+}
+
+export function toPublicKanaalpost(raw) {
+  const leeg = (reason, ingehouden = 0) => ({ available: false, reason, rows: [], ingehouden });
+  if (!raw || raw.available !== true || !Array.isArray(raw.rows)) {
+    return leeg(raw?.reason === 'LEEG' ? 'LEEG' : 'BRON_ONBEREIKBAAR');
+  }
+  const { veilig, ingehouden } = veiligePubliekeRijen(raw);
+  // Afkappen gebeurt in `veiligePubliekeRijen`, vóór het knippen op vijftien. Dat verandert niets aan
+  // de selectie — `slice` telt posities, geen tekens — en houdt één definitie van "de publieke rij".
+  const rows = veilig.slice(-KANAAL_RIJEN).reverse();
   if (!rows.length) return leeg(ingehouden ? 'INGEHOUDEN' : 'LEEG', ingehouden);
   return { available: true, reason: null, rows, ingehouden };
 }

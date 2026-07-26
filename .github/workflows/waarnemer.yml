@@ -1,0 +1,576 @@
+name: waarnemer
+
+# DE PLAAT BEWAAKT ZICHZELF.
+#
+# `publish.yml` bewijst dat een BOUW slaagde. Deze workflow bewijst iets anders: dat de PAGINA die
+# een bezoeker nu ophaalt ook klopt — bestaat, is vers genoeg, toont dezelfde laatste melding als de
+# bron, en heeft geen lege of kapotte blokken. Een geslaagde build naast een uren oude pagina is
+# precies de storing die niemand ziet; dit is de controle die haar wél ziet.
+#
+# Vier momenten:
+#  - na elke publicatie (workflow_run op `publish`), want dan hoort de plaat te zijn bijgewerkt;
+#  - op een klok, want een pagina kan ook oud worden zonder dat er iets draaide. Eén keer per uur,
+#    bewust niet vaker: in deze repo is gemeten (23-07-2026, vastgelegd in publish.yml) dat GitHub
+#    kwartiercrons hier in de praktijk overslaat. Een lage frequentie die wél vuurt is meer waard;
+#  - bij elke wijziging aan de waarnemer zelf, op welke tak dan ook — wie de bewaker verandert,
+#    laat de bewaker meteen draaien;
+#  - met de hand, met een sabotage-schakelaar voor het acceptatiebewijs.
+#
+# Een afwijking doet twee dingen tegelijk: de run wordt rood ÉN er komt een GEBLOKKEERD-regel in de
+# publieke spiegel. Alleen rood zijn is niet genoeg — dan staat het falen in een logboek dat niemand
+# opent, terwijl Richard naar de plaat kijkt.
+on:
+  workflow_run:
+    workflows: [publish]
+    types: [completed]
+  schedule:
+    - cron: '17 * * * *'
+  push:
+    paths:
+      - '.github/workflows/waarnemer.yml'
+      - 'scripts/waarnemer.mjs'
+      - 'scripts/lib/waarnemer.mjs'
+      - 'scripts/lib/spiegelwet.mjs'
+      - 'data/kanaalpost-publiek.md'
+  workflow_dispatch:
+    inputs:
+      sabotage:
+        description: 'Acceptatietest: forceer één toets te falen (stempel = drempel op nul).'
+        type: choice
+        options: [geen, stempel]
+        default: geen
+
+# Standaard niets; elke job krijgt hieronder precies wat hij nodig heeft.
+permissions: {}
+
+# Niet annuleren: een lopende ronde die net de spiegel aan het aanvullen is, mag niet halverwege
+# worden afgekapt.
+concurrency:
+  group: waarnemer
+  cancel-in-progress: false
+
+jobs:
+  toetsen:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      afwijking: ${{ steps.toets.outputs.afwijking }}
+      appenden: ${{ steps.toets.outputs.appenden }}
+      rij_b64: ${{ steps.toets.outputs.rij_b64 }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+
+      # De toetsende stap mag de run NIET zelf rood maken: dan zou de melding-job zijn uitkomsten
+      # niet betrouwbaar kunnen lezen. De poort onderaan maakt de run rood, ná het melden. Zo is de
+      # volgorde vast: eerst zichtbaar maken waar Richard kijkt, dan pas falen.
+      - id: toets
+        continue-on-error: true
+        env:
+          BASE_URL: https://rvanhooijdonk-png.github.io/stack-dashboard/
+          SPIEGEL_URL: https://raw.githubusercontent.com/rvanhooijdonk-png/stack-dashboard/main/data/kanaalpost-publiek.md
+          # Twee wegen naar de sabotagetest. Met de hand (workflow_dispatch) kan pas als deze
+          # workflow op de hoofdtak staat; daarvóór — en later ook nog — kan het met een commit die
+          # `[sabotage]` in zijn bericht draagt. Zo is het acceptatiebewijs op ELKE tak te herhalen,
+          # ook op de tak waarop de waarnemer wordt ingevoerd. Bewust zichtbaar en niet stiekem: de
+          # alarmregel die eruit komt zegt in de spiegel zelf dat hij een test is.
+          SABOTAGE: ${{ inputs.sabotage || (contains(github.event.head_commit.message || '', '[sabotage]') && 'stempel' || 'geen') }}
+        run: node scripts/waarnemer.mjs
+
+  # Falen hoort zichtbaar te zijn op de plek waar Richard kijkt. Deze job heeft als enige
+  # schrijfrechten, en doet als enige één ding: de al door de publicatiepoort gehaalde alarmregel
+  # onderaan de publieke spiegel zetten.
+  melden:
+    needs: toetsen
+    if: ${{ !cancelled() && needs.toetsen.outputs.afwijking == 'ja' && needs.toetsen.outputs.appenden == 'ja' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # Bewust GEEN `actions: write` hier: deze job haalt de repo op en voert er code uit. Zou hij
+      # ook workflows mogen starten, annuleren of uitzetten, dan zou iedereen met pushrecht op een
+      # tak dat recht in één push naar zich toe kunnen trekken. Het starten van een verse publicatie
+      # gebeurt daarom in `verversen`, hieronder, zonder checkout en alleen op de hoofdtak.
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.ref_name }}
+          # Volledige historie, net als in de `spiegelwet`-job hieronder. Deze job doet bij een botsing
+          # `git pull --rebase`, en een rebase in een ondiepe kloon kan het gemeenschappelijke punt
+          # missen; dan zou de alarmregel niet geschreven kunnen worden (bevinding Gemini, 26-07-2026).
+          fetch-depth: 0
+
+      - name: Alarmregel aan de publieke spiegel toevoegen
+        env:
+          RIJ_B64: ${{ needs.toetsen.outputs.rij_b64 }}
+          # `RUNNER_TEMP` en niet `/tmp`: dat laatste is een voorspelbaar pad in een map waar ook
+          # andere processen mogen schrijven, dus een vooraf gelegde symlink laat `cp` iets anders
+          # overschrijven, en op een self-hosted runner kunnen twee jobs elkaars snapshot pakken
+          # (Codex D, Gemini D). `RUNNER_TEMP` staat per job apart en wordt na de job opgeruimd.
+          SPIEGEL_VOOR: ${{ runner.temp }}/spiegel-voor.md
+        run: |
+          set -euo pipefail
+          if [ -z "${RIJ_B64:-}" ]; then
+            echo "::error::geen alarmregel doorgekregen van de toets-job — er wordt niets geschreven."
+            exit 1
+          fi
+          cp data/kanaalpost-publiek.md "$SPIEGEL_VOOR"
+          # Een append-only bestand moet op een regeleinde eindigen. Doet het dat niet, dan plakt deze
+          # rij achter de laatste rij aan: de gepubliceerde regel is dan HERSCHREVEN en de nieuwe melding
+          # staat er als aparte rij niet in — twee meldingen worden één rij (bevinding Gemini, 26-07-2026).
+          # De poort ziet dat overigens wél: `alleenAangevuld` telt de oude regel als verdwenen en de run
+          # gaat op slot (nagemeten Codex, 26-07-2026 — de eerdere toelichting hier beweerde het
+          # tegenovergestelde). Het gevolg is dus geen stille publicatie maar een geblokkeerd alarm, en
+          # een alarm dat niet geschreven kan worden is even stil. Vandaar dat het hier wordt rechtgezet
+          # in plaats van afgewacht. `$(tail -c1 ...)` is leeg als de laatste byte een regeleinde is —
+          # commandosubstitutie knipt afsluitende regeleindes weg.
+          if [ -s data/kanaalpost-publiek.md ] && [ -n "$(tail -c1 data/kanaalpost-publiek.md)" ]; then
+            echo "::warning::de spiegel eindigde niet op een regeleinde — eerst rechtgezet, anders had deze rij aan de vorige vastgeplakt."
+            printf '\n' >> data/kanaalpost-publiek.md
+          fi
+          printf '%s' "$RIJ_B64" | base64 -d >> data/kanaalpost-publiek.md
+          # En de eigen rij sluit óók af, zodat de volgende schrijver niet in dezelfde val loopt.
+          if [ -n "$(tail -c1 data/kanaalpost-publiek.md)" ]; then printf '\n' >> data/kanaalpost-publiek.md; fi
+          tail -1 data/kanaalpost-publiek.md
+          # Fail-closed: wat we net toevoegden moet ook echt als publieke rij terugkomen. Komt hij
+          # niet door de poort, dan draaien we de wijziging terug in plaats van een regel achter te
+          # laten die de plaat stilletjes weglaat.
+          node -e '
+            const { readFileSync } = require("node:fs");
+            const regel = Buffer.from(process.env.RIJ_B64, "base64").toString("utf8").trim();
+            import("./scripts/lib/kanaalpost.mjs")
+              .then(({ kanaalpostUitTekst, toPublicKanaalpost }) => {
+                const projecteer = (tekst) => toPublicKanaalpost(kanaalpostUitTekst(tekst));
+                const lees = (p) => projecteer(readFileSync(p, "utf8"));
+                const na = lees("data/kanaalpost-publiek.md");
+                const voor = lees(process.env.SPIEGEL_VOOR);
+                const bovenaan = na.rows?.[0];
+                // Wat DEZE regel publiek hoort te worden: dezelfde regel, in zijn eentje, door dezelfde
+                // poort. Geen eigen markdown-lezer en geen eigen sterretjes-stripper — wat de poort er
+                // van maakt is per definitie de juiste publieke vorm. De eerste versie hiervan zette het
+                // RUWE onderwerp (met `**vet**`) naast de GEPUBLICEERDE tekst, waar de poort die
+                // sterretjes juist uit haalt: die twee zijn nooit gelijk, dus die controle kon niet
+                // slagen en de alarmregel kon niet geschreven worden — gemeten 26-07-2026. De versie
+                // daarna liet onderwerp en actiehouder dan maar helemaal buiten de vergelijking, en dat
+                // maakte precies de gaten die Codex C en Gemini C aanwezen: een verminkt of leeg
+                // onderwerp, of `niemand` in plaats van `Richard of Fable`, kwam er ongezien door. Deze
+                // vorm vergelijkt alle vijf velden zonder ergens langs de publicatievorm heen te kijken.
+                const KOP = "| datum-tijd | tab-rol | onderwerp | status | actie voor |\n|---|---|---|---|---|\n";
+                const verwacht = projecteer(KOP + regel + "\n").rows?.[0];
+                const vorm = (r) => (r ? JSON.stringify([r.datum, r.tab, r.onderwerp, r.status, r.actie]) : null);
+                const laatsteBronregel = readFileSync("data/kanaalpost-publiek.md", "utf8")
+                  .split("\n").map((r) => r.trim()).filter(Boolean).pop();
+                const eisen = {
+                  poort_open: na.available,
+                  regel_staat_onderaan: laatsteBronregel === regel,
+                  // Slaagt deze niet, dan is de regel geen geldige vijfkolomsrij — dat vangt ook de
+                  // misvormde-kolommen en escape-pariteit-gevallen die Codex E noemde, zonder zelf
+                  // op pipes te splitsen.
+                  regel_is_publiceerbaar: Boolean(verwacht),
+                  rij_is_waarnemer_alarm: verwacht?.tab === "WAARNEMER" && verwacht?.status === "GEBLOKKEERD",
+                  rij_klopt_veld_voor_veld: Boolean(verwacht) && vorm(bovenaan) === vorm(verwacht),
+                  bovenste_rij_is_nieuw: vorm(bovenaan) !== vorm(voor.rows?.[0]),
+                };
+                const gezakt = Object.entries(eisen).filter(([, v]) => !v).map(([k]) => k);
+                if (gezakt.length) {
+                  console.error(`::error::de zojuist toegevoegde alarmregel komt niet als bovenste publieke rij terug (${gezakt.join(", ")}).`);
+                  process.exit(1);
+                }
+                console.log("alarmregel staat bovenaan de publieke stand.");
+              }).catch((e) => { console.error(`::error::poortcontrole mislukt: ${e.message}`); process.exit(1); });
+          '
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/kanaalpost-publiek.md
+          git commit -m 'chore(waarnemer): automatische GEBLOKKEERD-melding — de plaat wijkt af van de bron'
+          # DE SPIEGELWET GELDT OOK VOOR DE WAARNEMER ZELF (besluit Fable, 26-07-2026, punt 2). Een push
+          # met GITHUB_TOKEN start geen workflow, dus de `spiegelwet`-job draait NIET op deze commit —
+          # precies de schrijfactie van de bewaker zou daarmee buiten de poort vallen. Geen uitzondering
+          # dus: dezelfde wet, hier in de job zelf, vóór elke push en opnieuw na elke herplaatsing.
+          #
+          # DRIE toetsen, en de eerste is de belangrijkste. Alleen tegen `HEAD~1` meten is na een rebase
+          # de VERKEERDE basis: zou de tak intussen een regel kwijtgeraakt zijn, dan is die verdwijning
+          # al in de nieuwe voorganger verwerkt en houdt de bot zich er keurig aan — en publiceert
+          # vervolgens die verminkte stand, zonder dat er nog een spiegelwet-run op volgt (bevinding
+          # Codex, 26-07-2026, hoog). Daarom óók tegen de stand waarvan deze job vertrok, en daarom een
+          # aparte controle dat de alarmregel zelf de rebase heeft overleefd.
+          spiegelwet() {
+            node -e '
+              const { execFileSync } = require("node:child_process");
+              const { readFileSync } = require("node:fs");
+              // Zonder ruime `maxBuffer` loopt een append-only bestand ooit tegen de standaardgrens van
+              // ~1 MiB en stopt de bewaker (bevinding Codex). Fail-closed, maar onnodig.
+              const lees = (rev) => execFileSync("git", ["show", `${rev}:data/kanaalpost-publiek.md`], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+              const regel = Buffer.from(process.env.RIJ_B64, "base64").toString("utf8").trim();
+              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld, nietCanoniekeRegels, nieuweNietCanoniekeRegels, nieuweDuplicaten, publiekeAfwijkingen }) => {
+                const nu = lees("HEAD");
+                const vertrek = readFileSync(process.env.SPIEGEL_VOOR, "utf8");
+                for (const [wat, oud] of [["de stand waarvan deze job vertrok", vertrek], ["de voorganger van deze commit", lees("HEAD~1")]]) {
+                  const r = alleenAangevuld(oud, nu);
+                  if (!r.ok) {
+                    console.error(`::error::t.o.v. ${wat} zouden ${r.verdwenen} regel(s) verdwijnen — de waarnemer publiceert dat niet.`);
+                    process.exit(1);
+                  }
+                  // De andere helft van dezelfde wet: er mag ook niets stilletjes DUBBEL bij komen. Een
+                  // botsing die met `git pull --rebase` wordt opgelost zet de eigen rij er anders een
+                  // tweede keer bij, en "niets verdwenen" is dan nog steeds waar (bevinding Codex).
+                  const dubbel = nieuweDuplicaten(oud, nu);
+                  if (dubbel.length) {
+                    console.error(`::error::t.o.v. ${wat} komt/komen ${dubbel.length} regel(s) dubbel in de spiegel: ${dubbel.map((d) => `regel ${d.regel} (${d.aantal}x, mocht ${d.toegestaan}x)`).join("; ")}.`);
+                    process.exit(1);
+                  }
+                  // En dezelfde wet nog eens, geteld op de rijen die de publieke kant eruit haalt. De
+                  // bot lost een botsing op met `git pull --rebase`; komt daar een lege regel of een
+                  // tweede kop middenin de tabel uit, dan is er geen brontekstregel verdwenen en toch
+                  // de halve plaat (bevinding Codex, 26-07-2026, hoog). Hier geen zachte variant: deze
+                  // job schrijft naar de tak die gepubliceerd wordt. Wat hier bewaakt wordt is de
+                  // rij-identiteit en hun onderlinge volgorde — niet elke denkbare verandering aan de
+                  // publieke uitkomst; zie de begrenzing in het rapport.
+                  const p = publiekeAfwijkingen(oud, nu);
+                  if (p.onleesbaar) {
+                    console.error(`::error::t.o.v. ${wat} levert de publieke lezing geen enkele rij op terwijl de spiegel wel rijen bevat — de toets heeft niets gemeten en dat is rood.`);
+                    process.exit(1);
+                  }
+                  if (!p.ok) {
+                    // Alleen de volgorde noemen als er niets verdwijnt: een verdwenen rij laat de
+                    // deelrij-toets per definitie ook vallen, en dan zou de melding twee dingen
+                    // beweren waarvan er één niet gemeten is (bevinding Gemini, 26-07-2026).
+                    const volgorde = p.verdwenen === 0 && !p.volgordeOk
+                      ? `, de onderlinge volgorde is gewijzigd (de ${p.eerste}e rij van ${wat} komt niet meer op zijn plaats terug)` : "";
+                    console.error(`::error::t.o.v. ${wat} verandert de publieke lezing van de spiegel: ${p.verdwenen} rij(en) komen er niet meer uit${p.dubbel.length ? `, ${p.dubbel.length} rij(en) dubbel` : ""}${volgorde} — de waarnemer publiceert dat niet.`);
+                    process.exit(1);
+                  }
+                }
+                // Een rebase kan de eigen commit laten vallen. Dan zou de job groen doorlopen en een
+                // stand pushen zonder alarm — het alarm is dan stil, en stil is precies wat niet mag.
+                if (!nu.split("\n").map((r) => r.trim()).includes(regel)) {
+                  console.error("::error::de alarmregel staat na het herplaatsen niet meer in de spiegel — geweigerd.");
+                  process.exit(1);
+                }
+                const vuilNieuw = nieuweNietCanoniekeRegels(vertrek, nu);
+                if (vuilNieuw.length) {
+                  console.error(`::error::niet-canonieke NIEUWE regel(s) in de spiegel: ${vuilNieuw.map((v) => `regel ${v.regel} (${v.tekens.join(" ")})`).join("; ")}.`);
+                  process.exit(1);
+                }
+                const oudVuil = nietCanoniekeRegels(nu).length - vuilNieuw.length;
+                if (oudVuil > 0) console.log(`::warning::${oudVuil} bestaande regel(s) in de spiegel zijn niet canoniek; die blokkeren niet, maar horen opgeruimd te worden.`);
+                console.log("spiegelwet op de eigen commit: niets verdwenen, alarm aanwezig, vorm canoniek.");
+                process.exit(0);
+              }).catch((e) => { console.error(`::error::spiegelwet niet te draaien: ${e.message}`); process.exit(1); });
+            '
+          }
+          spiegelwet
+          # Een gelijktijdige push mag deze melding niet laten verdampen: opnieuw ophalen, erbovenop
+          # zetten, nog eens proberen. Na het herplaatsen staat er een ANDERE voorganger onder de commit,
+          # dus de wet wordt opnieuw getoetst — anders zou een herplaatsing de poort omzeilen. Na de
+          # LAATSTE mislukte poging niet meer herplaatsen: daar komt geen push meer achteraan.
+          for poging in 1 2 3; do
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then exit 0; fi
+            if [ "${poging}" = 3 ]; then break; fi
+            echo "push-poging ${poging} mislukt — opnieuw ophalen en herplaatsen"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            spiegelwet
+          done
+          echo "::error::de alarmregel kon niet naar de tak worden geschreven."
+          exit 1
+
+  # Losse job met precies één recht en geen repo-code: een push met GITHUB_TOKEN start zelf geen
+  # workflow, dus zonder deze zet zou de alarmregel pas bij de volgende bouw op de plaat verschijnen.
+  verversen:
+    needs: melden
+    if: ${{ needs.melden.result == 'success' && github.ref_name == 'main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Verse publicatie starten zodat de melding op de plaat komt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run publish.yml --ref main
+
+  # DE SPIEGELWET. Op 26-07-2026 heeft de waarnemer een GEBLOKKEERD-regel in de publieke spiegel
+  # gezet en heb ik die bij het opruimen weggehaald (commit 211faaf, één regel `-`). De spiegel is
+  # append-only; dat was dus een overtreding, hersteld met de regel teruggezet plus een correctie
+  # eronder. Deze job zorgt dat de volgende keer niet van oplettendheid afhangt: vergelijken gebeurt
+  # met de versie op het AFTAKPUNT, niet met de top van main — een tak die achterloopt mist regels
+  # zonder ze te hebben weggehaald, en dat is geen overtreding.
+  spiegelwet:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+      # TWEE vergelijkingen, want één is aantoonbaar niet genoeg. Mijn eigen overtreding zat binnen
+      # één tak: de bot voegde de regel toe (push 1), ik haalde hem weg (push 2). Tegen het aftakpunt
+      # gemeten is er dan niets verdwenen — die controle had mij dus niet gevangen. Daarom eerst de
+      # vergelijking met de VORIGE stand van deze tak (`before`), die precies dat geval ziet, en
+      # daarnaast het aftakpunt, dat een tak vangt die met opzet regels van main weglaat.
+      - name: De publieke spiegel is alleen aangevuld, nooit gewijzigd
+        env:
+          VOOR: ${{ github.event.before }}
+          # Zie de toelichting bij `SPIEGEL_VOOR` in de melden-job: een voorspelbaar pad in `/tmp`
+          # is symlink-gevoelig en op een self-hosted runner deelbaar tussen jobs.
+          SPIEGEL_OUD: ${{ runner.temp }}/spiegel-oud.md
+        run: |
+          set -uo pipefail
+          # GitHub start deze stap als `bash -e`. Dat betekent dat ELK kaal commando met een
+          # exitcode ≠ 0 de stap ter plekke doodt — zonder melding, midden in de controle. Precies dat
+          # gebeurde met `git merge-base --is-ancestor` (exitcode 1 = "geen voorouder", een normale
+          # uitkomst): de hele herschreven-tak-route was in CI dode code en de run stierf zwijgend
+          # rood (gemeten: run 30208787315, exit 1, nul regels uitvoer). Rood is de juiste kant om op
+          # te falen, maar zwijgend falen is precies wat deze wet elders verbiedt. Vandaar deze val:
+          # eindigt de stap onverwacht, dan zegt hij dat tenminste.
+          trap 'code=$?; if [ "${code}" -ne 0 ] && [ "${netjes:-0}" -ne 1 ]; then echo "::error::de spiegelwet-stap stopte onverwacht met exitcode ${code} — er is dus niets afgetoetst, en dat is rood."; fi' EXIT
+          netjes=0
+          leeg=0000000000000000000000000000000000000000
+          toets() { # $1 = commit, $2 = omschrijving, $3 = "zacht" → verdwenen regels zijn een waarschuwing
+            # Onderscheid maken tussen "bestond nog niet" en "kon niet gelezen worden". Alles op één
+            # hoop gooien zou een leesfout als een lege oude spiegel behandelen, en dan is elke
+            # verwijdering ineens toegestaan (bevinding Codex, 26-07-2026).
+            if git cat-file -e "$1:data/kanaalpost-publiek.md" 2>/dev/null; then
+              if ! git show "$1:data/kanaalpost-publiek.md" > "$SPIEGEL_OUD"; then
+                echo "::error::de spiegel van $2 is niet te lezen — dat is rood, niet leeg."
+                return 1
+              fi
+            else
+              echo "$2: de spiegel bestond daar nog niet."
+              : > "$SPIEGEL_OUD"
+            fi
+            OUD="$SPIEGEL_OUD" WAT="$2" ZACHT="${3:-}" node -e '
+              const { readFileSync } = require("node:fs");
+              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld, nieuweDuplicaten, publiekeAfwijkingen }) => {
+                const oud = readFileSync(process.env.OUD, "utf8");
+                const nu = readFileSync("data/kanaalpost-publiek.md", "utf8");
+                const r = alleenAangevuld(oud, nu);
+                if (!r.ok) {
+                  // `zacht` bestaat voor precies één geval: een tak die herschreven is (rebase). Wat main
+                  // al publiceerde wordt dáár apart en hard getoetst; deze melding gaat over regels die
+                  // alleen als voorstel op de tak stonden. Zie de toelichting bij de aanroep.
+                  const hard = process.env.ZACHT !== "zacht";
+                  console[hard ? "error" : "log"](`::${hard ? "error" : "warning"}::append-only ${hard ? "overtreden" : "afwijking"} t.o.v. ${process.env.WAT}: ${r.verdwenen} regel(s) verdwenen, vanaf regel ${r.eerste}. ${hard ? "Zet terug wat er stond en schrijf de correctie eronder." : "Herschreven tak — controleer in de PR of dit alleen taktekst betreft."}`);
+                  if (hard) process.exit(1);
+                }
+                // De andere helft van dezelfde wet: net zo min als een regel mag verdwijnen, mag er een
+                // stilletjes DUBBEL bij komen. Een samenvoeging of rebase van dit bestand levert dat op,
+                // en "niets verdwenen" blijft dan waar — de plaat zou de melding twee keer laten zien
+                // en niemand ziet waaróm (bevinding Codex, 26-07-2026).
+                const dubbel = nieuweDuplicaten(oud, nu);
+                if (dubbel.length) {
+                  console.error(`::error::t.o.v. ${process.env.WAT} staat/staan ${dubbel.length} regel(s) dubbel in de spiegel: ${dubbel.map((d) => `regel ${d.regel} (${d.aantal}x, mocht ${d.toegestaan}x)`).join("; ")}. Eén rij, één keer; een rechtzetting krijgt haar eigen tekst.`);
+                  process.exit(1);
+                }
+                // DE DERDE LAAG: tellen wat de LEZER krijgt, niet wat er in de brontekst staat. De twee
+                // controles hierboven bewijzen behoud van letterlijke regels, en dat is niet hetzelfde:
+                // één lege regel middenin de tabel laat geen enkele regel verdwijnen en sluit toch de
+                // tabel, waarna alles eronder ongepubliceerd blijft; en een rij die alleen in celopvulling
+                // verschilt is als brontekst nieuw maar als publieke rij een duplicaat (bevinding Codex,
+                // 26-07-2026, hoog, met twee tegenvoorbeelden). Een NIEUW dubbel exemplaar is hier altijd
+                // hard, ook op een herschreven tak; wat er al dubbel stond blijft toegestaan.
+                const p = publiekeAfwijkingen(oud, nu);
+                const hardP = process.env.ZACHT !== "zacht";
+                // Leest de parser niets terwijl er wel rijen staan, dan heeft deze hele laag niets
+                // gemeten. Altijd hard, ook op een herschreven tak: dit is een meetfout, geen afwijking.
+                if (p.onleesbaar) {
+                  console.error(`::error::t.o.v. ${process.env.WAT} levert de publieke lezing geen enkele rij op terwijl de spiegel wel rijen bevat — een toets die niets meet is rood.`);
+                  process.exit(1);
+                }
+                if (p.dubbel.length) {
+                  // "In de publieke lezing", niet "op de plaat": de telling loopt over ALLE herkende
+                  // rijen, ook die door aangroei buiten het venster van vijftien zijn geschoven. Dat is
+                  // bewust — het bestand is het verslag, de plaat is er het venster op — maar dan moet
+                  // de melding dat ook zeggen (preciezering Codex, 26-07-2026).
+                  console.error(`::error::t.o.v. ${process.env.WAT} komt/komen ${p.dubbel.length} PUBLIEKE rij(en) dubbel in de publieke lezing van de spiegel: ${p.dubbel.map((d) => `de ${d.rij}e herkende rij (${d.aantal}x, mocht ${d.toegestaan}x)`).join("; ")}. Twee brontekstregels kunnen tot dezelfde publieke rij normaliseren.`);
+                  process.exit(1);
+                }
+                if (p.verdwenen > 0) {
+                  console[hardP ? "error" : "log"](`::${hardP ? "error" : "warning"}::${hardP ? "de publieke lezing verliest rijen t.o.v." : "afwijking t.o.v."} ${process.env.WAT}: ${p.verdwenen} rij(en) die de publieke kant eerder herkende komen er niet meer uit, terwijl de brontekst ${r.ok ? "compleet is" : "ook al afwijkt"}. Kijk naar lege regels, koppen of scheidingsregels middenin de tabel.`);
+                  if (hardP) process.exit(1);
+                }
+                // En de volgorde, hier wél hard. De plaat toont de laatste vijftien rijen omgedraaid, dus
+                // herschikken zonder iets weg te halen haalt de bovenste melding van de plaat af en zet
+                // een oude terug — zonder dat een telling iets ziet (bevinding Codex, met tegenvoorbeeld).
+                // De eis is de merge-bestendige variant: oude rijen mogen uit elkaar geschoven worden,
+                // niet door elkaar gehusseld.
+                else if (!p.volgordeOk) {
+                  console[hardP ? "error" : "log"](`::${hardP ? "error" : "warning"}::${process.env.WAT}: er is publiek niets verdwenen, maar de onderlinge VOLGORDE van de bestaande rijen is veranderd: de ${p.eerste}e rij van ${process.env.WAT} komt niet meer op zijn plaats in de reeks terug. De plaat toont de laatste vijftien omgedraaid, dus dit verandert wat er in beeld staat.`);
+                  if (hardP) process.exit(1);
+                }
+                // Deze twee slotregels alleen als er ook niets verdwenen is. Anders sloot een zachte
+                // melding af met "niets verdwenen" pal onder "1 regel verdwenen" — twee uitspraken over
+                // dezelfde meting, waarvan één onwaar (gemeten in de lokale proef, 26-07-2026).
+                if (r.ok && !r.opOrde) console.log(`::warning::${process.env.WAT}: niets verdwenen, maar de volgorde wijkt af vanaf regel ${r.eerste} (samenvoeging?).`);
+                // Bij een zachte melding NIET beweren dat de regels "herschreven" zijn: gemeten is dat ze
+                // niet meer voorkomen, niet dat er een vervanger voor in de plaats kwam (preciezering
+                // Codex, 26-07-2026). De meting benoemen, niet de vermoedelijke oorzaak.
+                // `p.aantal` is het aantal HERKENDE rijen over het hele bestand, niet wat er in beeld
+                // staat: de plaat toont er hoogstens vijftien. Dat stond er eerst wel, en was onwaar
+                // (preciezering Codex, 26-07-2026).
+                console.log(`${process.env.WAT}: ${r.ok ? "geen regel verdwenen" : `${r.verdwenen} regel(s) niet teruggevonden, toegelaten omdat de tak herschreven is`}, geen regel dubbel, ${p.aantal} rij(en) publiek herkend (de plaat toont er hoogstens 15).`);
+                process.exit(0);
+              }).catch(() => { console.error("::error::spiegelwet niet te laden — dat is rood."); process.exit(1); });
+            '
+          }
+          fout=0
+          # Main moet hier bekend zijn, anders vergelijkt alles hieronder met niets: `toets` zou een
+          # onbekende commit als "de spiegel bestond daar nog niet" behandelen en dan is elke verwijdering
+          # ineens toegestaan. Dus eerst ophalen, en anders rood.
+          if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+            git fetch --no-tags origin main:refs/remotes/origin/main 2>/dev/null || true
+          fi
+          if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+            echo "::error::main is in deze kloon niet bekend — er is niets om de spiegel tegen te houden, dus rood."
+            exit 1
+          fi
+          # De vorige stand is de belangrijkste van de twee vergelijkingen, dus wordt er ook echt moeite
+          # voor gedaan: staat `before` niet in de kloon (na een samenvoeging op main wijst hij naar een
+          # commit die niet in de eerstevoorouderlijn van deze tak ligt), dan halen we hem eerst apart op.
+          # Het oude gedrag liet dat geval stil door met alleen de aftakpunt-toets, en juist de overtreding
+          # die deze wet aanleiding gaf — toevoegen in push 1, weghalen in push 2 binnen één tak — is tegen
+          # het aftakpunt onzichtbaar. Fail-open op de scherpste toets dus (bevinding Codex, 26-07-2026, hoog).
+          heeft_voor() { git cat-file -e "${VOOR}^{commit}" 2>/dev/null; }
+          if [ -z "${VOOR:-}" ] || [ "${VOOR}" = "${leeg}" ]; then
+            # Geen `before` in de gebeurtenis: een verse tak, of een gebeurtenissoort die er geen heeft
+            # (schedule, workflow_run, handmatig). Dan bestaat er niets om tegen te meten.
+            if [ "${GITHUB_REF_NAME}" = "main" ] && [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+              echo "::error::een push op main zonder bruikbare vorige stand is een force-push of herschreven historie — niet te beoordelen, dus rood."
+              fout=1
+            else
+              echo "geen vorige stand in de gebeurtenis (${GITHUB_EVENT_NAME}, nieuwe tak of force-push) — alleen tegen het aftakpunt getoetst."
+            fi
+          else
+            if ! heeft_voor; then
+              echo "de vorige stand ${VOOR} zit niet in de kloon — apart ophalen."
+              git fetch --no-tags --depth=1 origin "${VOOR}" 2>/dev/null \
+                || git fetch --no-tags origin "${VOOR}" 2>/dev/null \
+                || true
+            fi
+            # `--is-ancestor` kent DRIE uitkomsten, en die op twee hopen gooien is precies de fout die
+            # deze wet elders bestrijdt: 0 = voorouder, 1 = geen voorouder, alles daarboven = git kon de
+            # vraag niet beantwoorden (kapot object, onvolledige kloon). Dat laatste als "geen voorouder"
+            # lezen zou een meetfout stilletjes tot de zachte tak-route promoveren (bevinding Codex,
+            # 26-07-2026). Een toets die niets kon zeggen is rood.
+            # De exitcode moet door een `if` opgevangen worden; kaal laten staan doodt de stap onder
+            # `bash -e` zodra het antwoord "geen voorouder" is (gemeten, zie de val bovenaan).
+            ANC=""
+            if heeft_voor; then
+              if git merge-base --is-ancestor "${VOOR}" HEAD 2>/dev/null; then ANC=0; else ANC=$?; fi
+            fi
+            if [ "${ANC}" = "0" ]; then
+              # Het gewone geval: de vorige stand ligt in de historie van deze stand. Volle, harde toets.
+              toets "${VOOR}" "de vorige stand van deze tak" || fout=1
+            elif [ -n "${ANC}" ] && [ "${ANC}" != "1" ]; then
+              echo "::error::git kon niet vaststellen of ${VOOR} in de historie van deze stand ligt (exitcode ${ANC}) — een toets die niets zegt is rood."
+              fout=1
+            elif [ "${ANC}" = "1" ] && [ "${GITHUB_REF_NAME}" = "main" ]; then
+              # De vorige stand van main ligt NIET in haar eigen historie: main is herschreven. Dat is de
+              # aanval waar deze wet over gaat, en op main bestaat er geen goede reden voor. Rood.
+              echo "::error::main is herschreven — ${VOOR} ligt niet in de historie van deze stand. Een gepubliceerde regel kan zo verdwijnen zonder dat er iets aan het bestand te zien is."
+              fout=1
+            elif [ "${ANC}" = "1" ]; then
+              # Een herschreven TAK (rebase, force-push) is wel legitiem: een voorstel mag herwoord worden,
+              # en deze ronde is daar het bewijs van — de foute tussenstap die een gepubliceerde regel
+              # weghaalde is er juist uit gehaald. Alleen: "voorstel" is geen vrijbrief. Wat main al
+              # publiceerde wordt daarom hard tegen main zelf getoetst (sterker dan het aftakpunt, want
+              # main groeit door), en de takeigen herwoording komt als waarschuwing in het log te staan.
+              echo "::warning::deze tak is herschreven (rebase of force-push): ${VOOR} ligt niet in haar historie. Regels die main al publiceerde worden hieronder hard getoetst."
+              toets "${VOOR}" "de herschreven vorige stand van deze tak" zacht || fout=1
+              toets "origin/main" "de huidige stand van main (harde eis bij een herschreven tak)" || fout=1
+            else
+              # Wél een `before` opgegeven, en tóch niet te lezen. Dat is geen onschuldig geval: de
+              # scherpste van de twee toetsen kan hier geen uitspraak doen, en een toets die niets zegt
+              # is rood — op elke tak, niet alleen op main.
+              echo "::error::de opgegeven vorige stand ${VOOR} is niet op te halen; deze tak kan niet tegen haar eigen vorige stand beoordeeld worden — dus rood."
+              fout=1
+            fi
+          fi
+          BASIS="$(git merge-base HEAD origin/main || true)"
+          if [ -z "${BASIS}" ]; then
+            echo "::error::geen gemeenschappelijk aftakpunt met main gevonden — niet te beoordelen, dus rood."
+            exit 1
+          fi
+          toets "${BASIS}" "het aftakpunt met main" || fout=1
+          # DE SCHRIJFKANT (besluit Fable, 26-07-2026, punt 3). De leeskant mag normaliseren om te kunnen
+          # vergelijken; de spiegel zelf houdt één vorm aan, zodat er geen twee schrijfwijzen van dezelfde
+          # regel kunnen bestaan die de leeskant later gelijk noemt.
+          #
+          # HARD op wat deze tak NIEUW toevoegt, WAARSCHUWING op wat er al stond. Een harde eis op het
+          # hele bestand klinkt strenger maar slaat de deur dicht: append-only verbiedt een vuile
+          # historische regel te herstellen, dus die ene regel zou élke volgende commit rood houden —
+          # ook van iemand die de spiegel niet aanraakt (Codex D, Gemini D, onafhankelijk). De vorm-eis
+          # gaat over schrijven, dus toetst hij wat er geschreven wordt. `$SPIEGEL_OUD` bevat hier de
+          # stand van het aftakpunt, van de laatste `toets` hierboven. Nulmeting bij invoering: alle 44
+          # tabelregels voldeden al, dus deze eis legt niets recht met terugwerkende kracht.
+          OUD="$SPIEGEL_OUD" node -e '
+            const { readFileSync } = require("node:fs");
+            import("./scripts/lib/spiegelwet.mjs").then(({ nietCanoniekeRegels, nieuweNietCanoniekeRegels }) => {
+              const nu = readFileSync("data/kanaalpost-publiek.md", "utf8");
+              const oud = readFileSync(process.env.OUD, "utf8");
+              const nieuw = nieuweNietCanoniekeRegels(oud, nu);
+              const bestaand = nietCanoniekeRegels(nu).length - nieuw.length;
+              if (bestaand > 0) console.log(`::warning::${bestaand} regel(s) die er al stonden zijn niet canoniek; die blokkeren niet, maar horen opgeruimd te worden.`);
+              if (nieuw.length) {
+                console.error(`::error::de spiegel eist één canonieke vorm; nieuw en niet-canoniek: ${nieuw.map((v) => `regel ${v.regel} (${v.tekens.join(" ")})`).join("; ")}. Schrijf gewone tekens (bijvoorbeeld ... in plaats van het afkap-teken) en geen onzichtbare tekens.`);
+                process.exit(1);
+              }
+              console.log(`canonieke vorm van de nieuwe regels: in orde.`);
+              process.exit(0);
+            }).catch((e) => { console.error(`::error::vormcontrole niet te draaien: ${e.message}`); process.exit(1); });
+          ' || fout=1
+          # Hier eindigt de stap zoals bedoeld — met een oordeel dat hierboven al is uitgeschreven.
+          # De val hoeft er dan niets meer bovenop te zeggen.
+          netjes=1
+          exit "${fout}"
+
+  # De run is pas rood NA het melden. Deze poort bestaat apart zodat "zichtbaar maken" en "falen"
+  # niet om dezelfde exitcode hoeven te vechten.
+  poort:
+    needs: [toetsen, melden, spiegelwet]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      # De spiegelwet hangt hieronder, niet ernaast: wordt ooit alleen `poort` als vereiste controle
+      # ingesteld, dan zou een rode spiegelwet naast een groene poort onzichtbaar blijven (bevinding
+      # Codex, 26-07-2026). `skipped` is hier geen fout — de job draait alleen op push.
+      - name: Spiegelwet meenemen
+        env:
+          SPIEGELWET: ${{ needs.spiegelwet.result }}
+        run: |
+          set -uo pipefail
+          case "${SPIEGELWET:-}" in
+            success|skipped) echo "spiegelwet: ${SPIEGELWET:-leeg}" ;;
+            *) echo "::error::de spiegelwet-controle is niet geslaagd (${SPIEGELWET:-leeg})."; exit 1 ;;
+          esac
+      - name: Afwijking = rode run
+        env:
+          AFWIJKING: ${{ needs.toetsen.outputs.afwijking }}
+          GEMELD: ${{ needs.melden.result }}
+        run: |
+          set -uo pipefail
+          if [ "${AFWIJKING:-}" = "nee" ]; then
+            echo "✓ de openbare plaat komt overeen met de bron."
+            exit 0
+          fi
+          if [ "${AFWIJKING:-}" = "ja" ]; then
+            echo "::error::de openbare plaat wijkt af van de bron (spiegelmelding: ${GEMELD})."
+            exit 1
+          fi
+          echo "::error::de waarnemer heeft geen uitkomst opgeleverd — dat is zelf een afwijking."
+          exit 1
+
+# ACCEPTATIE — het bewijs dat deze bewaker echt bijt.
+# Een bewaker die nooit heeft gepiept is niet bewezen stil, alleen ongetest. Daarom is de
+# sabotagetest onderdeel van dit bestand en niet van een eenmalig verslag: zet `[sabotage]` in een
+# commit-bericht dat een van de waarnemer-bestanden raakt (of kies `stempel` bij een handmatige
+# start), en de stempeltoets krijgt drempel nul. Verwachte uitkomst: rode run, plus één
+# GEBLOKKEERD-regel in de publieke spiegel die er zelf bij zegt dat hij een test is. Herhaalbaar,
+# op elke tak, ook lang nadat iedereen deze PR vergeten is.
