@@ -118,10 +118,14 @@ jobs:
           fi
           cp data/kanaalpost-publiek.md "$SPIEGEL_VOOR"
           # Een append-only bestand moet op een regeleinde eindigen. Doet het dat niet, dan plakt deze
-          # rij achter de laatste rij aan: die gepubliceerde regel is dan stilletjes HERSCHREVEN en de
-          # nieuwe melding is er als aparte rij niet, terwijl het regelaantal gelijk blijft en geen van
-          # beide poorten iets ziet vertrekken (bevinding Gemini, 26-07-2026). `$(tail -c1 ...)` is leeg
-          # als de laatste byte een regeleinde is — commandosubstitutie knipt afsluitende regeleindes weg.
+          # rij achter de laatste rij aan: de gepubliceerde regel is dan HERSCHREVEN en de nieuwe melding
+          # staat er als aparte rij niet in — twee meldingen worden één rij (bevinding Gemini, 26-07-2026).
+          # De poort ziet dat overigens wél: `alleenAangevuld` telt de oude regel als verdwenen en de run
+          # gaat op slot (nagemeten Codex, 26-07-2026 — de eerdere toelichting hier beweerde het
+          # tegenovergestelde). Het gevolg is dus geen stille publicatie maar een geblokkeerd alarm, en
+          # een alarm dat niet geschreven kan worden is even stil. Vandaar dat het hier wordt rechtgezet
+          # in plaats van afgewacht. `$(tail -c1 ...)` is leeg als de laatste byte een regeleinde is —
+          # commandosubstitutie knipt afsluitende regeleindes weg.
           if [ -s data/kanaalpost-publiek.md ] && [ -n "$(tail -c1 data/kanaalpost-publiek.md)" ]; then
             echo "::warning::de spiegel eindigde niet op een regeleinde — eerst rechtgezet, anders had deze rij aan de vorige vastgeplakt."
             printf '\n' >> data/kanaalpost-publiek.md
@@ -200,7 +204,7 @@ jobs:
               // ~1 MiB en stopt de bewaker (bevinding Codex). Fail-closed, maar onnodig.
               const lees = (rev) => execFileSync("git", ["show", `${rev}:data/kanaalpost-publiek.md`], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
               const regel = Buffer.from(process.env.RIJ_B64, "base64").toString("utf8").trim();
-              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld, nietCanoniekeRegels, nieuweNietCanoniekeRegels, nieuweDuplicaten }) => {
+              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld, nietCanoniekeRegels, nieuweNietCanoniekeRegels, nieuweDuplicaten, publiekeAfwijkingen }) => {
                 const nu = lees("HEAD");
                 const vertrek = readFileSync(process.env.SPIEGEL_VOOR, "utf8");
                 for (const [wat, oud] of [["de stand waarvan deze job vertrok", vertrek], ["de voorganger van deze commit", lees("HEAD~1")]]) {
@@ -215,6 +219,16 @@ jobs:
                   const dubbel = nieuweDuplicaten(oud, nu);
                   if (dubbel.length) {
                     console.error(`::error::t.o.v. ${wat} komt/komen ${dubbel.length} regel(s) dubbel in de spiegel: ${dubbel.map((d) => `regel ${d.regel} (${d.aantal}x, mocht ${d.toegestaan}x)`).join("; ")}.`);
+                    process.exit(1);
+                  }
+                  // En dezelfde wet nog eens, geteld op de rijen die de publieke kant eruit haalt. De
+                  // bot lost een botsing op met `git pull --rebase`; komt daar een lege regel of een
+                  // tweede kop middenin de tabel uit, dan is er geen brontekstregel verdwenen en toch
+                  // de halve plaat (bevinding Codex, 26-07-2026, hoog). Hier geen zachte variant: deze
+                  // job schrijft naar de tak die gepubliceerd wordt.
+                  const p = publiekeAfwijkingen(oud, nu);
+                  if (!p.ok) {
+                    console.error(`::error::t.o.v. ${wat} verandert de PUBLIEKE stand: ${p.verdwenen} rij(en) komen er niet meer uit${p.dubbel.length ? `, ${p.dubbel.length} rij(en) dubbel` : ""} — de waarnemer publiceert dat niet.`);
                     process.exit(1);
                   }
                 }
@@ -313,7 +327,7 @@ jobs:
             fi
             OUD="$SPIEGEL_OUD" WAT="$2" ZACHT="${3:-}" node -e '
               const { readFileSync } = require("node:fs");
-              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld, nieuweDuplicaten }) => {
+              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld, nieuweDuplicaten, publiekeAfwijkingen }) => {
                 const oud = readFileSync(process.env.OUD, "utf8");
                 const nu = readFileSync("data/kanaalpost-publiek.md", "utf8");
                 const r = alleenAangevuld(oud, nu);
@@ -334,11 +348,31 @@ jobs:
                   console.error(`::error::t.o.v. ${process.env.WAT} staat/staan ${dubbel.length} regel(s) dubbel in de spiegel: ${dubbel.map((d) => `regel ${d.regel} (${d.aantal}x, mocht ${d.toegestaan}x)`).join("; ")}. Eén rij, één keer; een rechtzetting krijgt haar eigen tekst.`);
                   process.exit(1);
                 }
+                // DE DERDE LAAG: tellen wat de LEZER krijgt, niet wat er in de brontekst staat. De twee
+                // controles hierboven bewijzen behoud van letterlijke regels, en dat is niet hetzelfde:
+                // één lege regel middenin de tabel laat geen enkele regel verdwijnen en sluit toch de
+                // tabel, waarna alles eronder ongepubliceerd blijft; en een rij die alleen in celopvulling
+                // verschilt is als brontekst nieuw maar als publieke rij een duplicaat (bevinding Codex,
+                // 26-07-2026, hoog, met twee tegenvoorbeelden). Dubbel is hier ALTIJD hard — ook op een
+                // herschreven tak is er geen enkele reden waarom dezelfde publieke rij twee keer hoort.
+                const p = publiekeAfwijkingen(oud, nu);
+                if (p.dubbel.length) {
+                  console.error(`::error::t.o.v. ${process.env.WAT} verschijnt/verschijnen ${p.dubbel.length} PUBLIEKE rij(en) dubbel op de plaat: ${p.dubbel.map((d) => `publieke rij ${d.rij} (${d.aantal}x, mocht ${d.toegestaan}x)`).join("; ")}. Twee brontekstregels kunnen dezelfde publieke rij worden.`);
+                  process.exit(1);
+                }
+                if (p.verdwenen > 0) {
+                  const hardP = process.env.ZACHT !== "zacht";
+                  console[hardP ? "error" : "log"](`::${hardP ? "error" : "warning"}::${hardP ? "de plaat verliest rijen t.o.v." : "afwijking t.o.v."} ${process.env.WAT}: ${p.verdwenen} rij(en) die de publieke kant eerder toonde komen er niet meer uit, terwijl de brontekst ${r.ok ? "compleet is" : "ook al afwijkt"}. Kijk naar lege regels, koppen of scheidingsregels middenin de tabel.`);
+                  if (hardP) process.exit(1);
+                }
                 // Deze twee slotregels alleen als er ook niets verdwenen is. Anders sloot een zachte
                 // melding af met "niets verdwenen" pal onder "1 regel verdwenen" — twee uitspraken over
                 // dezelfde meting, waarvan één onwaar (gemeten in de lokale proef, 26-07-2026).
                 if (r.ok && !r.opOrde) console.log(`::warning::${process.env.WAT}: niets verdwenen, maar de volgorde wijkt af vanaf regel ${r.eerste} (samenvoeging?).`);
-                console.log(`${process.env.WAT}: ${r.ok ? "geen regel verdwenen" : `${r.verdwenen} regel(s) herschreven, toegestaan omdat de tak herschreven is`}, geen regel dubbel.`);
+                // Bij een zachte melding NIET beweren dat de regels "herschreven" zijn: gemeten is dat ze
+                // niet meer voorkomen, niet dat er een vervanger voor in de plaats kwam (preciezering
+                // Codex, 26-07-2026). De meting benoemen, niet de vermoedelijke oorzaak.
+                console.log(`${process.env.WAT}: ${r.ok ? "geen regel verdwenen" : `${r.verdwenen} regel(s) niet teruggevonden, toegelaten omdat de tak herschreven is`}, geen regel dubbel, ${p.aantal} publieke rij(en) in beeld.`);
                 process.exit(0);
               }).catch(() => { console.error("::error::spiegelwet niet te laden — dat is rood."); process.exit(1); });
             '
@@ -377,15 +411,28 @@ jobs:
                 || git fetch --no-tags origin "${VOOR}" 2>/dev/null \
                 || true
             fi
-            if heeft_voor && git merge-base --is-ancestor "${VOOR}" HEAD 2>/dev/null; then
+            # `--is-ancestor` kent DRIE uitkomsten, en die op twee hopen gooien is precies de fout die
+            # deze wet elders bestrijdt: 0 = voorouder, 1 = geen voorouder, alles daarboven = git kon de
+            # vraag niet beantwoorden (kapot object, onvolledige kloon). Dat laatste als "geen voorouder"
+            # lezen zou een meetfout stilletjes tot de zachte tak-route promoveren (bevinding Codex,
+            # 26-07-2026). Een toets die niets kon zeggen is rood.
+            ANC=""
+            if heeft_voor; then
+              git merge-base --is-ancestor "${VOOR}" HEAD 2>/dev/null
+              ANC=$?
+            fi
+            if [ "${ANC}" = "0" ]; then
               # Het gewone geval: de vorige stand ligt in de historie van deze stand. Volle, harde toets.
               toets "${VOOR}" "de vorige stand van deze tak" || fout=1
-            elif heeft_voor && [ "${GITHUB_REF_NAME}" = "main" ]; then
+            elif [ -n "${ANC}" ] && [ "${ANC}" != "1" ]; then
+              echo "::error::git kon niet vaststellen of ${VOOR} in de historie van deze stand ligt (exitcode ${ANC}) — een toets die niets zegt is rood."
+              fout=1
+            elif [ "${ANC}" = "1" ] && [ "${GITHUB_REF_NAME}" = "main" ]; then
               # De vorige stand van main ligt NIET in haar eigen historie: main is herschreven. Dat is de
               # aanval waar deze wet over gaat, en op main bestaat er geen goede reden voor. Rood.
               echo "::error::main is herschreven — ${VOOR} ligt niet in de historie van deze stand. Een gepubliceerde regel kan zo verdwijnen zonder dat er iets aan het bestand te zien is."
               fout=1
-            elif heeft_voor; then
+            elif [ "${ANC}" = "1" ]; then
               # Een herschreven TAK (rebase, force-push) is wel legitiem: een voorstel mag herwoord worden,
               # en deze ronde is daar het bewijs van — de foute tussenstap die een gepubliceerde regel
               # weghaalde is er juist uit gehaald. Alleen: "voorstel" is geen vrijbrief. Wat main al

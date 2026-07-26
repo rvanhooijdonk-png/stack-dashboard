@@ -270,12 +270,18 @@ function publiekeVorm(r) {
  * toevoegen is), dus de laatste vijftien regels zijn per afspraak de laatste vijftien meldingen;
  * een venster dat een rij met een oudere tijd aanvult, hoort niet ineens bovenaan te springen.
  */
-export function toPublicKanaalpost(raw) {
-  const leeg = (reason, ingehouden = 0) => ({ available: false, reason, rows: [], ingehouden });
-  if (!raw || raw.available !== true || !Array.isArray(raw.rows)) {
-    return leeg(raw?.reason === 'LEEG' ? 'LEEG' : 'BRON_ONBEREIKBAAR');
-  }
-  const cap = (v, max) => (v.length > max ? `${v.slice(0, max - 1).trimEnd()}…` : v);
+const cap = (v, max) => (v.length > max ? `${v.slice(0, max - 1).trimEnd()}…` : v);
+
+/**
+ * Alle rijen die de publieke kant HERKENT, in bronvolgorde en zonder de limiet van vijftien: elke rij
+ * door vorm- en publicatiepoort, daarna afgekapt zoals hij op de plaat komt te staan.
+ *
+ * Apart van `toPublicKanaalpost`, en dat is de hele reden dat deze functie bestaat. De spiegelwet moet
+ * kunnen tellen wat de LEZER ziet, niet wat er in de brontekst staat, en zij mag daarbij niet op de
+ * laatste vijftien knippen — dan zou een rij die door normale veroudering uit beeld schuift als
+ * "verdwenen" gelden en de poort permanent rood staan.
+ */
+function veiligePubliekeRijen(raw) {
   const veilig = [];
   let ingehouden = 0;
   for (const r of raw.rows) {
@@ -284,15 +290,45 @@ export function toPublicKanaalpost(raw) {
       ingehouden += 1;
       continue;
     }
-    veilig.push(rij);
+    veilig.push({
+      tab: cap(rij.tab, MAX_TAB),
+      onderwerp: cap(rij.onderwerp, MAX_ONDERWERP),
+      status: cap(rij.status, MAX_STATUS),
+      actie: cap(rij.actie, MAX_ACTIE),
+      datum: cap(rij.datum, MAX_DATUM),
+    });
   }
-  const rows = veilig.slice(-KANAAL_RIJEN).reverse().map((rij) => ({
-    tab: cap(rij.tab, MAX_TAB),
-    onderwerp: cap(rij.onderwerp, MAX_ONDERWERP),
-    status: cap(rij.status, MAX_STATUS),
-    actie: cap(rij.actie, MAX_ACTIE),
-    datum: cap(rij.datum, MAX_DATUM),
-  }));
+  return { veilig, ingehouden };
+}
+
+/**
+ * De publieke rijen van een spiegelBESTAND, in bronvolgorde, ongelimiteerd. Dit is de vorm waarop de
+ * spiegelwet zijn oordeel baseert (zie `publiekeAfwijkingen` in `spiegelwet.mjs`).
+ *
+ * Waarom dit er is, met het tegenvoorbeeld erbij (bevinding Codex, 26-07-2026, hoog): de wet telde
+ * letterlijke brontekstregels. Zet iemand één LEGE regel vóór een bestaande rij, dan is er geen enkele
+ * regel verdwenen — en toch sluit die lege regel de tabel, waarna alles eronder niet meer gepubliceerd
+ * wordt. Andersom kan een rij die textueel verschilt (dubbele spatie, andere celopvulling) na
+ * normalisatie dezelfde publieke rij worden, en dan staat die rij twee keer op de plaat terwijl de
+ * duplicatentelling op brontekst niets ziet. Beide gaten sluiten alleen door te tellen wat hier
+ * uitkomt.
+ */
+export function publiekeRijenUitTekst(tekst) {
+  const raw = kanaalpostUitTekst(tekst);
+  if (raw.available !== true || !Array.isArray(raw.rows)) return { rijen: [], ingehouden: 0 };
+  const { veilig, ingehouden } = veiligePubliekeRijen(raw);
+  return { rijen: veilig, ingehouden };
+}
+
+export function toPublicKanaalpost(raw) {
+  const leeg = (reason, ingehouden = 0) => ({ available: false, reason, rows: [], ingehouden });
+  if (!raw || raw.available !== true || !Array.isArray(raw.rows)) {
+    return leeg(raw?.reason === 'LEEG' ? 'LEEG' : 'BRON_ONBEREIKBAAR');
+  }
+  const { veilig, ingehouden } = veiligePubliekeRijen(raw);
+  // Afkappen gebeurt in `veiligePubliekeRijen`, vóór het knippen op vijftien. Dat verandert niets aan
+  // de selectie — `slice` telt posities, geen tekens — en houdt één definitie van "de publieke rij".
+  const rows = veilig.slice(-KANAAL_RIJEN).reverse();
   if (!rows.length) return leeg(ingehouden ? 'INGEHOUDEN' : 'LEEG', ingehouden);
   return { available: true, reason: null, rows, ingehouden };
 }

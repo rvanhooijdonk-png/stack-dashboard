@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto';
 
 import {
   alleenAangevuld, canoniek, nietCanoniekeRegels, nieuweNietCanoniekeRegels, nieuweDuplicaten,
+  publiekeAfwijkingen,
 } from '../scripts/lib/spiegelwet.mjs';
 import { alarmRij, alarmRijPubliceerbaar } from '../scripts/lib/waarnemer.mjs';
 
@@ -155,9 +156,14 @@ test('de echte spiegel voldoet — de nulmeting die deze eis draagt', () => {
 
 test('het bestand eindigt op een regeleinde — anders plakt de volgende melding vast aan de vorige', () => {
   // Zonder afsluitend regeleinde schrijft de volgende toevoeging zijn rij achter de laatste rij aan.
-  // Dat herschrijft stilletjes een gepubliceerde regel én laat de nieuwe melding verdwijnen, en geen
-  // van beide poorten ziet het als een verdwenen regel (bevinding Gemini, 26-07-2026 — de fout stond
-  // op dat moment echt in dit bestand, ik had hem er bij het oplossen van een conflict in gezet).
+  // Dat herschrijft een gepubliceerde regel én laat de nieuwe melding als aparte rij verdwijnen: twee
+  // meldingen worden één (bevinding Gemini, 26-07-2026 — de fout stond op dat moment echt in dit
+  // bestand, ik had hem er bij het oplossen van een conflict in gezet).
+  //
+  // Wat hier eerst stond en niet klopte: dat geen van beide poorten dat ziet. `alleenAangevuld` telt de
+  // vastgeplakte regel wél als verdwenen (nagemeten Codex, 26-07-2026 — zie de test hieronder). Het
+  // gevolg is dus geen stille publicatie maar een alarm dat niet geschreven kán worden, en dat is
+  // even stil. Vandaar dat de bot het regeleinde zelf rechtzet in plaats van erop te vertrouwen.
   const bestand = readFileSync(join(ROOT, 'data/kanaalpost-publiek.md'), 'utf8');
   assert.equal(bestand.endsWith('\n'), true);
   assert.equal(bestand.endsWith('\n\n'), false);
@@ -269,4 +275,70 @@ test('een niet-canonieke regel wordt niet publiceerbaar genoemd', () => {
   assert.equal(alarmRijPubliceerbaar(goed), true);
   assert.equal(alarmRijPubliceerbaar(goed.replace('drempel', 'drempel​')), false, 'onzichtbaar teken hoort hem tegen te houden');
   assert.equal(alarmRijPubliceerbaar(goed.replace('drempel', 'drempel…')), false, 'afkap-teken ook');
+});
+
+// --- de derde laag: tellen wat de LEZER ziet, niet wat er in de brontekst staat -----------------
+//
+// Beide gevallen hieronder zijn de letterlijke tegenvoorbeelden van Codex (26-07-2026, hoog). Ze
+// hebben één ding gemeen: de twee lagen hierboven blijven groen, terwijl de plaat verandert.
+
+const KOP = '| datum-tijd | tab-rol | onderwerp | status | actie voor |\n|---|---|---|---|---|\n';
+const rij = (n) => `| 2026-07-26 14:${String(10 + n).padStart(2, '0')} | AUTOPILOT | melding ${n} | AFGEROND | Richard |\n`;
+const SPIEGEL = KOP + rij(1) + rij(2) + rij(3);
+
+test('een lege regel middenin de tabel laat geen regel verdwijnen en tóch de halve plaat', () => {
+  // Codex, tegenvoorbeeld 1. Er wordt niets weggehaald en niets herschreven: er komt alleen een lege
+  // regel bij. Een lege regel sluit de tabel, dus alles eronder wordt niet meer gepubliceerd.
+  const na = KOP + rij(1) + '\n' + rij(2) + rij(3);
+
+  // De twee oude lagen zien er niets in — precies het gat.
+  assert.equal(alleenAangevuld(SPIEGEL, na).ok, true, 'geen enkele regel verdwenen uit de brontekst');
+  assert.deepEqual(nieuweDuplicaten(SPIEGEL, na), [], 'en geen duplicaat');
+
+  // De derde laag wel: twee van de drie rijen komen er publiek niet meer uit.
+  const p = publiekeAfwijkingen(SPIEGEL, na);
+  assert.equal(p.ok, false);
+  assert.equal(p.verdwenen, 2);
+  assert.equal(p.aantal, 1);
+});
+
+test('een rij die alleen in celopvulling verschilt is publiek een duplicaat', () => {
+  // Codex, tegenvoorbeeld 2. Als brontekst is dit een nieuwe, unieke regel; na normalisatie is het
+  // exact dezelfde publieke rij en staat de melding twee keer op de plaat.
+  const kopie = rij(3).replace('| melding 3 |', '|  melding 3   |');
+  const na = SPIEGEL + kopie;
+  assert.notEqual(kopie, rij(3), 'de brontekstregels moeten echt verschillen, anders bewijst dit niets');
+
+  assert.deepEqual(nieuweDuplicaten(SPIEGEL, na), [], 'op brontekst is er niets aan de hand');
+
+  const p = publiekeAfwijkingen(SPIEGEL, na);
+  assert.equal(p.ok, false);
+  assert.deepEqual(p.dubbel, [{ rij: 4, aantal: 2, toegestaan: 1 }]);
+});
+
+test('gewoon aanvullen blijft groen op de publieke telling', () => {
+  const p = publiekeAfwijkingen(SPIEGEL, SPIEGEL + rij(4));
+  assert.equal(p.ok, true);
+  assert.equal(p.verdwenen, 0);
+  assert.equal(p.aantal, 4);
+});
+
+test('de publieke telling knipt NIET op vijftien — anders is veroudering een overtreding', () => {
+  // Zonder deze eigenschap zou elke zestiende melding de zestien-min-vijftien oudste rijen als
+  // "verdwenen" laten gelden en stond de poort permanent rood.
+  let veel = KOP;
+  for (let i = 1; i <= 20; i += 1) veel += rij(i);
+  const p = publiekeAfwijkingen(veel, veel + rij(21));
+  assert.equal(p.ok, true);
+  assert.equal(p.aantal, 21);
+});
+
+test('een regel die wordt vastgeplakt aan de vorige wordt wél gezien — door beide lagen', () => {
+  // De correctie op wat hierboven eerst beweerd werd: de oude regel is dan verdwenen (hij is nu een
+  // langere regel), dus `alleenAangevuld` slaat aan, én de publieke rij verandert mee.
+  const vastgeplakt = KOP + rij(1) + rij(2) + rij(3).replace(/\n$/, '') + rij(4).trimStart();
+  const r = alleenAangevuld(SPIEGEL, vastgeplakt);
+  assert.equal(r.ok, false);
+  assert.equal(r.verdwenen, 1);
+  assert.equal(publiekeAfwijkingen(SPIEGEL, vastgeplakt).ok, false);
 });

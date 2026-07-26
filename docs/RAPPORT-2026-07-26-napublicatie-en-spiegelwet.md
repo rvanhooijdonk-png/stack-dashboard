@@ -359,9 +359,181 @@ in een ondiepe kloon kan het gemeenschappelijke punt missen).
 daar niet gepind. Dat is bestaand gedrag van vóór deze ronde en raakt de wet niet; het hoort in een
 eigen wijziging thuis.
 
+## 6c. De rebase op main — en de tweede helft van de wet
+
+Fable's ordening zei: #24 eerst, daarna #27 omhangen naar main. #24 blijkt al samengevoegd te zijn
+(squash `1852c9c`, 12:20:40Z) en GitHub heeft de basis van #27 daarbij zelf al naar `main` gezet. Het
+omhangen was dus alleen nog het herplaatsen zelf. Dat is twee keer gedaan, en de eerste poging was fout.
+
+**Wat er in poging 1 misging, en hoe het gemeten is.** Bij het herplaatsen botste het spiegelbestand. Ik
+loste dat op door de oorspronkelijke historie getrouw na te maken — inclusief de bekende foute tussenstap
+die een gepubliceerde regel weghaalde. De eindtoestand was daardoor schoon, en precies dáárom zag ik het
+niet: wie alleen de eindtoestand meet, ziet een verwijdering-en-terugzetting tegen elkaar wegvallen.
+Codex mat per commit en vond het wél:
+
+```
+poging 1, per commit:   d7322bc  verdwenen 1     ← de foute tussenstap, letterlijk gereproduceerd
+```
+
+Sindsdien meet ik elke commit apart (`keur-tak.mjs`). Poging 2 is opnieuw vanaf de veiligtak gedaan, met
+de botsing als vereniging opgelost — élke regel van beide kanten blijft staan. Uitkomst over alle tien
+commits van de tak:
+
+```
+2ae1d45 … 18f8376   verdwenen 0  duplicaten 0   (10 commits)
+eindtoestand t.o.v. origin/main — verdwenen 0, ok true, opOrde true
+```
+
+**En daar zat de tweede helft van de wet in.** Poging 2 leverde eerst een exact duplicaat op (de
+10:21-regel kwam er een tweede keer bij). Verdwenen: 0 — de wet zei dus groen. Toch is een regel die er
+stilletjes tweemaal staat net zo goed een andere werkelijkheid dan er gebeurd is. Daarom
+`nieuweDuplicaten()`, hard in beide poorten, met vier tests. De echte spiegel heeft er nul.
+
+**Wat een herschreven tak betekent voor de wet — en waarom dit geen uitzondering is.** De `before`-toets
+is de scherpste van de twee, want de overtreding waar deze wet uit ontstond (toevoegen in push 1,
+weghalen in push 2) is tegen het aftakpunt onzichtbaar. Maar na een rebase ligt `before` niet meer in de
+historie van de tak. Gemeten aan deze tak:
+
+```
+huidige stand t.o.v. de oude taktip c47fecf : verdwenen 1   ← de herwoorde 14:15-correctieregel
+huidige stand t.o.v. origin/main 905a300    : verdwenen 0
+```
+
+Die ene regel is de correctieregel die tijdens de rebase herwoord is, omdat haar oude tekst
+("de regel staat nu terug") in de nieuwe historie niet meer waar was. Fail-closed op `before` zou deze
+eigen reparatie dus rood maken. De oplossing is geen uitzondering maar een onderscheid dat ik hardop
+maak: **main herschrijven is rood, altijd**; een **tak** herschrijven mag haar eigen voorsteltekst
+herwoorden, en daar staat tegenover dat de tak dan **hard tegen main zelf** wordt gehouden — strenger
+dan het aftakpunt, want main groeit door. Wat main publiceerde blijft dus onaantastbaar; wat alleen als
+voorstel op een tak stond, is een voorstel. Vijf scenario's, gedraaid met het letterlijke `run`-blok uit
+`waarnemer.yml`:
+
+```
+A voorouder (gewone push)        → vorige stand + aftakpunt: geen regel verdwenen, geen dubbel  exit=0
+B herschreven tak (force-push)   → ::warning:: herschreven; 1 regel herwoord; main hard: schoon exit=0
+C onleesbare before-SHA          → ::error:: niet op te halen … dus rood                        exit=1
+D lege before op main            → ::error:: force-push of herschreven historie … dus rood      exit=1
+E lege before bij schedule       → geen vorige stand in de gebeurtenis — alleen aftakpunt       exit=0
+```
+
+C is het gat dat Codex aanwees: dat liep vroeger stil door met alleen de aftakpunt-toets.
+
+**De bot plakte zijn eigen alarm aan de vorige regel.** Eindigt het bestand niet op een regeleinde, dan
+komt de alarmregel achter de laatste rij te staan. Nulmeting met de oude code, en met de reparatie:
+
+```
+zonder reparatie: rijen 1   | 2026-07-26 14:00 | … | geen || 2026-07-26 15:00 | WAARNEMER | …
+met reparatie:    rijen 2   (beide rijen heel, bestand eindigt op een regeleinde)
+```
+
+Gevolg zonder de fix: de gepubliceerde regel is herschreven én het alarm is er als rij niet — waarna de
+eigen poort de push weigert en het alarm dus nooit op de plaat komt. Stille uitval van de bewaker zelf.
+
+**En toen bewoog main opnieuw.** Tijdens deze ronde kwam er op `main` een commit bij die zélf een regel
+aan de spiegel toevoegde (`00e7a54`). Daarmee werd #27 vuil — precies de controle die je vroeg te doen
+vóór aanmelding. Dus opnieuw herbaseerd, met de botsing weer als vereniging opgelost, en veiligtak
+`reserve/waarnemer-voor-rebase2` (18f8376) ervoor. Uitkomst op de nieuwe basis: 10 commits,
+`verdwenen 0 / duplicaten 0`, eindtoestand t.o.v. `origin/main` schoon, `npm test` 328/328.
+
+Dit is vandaag de derde keer dat één bestand door meer dan één tak wordt beschreven, en dat is geen
+toeval meer: `data/kanaalpost-publiek.md` is een gedeelde schrijfplek zonder afspraak over wie er wanneer
+aan zit. Voorstel voor CONTROL, niet zelf doorgevoerd omdat het ieders samenvoegingen raakt: geef dit ene
+bestand in `.gitattributes` de `merge=union`-driver. Een append-only bestand heeft precies die semantiek
+— houd beide kanten — en het duplicaat dat een vereniging kan opleveren wordt sinds deze commit hard
+afgevangen. Zonder zo'n afspraak blijft elke tak die dit bestand aanraakt het werk van de vorige ongeldig
+maken.
+
+**Beslispunt voor Fable — NFKC of NFC.** Punt 3 van je besluit noemt NFKC met zoveel woorden, en zo staat
+het er nu in. Beide reviewers stellen onafhankelijk iets anders voor, en zij hebben inhoudelijk gelijk:
+NFKC is een *huisstijl*regel, geen bescherming. Hij weigert `…`, `½`, `²` en `ﬁ`, maar laat Cyrillische
+letters die er als Latijnse uitzien gewoon door — juist het geval waar je bang voor zou moeten zijn. Hun
+voorstel: NFC (identiteit behouden) + een verbod op stuur- en opmaaktekens + vaste waardelijsten voor de
+dichte velden + UTS#39 op namen. Praktisch gevolg van NFKC zoals het er nu staat: macOS maakt van `...`
+automatisch `…`, en dat wordt bij een nieuwe rij nu hard geweigerd. Ik heb het **niet** gewijzigd, want
+een besluit van jou wijzigen is geen reparatie. Zeg je "NFC", dan is het een kleine wijziging in
+`canoniek()` plus de tests.
+
+### Dubbele review van deze ronde
+
+**Gemini: geen enkele echte bevinding.** Punt voor punt nagelopen: de poorten sluiten fail-closed (een
+vervalste of onbereikbare `before` eindigt in het rode pad), het onderscheid herschreven-tak/main is
+"geen gat maar een correct opgezette veiligheidsklep" omdat de harde main-toets er meteen achteraan komt,
+en de rekenkunde van `nieuweDuplicaten` klopt inclusief de bestaande-duplicaten- en
+regelnummer-rapportage. Eén punt van laag gewicht, door Gemini zelf als speculatie gemarkeerd: op een
+**ondiepe** kloon zou `git merge-base --is-ancestor` een gewone push als "herschreven tak" kunnen
+aanmerken. Weerlegd door meting — beide jobs checken uit met `fetch-depth: 0`:
+
+```
+spiegelwet → checkout with: {'fetch-depth': 0}
+melden     → checkout with: {'ref': '…', 'fetch-depth': 0}
+```
+
+**Codex: *niet aannemen*, en met reden.** Twee hoge bevindingen, allebei dezelfde blinde vlek, en
+allebei terecht. Zijn formulering: *"het gat zit in de zogenaamd harde main-toets: die bewijst behoud
+van letterlijke regels, niet behoud van door de publieke parser herkende rijen."* De wet telde tot nu
+toe brontekstregels; wat er op de plaat komt is iets anders.
+
+Twee tegenvoorbeelden, allebei nagebouwd als test en allebei gemeten vóór de reparatie:
+
+| # | aanval | oude poorten | wat er publiek gebeurt |
+|---|---|---|---|
+| 1 | één **lege regel** middenin de tabel | `alleenAangevuld.ok = true`, `nieuweDuplicaten = []` | de lege regel sluit de tabel; alles eronder wordt niet meer gepubliceerd |
+| 2 | de nieuwste rij **gekopieerd met andere celopvulling** | `nieuweDuplicaten = []` (het is een andere brontekstregel) | na normalisatie exact dezelfde publieke rij, dus twee keer op de plaat |
+
+### §6d. Wat er tegen die twee gebouwd is
+
+Een **derde laag** in dezelfde wet: `publiekeAfwijkingen(oud, nieuw)` telt niet de brontekstregels maar
+de rijen die de publieke kant er daadwerkelijk uit haalt — de vijf velden ná vorm- en publicatiepoort en
+ná afkappen. Bewust **zonder** de limiet van vijftien zichtbare rijen: met die limiet zou elke rij die
+door normale aangroei uit beeld schuift als "verdwenen" gelden en stond de poort permanent rood.
+Daarvoor is `publiekeRijenUitTekst` uit `kanaalpost.mjs` losgetrokken; `toPublicKanaalpost` gebruikt nu
+diezelfde functie, zodat er één definitie van "de publieke rij" is en niet twee.
+
+De laag hangt hard in **beide** poorten — de `spiegelwet`-job én de schrijfactie van de bot zelf, want
+de spiegelwet geldt ook voor de waarnemer (jouw punt 2). Dubbele publieke rijen zijn er **altijd** hard,
+ook op een herschreven tak: er bestaat geen goede reden waarom dezelfde melding twee keer hoort.
+
+Meting op het echte bestand, met de letterlijke code uit `waarnemer.yml`, aanval 1 ingevoegd:
+
+```
+::error::de plaat verliest rijen t.o.v. de vorige stand van deze tak: 45 rij(en) die de publieke kant
+eerder toonde komen er niet meer uit, terwijl de brontekst compleet is.
+→ exit=1
+```
+
+Die laatste halve zin is het hele punt: *de brontekst is compleet* en de plaat is toch leeg.
+
+De twee lichte punten van Codex zijn ook verwerkt. `git merge-base --is-ancestor` kent drie uitkomsten
+(0 = voorouder, 1 = niet, hoger = git kon de vraag niet beantwoorden); die laatste twee lagen op één
+hoop, waardoor een **meetfout** stilzwijgend de zachte tak-route inging. Nu apart en rood — gemeten met
+een `git`-stub die 128 teruggeeft:
+
+```
+::error::git kon niet vaststellen of 97fd038 in de historie van deze stand ligt (exitcode 128) —
+een toets die niets zegt is rood.  → exit=1
+```
+
+En drie teksten die meer beweerden dan er gemeten was, zijn rechtgezet: "N regel(s) herschreven" is nu
+"niet teruggevonden" (dat er een vervanger voor in de plaats kwam, is niet gemeten); het regelnummer van
+het laatste exemplaar is een aanwijzing, geen bewijs van wélk exemplaar erbij kwam; en de toelichting bij
+het regeleinde beweerde dat géén van beide poorten een vastgeplakte rij ziet — Codex heeft nagemeten dat
+`alleenAangevuld` dat wél ziet (`ok=false, verdwenen=1`). Het gevolg is dus geen stille publicatie maar
+een alarm dat niet geschreven kán worden, en dat is even stil; de reparatie blijft daarmee nodig, de
+**onderbouwing** was fout. Er staat nu een test die dat vastlegt.
+
+**Codex' derde hoge bevinding is geen code-fout maar een systeemgrens, en gaat naar jouw punt 4.** Een
+push kan `[skip ci]` in het bericht zetten, en de workflow-code die de poort uitvoert komt van de tak
+die zichzelf laat beoordelen. Zolang dat zo is zijn deze poorten **bewaking, geen grens**: ze meten
+netjes en ze zijn te omzeilen door wie pushrecht heeft. Dat repareert alleen takbescherming op main met
+verplichte controles — precies het punt dat jij naar de GitHub-plan-beslissessie hebt gestuurd. Ik meld
+het hier als *bekend en aanvaard*, niet als opgelost.
+
 ## AFSLUITING
 
-- Tests groen: `npm test` → `tests 321 / pass 321 / fail 0`. Nulmeting vóór de bouw: `pass 276 / fail 1`.
+- Tests groen: `npm test` → `tests 333 / pass 333 / fail 0` (na §6d; na §6c 328, daarvóór 321).
+  Nulmeting vóór de bouw: `pass 276 / fail 1`. De vijf nieuwe tests zijn de twee tegenvoorbeelden van
+  Codex, het bewijs dat de publieke telling níét op vijftien knipt, en de correctie op de
+  regeleinde-bewering.
   Nulmeting van de rondgang-tests tegen de ongerepareerde waarnemer: `pass 6 / fail 1` op de `<br>`-fix,
   en eerder `2 van 5 rood` op de twee productiefouten.
 - Rollback/additief geborgd: alles nieuwe bestanden plus één job en één trigger-pad in `waarnemer.yml`;
@@ -386,7 +558,11 @@ eigen wijziging thuis.
   doorgezet. Fixronde (A–E): vijf punten overgenomen, één erkend-maar-niet-gerepareerd met reden, één
   weerlegd (§5b). Besluitenronde: oordeel *niet aannemen*; de hoge bevinding (rebase bewaakte de
   verkeerde basis) is gemeten, gerepareerd en met vijf scenario's bewezen, plus vier kleinere; één
-  punt beargumenteerd niet overgenomen, één als bestaand gedrag gemeld (§6b).
+  punt beargumenteerd niet overgenomen, één als bestaand gedrag gemeld (§6b). Vierde ronde (rebase-ronde):
+  opnieuw *niet aannemen* — twee hoge bevindingen op dezelfde blinde vlek (de wet telde brontekstregels
+  in plaats van publieke rijen), beide met een werkend tegenvoorbeeld. Alle vijf punten overgenomen en
+  gerepareerd (§6d); de derde hoge bevinding is een systeemgrens die alleen takbescherming oplost en
+  gaat naar het GitHub-plan-besluit.
 - Gemini: ja — drie ronden. Eerste ronde: vier punten, één overgenomen (force-push op main), één weerlegd
   (typo). Fixronde: vier punten, waarvan drie samenvallen met Codex en overgenomen zijn; E1 weerlegd door
   meting. Besluitenronde: vier punten, waarvan er drie samenvallen met Codex (tekenverzameling te
@@ -406,4 +582,19 @@ Beslissingen die niet letterlijk in de opdracht stonden:
 - Referentiemoment bij handmatige of push-runs: de laatst geslaagde publicatie. Verworpen alternatief:
   de controle daar niet laten draaien, waardoor een wijziging aan de bewaker ongetest blijft.
 
-Wacht op Richard: de vier beslispunten in §6, en een handtekening op #27 (en op #24 als basis).
+Aanvullend na §6c:
+
+- Elke commit van de tak is apart gemeten, niet alleen de eindtoestand: 10 commits, `verdwenen 0`,
+  `duplicaten 0` (`keur-tak.mjs`). Dat is de les van poging 1, waar de eindtoestand schoon was terwijl
+  één tussenstap een gepubliceerde regel weghaalde. Na §6d meet dat script óók de publieke rijen: alle
+  commits `-0 verdwenen / 0 dubbel`, eindtoestand t.o.v. `origin/main` 47 rijen in beeld, `ok true`.
+- Veiligtakken vóór het herplaatsen: `reserve/waarnemer-voor-rebase` (730cfab) en
+  `reserve/waarnemer-rebase-poging1` (c47fecf). Terugdraaien = de tak op een van die twee terugzetten.
+- Secrets-scan van deze ronde: `gitleaks protect --staged` → `no leaks found` (17,13 KB).
+- #24 vraagt geen tikregel meer: al samengevoegd als squash `1852c9c` (12:20:40Z), en de basis van #27
+  is daarbij door GitHub zelf naar `main` gezet.
+
+Wacht op Richard: de vier beslispunten in §6, het NFKC/NFC-beslispunt in §6c, en een handtekening op
+#27. Voor CONTROL zit er één gemeten volgorde-eis bij: **#27 en #30 botsen** — beide raken het
+spiegelbestand en in beide richtingen ontstaat een conflict, dus wie als tweede gaat moet opnieuw
+aanleveren met een verse kop-SHA.

@@ -21,7 +21,7 @@
  * dus gemeld, niet bestraft.
  */
 
-import { bevatOnzichtbaar } from './kanaalpost.mjs';
+import { bevatOnzichtbaar, publiekeRijenUitTekst } from './kanaalpost.mjs';
 
 const regels = (tekst) => String(tekst ?? '').replace(/\n+$/, '').split('\n');
 const isLeeg = (r) => r.length === 0 || (r.length === 1 && r[0] === '');
@@ -194,12 +194,64 @@ export function nieuweDuplicaten(oud, nieuw) {
   for (const [regel, aantal] of nieuweTelling) {
     const toegestaan = Math.max(oudeTelling.get(regel) ?? 0, 1);
     if (aantal <= toegestaan) continue;
-    // Het regelnummer van het LAATSTE exemplaar: dat is het exemplaar dat erbij kwam.
+    // Het regelnummer van het LAATSTE exemplaar. Dat is een aanwijzing, geen bewijs: welk exemplaar
+    // er is bijgekomen valt uit een telling niet af te leiden. In een append-only bestand groeit het
+    // onderaan aan, dus dit is het eerste regelnummer om te bekijken (preciezering Codex, 26-07-2026).
     let laatste = 0;
     regels.forEach((ruw, i) => { if (ruw.replace(/\r$/, '') === regel) laatste = i + 1; });
     gevonden.push({ regel: laatste, aantal, toegestaan });
   }
   return gevonden;
+}
+
+/**
+ * DE DERDE LAAG — dezelfde wet, maar geteld op de rijen die de PUBLIEKE PARSER herkent.
+ *
+ * De twee lagen hierboven bewijzen iets over letterlijke regels in het bronbestand. Dat is niet wat
+ * de lezer krijgt, en het verschil is uitbuitbaar (bevinding Codex, 26-07-2026, twee tegenvoorbeelden,
+ * beide hoog):
+ *
+ *  1. Zet één LEGE regel middenin de tabel. Er verdwijnt geen enkele regel, er komt geen duplicaat bij,
+ *     beide poorten blijven groen — en toch sluit die lege regel de tabel, waarna álles eronder niet
+ *     meer gepubliceerd wordt. De harde main-toets bewees behoud van regels, niet behoud van rijen.
+ *  2. Kopieer de nieuwste rij met een andere celopvulling (dubbele spatie, andere uitlijning). Als
+ *     brontekst is dat een andere regel, dus `nieuweDuplicaten` zwijgt; na normalisatie is het exact
+ *     dezelfde publieke rij en staat hij twee keer op de plaat.
+ *
+ * Wat hier geteld wordt is de vijf-veldenrij ná vorm- en publicatiepoort en ná afkappen — precies de
+ * vorm die op de plaat verschijnt — en BEWUST zonder de limiet van vijftien zichtbare rijen. Met die
+ * limiet zou elke rij die door normale aangroei uit beeld schuift als verdwenen gelden.
+ *
+ * Uitkomst: `{ ok, verdwenen, dubbel }`. `dubbel` bevat per overtreding de POSITIE onder de publieke
+ * rijen plus de aantallen — geen inhoud, want dit oordeel belandt in een logregel.
+ */
+export function publiekeAfwijkingen(oud, nieuw) {
+  const sleutel = (r) => JSON.stringify([r.tab, r.onderwerp, r.status, r.actie, r.datum]);
+  const tel = (rijen) => {
+    const m = new Map();
+    for (const r of rijen) m.set(sleutel(r), (m.get(sleutel(r)) ?? 0) + 1);
+    return m;
+  };
+  const oude = publiekeRijenUitTekst(oud).rijen;
+  const nieuwe = publiekeRijenUitTekst(nieuw).rijen;
+  const oudeTelling = tel(oude);
+  const nieuweTelling = tel(nieuwe);
+
+  // Verdwenen: elke publieke rij die er stond moet er nog minstens even vaak staan.
+  let verdwenen = 0;
+  for (const [s, aantal] of oudeTelling) verdwenen += Math.max(aantal - (nieuweTelling.get(s) ?? 0), 0);
+
+  // Erbij: net als bij de brontekst mag wat er al dubbel stond dubbel blijven — weghalen mag immers
+  // niet. Alleen het EXTRA exemplaar is de overtreding.
+  const dubbel = [];
+  for (const [s, aantal] of nieuweTelling) {
+    const toegestaan = Math.max(oudeTelling.get(s) ?? 0, 1);
+    if (aantal <= toegestaan) continue;
+    let laatste = 0;
+    nieuwe.forEach((r, i) => { if (sleutel(r) === s) laatste = i + 1; });
+    dubbel.push({ rij: laatste, aantal, toegestaan });
+  }
+  return { ok: verdwenen === 0 && dubbel.length === 0, verdwenen, dubbel, aantal: nieuwe.length };
 }
 
 export function nieuweNietCanoniekeRegels(oud, nieuw) {
