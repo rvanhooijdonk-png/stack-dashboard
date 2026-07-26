@@ -24,7 +24,7 @@
   "properties": {
     "contractVersion": {
       "type": "string",
-      "const": "2.4.0",
+      "const": "2.5.0",
       "description": "Vastgepind: een DTO die zich niet als exact deze contractversie meldt, hoort niet bij dit schema. Bump dit samen met CONTRACT_VERSION in scripts/build.mjs."
     },
     "generatedAt": {
@@ -257,7 +257,7 @@
     },
     "kanaalpost": {
       "type": "object",
-      "description": "v2.4: de vloot-kanaalpost, gelezen uit de publieke spiegel `data/kanaalpost-publiek.md` in deze repo — niet uit het interne logboek. Laatste vijftien rijen, nieuwste boven. `available: false` met reason BRON_ONBEREIKBAAR/LEEG/INGEHOUDEN is een geldige fail-closed eindstand; net als planning staat deze sectie bewust niet in `sources`. De rijvelden zijn sinds de dubbele review niet meer nullable: corrupte invoer wordt ingehouden en geteld, niet als geldige rij vol streepjes gepubliceerd. `ingehouden` telt ÁLLE rijen van de spiegel die niet door vorm- of publicatiepoort kwamen, niet alleen die binnen het venster van vijftien — anders zou 0 een geruststelling zijn die niets bewijst. Wat het schema niet kan afdwingen (de validator kent geen if/then, maxItems of maxLength): dat `available: true` een niet-lege rows impliceert en `available: false` een lege. De converter bewaakt dat, met tests erop.",
+      "description": "v2.4: de vloot-kanaalpost, gelezen uit de publieke spiegel `data/kanaalpost-publiek.md` in deze repo — niet uit het interne logboek. Laatste vijftien rijen, nieuwste boven. `available: false` met reason BRON_ONBEREIKBAAR/LEEG/INGEHOUDEN is een geldige fail-closed eindstand; net als planning staat deze sectie bewust niet in `sources`. De rijvelden zijn sinds de dubbele review niet meer nullable: corrupte invoer wordt ingehouden en geteld, niet als geldige rij vol streepjes gepubliceerd. `ingehouden` telt ÁLLE rijen van de spiegel die niet door vorm- of publicatiepoort kwamen, niet alleen die binnen het venster van vijftien — anders zou 0 een geruststelling zijn die niets bewijst. Wat het schema niet kan afdwingen (de validator kent geen if/then, maxItems of maxLength): dat `available: true` een niet-lege rows impliceert en `available: false` een lege. De converter bewaakt dat, met tests erop. v2.5: de sectie is geen filter meer maar een PROJECTIE. De bronrij selecteert alleen; de gepubliceerde tekst komt uit `data/spiegel-catalogus.json`, een gesloten lijst van vooraf beoordeelde hele rijen (tab+onderwerp+status+actie als ondeelbaar viertal). Aanleiding is audit AUD-002: negen must-reject-vormen — verkort thuispad, underscore-sleutelvorm, adres zonder puntdomein, adres met hex-staart, CamelCase-sleutelnaam, persoonsnaam, tijdelijk pad, systeemroot en codenaamzin — haalden de publieke DTO, beide schema's en gitleaks, omdat een patroonscanner betekenis niet kan wegen. Wat hier staat is sinds 2.5 letterlijk de byte-reeks uit de catalogus; afkappen gebeurt niet meer op de uitvoer maar is bij het goedkeuren al gedaan. Nieuwe fail-closed eindstand CATALOGUS_ONBESCHIKBAAR.",
       "required": [
         "available",
         "reason",
@@ -278,9 +278,10 @@
             "BRON_ONBEREIKBAAR",
             "LEEG",
             "INGEHOUDEN",
+            "CATALOGUS_ONBESCHIKBAAR",
             null
           ],
-          "description": "Waarom de sectie leeg is; null als hij gevuld is. Gesloten lijst, nooit vrije tekst."
+          "description": "Waarom de sectie leeg is; null als hij gevuld is. Gesloten lijst, nooit vrije tekst. CATALOGUS_ONBESCHIKBAAR betekent dat de catalogus ontbrak, onleesbaar of ongeldig was: dan verschijnt er niets, want zonder de lijst van wat mag is elke rij onbeoordeeld. De bouw breekt daar bovendien op af, zodat de laatste goede publicatie blijft staan."
         },
         "rows": {
           "type": "array",
@@ -302,7 +303,7 @@
               },
               "onderwerp": {
                 "type": "string",
-                "description": "Wat er gebeurd is, in gewone taal. Al voor publiek geschreven in de spiegel en hier nogmaals langs de publish-poort; afgekapt op 600 tekens met een zichtbare `…`. Nooit null: een rij zonder onderwerp is geen rij en wordt ingehouden (review Codex, 26-07-2026)."
+                "description": "Wat er gebeurd is, in gewone taal. Sinds v2.5 niet de tekst uit de spiegel maar de vooraf beoordeelde tekst uit `data/spiegel-catalogus.json`; de bronrij kiest alleen welke goedgekeurde regel getoond wordt. Al binnen de 600 tekens bij het goedkeuren, dus hier wordt niets meer afgekapt. Nooit null: een rij zonder onderwerp is geen rij en wordt ingehouden (review Codex, 26-07-2026)."
               },
               "status": {
                 "enum": [
@@ -314,7 +315,7 @@
               },
               "actie": {
                 "type": "string",
-                "description": "Wie aan zet is. Wordt in de statuskolom getoond, niet in een eigen kolom."
+                "description": "Wie aan zet is. Wordt in de statuskolom getoond, niet in een eigen kolom. Sinds v2.5 ook dit veld uit de catalogus, als deel van hetzelfde goedgekeurde viertal — een goedgekeurde actie naast een ander goedgekeurd onderwerp is een bewering die niemand heeft gelezen."
               },
               "datum": {
                 "type": "string",
@@ -327,7 +328,7 @@
         "ingehouden": {
           "type": "integer",
           "minimum": 0,
-          "description": "Aantal rijen dat de publicatie-poort niet haalde. Zichtbaar op de plaat: inhouden mag, stilzwijgend inhouden niet."
+          "description": "Aantal rijen dat de publicatie-poort niet haalde. Zichtbaar op de plaat: inhouden mag, stilzwijgend inhouden niet. Sinds v2.5 telt dit ook de rijen waarvoor geen catalogusregel bestaat."
         }
       }
     },

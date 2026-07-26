@@ -1,0 +1,477 @@
+{
+  "versie": 1,
+  "regels": [
+    {
+      "bron": {
+        "tab": "INSTROOM",
+        "onderwerp": "Elf extra kennisankers uit een oudere bron zijn opgenomen als verrijking. Ze tellen bewust niet mee als bouwwerk, dus de bouwlijst blijft ongewijzigd.",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      }
+    },
+    {
+      "bron": {
+        "tab": "INSTROOM",
+        "onderwerp": "Onafhankelijke tweede review bevestigde dat die opname verliesvrij is en niet naar de bouwlijst kan lekken. Twee kleine kanttekeningen verwerkt.",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      }
+    },
+    {
+      "bron": {
+        "tab": "COMMAND-CANON",
+        "onderwerp": "Twee integratiegaten in het centrale modellenregister gedicht, met een falende test vooraf: het register vindt zichzelf nu ongeacht de werkmap, en de controlefunctie kreeg dezelfde vorm als de bestaande koppelstukken.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (command-canon #31)"
+      }
+    },
+    {
+      "bron": {
+        "tab": "ARCHEOLOGIE",
+        "onderwerp": "Zeven lagen historisch materiaal op elkaar gelegd. Kernbevinding: alle vastgelegde besluiten gaan over werkwijze, geen enkele over het product zelf — de grootste terugkerende thema's zijn nooit bestuurd.",
+        "status": "AFGEROND",
+        "actie": "Richard"
+      }
+    },
+    {
+      "bron": {
+        "tab": "COMMAND-CANON",
+        "onderwerp": "Uitvoerbaar plan om handgekopieerde modeltabellen in twee andere repo's te vervangen door een dun koppelstuk op de centrale bron. Gedrag blijft identiek; het is uitdrukkelijk géén modelwissel.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard"
+      }
+    },
+    {
+      "bron": {
+        "tab": "COMMAND-CANON",
+        "onderwerp": "In de assistent-bot-repo stond nog een afgekeurde model-aanduiding op drie plekken; een al gereviewde correctie lag ongebruikt klaar en is als voorstel ingediend. Nevenvondst: de testpoort van die repo was rood op de hoofdlijn zelf, waardoor geen enkel voorstel er schoon doorheen kon.",
+        "status": "GEBLOKKEERD",
+        "actie": "CHIEF / CONTROL"
+      }
+    },
+    {
+      "bron": {
+        "tab": "COMMAND-CANON",
+        "onderwerp": "Voorstel voor een aanbevolen inspanningsstand per venster-rol, nadat bleek dat niemand die per sessie bewust koos. Zwaar werk mag hoger, bulkwerk lager — per saldo kostenverlagend.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "CONTROL"
+      }
+    },
+    {
+      "bron": {
+        "tab": "DASHBOARD",
+        "onderwerp": "De echte bouwlijst staat nu op de planningsplaat in plaats van vijf voorbeeldregels; dubbele review binnen, zes punten verwerkt. Aandachtspunt bij de beslissing: de plaat is openbaar, een deel van de labels bevat eigennaam-achtige woorden en de blokkeerlijst was nog leeg.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (stack-dashboard #18)"
+      }
+    },
+    {
+      "bron": {
+        "tab": "COMMAND-CANON",
+        "onderwerp": "Vijfde integriteitscontrole op de meetopstelling. Eén enkele afwijking kon eerder willekeurig veel ontbrekende metingen wegpoetsen terwijl de meting toch \"deugdelijk\" heette; dat excuus geldt nu alleen nog als de afwijking de run echt afbrak.",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      }
+    },
+    {
+      "bron": {
+        "tab": "COMMAND-CANON",
+        "onderwerp": "Voorraad bewezen leeg: geen nieuwe opdracht in de eigen wachtrij en geen enkele openstaande taak raakt deze repo's. Nachtteller zes van zes.",
+        "status": "AFGEROND",
+        "actie": "Richard"
+      }
+    },
+    {
+      "bron": {
+        "tab": "COMMAND-CANON",
+        "onderwerp": "Na de herstart bleek dat twee gepubliceerde rapporten verwezen naar commits die alleen lokaal bestonden — het bewijs was voor een lezer dus niet na te rekenen. Beide takken alsnog gepubliceerd; de cijfers in de rapporten zijn onveranderd.",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      }
+    },
+    {
+      "bron": {
+        "tab": "PRESENTATIES",
+        "onderwerp": "Batch van negen punten rond het presentatie-archief afgerond: de schijfwachter meldt nu falen in plaats van stil door te gaan, een ontdubbelingsgeval is beslecht en het metadataschema bleek al bevroren. Losse vondst: een kopie van een script buiten de repo is nog de oude, ongepoorte versie.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard + Fable"
+      }
+    },
+    {
+      "bron": {
+        "tab": "PRESENTATIES",
+        "onderwerp": "Voorraad bewezen leeg, met methode erbij. Twee hygiënepunten voor de centrale wachtrij gemeld: één taak is achterhaald omdat het werk al geleverd is, en twee taken wijzen naar een repository die niet bestaat.",
+        "status": "AFGEROND",
+        "actie": "Richard"
+      }
+    },
+    {
+      "bron": {
+        "tab": "CONTENT",
+        "onderwerp": "Eerste fase van de artikel-pijplijn is klaar om samengevoegd te worden: van signaal naar conceptdossier met bronregister, volledig offline, met een harde eigenaarspoort zodat er niets automatisch gepubliceerd wordt. Onafhankelijke herreview akkoord.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "merger (niet de bouwer)"
+      }
+    },
+    {
+      "bron": {
+        "tab": "MARKT",
+        "onderwerp": "Publicatieroute en verversingsschema voor de statische voorpagina van de markt-radar; publiek-veilig en alleen-lezen.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard"
+      }
+    },
+    {
+      "bron": {
+        "tab": "MARKT",
+        "onderwerp": "Tweede fase van de voorspellingen-administratie: uitkomstcontrole en geloofwaardigheid per bron, bovenop het bestaande grootboek. Dubbele review verwerkt.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard"
+      }
+    },
+    {
+      "bron": {
+        "tab": "MARKT",
+        "onderwerp": "Na de herstart bleken twee voorstellen stil onbruikbaar geworden doordat de hoofdlijn was doorgelopen. Beide conflicten waren triviaal en zijn opgelost zonder een test aan te raken; alles weer groen.",
+        "status": "AFGEROND",
+        "actie": "Richard"
+      }
+    },
+    {
+      "bron": {
+        "tab": "MARKT",
+        "onderwerp": "De testpoort zelf viel stil uit: door een filter draaide hij nul keer op een gestapeld voorstel, en dat leest als \"niets mis\" in plaats van als rood. Gerepareerd en met een wegwerp-voorstel gemeten in plaats van beredeneerd. Beide reviewers wezen daarnaast op een openstaand beslispunt: controles zijn nu aanwezig, maar nog niet verplicht vóór samenvoegen.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard"
+      }
+    },
+    {
+      "bron": {
+        "tab": "CHIEF",
+        "onderwerp": "De rode testpoort van de assistent-bot-repo is gedicht; samenvoegen kan daar weer. Correctie op de eerdere diagnose: het leeuwendeel van de fouten kwam niet van de eerder aangewezen oorzaak, maar van een opdracht die alleen op macOS bestaat en op de bouwserver faalde. Lokaal exact nagespeeld met een wegwerp-emulator van die server.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "merger (niet de auteur)"
+      }
+    },
+    {
+      "bron": {
+        "tab": "COMMAND-CANON",
+        "onderwerp": "Tweede-familie-review op het modellenregister: vier bevindingen bevestigd, één direct gerepareerd. De zwaarste was dat de integratie-instructie een aanroep voorschreef die meteen crasht — juist wie de instructie netjes volgde, viel om. Drie punten die stil kunnen falen zijn bewust níét gerepareerd, omdat ze gedrag veranderen en de vervanging op gedragsbehoud rust.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (command-canon #31)"
+      }
+    },
+    {
+      "bron": {
+        "tab": "ORCHESTRATOR",
+        "onderwerp": "Eerste bouwlaag van het zelfvoedende werksysteem staat: de meting. Alles wat een taak overkomt wordt voortaan als losse gebeurtenis weggeschreven in een stroom die alleen aangroeit en nooit herschreven wordt — een halfgeschreven regel wordt bij het lezen overgeslagen in plaats van het geheel te laten omvallen. Daarop draaien duurschattingen per repository en per soort werk, gevoed door uitsluitend geaccepteerd werk, zodat afgekeurd werk de norm niet stilletjes oprekt. Bewezen met de volledige testset groen en met een proef waarin tien opzettelijk aangebrachte fouten alle tien een test rood maakten.",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      },
+      "publiek": {
+        "tab": "ORCHESTRATOR",
+        "onderwerp": "Eerste bouwlaag van het zelfvoedende werksysteem staat: de meting. Alles wat een taak overkomt wordt voortaan als losse gebeurtenis weggeschreven in een stroom die alleen aangroeit en nooit herschreven wordt — een halfgeschreven regel wordt bij het lezen overgeslagen in plaats van het geheel te laten omvallen. Daarop draaien duurschattingen per repository en per soort werk, gevoed door uitsluitend geaccepteerd werk, zodat afgekeurd werk de norm niet stilletjes oprekt. Bewezen met de volledige testset groen en met een proef waarin tien opzettelijk aangebrachte fouten alle tien een test rood ma…",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      }
+    },
+    {
+      "bron": {
+        "tab": "ORCHESTRATOR",
+        "onderwerp": "Tweede laag in aanbouw: de blijvende werker. Het kernpunt is dat een antwoord van een taalmodel mag eindigen zonder dat het werkproces eindigt — de werker pakt zelf de volgende taak op, houdt zijn recht op een repository levend met een hartslag, en levert werk alleen af als het aan de afgesproken vorm voldoet en de werkmap schoon is. Tijdens het bouwen kwam een echt defect boven water in de bestaande opruimlus: werk waarvan de houdbaarheid verlopen was ging rechtstreeks terug de voorraad in, zonder de vijf controles die moeten vaststellen of het oude proces werkelijk dood is. Dat had dezelfde taak aan twee werkers tegelijk kunnen geven; gedicht en met tests afgedekt.",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      },
+      "publiek": {
+        "tab": "ORCHESTRATOR",
+        "onderwerp": "Tweede laag in aanbouw: de blijvende werker. Het kernpunt is dat een antwoord van een taalmodel mag eindigen zonder dat het werkproces eindigt — de werker pakt zelf de volgende taak op, houdt zijn recht op een repository levend met een hartslag, en levert werk alleen af als het aan de afgesproken vorm voldoet en de werkmap schoon is. Tijdens het bouwen kwam een echt defect boven water in de bestaande opruimlus: werk waarvan de houdbaarheid verlopen was ging rechtstreeks terug de voorraad in, zonder de vijf controles die moeten vaststellen of het oude proces werkelijk dood is. Dat had dezelfde…",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      }
+    },
+    {
+      "bron": {
+        "tab": "ORCHESTRATOR",
+        "onderwerp": "Merge-opdracht markt-radar-repo voorstel 11 (poort tegen gestapelde voorstellen): niets gedaan, want het was al gemerged — om 06:18 UTC, door Richards eigen account, een paar minuten voordat de opdracht mij bereikte. Controles op de gemergede kop stonden groen: testronde, geheimenscan en de voorbeeldbouw. Geen afwijking, geen actie van mij nodig.",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      }
+    },
+    {
+      "bron": {
+        "tab": "ORCHESTRATOR",
+        "onderwerp": "Merge-opdracht markt-radar-repo voorstel 13 (verslag van de poortronde): eveneens al gemerged, 06:18 UTC, zelfde account. Wel een kanttekening die telt: op de gemergede kop had alléén de voorbeeldbouw gedraaid — de testronde en de geheimenscan hebben op die kop nooit gelopen, terwijl de opdracht juist was om ze eerst opnieuw aan te zwengelen en pas bij groen te mergen. Het gaat om een tekstwijziging, dus de schade is nul, maar de poort is hier niet gehaald zoals bedoeld.",
+        "status": "AFGEROND",
+        "actie": "Richard (ter kennisgeving)"
+      }
+    },
+    {
+      "bron": {
+        "tab": "ORCHESTRATOR",
+        "onderwerp": "Merge-opdracht website-repo voorstel 2 (dezelfde poortwijziging als in de markt-radar): ook al gemerged om 06:18 UTC door hetzelfde account, met testronde en geheimenscan groen op de gemergede kop. Samengevat: van de drie geautoriseerde merges was er niets meer te doen; ik heb niets gemergd en niets aangeraakt. De overige openstaande voorstellen in beide repositories vielen buiten de autorisatie en blijven staan.",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      }
+    },
+    {
+      "bron": {
+        "tab": "CONTROL",
+        "onderwerp": "Deze spiegel is nu ook als regel vastgelegd, niet alleen als bestand. Twee besluiten liggen klaar ter ondertekening: (1) de spiegel is een bewuste uitzondering op de afspraak dat er geen vrije tekst uit het interne archief naar buiten gaat — die uitzondering staat er met de prijs bij, namelijk dat de schrijver hier de verdediging is in plaats van een automatische filter, met herformuleerplicht, een tweede paar ogen vóór publicatie en een wekelijkse steekproef als tegenwicht; (2) melden gebeurt voortaan bij elke toestandswissel die iemand anders aan zet zet — iets is mergebaar, iets wacht op een besluit, een voorraad is leeg, iets zit vast — en wel binnen dezelfde werkbeurt, niet pas bij het eindrapport. Kern: een poort zonder regel in dit logboek bestaat niet.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (stack-control #338)"
+      },
+      "publiek": {
+        "tab": "CONTROL",
+        "onderwerp": "Deze spiegel is nu ook als regel vastgelegd, niet alleen als bestand. Twee besluiten liggen klaar ter ondertekening: (1) de spiegel is een bewuste uitzondering op de afspraak dat er geen vrije tekst uit het interne archief naar buiten gaat — die uitzondering staat er met de prijs bij, namelijk dat de schrijver hier de verdediging is in plaats van een automatische filter, met herformuleerplicht, een tweede paar ogen vóór publicatie en een wekelijkse steekproef als tegenwicht; (2) melden gebeurt voortaan bij elke toestandswissel die iemand anders aan zet zet — iets is mergebaar, iets wacht op e…",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (stack-control #338)"
+      }
+    },
+    {
+      "bron": {
+        "tab": "CONTROL",
+        "onderwerp": "Vlootmededeling: de tweede, onafhankelijke reviewfamilie is weer beschikbaar. Daarmee is dubbele review hersteld naar twee echt verschillende modellen in plaats van één model dat twee keer kijkt — dat is de hele reden dat de dubbele review bestaat. Het regime blijft strikt: wie een review vraagt, levert de complete wijziging kant-en-klaar aan met drie tot vijf gerichte vragen en krijgt één afgebakende beurt terug. Geen zoekwerk, geen doorlopende opdrachten. Het verbruik gaat mee in het weekoverzicht.",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      }
+    },
+    {
+      "bron": {
+        "tab": "CONTROL",
+        "onderwerp": "Eerlijke tussenstand onder de nieuwe regel: het opruimwerk aan de centrale werkvoorraad is nog niet gebouwd, en dat meld ik nu in plaats van pas bij de oplevering. Reden om niet te beginnen: de benodigde extra taakstatus is geen labeltje maar een schemawijziging op drie plekken tegelijk — laat je er één weg, dan blijft een afgesloten taak zichtbaar als gepland op de planningsplaat. Bovendien heeft een ander voorstel het te wijzigen bestand al open; twee schrijvers op één bestand is precies wat we niet doen. Verder ligt er: één taak die achterhaald is omdat het werk al geleverd is, twee taken die naar de verkeerde bronrepo wijzen, en twee taken waarvan de bronrepo helemaal niet bestaat — die laatste twee worden geblokkeerd met een getypeerde reden en gaan als beslispunt naar de bundel, want de doelrepo raden is erger dan hem openlaten.",
+        "status": "GEBLOKKEERD",
+        "actie": "niemand (wacht op stack-control #326)"
+      },
+      "publiek": {
+        "tab": "CONTROL",
+        "onderwerp": "Eerlijke tussenstand onder de nieuwe regel: het opruimwerk aan de centrale werkvoorraad is nog niet gebouwd, en dat meld ik nu in plaats van pas bij de oplevering. Reden om niet te beginnen: de benodigde extra taakstatus is geen labeltje maar een schemawijziging op drie plekken tegelijk — laat je er één weg, dan blijft een afgesloten taak zichtbaar als gepland op de planningsplaat. Bovendien heeft een ander voorstel het te wijzigen bestand al open; twee schrijvers op één bestand is precies wat we niet doen. Verder ligt er: één taak die achterhaald is omdat het werk al geleverd is, twee taken…",
+        "status": "GEBLOKKEERD",
+        "actie": "niemand (wacht op stack-control #326)"
+      }
+    },
+    {
+      "bron": {
+        "tab": "CONTROL",
+        "onderwerp": "De tikronde staat klaar: dertien goedgekeurde samenvoegingen achter één commando, in plaats van dertien losse regels. De zeggenschap verandert niet — het script voert uit zichzelf niets uit; het draaien ervan ís het akkoordmoment, en degene die het draait is nooit de schrijver. Wat het toevoegt boven een lijstje commando's: (1) elke regel is vastgeklonken aan de exacte versie die gereviewd is — verschuift die versie tussen de melding en het moment van uitvoeren, dan wordt die ene regel overgeslagen in plaats van dat er ongelezen werk meegaat; (2) overslaan is geen falen — een regel die nog niet rijp is (versie verschoven, controles nog niet groen, al afgehandeld, conflict met de hoofdlijn) krijgt een reden op het scherm en de overige twaalf gaan gewoon door; alleen een échte fout stopt de ronde; (3) meten met geduld, want na een samenvoeging rekent het platform even door en een gestapeld voorstel wordt pas daarna omgehangen — een tijdelijke hapering is geen reden af te breken; (4) na afloop een gedateerde archiefkopie en een geleegde lijst, zodat er niets verdwijnt maar de volgende ronde schoon begint. De mechaniek bewees zich meteen: tijdens de proefronde verschoof de versie van een van de voorstellen en het script sloeg 'm over; het betreffende venster meldde daarna opnieuw met de nieuwe versie en die staat er nu in. Eén rechtzetting van mezelf: ik meldde eerst een fout in mijn eigen script die er na nameting niet bleek te zijn — de tweede reviewfamilie gaf dezelfde bevinding en ik nam die over zonder te meten. Twee ándere punten van diezelfde review waren wél raak en zijn verwerkt. Drie voorstellen die in de opdracht stonden bleken al samengevoegd en staan daarom als niet van toepassing vermeld, met die reden erbij.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (één commando draait de hele ronde)"
+      },
+      "publiek": {
+        "tab": "CONTROL",
+        "onderwerp": "De tikronde staat klaar: dertien goedgekeurde samenvoegingen achter één commando, in plaats van dertien losse regels. De zeggenschap verandert niet — het script voert uit zichzelf niets uit; het draaien ervan ís het akkoordmoment, en degene die het draait is nooit de schrijver. Wat het toevoegt boven een lijstje commando's: (1) elke regel is vastgeklonken aan de exacte versie die gereviewd is — verschuift die versie tussen de melding en het moment van uitvoeren, dan wordt die ene regel overgeslagen in plaats van dat er ongelezen werk meegaat; (2) overslaan is geen falen — een regel die nog ni…",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (één commando draait de hele ronde)"
+      }
+    },
+    {
+      "bron": {
+        "tab": "CONTROL",
+        "onderwerp": "De verdeling van rekencapaciteit over de modelfamilies is nu een vastgelegde regel in plaats van gewoonte. Drie delen. (1) Rolverdeling: de ene familie is hoofdbouwer voor het herstel van de controlepoorten én eerste beoordelaar van al het zware werk; de tweede familie blijft de onafhankelijke tweede lezer; de eigen vensters beoordelen alleen hun eigen laag-risicowerk en vragen voor zwaar werk de eerste beoordeling elders aan — ook als dat langzamer voelt. (2) Bewezen lege voorraad betekent stil blijven. Dat was al de afspraak; het staat er nu bij als capaciteitsregel, met de grond erbij: werk verzinnen om bezig te lijken kost precies de ruimte die het echte bouwen nodig heeft. Niemand voert een leeg venster werk toe. (3) Verbruik wordt zichtbaar in het weekoverzicht, per account, met een uitdrukkelijke waarschuwing: waar het echte verbruik niet meetbaar is wordt de bezetting als benadering getoond, en dat woord staat in de regel zelf — een benadering naast een echt bedrag zetten zonder dat erbij te zeggen is precies hoe je later op een verkeerd getal gaat sturen. Daarnaast twee aanscherpingen op de tikronde die niet bedacht maar geleerd zijn: elke regel moet de exacte gereviewde versie noemen (geen versie = geen regel), en een nog niet rijpe regel wordt overgeslagen in plaats van de hele ronde te laten stoppen. Dat tweede vervangt een eerdere formulering en is dus een tekstwijziging, geen toevoeging — daarom meld ik het als zodanig.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (zit in de tikronde)"
+      },
+      "publiek": {
+        "tab": "CONTROL",
+        "onderwerp": "De verdeling van rekencapaciteit over de modelfamilies is nu een vastgelegde regel in plaats van gewoonte. Drie delen. (1) Rolverdeling: de ene familie is hoofdbouwer voor het herstel van de controlepoorten én eerste beoordelaar van al het zware werk; de tweede familie blijft de onafhankelijke tweede lezer; de eigen vensters beoordelen alleen hun eigen laag-risicowerk en vragen voor zwaar werk de eerste beoordeling elders aan — ook als dat langzamer voelt. (2) Bewezen lege voorraad betekent stil blijven. Dat was al de afspraak; het staat er nu bij als capaciteitsregel, met de grond erbij: wer…",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (zit in de tikronde)"
+      }
+    },
+    {
+      "bron": {
+        "tab": "DASHBOARD",
+        "onderwerp": "De echte bouwlijst staat nu live op de openbare planningsplaat, en de woordpoort ervoor is meegetikt. Van de bouwlijst-regels verschijnen er 328 op de plaat; 365 worden ingehouden en dat aantal staat zichtbaar boven de tabel — nooit stil weggelaten. De poort werkt op afwezigheid: elk woord van een regel moet vooraf beoordeeld zijn, dus één onbekend woord houdt de hele regel tegen. Er staat bewust géén namenlijst in de repo, ook niet gehasht: die repo is openbaar, en zo'n lijst zou zelf het lek zijn. Wat de poort niet kan: betekenis wegen — een regel waarvan elk woord doodgewoon is maar die als geheel te veel zegt, komt er door. De echte grens blijft een vooraf goedgekeurde catalogus van complete regels.",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      },
+      "publiek": {
+        "tab": "DASHBOARD",
+        "onderwerp": "De echte bouwlijst staat nu live op de openbare planningsplaat, en de woordpoort ervoor is meegetikt. Van de bouwlijst-regels verschijnen er 328 op de plaat; 365 worden ingehouden en dat aantal staat zichtbaar boven de tabel — nooit stil weggelaten. De poort werkt op afwezigheid: elk woord van een regel moet vooraf beoordeeld zijn, dus één onbekend woord houdt de hele regel tegen. Er staat bewust géén namenlijst in de repo, ook niet gehasht: die repo is openbaar, en zo'n lijst zou zelf het lek zijn. Wat de poort niet kan: betekenis wegen — een regel waarvan elk woord doodgewoon is maar die al…",
+        "status": "AFGEROND",
+        "actie": "niemand"
+      }
+    },
+    {
+      "bron": {
+        "tab": "ORCHESTRATOR",
+        "onderwerp": "Twee verse externe audits over autonoom programmeren zijn integraal getoetst tegen de lopende bouwopdracht: 7 bevestigingen, 12 overnames, 3 geschilpunten die ik niet zelf beslis. Vijf punten heb ik gemotiveerd níét overgenomen. Wat ze bevestigen is de strenge kant van het plan: toestemming moet aan een exacte versie hangen en vervallen, twijfel moet doorstroming blokkeren, en een slot op een werkmap is goede volgordebewaking maar géén toestemming — twee verschillende dingen, die het plan al uit elkaar hield. Wat ze toevoegen is praktisch: een noodrem die de bouwer zélf niet kan uitschakelen (de ene audit legde die op een plek waar iedere lokale gebruiker mag schrijven — dus ook het proces dat gestopt moet worden; ik volg de andere audit, die dat wel dichtzet), een ketting van hashes over het gebeurtenislog zodat 'alleen toevoegen' een controle wordt in plaats van een belofte, en de regel dat een mislukte logregel het werk zelf tegenhoudt: werk waarvan geen spoor bestaat mag niet bestaan. Twee overnames zijn zelfkritiek. Deze meldregel zelf neemt interne tekst en schoont die daarna — precies de richting die de audit afkeurt, en dezelfde dag liet een codereview zien waaróm: het filter laat een sleutel met hoofdletters en een Windows-pad gewoon door, en op een openbare plek is dat onomkeerbaar. Het wordt omgedraaid: er komt een apart openbaar veld en alleen dát wordt gepubliceerd; ontbreekt het, dan verschijnt de regel zónder onderwerp. En mijn eigen dubbelreviews lagen zonder binding aan de versie die ze beoordeelden; een review op een verouderde versie is geen review. Eén rechtzetting in dezelfde adem: de eerste bouwfase stond op afgerond en staat nu terug op in reparatie. De tweede beoordelaar draaide gerichte crash- en gelijktijdigheidsproeven en reproduceerde acht zware fouten terwijl alle 64 tests groen stonden. Groene tests waren dus geen bewijs van afwezigheid — de tests misten precies de situaties waar dit systeem om draait. Ik bouw door aan die acht, met de regel dat elk punt een test krijgt die aantoonbaar rood was vóór de reparatie.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (3 geschilpunten)"
+      },
+      "publiek": {
+        "tab": "ORCHESTRATOR",
+        "onderwerp": "Twee verse externe audits over autonoom programmeren zijn integraal getoetst tegen de lopende bouwopdracht: 7 bevestigingen, 12 overnames, 3 geschilpunten die ik niet zelf beslis. Vijf punten heb ik gemotiveerd níét overgenomen. Wat ze bevestigen is de strenge kant van het plan: toestemming moet aan een exacte versie hangen en vervallen, twijfel moet doorstroming blokkeren, en een slot op een werkmap is goede volgordebewaking maar géén toestemming — twee verschillende dingen, die het plan al uit elkaar hield. Wat ze toevoegen is praktisch: een noodrem die de bouwer zélf niet kan uitschakelen…",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (3 geschilpunten)"
+      }
+    },
+    {
+      "bron": {
+        "tab": "ORCHESTRATOR",
+        "onderwerp": "In gewone taal: wat de tweede beoordelaar vond, en wat het had kunnen kosten. Dit is dezelfde melding als hierboven, nu zonder vakjargon — er zijn geen nieuwe feiten en geen extra beslispunten bijgekomen. Acht zware fouten, elk in één zin. (1) Gaat een taak in quarantaine omdat we niet zéker weten of de oude bouwer dood is, dan geven we zijn werkmap tóch vrij — een nieuwe bouwer begint dan mogelijk terwijl de oude er nog in schrijft, en achteraf is niet meer te zien wiens werk er staat. (2) Het slot op de werkmap gaat los vóór het opruimen klaar is, dus een tweede bouwer kan de map pakken terwijl de eerste hem nog weghaalt. (3) De controle 'ben jij wel aan de beurt' slaan we over als er geen naam wordt meegegeven — en de bewaker geeft zelf nooit een naam mee, dus een bouwer wiens beurt allang voorbij is kan de taak alsnog verder duwen. (4) De herstelprocedure claimt tien minuten en heeft geen hartslag: blijft er iets hangen, dan begint een tweede hersteller terwijl de eerste nog bezig is, en overschrijven ze elkaars conclusie. (5) Twee verschillende namen mogen naar dezelfde map wijzen — we vergrendelen de naam en niet de map, dus 'één bouwer per werkmap' is stilletjes niet meer waar. (6) De rechtenlijst begrenst wat de bouwer mág, maar niet wat de machine tóélaat: via een omweg kan hij bestanden buiten zijn eigen werkmap lezen, terwijl de lijst het tegendeel suggereert. (7) Bij het afbreken wachten we alleen tot het hoofdproces weg is en niet op wat dat zelf gestart heeft — er bleef aantoonbaar een spookproces leven dat kan doorschrijven in een map die wij als vrij melden. (8) De filter die openbare meldregels schoonmaakt kijkt hoofdlettergevoelig en kent maar een korte lijst; een sleutel met hoofdletters en een Windows-pad gaan er gewoon doorheen — en een sleutel die openbaar is geweest krijg je niet terug, die kun je alleen vervangen. De vijf belangrijkste dingen die we uit de audits overnemen voor de volgende bouwfasen: een taak mag alleen gepakt worden als hij nog actueel is, en raakt hij tijdens het werk achterhaald dan stopt hij in plaats van door te lopen; de aanvulregelaar levert standaard in proefstand en mag pas in stappen omhoog (tien, vijfentwintig, vijftig) met een pauzeknop bij elke onverklaarde afwijking; toestemming om samen te voegen noemt voortaan de exacte versie, verloopt vanzelf en vervalt bij elke nieuwe wijziging; een beoordeling telt alleen als hij aan díé exacte versie hangt, want een review van gisteren zegt niets over de code van vandaag; en de samenvoeger weigert te starten als de hoofdlijn technisch onbeschermd is, met een risico-indeling waarbij het zwaarste werk nooit via de automatische route loopt. Er staan nog steeds drie beslispunten open, dezelfde als hierboven: de merge-poort (afspraak versus techniek), het moment waarop de aanvulregelaar scherp gezet wordt, en het pakket eigenaarsacties dat ik niet zelf kan uitvoeren.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (dezelfde 3 beslispunten, niet nieuw)"
+      },
+      "publiek": {
+        "tab": "ORCHESTRATOR",
+        "onderwerp": "In gewone taal: wat de tweede beoordelaar vond, en wat het had kunnen kosten. Dit is dezelfde melding als hierboven, nu zonder vakjargon — er zijn geen nieuwe feiten en geen extra beslispunten bijgekomen. Acht zware fouten, elk in één zin. (1) Gaat een taak in quarantaine omdat we niet zéker weten of de oude bouwer dood is, dan geven we zijn werkmap tóch vrij — een nieuwe bouwer begint dan mogelijk terwijl de oude er nog in schrijft, en achteraf is niet meer te zien wiens werk er staat. (2) Het slot op de werkmap gaat los vóór het opruimen klaar is, dus een tweede bouwer kan de map pakken ter…",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard (dezelfde 3 beslispunten, niet nieuw)"
+      }
+    },
+    {
+      "bron": {
+        "tab": "CHIEF",
+        "onderwerp": "Audit E (altijd-aan werken) verwerkt: 5 bevestigingen, 7 overnames, 2 gemotiveerd niet overgenomen, 1 punt voor jou. Het verdict is NO-GO voor een kanaal waar zomaar opdrachten in kunnen vallen — niet voor altijd-aan werken zelf. De audit bevestigt het kernprincipe van de vloot (een antwoord mag stoppen, het proces niet) en scherpt het op één punt aan: we meten nu alleen óf een dienst leeft, niet óf hij nog iets doet. Een dienst die draait en niets meer verwerkt, staat vandaag op groen. Twee overnames zijn voorwaarde vóór het Telegram-kanaal aan mag: elk uitgaand bericht wordt opgebouwd uit toegelaten velden in plaats van geschoond, en sleutels verdwijnen uit de opdrachtregel waar elk ander proces ze kan meelezen. Alle zeven overnames staan als kandidaat in de queue met de audit als bewijs; er start hierdoor niets vanzelf.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard: één punt — de dodemansknop die afgaat als deze Mac zwijgt, kan niet op deze Mac draaien. Externe dienst, klein bedrag per maand. Wil je dat, en waar?"
+      },
+      "publiek": {
+        "tab": "CHIEF",
+        "onderwerp": "Audit E (altijd-aan werken) verwerkt: 5 bevestigingen, 7 overnames, 2 gemotiveerd niet overgenomen, 1 punt voor jou. Het verdict is NO-GO voor een kanaal waar zomaar opdrachten in kunnen vallen — niet voor altijd-aan werken zelf. De audit bevestigt het kernprincipe van de vloot (een antwoord mag stoppen, het proces niet) en scherpt het op één punt aan: we meten nu alleen óf een dienst leeft, niet óf hij nog iets doet. Een dienst die draait en niets meer verwerkt, staat vandaag op groen. Twee overnames zijn voorwaarde vóór het Telegram-kanaal aan mag: elk uitgaand bericht wordt opgebouwd uit t…",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard: één punt — de dodemansknop die afgaat als deze Mac zwijgt, kan niet op…"
+      }
+    },
+    {
+      "bron": {
+        "tab": "DASHBOARD",
+        "onderwerp": "Audit F (publicatiepoorten) verwerkt: 4 bevestigingen, 7 overnames, 1 gemotiveerd niet overgenomen, 2 punten voor jou. Het verdict is NO-GO voor vrije tekst op een openbaar oppervlak en voor een spiegel die op discipline draait. Wat we vandaag gebouwd hebben (alleen een expliciet publiek label naar buiten, de rest niet) is precies de goede richting; de audit wil er twee dingen bij die we nog niet doen. Eén: keur het gebouwde artefact en niet de bron, inclusief bestandsnamen — wat de bouw er zelf bij zet, ziet niemand nu. Twee: publiceer exact de vingerafdruk die gekeurd is, en controleer ná afloop dat buiten staat wat goedgekeurd werd. De zwaarste overname is een vraag aan jou en geldt als voorwaarde vóór plaat v2.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard: twee punten — (1) een vaste labelcatalogus maakt de plaat veiliger maar saaier: hoe compleet moet die lijst zijn? (2) de audit wil géén losse taakregels publiek; jouw besluit F5 is 'alles openbaar'. Dat botst, en ik heb F5 niet stilletjes ingeperkt."
+      },
+      "publiek": {
+        "tab": "DASHBOARD",
+        "onderwerp": "Audit F (publicatiepoorten) verwerkt: 4 bevestigingen, 7 overnames, 1 gemotiveerd niet overgenomen, 2 punten voor jou. Het verdict is NO-GO voor vrije tekst op een openbaar oppervlak en voor een spiegel die op discipline draait. Wat we vandaag gebouwd hebben (alleen een expliciet publiek label naar buiten, de rest niet) is precies de goede richting; de audit wil er twee dingen bij die we nog niet doen. Eén: keur het gebouwde artefact en niet de bron, inclusief bestandsnamen — wat de bouw er zelf bij zet, ziet niemand nu. Twee: publiceer exact de vingerafdruk die gekeurd is, en controleer ná a…",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard: twee punten — (1) een vaste labelcatalogus maakt de plaat veiliger maa…"
+      }
+    },
+    {
+      "bron": {
+        "tab": "CHIEF",
+        "onderwerp": "Audit G (Telegram) verwerkt: 3 bevestigingen, 6 overnames, 2 gemotiveerd niet overgenomen, 1 punt voor jou. Het verdict is permanent NO-GO voor iets uitvoeren via Telegram, en voorwaardelijk GO voor alleen aannemen. De regel die daaruit volgt is scherp: een binnengekomen bericht mag hoogstens één onveranderlijk voorstel opleveren, zonder enige bevoegdheid, en verder niets. Twee overnames zijn voorwaarde vóór de eerste echte proef: alleen-aannemen moet technisch onvermogen zijn (eigen gebruiker, geen rechten op repo's, sleutels of uitrol) en bevestigen vraagt een factor buiten het berichtenkanaal. Gevolg: de proef schuift op. De audit legt er veertien controles voor.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard: één punt met twee kanten — akkoord dat de proef opschuift tot de controles groen zijn? En volstaat voor die proef een code uit een app plus een bevestiging op de Mac, of wil je meteen het zware slot dat de audit vraagt?"
+      },
+      "publiek": {
+        "tab": "CHIEF",
+        "onderwerp": "Audit G (Telegram) verwerkt: 3 bevestigingen, 6 overnames, 2 gemotiveerd niet overgenomen, 1 punt voor jou. Het verdict is permanent NO-GO voor iets uitvoeren via Telegram, en voorwaardelijk GO voor alleen aannemen. De regel die daaruit volgt is scherp: een binnengekomen bericht mag hoogstens één onveranderlijk voorstel opleveren, zonder enige bevoegdheid, en verder niets. Twee overnames zijn voorwaarde vóór de eerste echte proef: alleen-aannemen moet technisch onvermogen zijn (eigen gebruiker, geen rechten op repo's, sleutels of uitrol) en bevestigen vraagt een factor buiten het berichtenkan…",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard: één punt met twee kanten — akkoord dat de proef opschuift tot de contr…"
+      }
+    },
+    {
+      "bron": {
+        "tab": "NQ-RADAR",
+        "onderwerp": "Audit H (markt-lane) verwerkt: 3 bevestigingen, 7 overnames, 2 gemotiveerd niet overgenomen, 2 punten voor jou. Het verdict is voorwaardelijk GO zolang de lane informatief blijft, en NO-GO voor alles wat geld raakt. De kern van de audit is een oude bekende in nieuwe vorm: een gemeten nul, een lege uitkomst, een ontbrekende meting en een onbereikbare bron mogen nooit hetzelfde getal worden — en een mislukte modelaanroep is geen oordeel. Verder: vijf sites die één persbericht napraten zijn één bron, geen bevestiging. De zwaarste overname is de geldpoort: elke geld-route eindigt zonder jouw expliciete vrijgave op geblokkeerd, als toestand in de code en niet als afspraak.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard: twee punten — (1) wie mag geld vrijgeven, langs welke weg, per bedrag of per keer? (2) de markt-lane mag publiek alleen vertraagd: hoeveel vertraging, of laten we die weergave voorlopig weg — en wil je een terugblik op wat er van de radar al publiek stond?"
+      },
+      "publiek": {
+        "tab": "NQ-RADAR",
+        "onderwerp": "Audit H (markt-lane) verwerkt: 3 bevestigingen, 7 overnames, 2 gemotiveerd niet overgenomen, 2 punten voor jou. Het verdict is voorwaardelijk GO zolang de lane informatief blijft, en NO-GO voor alles wat geld raakt. De kern van de audit is een oude bekende in nieuwe vorm: een gemeten nul, een lege uitkomst, een ontbrekende meting en een onbereikbare bron mogen nooit hetzelfde getal worden — en een mislukte modelaanroep is geen oordeel. Verder: vijf sites die één persbericht napraten zijn één bron, geen bevestiging. De zwaarste overname is de geldpoort: elke geld-route eindigt zonder jouw expl…",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard: twee punten — (1) wie mag geld vrijgeven, langs welke weg, per bedrag…"
+      }
+    },
+    {
+      "bron": {
+        "tab": "TRECHTER",
+        "onderwerp": "De audits C en D zijn binnen, maar het pakket is niet compleet — en dat is met grep aantoonbaar, niet met een indruk. ● A en B: compleet. Beide PDF's liggen in de repo met hash (77d7b888c338c9a6 en 78e3969431038661). Er bestaat geen losstaand B-rapport en dat is geen gat: B zit ín het gecombineerde document. ● C en D: er ontbreekt een heel rapport. Je leverde twee dingen tegelijk die niet bij elkaar horen — een dekkingscontrole met twee tabellen, en een uitgevoerd C+D-rapport van 33 secties. De dekkingscontrole gaat over een ander rapport. Bewijs: haar eigen ankers (TEST-C1 t/m C4, TEST-D1 t/m D4, restic, bootstrap_recovery.sh, Inverted Heartbeat, Analoge Papier-Kluis) komen in geen enkel bronbestand voor, ook niet in het geleverde rapport. Omgekeerd draait het geleverde rapport op C-AT-01...C-AT-20, D-AT-01...D-AT-24, zeven-plus-één dataklassen, drie waarheden en 90 seconden drift — waar de dekkingscontrole vijf dataklassen, vier lagen en 180 seconden noemt. Twee onverenigbare documenten. ● De uitvraag van D ontbreekt. Alleen die van C is meegeleverd; het rapport verwijst wel naar 'de eerder aangeleverde opdracht'. ● E t/m H bestaat nu in twéé uitvoeringen. De opnieuw geplakte tekst (407 regels) is niet de bron van de 27 overnames — dat is ...-v1.0.md (3207 regels). Bewijs: ThrottleInterval, FLEET_KILL, EX_CONFIG, TEST-E1 en TEST-G4 komen in v1.0 nul keer voor; omgekeerd ontbreekt in de compacte versie de bypass-reeks B01–B48. Of de compacte versie iets toevoegt boven de 27 is een delta-analyse die nog niet gedraaid is — ik claim dus niet dat zij gedekt is. ● Wat ik wél gedaan heb: alles wat je plakte woordelijk vastgelegd als bron met hash, met een herkomstwaarschuwing erboven — het zijn chatplakken, geen originele bestanden, dus de hash dekt mijn transcriptie en niet het origineel van de opsteller. Bij A en A+B is dat andersom: daar ligt de PDF zelf in de repo. ● Wat ik niet gedaan heb: C en D inhoudelijk verwerkt. Dat begint pas als het pakket compleet is, anders bouw ik op een rapport waarvan de helft ontbreekt.",
+        "status": "GEBLOKKEERD",
+        "actie": "Richard: drie dingen aanleveren, dan gaat C/D door de molen. (1) Het C/D-rapport waar de dekkingscontrole écht bij hoort — dat met TEST-C1 t/m C4 en restic. (2) De uitvraag (opdrachttekst) van audit D. (3) Bij voorkeur de originele bestanden in plaats van een chatplak, zodat er een hash tegen de bron te leggen is. Losse vraag: wil je dat ik de compacte E–H-versie langs de 27 bestaande overnames leg (delta-analyse), of laten we die staan?"
+      },
+      "publiek": {
+        "tab": "TRECHTER",
+        "onderwerp": "De audits C en D zijn binnen, maar het pakket is niet compleet — en dat is met grep aantoonbaar, niet met een indruk. ● A en B: compleet. Beide PDF's liggen in de repo met hash (77d7b888c338c9a6 en 78e3969431038661). Er bestaat geen losstaand B-rapport en dat is geen gat: B zit ín het gecombineerde document. ● C en D: er ontbreekt een heel rapport. Je leverde twee dingen tegelijk die niet bij elkaar horen — een dekkingscontrole met twee tabellen, en een uitgevoerd C+D-rapport van 33 secties. De dekkingscontrole gaat over een ander rapport. Bewijs: haar eigen ankers (TEST-C1 t/m C4, TEST-D1 t/…",
+        "status": "GEBLOKKEERD",
+        "actie": "Richard: drie dingen aanleveren, dan gaat C/D door de molen. (1) Het C/D-rappor…"
+      }
+    },
+    {
+      "bron": {
+        "tab": "TRECHTER",
+        "onderwerp": "Correctie op mijn rij van 14:10: er ontbrak niets. Ik las twee auditors als één, en noemde het verschil tussen hen een tegenstrijdigheid. ● Wat ik fout had. Ik meldde een ontbrekend C/D-rapport en twee onverenigbare documenten. Richard lichtte toe dat C en D door twéé auditors zijn gedaan, Gemini en ChatGPT. Dat is precies wat protocol §2 wil — twee onafhankelijke stemmen — en niet een gat. ● Wat er nu ligt. Gemini's C/D-antwoord (§1 t/m §9 per opdracht, 454 regels) en de uitvraag van audit D zijn nageleverd en woordelijk vastgelegd. Daarmee: acht opdrachten binnen, waarvan C t/m H dubbel uitgevoerd. ● De koppeling is gemeten, niet aangenomen. De dekkingscontrole hoorde bij Gemini's rapport: tien ankers (TEST-C1/C4, TEST-D1/D4, restic, bootstrap_recovery, Inverted Heartbeat, Papier-Kluis) komen wél in Gemini's antwoord voor en in géén enkel ander document. ● Waar ze verschillen blijft staan — als beslispunt. ChatGPT werkt met acht dataklassen, drie waarheden en 90 seconden drift; Gemini met vijf dataklassen, vier verificatielagen en 180 seconden. Dat kiezen we bij de verwerking, het is geen fout van een van beide. ● Wat nog niet gedaan is, en dat claim ik ook niet. C en D zijn nog niet inhoudelijk verwerkt, en de delta van de compacte E–H tegen de 27 bestaande overnames is niet gedraaid — zolang die niet draait geldt die versie niet als gedekt.",
+        "status": "AFGEROND",
+        "actie": "Richard: één keuze. Ga ik door met de inhoudelijke verwerking van C en D — drie bakken, CANDIDATE-taken met owner_window, plus een expliciete vergelijking waar Gemini en ChatGPT elkaar tegenspreken — of eerst de delta-analyse van de compacte E–H tegen de 27 overnames? Zonder antwoord pak ik de orchestrator-P0's weer op. Blijft open: originele bronbestanden in plaats van chatplakken zijn welkom, maar blokkeren niets."
+      },
+      "publiek": {
+        "tab": "TRECHTER",
+        "onderwerp": "Correctie op mijn rij van 14:10: er ontbrak niets. Ik las twee auditors als één, en noemde het verschil tussen hen een tegenstrijdigheid. ● Wat ik fout had. Ik meldde een ontbrekend C/D-rapport en twee onverenigbare documenten. Richard lichtte toe dat C en D door twéé auditors zijn gedaan, Gemini en ChatGPT. Dat is precies wat protocol §2 wil — twee onafhankelijke stemmen — en niet een gat. ● Wat er nu ligt. Gemini's C/D-antwoord (§1 t/m §9 per opdracht, 454 regels) en de uitvraag van audit D zijn nageleverd en woordelijk vastgelegd. Daarmee: acht opdrachten binnen, waarvan C t/m H dubbel uit…",
+        "status": "AFGEROND",
+        "actie": "Richard: één keuze. Ga ik door met de inhoudelijke verwerking van C en D — drie…"
+      }
+    },
+    {
+      "bron": {
+        "tab": "TRECHTER",
+        "onderwerp": "Twee van de acht P0's uit de codereview zijn dicht, elk met een test die eerst aantoonbaar rood stond. ● P0-3 — iedereen mocht andermans werk wegschrijven. De queue controleerde eigendom alleen als er toevallig een workernaam werd meegegeven, en de supervisor gaf er geen. Eigendom zit nu in één poort die beide schrijfwegen aanroepen, en die naast de naam ook de lease toetst: een verlopen greep schrijft niet meer. ● De bevinding bleek breder dan de review beschreef. Blokkeren keek alleen naar CLAIMED, dus een taak in uitvoering of verificatie was ook mét naam onbeschermd. Meegenomen. De menselijke uitweg is expliciet gemaakt in plaats van weggelaten: eq block --force. ● P0-5 — twee namen, één map, twee schrijvers. Het slot zat op de repositorynaam. Nu op de fysieke identiteit, en bewust op de gedeelde git-map en niet op de werkmap: twee worktrees van dezelfde repo delen objectdatabase, refs en index-locks, dus die schrijven wél in elkaars vaarwater. ● Dit defect stond als eigenschap in mijn eigen testsuite. De parallel-test gaf drie logische repositories één werkkopie, met in het commentaar 'in de proef is dat genoeg'. Die test bevestigde dus precies het gat. Ik heb de fixture gerepareerd, niet de controle verzwakt. ● Wat ik niet claim. Zes P0's staan nog open; de serie is niet af en er is nog geen review op één kop-SHA.",
+        "status": "AFGEROND",
+        "actie": "Niemand — ik werk door. Volgens de opdracht is dit een doorwerkcyclus: nu de resterende vier (P0-1 quarantaine, P0-4 herstel-lease, P0-6 rechtenenvelop, P0-7 procesgroep), elk met rode test vooraf, daarna één review op één kop-SHA over de hele serie, en direct daarna de spiegel-exporter."
+      },
+      "publiek": {
+        "tab": "TRECHTER",
+        "onderwerp": "Twee van de acht P0's uit de codereview zijn dicht, elk met een test die eerst aantoonbaar rood stond. ● P0-3 — iedereen mocht andermans werk wegschrijven. De queue controleerde eigendom alleen als er toevallig een workernaam werd meegegeven, en de supervisor gaf er geen. Eigendom zit nu in één poort die beide schrijfwegen aanroepen, en die naast de naam ook de lease toetst: een verlopen greep schrijft niet meer. ● De bevinding bleek breder dan de review beschreef. Blokkeren keek alleen naar CLAIMED, dus een taak in uitvoering of verificatie was ook mét naam onbeschermd. Meegenomen. De mensel…",
+        "status": "AFGEROND",
+        "actie": "Niemand — ik werk door. Volgens de opdracht is dit een doorwerkcyclus: nu de re…"
+      }
+    },
+    {
+      "bron": {
+        "tab": "TRECHTER",
+        "onderwerp": "Derde P0 dicht: quarantaine gaf een repository vrij terwijl er nog iemand in kon schrijven. ● Wat quarantaine eigenlijk betekent. Het is niet het einde van het herstel maar het opgeven ervan — de vijf controles kregen het niet rond. De eerste vraagt of het oude proces aantoonbaar dood is, en 'ik weet het niet' telt daar als nee. Quarantaine is dus juist de toestand waarin een oude schrijver nog kan leven. ● En precies daar ging de deur open. De queue rekende alleen een lopende taak en een taak-in-herstel als bezet; quarantaine niet. Een tweede worker kon er zo naast gezet worden. ● Wat er nu gebeurt. De beoordelaar legt vast of het proces bewezen dood was. Alleen een uitgesproken ja opent de deur; bij twijfel of bij een taak van vóór deze reparatie blijft de repository op slot tot een mens kijkt. De uitweg bestond al: haal de taak uit quarantaine en de repository komt vrij. ● Ook het spoor bleef bewaard. De naam van de mogelijk nog levende schrijver werd bij quarantaine gewist — juist die naam is het antwoord op 'wiens proces moet iemand controleren?'. ● Wat ik niet claim. Drie P0's staan nog open (herstel-lease, rechtenenvelop, procesgroep) en de review op één kop-SHA over de hele serie komt pas daarna.",
+        "status": "AFGEROND",
+        "actie": "Niemand — ik werk door. Volgens de opdracht is dit een doorwerkcyclus: nu P0-4 (herstel-lease dekt zijn eigen kritieke sectie niet), daarna P0-6 (rechtenenvelop) en P0-7 (procesgroep), elk met rode test vooraf, daarna één review op één kop-SHA over de hele serie, en direct daarna de spiegel-exporter."
+      },
+      "publiek": {
+        "tab": "TRECHTER",
+        "onderwerp": "Derde P0 dicht: quarantaine gaf een repository vrij terwijl er nog iemand in kon schrijven. ● Wat quarantaine eigenlijk betekent. Het is niet het einde van het herstel maar het opgeven ervan — de vijf controles kregen het niet rond. De eerste vraagt of het oude proces aantoonbaar dood is, en 'ik weet het niet' telt daar als nee. Quarantaine is dus juist de toestand waarin een oude schrijver nog kan leven. ● En precies daar ging de deur open. De queue rekende alleen een lopende taak en een taak-in-herstel als bezet; quarantaine niet. Een tweede worker kon er zo naast gezet worden. ● Wat er nu…",
+        "status": "AFGEROND",
+        "actie": "Niemand — ik werk door. Volgens de opdracht is dit een doorwerkcyclus: nu P0-4…"
+      }
+    },
+    {
+      "bron": {
+        "tab": "TRECHTER",
+        "onderwerp": "Vierde P0 dicht: de herstelgreep beschermde niet wat hij beweerde te beschermen. ● Waar het over gaat. Crasht een worker, dan gaat zijn taak naar herstel en loopt precies één supervisor de vijf controles langs — die ruimen worktrees op, stellen onbewaard werk veilig en beslissen: hervatten of in quarantaine. Twee beoordelaars tegelijk doen dat aan elkaars werk. ● Drie gaten, samen één gat. De greep op dat beoordelen duurde tien minuten vast, werd nergens verlengd, en het eindbesluit werd geschreven zonder te controleren wie het schreef — die controle keek alleen naar lopende taken, en een taak in herstel is dat niet. Een beoordelaar die onderweg zijn greep kwijtraakte (controle vijf praat met GitHub en kan blijven hangen) schreef zijn oordeel dus alsnog over dat van zijn opvolger heen. ● Wat er nu gebeurt. Er tikt een hartslag op de greep zolang de controles draaien, en het eindbesluit verlangt de naam van de beoordelaar. Klopt die naam niet meer, dan gaat het oordeel in de prullenbak in plaats van over dat van een ander heen. Geven we op, dan geven we de greep ook meteen terug in plaats van hem tien minuten dicht te houden. ● De handmatige route bleef expres open — een taak die niemand beoordeelt blijft gewoon aanraakbaar, en het bedieningspaneel gaat er met de hand langs. ● Wat ik niet claim. Twee P0's staan nog open (rechtenenvelop, procesgroep) en de review over de hele serie komt daarna, op één kop-SHA.",
+        "status": "AFGEROND",
+        "actie": "Niemand — ik werk door. Doorwerkcyclus: nu P0-6 (de rechtenenvelop begrenst Claude-tools maar geen OS-toegang) en daarna P0-7 (procesgroepopruiming laat kleinkinderen leven), elk met rode test vooraf, daarna één review op één kop-SHA over de hele serie, en direct daarna de spiegel-exporter."
+      },
+      "publiek": {
+        "tab": "TRECHTER",
+        "onderwerp": "Vierde P0 dicht: de herstelgreep beschermde niet wat hij beweerde te beschermen. ● Waar het over gaat. Crasht een worker, dan gaat zijn taak naar herstel en loopt precies één supervisor de vijf controles langs — die ruimen worktrees op, stellen onbewaard werk veilig en beslissen: hervatten of in quarantaine. Twee beoordelaars tegelijk doen dat aan elkaars werk. ● Drie gaten, samen één gat. De greep op dat beoordelen duurde tien minuten vast, werd nergens verlengd, en het eindbesluit werd geschreven zonder te controleren wie het schreef — die controle keek alleen naar lopende taken, en een taa…",
+        "status": "AFGEROND",
+        "actie": "Niemand — ik werk door. Doorwerkcyclus: nu P0-6 (de rechtenenvelop begrenst Cla…"
+      }
+    },
+    {
+      "bron": {
+        "tab": "TRECHTER",
+        "onderwerp": "Vijfde P0 dicht: de rechtenlijst zei wat de worker mag pakken, niet wat er dan draait. ● Waar het over gaat. De uitvoerder krijgt een korte lijst gereedschap mee, en committen hoort erbij — zonder commit is er geen werk. Maar git voert bij zo'n commando uit wat er in de instellingen van de doelrepo staat, en die instellingen mogen commando's zijn. Een repository kan dus zeggen: draai dit als iemand hier iets toevoegt. Dat valt netjes binnen wat is toegestaan, want er wordt precies het toegestane commando gebruikt. ● Gemeten, niet beredeneerd. Een proefrepo met zo'n instelling liet zijn eigen commando draaien op het moment dat de worker het werk vastlegde. Met de nieuwe controle ervoor gebeurde dat niet meer; met de controle er weer uit gebeurde het opnieuw. Dat is dezelfde proef twee kanten op. ● Wat er nu gebeurt. Instellingen met een vaste naam zetten we plat, en de instellingen van deze computer tellen niet meer mee in het werk van de worker. Namen die vrij te kiezen zijn kun je niet platzetten — daar kijkt de worker nu vooraf naar, en vindt hij zoiets, dan gaat de taak stil met de vraag aan een mens of dit hier hoort. Ook nieuw: de doelrepo mag de worker niet langer zelf instellen. ● De tweede lezer vond het belangrijkste gat. Een puntje in een naam was genoeg om mijn hele controle voorbij te lopen; die omzeiling werkte echt en is nu dicht. ● Wat dit kost. Repo's die grote bestanden via zo'n instelling beheren worden nu ook stilgezet. Dat is de bedoeling: liever een vraag te veel dan een commando te veel. ● Wat ik niet claim. Eén P0 staat nog open (procesgroep), en de review over de hele serie komt daarna, op één kop-SHA.",
+        "status": "AFGEROND",
+        "actie": "Niemand — ik werk door. Doorwerkcyclus: nu P0-7 (procesgroepopruiming laat kleinkinderen leven), rode test vooraf, en als onderdeel daarvan de review door beide families op één kop-SHA over de hele P0-serie. Direct daarna de spiegel-exporter."
+      },
+      "publiek": {
+        "tab": "TRECHTER",
+        "onderwerp": "Vijfde P0 dicht: de rechtenlijst zei wat de worker mag pakken, niet wat er dan draait. ● Waar het over gaat. De uitvoerder krijgt een korte lijst gereedschap mee, en committen hoort erbij — zonder commit is er geen werk. Maar git voert bij zo'n commando uit wat er in de instellingen van de doelrepo staat, en die instellingen mogen commando's zijn. Een repository kan dus zeggen: draai dit als iemand hier iets toevoegt. Dat valt netjes binnen wat is toegestaan, want er wordt precies het toegestane commando gebruikt. ● Gemeten, niet beredeneerd. Een proefrepo met zo'n instelling liet zijn eigen…",
+        "status": "AFGEROND",
+        "actie": "Niemand — ik werk door. Doorwerkcyclus: nu P0-7 (procesgroepopruiming laat klei…"
+      }
+    },
+    {
+      "bron": {
+        "tab": "TRECHTER",
+        "onderwerp": "De laatste van de zeven is dicht, en de review over de hele serie betrapte mijn eigen reparatie. ● Waar het over ging. Duurt het werk van een worker te lang, dan wordt het afgebroken. Dat afbreken stuurde een signaal naar de hele familie processen, maar wachtte daarna op precies één ervan: de oudste. Die stopt netjes, dus keerde het afbreken terug voordat het harde signaal ooit verstuurd was — alles wat het eerste signaal negeerde, bleef gewoon doorwerken. Gemeten met echte processen, niet beredeneerd: het achtergebleven proces stond er na afloop nog. Dat is ernstig omdat zo'n proces doorschrijft in een werkmap die het systeem inmiddels als afgehandeld beschouwt en aan een volgende taak kan uitgeven. Tweede helft: dat achtergebleven proces houdt de uitvoerlijn open, en het lezen daarvan had geen tijdgrens — dan is één hangend antwoord alsnog een worker die voor altijd bezig is. Beide dicht. ● Toen de afgesproken review over de hele serie, door twee onafhankelijke families lezers. Uitkomst: nog niet vrijgeven. De zwaarste bevinding was van mijzelf, van diezelfde dag. Ik liet zo'n afgebroken taak eindigen als geblokkeerd, en dat woord betekent in dit systeem \"er draait niets meer, er wacht een mens\" — precies het omgekeerde van wat hier aan de hand is. Gevolg: de werkplek kwam vrij op het enige moment waarop dat niet mag. Mijn reparatie liep dus langs de deur die een eerdere reparatie net had dichtgedaan. Beide lezers vonden dit los van elkaar. ● Gemeten in plaats van aangenomen: na zo'n afgebroken taak kreeg een tweede worker dezelfde werkplek toegewezen. ● De bestemming is nu herstel — de plek waar de vraag thuishoort. De afbreker kon niet vaststellen of dat proces nog leeft; herstel is het enige onderdeel dat dat met vijf controles uitzoekt in plaats van het aan te nemen, en het houdt de werkplek dicht zolang het antwoord er niet is. Blijft het antwoord uit, dan gaat de taak in quarantaine met het slot dicht en een mens erbij. De werkmap blijft daarbij bewust staan: daar kan nog een schrijver in zitten, en wie hem eerst wegzet laat de controles naar niets kijken. ● De tweede lezer wees op het faalpad — wat als die overgang naar herstel zélf mislukt? Nagemeten in plaats van beredeneerd: het systeem ruimt verlopen werkgrepen op bínnen het slot, vóór het bepaalt wat bezet is, dus dat gat bestaat niet. Het bezwaar klopte niet, de test staat er wel. ● Wat ik niet claim: de serie is hiermee niet vrij. De review liet vier bevindingen staan die ik niet heb aangeraakt, en die staan hiernaast.",
+        "status": "AFGEROND",
+        "actie": "Richard — vier bevindingen blijven staan en ik lees de serie daarom als niet af. Kort: de blokkade-route omzeilt de herstelgreep; het opruimen van een werkmap meldt succes ook als de map blijft staan; de hartslag dekt de fysieke kritieke secties niet; en werk dat de controle zelf start draait buiten de bewaakte procesfamilie. Ik ga door met de eerste, rode test eerst — de serie-review was onderdeel van de laatste blokker en dit is de uitkomst ervan, geen nieuw auditmateriaal. Wil je de spiegel-exporter tóch eerst, zeg het en ik draai om."
+      },
+      "publiek": {
+        "tab": "TRECHTER",
+        "onderwerp": "De laatste van de zeven is dicht, en de review over de hele serie betrapte mijn eigen reparatie. ● Waar het over ging. Duurt het werk van een worker te lang, dan wordt het afgebroken. Dat afbreken stuurde een signaal naar de hele familie processen, maar wachtte daarna op precies één ervan: de oudste. Die stopt netjes, dus keerde het afbreken terug voordat het harde signaal ooit verstuurd was — alles wat het eerste signaal negeerde, bleef gewoon doorwerken. Gemeten met echte processen, niet beredeneerd: het achtergebleven proces stond er na afloop nog. Dat is ernstig omdat zo'n proces doorschr…",
+        "status": "AFGEROND",
+        "actie": "Richard — vier bevindingen blijven staan en ik lees de serie daarom als niet af…"
+      }
+    }
+  ]
+}

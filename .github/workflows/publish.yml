@@ -76,6 +76,25 @@ jobs:
             exit 1
           fi
 
+      # De ondergrens hierboven ziet alleen de TOTALE instorting. Negen spiegeltests die stilvallen
+      # terwijl er elders vijftig bijkomen, blijft daar onzichtbaar: het totaal stijgt gewoon door.
+      # `test/register.json` verklaart daarom per bestand een minimum én de proeven die er met naam
+      # bij horen — de negen gemeten auditvormen staan er stuk voor stuk in. Deze stap draait elk
+      # geregistreerd bestand apart (in één gezamenlijke run is de TAP-uitvoer vlak, dus niet toe te
+      # rekenen aan een bestand) en gaat rood zodra een verklaarde proef ontbreekt, rood staat, of
+      # een testbestand op schijf niet geregistreerd is. Niet-gedraaid is rood.
+      #
+      # Bewust een eigen stap, ná de suite: hij bewaakt de suite en mag dus niet afhangen van het
+      # slagen ervan. `if: always()` hoort daar onlosmakelijk bij — zonder die regel slaat GitHub
+      # deze stap over zodra de Tests-stap rood is, en dan wordt "niet-gedraaid is rood" juist in het
+      # geval waarvoor hij bedoeld is (een testbestand met een syntaxfout dat niet meer draait) niet
+      # zelfstandig vastgesteld (bevinding review Codex, 26-07-2026). Publicatie was ook zonder die
+      # regel al geblokkeerd; het gaat erom dát de poort zijn oordeel geeft, ook op een rode dag.
+      # Draait ook lokaal met `npm run testregister`.
+      - name: Testregister — niet-gedraaid is rood
+        if: always()
+        run: node scripts/testregister.mjs
+
       # Poort 3 komt van buiten onze eigen regexen. Vaste versie, geverifieerde checksum:
       # een secretsscanner die je niet kunt vertrouwen, is geen poort.
       - name: gitleaks installeren (gepind + checksum)

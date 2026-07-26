@@ -20,6 +20,7 @@ import { validate } from './lib/validate.mjs';
 import { toPublicPlanning } from './lib/planning.mjs';
 import { vertaalBouwlijst } from './lib/planning-bron.mjs';
 import { kanaalpostUitTekst, toPublicKanaalpost } from './lib/kanaalpost.mjs';
+import { laadSpiegelCatalogus } from './lib/spiegel-catalogus.mjs';
 import {
   collectPullRequests, collectMergedRecent, collectTracker,
   collectDecisions, collectTracks, collectLogbook, collectCi, collectBouwlijst,
@@ -44,8 +45,14 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  *        kanaalpost aan de bouwlijst en toonde de plaat dus alleen de meldingen van dit venster —
  *        een lege bouwlijst nam dan de post van de hele vloot mee. Daarom is `planning.kanaalpost`
  *        vervallen: één bron, geen tweede stille route.
+ * 2.5.0: de kanaalpost wordt een PROJECTIE in plaats van een filter. Audit AUD-002 bood negen
+ *        must-reject-vormen aan die geen enkel patroon raken en toch de plaat, beide schema's en
+ *        gitleaks haalden; een patroonscanner kan betekenis niet wegen. Sinds deze versie komt de
+ *        getoonde tekst uit `data/spiegel-catalogus.json` — een gesloten lijst van vooraf
+ *        beoordeelde hele rijen — en kiest de bronrij alleen nog wélke goedgekeurde regel er komt.
+ *        Nieuw in het contract: de eindstand `CATALOGUS_ONBESCHIKBAAR`.
  */
-const CONTRACT_VERSION = '2.4.0';
+const CONTRACT_VERSION = '2.5.0';
 const REFRESH_SECONDS = 900;
 /** Een titel is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
 const MAX_TITLE = 80;
@@ -143,7 +150,16 @@ function publicWorkstream(w, index) {
  * Reduceer de interne snapshot tot wat de pagina toont — veld voor veld, met de hand.
  * Er is bewust geen spread: een nieuw veld in een collector verschijnt hier niet vanzelf.
  */
-export function toPublicSnapshot(raw, textPolicy = {}) {
+/**
+ * De catalogus is een EXPLICIET argument, geen import die zichzelf laadt (review Codex, 26-07-2026).
+ * `publishVeilig` — waar de catalogus zijn eigen regels mee keurt — leunt op deny-termen in
+ * modulestaat, dus wie de catalogus laadt moet dat na `loadDenyTerms` doen. Een module die zichzelf
+ * bij import laadt, laat die volgorde van importvolgorde afhangen; een parameter niet.
+ *
+ * Wordt er geen catalogus meegegeven, dan is de kanaalpost fail-closed leeg. Dat is de veilige kant
+ * voor elke aanroeper die deze reductie voor iets anders gebruikt dan de publicatie.
+ */
+export function toPublicSnapshot(raw, textPolicy = {}, catalogus = null) {
   const t = readTextPolicy(textPolicy);
   /** Vrije tekst komt er alleen in als iemand die sectie expliciet heeft vrijgegeven. */
   const text = (allowed, value) => (allowed ? value : null);
@@ -199,7 +215,11 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
     planning: toPublicPlanning(raw.planning, raw.generatedAt),
     // Vloot-breed doorgeefluik, zelfde fail-closed-per-sectie-regel als planning: geen `sources`-bron,
     // dus een onleesbare spiegel degradeert de rest van de pagina niet.
-    kanaalpost: toPublicKanaalpost(raw.kanaalpost),
+    kanaalpost: toPublicKanaalpost(raw.kanaalpost, catalogus, (datum) => {
+      // Alleen de datum. Het bouwlogboek van deze repo is openbaar, dus de tekst die niet door de
+      // poort kwam mag er niet in — dat zou het lek zijn dat de poort juist tegenhoudt.
+      console.warn(`kanaalpost: rij van ${datum} staat niet in de spiegel-catalogus en wordt ingehouden`);
+    }),
     workstreams: raw.workstreams.map((w, i) => publicWorkstream(w, i)),
     pullRequests: {
       available: raw.pullRequests.available,
@@ -311,9 +331,19 @@ async function main() {
   // die geweerd moest worden stond weer op de openbare pagina (review Codex, 26-07-2026).
   const termCount = loadDenyTerms(join(ROOT, 'data/deny-terms.json'), { strict: true });
 
+  // NA `loadDenyTerms`, en niet eerder: de catalogus keurt zijn eigen regels met `publishVeilig`,
+  // en dat leunt op de zojuist geladen termen. Andersom zou de lijst zichzelf goedkeuren met een
+  // lege termenlijst en pas op de plaat blijken dat er iets doorheen was (review Codex, 26-07-2026).
+  const catalogus = laadSpiegelCatalogus();
+  // Een kapotte catalogus stopt de BOUW, niet alleen de sectie. Doorbouwen zou een lege kanaalpost
+  // publiceren en dus alle vijftien publieke rijen in één klap laten verdwijnen; afbreken laat de
+  // laatste goede publicatie staan. Dat is het omgekeerde van de per-sectie-regel die voor een
+  // onbereikbare BRON geldt, en met opzet: de bron is de buitenwereld, de catalogus is deze repo.
+  if (!catalogus.geladen) throw new Error(`spiegel-catalogus niet bruikbaar: ${catalogus.reden}`);
+
   const textPolicy = readTextPolicy(await readJson('data/publish-text.json', {}));
   const raw = await buildSnapshot();
-  const reduced = toPublicSnapshot(raw, textPolicy);
+  const reduced = toPublicSnapshot(raw, textPolicy, catalogus);
 
   // SANITIZE-GATE — fail-closed. Alles hierna is publicabel of we publiceren niet.
   const { snapshot, findings } = assertPublishable(reduced, { strict });
@@ -349,6 +379,7 @@ async function main() {
   const degraded = snapshot.sources.filter((s) => s.trust !== 'VERIFIED_CURRENT');
   console.log(`gebouwd: ${relative(ROOT, join(outDir, 'index.html'))} (allowlist: ${PUBLISH_ALLOWLIST.join(', ')})`);
   console.log(`deny-terms geladen: ${termCount}`);
+  console.log(`spiegel-catalogus: ${catalogus.regels.size} vooraf beoordeelde rijen`);
   const vrijgegeven = ['trackerUpdates', 'trackerDecisionPoints', 'decisions', 'logbook'].filter((k) => textPolicy[k]);
   console.log(`vrije tekst gepubliceerd: ${vrijgegeven.length ? vrijgegeven.join(', ') : 'geen (alleen structuur)'}`);
   console.log(`status: ${snapshot.overallStatus}${degraded.length ? ` · niet-geverifieerd: ${degraded.map((s) => `${s.key}=${s.trust}`).join(', ')}` : ''}`);

@@ -576,6 +576,7 @@ const KANAAL_REDEN = {
   LEEG: 'De spiegel is gelezen, maar er stond geen enkele herkende rij in — mogelijk is het formaat gewijzigd. Liever deze melding dan een lege tabel die op "niets gebeurd" lijkt.',
   BRON_ONBEREIKBAAR: 'De kanaalpost-spiegel kon niet gelezen worden. Er staat hier bewust geen oude kopie: geen bron is geen stand.',
   INGEHOUDEN: 'Er was post, maar geen enkele rij kwam door de publicatie-poort. De rijen blijven leesbaar in de bron; hier verschijnen ze pas als ze publiceerbaar zijn.',
+  CATALOGUS_ONBESCHIKBAAR: 'De lijst met vooraf beoordeelde regels ontbrak of was ongeldig. Zonder die lijst is elke rij onbeoordeeld, dus er verschijnt hier niets — niet omdat er niets is gebeurd, maar omdat niemand kan zeggen wat er getoond mag worden.',
 };
 
 function kanaalpost(k) {

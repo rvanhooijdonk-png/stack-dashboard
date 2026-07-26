@@ -110,8 +110,13 @@ export function ontdaan(waarde) {
 /**
  * Markdown-nadruk weghalen zodat de plaat gewone tekst toont. Bewust NIET `_`: dat zou
  * `SERVICE_TOKEN` tot `SERVICETOKEN` maken en daarmee juist het secret-naam-patroon blind maken.
+ *
+ * Geëxporteerd omdat de spiegel-catalogus dezelfde canonieke vorm moet eisen als de parser
+ * oplevert. Deed hij dat niet — bijvoorbeeld met alleen `ontdaan` — dan zou een catalogusregel mét
+ * backticks laden, terwijl de parser diezelfde regel zónder backticks aanbiedt, en werd een
+ * goedgekeurde rij toch ingehouden (bevinding Gemini, 26-07-2026). Eén functie, dus dat kan niet.
  */
-const kaal = (s) => ontdaan(String(s ?? '').replace(/[`*]+/g, ''));
+export const kaal = (s) => ontdaan(String(s ?? '').replace(/[`*]+/g, ''));
 
 /**
  * Wat de spiegel volgens zijn eigen kop niet mag dragen en wat geen enkel `sanitize`-patroon vangt:
@@ -246,35 +251,144 @@ function publiekeVorm(r) {
 }
 
 /**
- * Reduceer de spiegel tot de publieke plaat-DTO: elke rij eerst door vorm- en publicatiepoort,
- * daarna de laatste vijftien die overbleven, nieuwste boven, en pas als laatste stap afgekapt.
+ * De SLEUTEL van een rij: het viertal vrije velden in canonieke vorm, als één ondubbelzinnige
+ * string. `JSON.stringify` van een array en niet een zelfgekozen scheidingsteken — elk teken dat je
+ * kiest kan in de tekst zelf voorkomen, en dan zouden twee verschillende viertallen dezelfde sleutel
+ * krijgen. `datum` hoort er niet bij: dat veld is strikt getypeerd en draagt geen bewering.
+ */
+export function viertalSleutel(v) {
+  return JSON.stringify([kaal(v?.tab), kaal(v?.onderwerp), kaal(v?.status), kaal(v?.actie)]);
+}
+
+/**
+ * Draagt deze string geen onzichtbare tekens en geen losse witruimte? Dit is `ontdaan` MINUS de
+ * NFKC-stap, en dat verschil is met opzet.
+ *
+ * `ontdaan(s) === s` eisen op tekst die GETOOND wordt kan niet: `cap()` sluit een afgekapte zin af
+ * met `…`, en NFKC ontleedt dat teken tot drie punten. Elke afgekapte regel zou dus als
+ * "niet-canoniek" worden geweigerd — en op de spiegel is op dit moment 20 van de 44 onderwerpen
+ * langer dan de plaat toelaat. NFKC-stabiliteit is ook geen veiligheidseigenschap: `publishVeilig`
+ * normaliseert zelf vóór het scannen, dus een breedbeeld-variant wordt gescand alsof hij gewoon
+ * geschreven was. Wat wél een veiligheidseigenschap is, staat hieronder: geen onzichtbare tekens
+ * (die maken elk deny-patroon blind) en geen witruimte waarin een patroon zich kan verstoppen.
+ */
+const netjes = (s) => s === s.replace(ONZICHTBAAR, '').replace(/\s+/g, ' ').trim();
+
+/**
+ * Voldoet een viertal aan álles wat de DTO van een PUBLIEKE rij eist — zonder dat er nog iets
+ * afgekapt of gerepareerd hoeft te worden? Dit is de enige plek waar die eisen staan, en de
+ * spiegel-catalogus gebruikt exact deze functie om zijn eigen `publiek`-kant te keuren.
+ *
+ * Dat is geen nettigheid maar de kern van de omslag: doordat elke cataloguswaarde hier al doorheen
+ * moet, is wat de plaat toont LETTERLIJK de byte-reeks die in het catalogusbestand staat. Zou de
+ * catalogus langere waarden toestaan, dan zou `cap()` er alsnog een half-afgekapte zin van maken en
+ * publiceerde de plaat iets wat niemand in die vorm heeft goedgekeurd (review Codex, 26-07-2026).
+ */
+export function publiekViertalGeldig(v) {
+  if (!v || typeof v !== 'object') return false;
+  const { tab, onderwerp, status, actie } = v;
+  const velden = [tab, onderwerp, status, actie];
+  if (!velden.every((s) => typeof s === 'string' && s !== '' && netjes(s))) return false;
+  if (!TAB_PUBLIEK.test(tab) || tab.length > MAX_TAB) return false;
+  if (!STATUSSEN.includes(status) || status.length > MAX_STATUS) return false;
+  if (onderwerp.length > MAX_ONDERWERP || actie.length > MAX_ACTIE) return false;
+  return velden.every(publishVeilig);
+}
+
+/**
+ * Projecteer één rij uit de CATALOGUS. De bronrij selecteert alleen: zijn vier vrije velden vormen
+ * samen één sleutel, en wat teruggegeven wordt zijn de strings uit het catalogusbestand.
+ *
+ * HET VIERTAL IS ONDEELBAAR (review Codex, 26-07-2026). Een eerdere opzet hield drie losse lijsten
+ * bij — goedgekeurde rollen, goedgekeurde onderwerpen, goedgekeurde acties — en had daarmee op
+ * celniveau precies het recombinatiegat waarvoor de woord-allowlist was afgewezen: een goedgekeurd
+ * onderwerp naast een goedgekeurde andere status is een bewering die niemand ooit heeft gelezen.
+ * Nu komt een publieke rij als GEHEEL in de catalogus voor, of hij verschijnt niet.
+ *
+ * `datum` blijft uit de bron komen: strikt getypeerd, geen vrije tekst, en een lijst die elke
+ * mogelijke datum moet bevatten is geen lijst.
+ */
+function projecteerUitCatalogus(rij, catalogus) {
+  const publiek = catalogus.regels.get(viertalSleutel(rij));
+  if (publiek === undefined) return null;
+  return { ...publiek, datum: rij.datum };
+}
+
+/**
+ * Reduceer de spiegel tot de publieke plaat-DTO: elke rij eerst door de vormpoort, dan door de
+ * CATALOGUS, daarna de laatste vijftien die overbleven, nieuwste boven, en pas als laatste stap
+ * afgekapt.
+ *
+ * DE OMSLAG (AUD-002, 26-07-2026). Tot deze versie was de inhoudspoort `publishVeilig`: een
+ * patroonscanner. Een externe audit bood negen vormen aan die geen patroon raken — een verkort
+ * thuispad, een sleutelachtige underscore-vorm, een adres zonder puntdomein, een adres met
+ * hex-staart, een CamelCase-sleutelnaam, een persoonsnaam, een tijdelijk pad, een kort
+ * systeemrootpad en een codenaamzin — en alle negen kwamen op de plaat, door beide schema's, langs
+ * gitleaks. Patronen kúnnen dit niet dichten: onbekend is precies wat er niet naar buiten mag.
+ * Daarom is publiek nu een PROJECTIE uit `data/spiegel-catalogus.json` en geen filter meer op de
+ * bron. De bron levert geen bytes; hij kiest alleen welke goedgekeurde regel getoond wordt.
+ *
+ * Zonder geladen catalogus verschijnt er niets. Dat is de bedoeling: een plaat die publiceert
+ * omdat de lijst met wat mag niet geladen kon worden, publiceert per definitie onbeoordeeld.
  *
  * ÁLLE rijen worden getoetst, niet alleen de vijftien die in beeld komen. Andersom zou de teller
  * `ingehouden: 0` melden terwijl een oudere rij nooit langs de poort is geweest — een geruststelling
- * die niets bewijst (review Codex, 26-07-2026). Nu betekent 0 wat het zegt: geen enkele rij in het
- * hele spiegelbestand raakt een patroon.
+ * die niets bewijst (review Codex, 26-07-2026). Nu betekent 0 wat het zegt: elke rij in het hele
+ * spiegelbestand staat in de catalogus.
  *
  * De volgorde is de BRONVOLGORDE omgedraaid, niet een sortering op de datumkolom. Het bestand is
  * append-only ("nieuwste onderaan", en de kop zegt er expliciet bij dat de volgorde die van het
  * toevoegen is), dus de laatste vijftien regels zijn per afspraak de laatste vijftien meldingen;
  * een venster dat een rij met een oudere tijd aanvult, hoort niet ineens bovenaan te springen.
  */
-export function toPublicKanaalpost(raw) {
+export function toPublicKanaalpost(raw, catalogus, meldIngehouden = null) {
   const leeg = (reason, ingehouden = 0) => ({ available: false, reason, rows: [], ingehouden });
   if (!raw || raw.available !== true || !Array.isArray(raw.rows)) {
     return leeg(raw?.reason === 'LEEG' ? 'LEEG' : 'BRON_ONBEREIKBAAR');
   }
+  // Fail-closed en met een eigen eindstand: "de catalogus laadde niet" is iets anders dan "er is
+  // niets goedgekeurd", en de plaat moet kunnen zeggen wát er mis is. Alle rijen tellen mee als
+  // ingehouden, zodat het aantal niet stilletjes nul wordt terwijl er post lag.
+  if (!catalogus?.geladen) return leeg('CATALOGUS_ONBESCHIKBAAR', raw.rows.length);
   const cap = (v, max) => (v.length > max ? `${v.slice(0, max - 1).trimEnd()}…` : v);
   const veilig = [];
+  const gezien = new Set();
   let ingehouden = 0;
   for (const r of raw.rows) {
-    const rij = publiekeVorm(r);
-    if (!rij || ![rij.tab, rij.onderwerp, rij.status, rij.actie, rij.datum].every(publishVeilig)) {
+    const vorm = publiekeVorm(r);
+    // VERDRINGING. Het venster toont de laatste vijftien; wie hetzelfde viertal vijftien keer in de
+    // bron zet, drukt daarmee alle andere meldingen van de plaat af — zonder één onbeoordeelde byte
+    // te publiceren, dus de catalogus houdt dat niet tegen (bevinding review Gemini, 26-07-2026).
+    // Eén viertal telt daarom één keer mee. Op de spiegel van vandaag is dit een no-op: 44 rijen,
+    // 44 unieke viertallen, gemeten. Een échte herhaling van precies hetzelfde viertal is trouwens
+    // ook redactioneel geen tweede melding — het is dezelfde melding, opnieuw geplakt.
+    const sleutel = vorm && viertalSleutel(vorm);
+    if (sleutel !== null && gezien.has(sleutel)) {
       ingehouden += 1;
+      if (meldIngehouden) meldIngehouden(DATUM_UIT.test(vorm.datum) ? vorm.datum : 'onbekende datum');
       continue;
     }
+    const rij = vorm && projecteerUitCatalogus(vorm, catalogus);
+    // De patroonscan is sinds de omslag overbodig-door-constructie: de vier vrije velden komen uit
+    // de catalogus en zijn daar bij het laden al door `publiekViertalGeldig` gegaan, en `datum` is
+    // een strikte vorm. Hij blijft staan als tweede lijn — als een latere wijziging een van die
+    // aannames breekt, mag dat niet meteen publicatie betekenen.
+    if (!rij || ![rij.tab, rij.onderwerp, rij.status, rij.actie, rij.datum].every(publishVeilig)) {
+      ingehouden += 1;
+      // Wie een rij mist, moet hem kunnen vinden zonder de hele spiegel af te lopen. Maar dit is een
+      // OPENBAAR bouwlogboek: er gaat alleen een datum uit, nooit de tekst waar het om gaat. Precies
+      // het onbeoordeelde onderwerp in de log zetten zou het lek zijn dat deze poort moet dichten
+      // (afweging bij de suggestie van Gemini, 26-07-2026). De datum is genoeg om de regel te vinden.
+      if (meldIngehouden) meldIngehouden(DATUM_UIT.test(vorm?.datum ?? '') ? vorm.datum : 'onbekende datum');
+      continue;
+    }
+    gezien.add(sleutel);
     veilig.push(rij);
   }
+  // `cap` is voor de vier catalogusvelden een no-op: `publiekViertalGeldig` heeft ze bij het laden
+  // al binnen dezelfde grenzen gehouden. Dat is met opzet zo — wat hier uitkomt is letterlijk de
+  // goedgekeurde tekst, en niemand publiceert een halve zin met een `…` die zo nooit is gelezen.
+  // De aanroep blijft staan voor `datum` en als tweede lijn.
   const rows = veilig.slice(-KANAAL_RIJEN).reverse().map((rij) => ({
     tab: cap(rij.tab, MAX_TAB),
     onderwerp: cap(rij.onderwerp, MAX_ONDERWERP),

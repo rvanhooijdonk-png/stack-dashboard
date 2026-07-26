@@ -6,7 +6,8 @@
   "description": "Read-only statuspagina over de stack: aggregeert bestaande canon, saneert fail-closed, publiceert statische HTML.",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "testregister": "node scripts/testregister.mjs"
   },
   "engines": {
     "node": ">=20"

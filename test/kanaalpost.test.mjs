@@ -11,12 +11,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
   spiegelUitTekst, kanaalpostUitTekst, toPublicKanaalpost, publishVeilig,
 } from '../scripts/lib/kanaalpost.mjs';
+import { laadSpiegelCatalogus } from '../scripts/lib/spiegel-catalogus.mjs';
 import { renderHtml } from '../scripts/lib/render.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -131,37 +134,66 @@ test('ontbrekende of lege spiegel is BRON_ONBEREIKBAAR, een spiegel zonder rijen
 const rij = (n) => ({ tab: 'CONTROL', onderwerp: `regel ${n}`, status: 'AFGEROND', actie: 'niemand', datum: '2026-07-25 10:00' });
 const bron = (rows) => ({ available: true, reason: null, rows });
 
+/**
+ * Sinds contract 2.5 is deze sectie een PROJECTIE: de bronrij selecteert, de catalogus levert de
+ * bytes. Deze proeven gaan over de reductie eromheen — venstergrootte, volgorde, vorm-poort,
+ * telling — dus krijgen ze een catalogus die precies de nette regels hieronder kent. Wat de
+ * catalogus zélf moet weigeren staat in `test/spiegel-catalogus.test.mjs`, met de negen gemeten
+ * auditvormen. De regels die deze proeven aanbieden en die er NIET in staan, horen dus ingehouden
+ * te worden — dat is nu de reden dat ze niet verschijnen, en niet meer dat een patroon aansloeg.
+ */
+const LANG_GOEDGEKEURD = 'nette tekst over af werk '.repeat(160).trim();
+const proefCatalogus = () => {
+  const regels = [
+    ...Array.from({ length: 21 }, (_, i) => ({ bron: { tab: 'CONTROL', onderwerp: `regel ${i}`, status: 'AFGEROND', actie: 'niemand' } })),
+    { bron: { tab: 'CONTROL', onderwerp: 'nette tekst', status: 'AFGEROND', actie: 'niemand' } },
+    {
+      bron: { tab: 'CONTROL', onderwerp: LANG_GOEDGEKEURD, status: 'AFGEROND', actie: 'niemand' },
+      publiek: { tab: 'CONTROL', onderwerp: 'Een lange regel, in de vorm die is goedgekeurd.', status: 'AFGEROND', actie: 'niemand' },
+    },
+  ];
+  const pad = join(mkdtempSync(join(tmpdir(), 'kanaalpost-catalogus-')), 'catalogus.json');
+  writeFileSync(pad, JSON.stringify({ versie: 1, regels }));
+  return laadSpiegelCatalogus(pad);
+};
+const CATALOGUS = proefCatalogus();
+const plaat = (rows) => toPublicKanaalpost(bron(rows), CATALOGUS);
+
+test('de proefcatalogus laadt — anders bewijst geen enkele reductie-proef hieronder iets', () => {
+  assert.equal(CATALOGUS.geladen, true, CATALOGUS.reden ?? '');
+});
+
 test('de plaat toont de laatste vijftien rijen met de nieuwste bovenaan', () => {
-  const dto = toPublicKanaalpost(bron(Array.from({ length: 20 }, (_, i) => rij(i + 1))));
+  const dto = plaat(Array.from({ length: 20 }, (_, i) => rij(i + 1)));
   assert.equal(dto.rows.length, 15);
   assert.equal(dto.rows[0].onderwerp, 'regel 20');
   assert.equal(dto.rows[14].onderwerp, 'regel 6');
 });
 
 test('een onbereikbare of lege bron geeft een nette melding, nooit een kapotte plaat', () => {
-  const onbereikbaar = toPublicKanaalpost({ available: false, reason: 'BRON_ONBEREIKBAAR', rows: [] });
+  const onbereikbaar = toPublicKanaalpost({ available: false, reason: 'BRON_ONBEREIKBAAR', rows: [] }, CATALOGUS);
   assert.equal(onbereikbaar.available, false);
   assert.equal(onbereikbaar.reason, 'BRON_ONBEREIKBAAR');
   assert.deepEqual(onbereikbaar.rows, []);
-  assert.equal(toPublicKanaalpost(null).available, false);
-  assert.equal(toPublicKanaalpost(bron([])).reason, 'LEEG');
+  assert.equal(toPublicKanaalpost(null, CATALOGUS).available, false);
+  assert.equal(plaat([]).reason, 'LEEG');
 });
 
 // --- publish-poort: de rijen dragen vrije tekst van álle vensters ---
 
 test('een rij met een herkend patroon wordt ingehouden, de rest blijft staan', () => {
-  const dto = toPublicKanaalpost(bron([
+  const dto = plaat([
     rij(1),
     { ...rij(2), onderwerp: 'fix in /Users/iemand/geheim/pad.md' },
     { ...rij(3), actie: 'zet AWS_SECRET_KEY opnieuw' },
-  ]));
+  ]);
   assert.equal(dto.rows.length, 1);
   assert.equal(dto.ingehouden, 2);
   assert.equal(JSON.stringify(dto).includes('/Users/'), false);
 });
 
-test('ook de actie-cel gaat door de poort, niet alleen het onderwerp', () => {
-  const dto = toPublicKanaalpost(bron([rij(1), { ...rij(2), actie: 'Richard — zie /Users/iemand/notitie.md' }]));
+test('ook de actie-cel telt mee in de selectie, niet alleen het onderwerp', () => {
+  const dto = plaat([rij(1), { ...rij(2), actie: 'Richard — zie /Users/iemand/notitie.md' }]);
   assert.equal(dto.rows.length, 1);
   assert.equal(dto.ingehouden, 1);
 });
@@ -169,28 +201,29 @@ test('ook de actie-cel gaat door de poort, niet alleen het onderwerp', () => {
 test('een patroon voorbij de afkap-grens wordt óók gezien (afkappen is geen poort)', () => {
   // ROOD-bewijs voor de bypass: wie eerst afkapt en dán scant, publiceert de eerste zeshonderd
   // tekens van een regel waarvan het geheim op teken 2500 staat — en ziet dat geheim nooit. De
-  // poort scant de VOLLEDIGE cel in overlappende vensters; pas daarna wordt er gecapt.
+  // poort scant de VOLLEDIGE cel in overlappende vensters. Sinds 2.5 is dit vooral de keuring van
+  // de CATALOGUS: dit is de reden dat zo'n regel er niet in kan komen te staan.
   const lang = `${'nette tekst '.repeat(260)}AKIAIOSFODNN7EXAMPLE`;
   assert.ok(lang.length > 2500);
   assert.equal(publishVeilig(lang), false);
-  const dto = toPublicKanaalpost(bron([rij(1), { ...rij(2), onderwerp: lang }]));
+  const dto = plaat([rij(1), { ...rij(2), onderwerp: lang }]);
   assert.equal(dto.rows.length, 1);
   assert.equal(dto.ingehouden, 1);
 });
 
-test('een lange maar schone regel wordt gepubliceerd, gecapt en zichtbaar afgekapt', () => {
-  // Bewust gewone woorden: een blok van 4000 dezelfde letters is zelf een hoog-entropie-treffer,
-  // en die zou de poort (terecht) laten dichtslaan — dat bewijst dan niets over lengte alleen.
-  const lang = 'nette tekst over af werk '.repeat(160);
-  assert.equal(publishVeilig(lang), true);
-  const dto = toPublicKanaalpost(bron([{ ...rij(1), onderwerp: lang }]));
+test('een lange bronregel verschijnt in de vorm die is goedgekeurd, niet in een afgekapte', () => {
+  // Vóór 2.5 kapte de plaat zelf af op 600 tekens met een `…` — een halve zin die niemand in die
+  // vorm had gelezen, en soms midden in een woord. Nu staat de korte vorm in de catalogus en is dát
+  // wat er verschijnt. Afkappen is een redactionele keuze geworden in plaats van een `slice()`.
+  assert.equal(publishVeilig(LANG_GOEDGEKEURD), true);
+  const dto = plaat([{ ...rij(1), onderwerp: LANG_GOEDGEKEURD }]);
   assert.equal(dto.rows.length, 1);
-  assert.ok(dto.rows[0].onderwerp.length <= 600);
-  assert.ok(dto.rows[0].onderwerp.endsWith('…'), 'afkappen hoort zichtbaar te zijn');
+  assert.equal(dto.rows[0].onderwerp, 'Een lange regel, in de vorm die is goedgekeurd.');
+  assert.equal(dto.rows[0].onderwerp.endsWith('…'), false);
 });
 
 test('alle rijen ingehouden is geen lege tabel maar een expliciete melding', () => {
-  const dto = toPublicKanaalpost(bron([{ ...rij(1), onderwerp: 'pad /Users/x/y' }]));
+  const dto = plaat([{ ...rij(1), onderwerp: 'pad /Users/x/y' }]);
   assert.equal(dto.available, false);
   assert.equal(dto.reason, 'INGEHOUDEN');
   assert.equal(dto.ingehouden, 1);
@@ -199,14 +232,14 @@ test('alle rijen ingehouden is geen lege tabel maar een expliciete melding', () 
 test('een lege plek in de rijenlijst laat de build niet omvallen, maar wordt ook niet gepubliceerd', () => {
   // ROOD: een `null`-rij werd een geldige publieke rij vol `—`. Corrupte invoer die geldige publieke
   // data wordt, is fail-open op integriteit (review Codex, 26-07-2026). Nu: ingehouden en geteld.
-  const dto = toPublicKanaalpost(bron([null, rij(1), { tab: 'CONTROL' }]));
+  const dto = plaat([null, rij(1), { tab: 'CONTROL' }]);
   assert.equal(dto.rows.length, 1);
   assert.equal(dto.ingehouden, 2);
   assert.ok(dto.rows.every((r) => Object.values(r).every((v) => typeof v === 'string' && v !== '')));
 });
 
 test('een status buiten de gesloten lijst wordt ingehouden, niet stil gepubliceerd', () => {
-  const dto = toPublicKanaalpost(bron([rij(1), { ...rij(2), status: 'BIJNA KLAAR' }]));
+  const dto = plaat([rij(1), { ...rij(2), status: 'BIJNA KLAAR' }]);
   assert.equal(dto.rows.length, 1);
   assert.equal(dto.ingehouden, 1);
   assert.equal(JSON.stringify(dto).includes('BIJNA KLAAR'), false);
@@ -215,7 +248,7 @@ test('een status buiten de gesloten lijst wordt ingehouden, niet stil gepublicee
 test('een repo-achtig rollabel komt niet op de plaat', () => {
   // Het rollabel hoort een ROL te zijn. `stack-control` is een repository — precies de waarde
   // waarmee de review een lekrij opbouwde (Codex, 26-07-2026).
-  const dto = toPublicKanaalpost(bron([rij(1), { ...rij(2), tab: 'stack-control' }]));
+  const dto = plaat([rij(1), { ...rij(2), tab: 'stack-control' }]);
   assert.equal(dto.rows.length, 1);
   assert.equal(dto.ingehouden, 1);
   assert.equal(publishVeilig('COMMAND-CANON'), true);
@@ -229,8 +262,10 @@ test('onzichtbare tekens maken de poort niet blind', () => {
   assert.equal(publishVeilig(`pad /Users${zwsp}/iemand/geheim.md`), false);
   assert.equal(publishVeilig(`mail iemand@voor${zwsp}beeld.nl`), false);
   assert.equal(publishVeilig(`host 10.20.${zwsp}30.40`), false);
-  // en de gepubliceerde tekst is de tekst die gescand is — geen onzichtbare resten
-  const dto = toPublicKanaalpost(bron([{ ...rij(1), onderwerp: `net${zwsp}te tekst` }]));
+  // en de sleutel waarmee de catalogus wordt opgezocht is de kále tekst: een onzichtbaar teken in de
+  // bronrij verandert niets aan wát er verschijnt, dus je kunt er geen tweede vorm mee binnensmokkelen.
+  const dto = plaat([{ ...rij(1), onderwerp: `net${zwsp}te tekst` }]);
+  assert.equal(dto.rows.length, 1);
   assert.equal(dto.rows[0].onderwerp, 'nette tekst');
 });
 
@@ -255,7 +290,7 @@ test('de teller kijkt naar álle spiegelrijen, niet alleen naar de vijftien in b
   // ROOD: eerst de laatste vijftien nemen en dán scannen, meldde `ingehouden: 0` terwijl een oudere
   // rij nooit langs de poort was geweest — een geruststelling die niets bewees (Codex, 26-07-2026).
   const rows = [{ ...rij(0), onderwerp: 'oud pad /Users/x/geheim.md' }, ...Array.from({ length: 16 }, (_, i) => rij(i + 1))];
-  const dto = toPublicKanaalpost(bron(rows));
+  const dto = plaat(rows);
   assert.equal(dto.rows.length, 15);
   assert.equal(dto.ingehouden, 1);
 });
@@ -316,9 +351,47 @@ test('de meegeleverde spiegel levert rijen op — de plaat leest een bestaand be
   const tekst = await readFile(join(ROOT, 'data/kanaalpost-publiek.md'), 'utf8');
   const bronDto = kanaalpostUitTekst(tekst);
   assert.equal(bronDto.available, true, 'de spiegel in deze repo hoort herkende rijen te bevatten');
-  const dto = toPublicKanaalpost(bronDto);
+  const catalogus = laadSpiegelCatalogus(join(ROOT, 'data/spiegel-catalogus.json'));
+  assert.equal(catalogus.geladen, true, catalogus.reden ?? '');
+  const dto = toPublicKanaalpost(bronDto, catalogus);
   assert.equal(dto.available, true);
   assert.ok(dto.rows.length > 0 && dto.rows.length <= 15);
-  // Geen enkele rij hoort een pad, sleutel of adres te dragen: de spiegel is al voor publiek geschreven.
-  assert.equal(dto.ingehouden, 0, 'een ingehouden rij betekent dat een venster iets schreef dat er niet hoort');
+  // Sinds 2.5 is `ingehouden: 0` een sterkere uitspraak dan vroeger: niet alleen "geen patroon sloeg
+  // aan", maar "elke rij in de meegeleverde spiegel is vooraf beoordeeld en staat in de catalogus".
+  // Loopt dit rood na een nieuwe spiegelrij, dan is dat de bedoeling: de rij moet eerst beoordeeld.
+  assert.equal(dto.ingehouden, 0, 'elke bronrij hoort een vooraf beoordeelde tegenhanger te hebben');
+});
+
+test('hetzelfde viertal vijftien keer verdringt de rest niet — het telt één keer', () => {
+  // ROOD: de catalogus houdt onbeoordeelde tekst tegen, maar niet HERHALING van goedgekeurde tekst.
+  // Wie het venster van vijftien volzet met één goedgekeurde rij, drukt alle andere meldingen van de
+  // plaat af zonder één onbeoordeelde byte te publiceren (bevinding review Gemini, 26-07-2026).
+  const dto = plaat([rij(1), rij(2), rij(3), ...Array.from({ length: 15 }, () => rij(4))]);
+  assert.equal(dto.rows.length, 4, 'vier verschillende meldingen horen alle vier zichtbaar te blijven');
+  assert.equal(new Set(dto.rows.map((r) => r.onderwerp)).size, 4);
+  assert.equal(dto.ingehouden, 14, 'de veertien herhalingen worden geteld, niet stil weggelaten');
+});
+
+test('ontdubbelen kijkt naar het viertal, niet naar de datum', () => {
+  // Twee meldingen die alleen in datum verschillen zijn dezelfde melding, twee keer geplakt. Andersom
+  // blijft een écht andere melding op dezelfde datum gewoon staan — anders zou één druk moment de
+  // rest van dat uur wegdrukken.
+  const zelfde = plaat([rij(1), { ...rij(1), datum: '2026-07-25 11:00' }]);
+  assert.equal(zelfde.rows.length, 1);
+  assert.equal(zelfde.ingehouden, 1);
+  const anders = plaat([rij(1), { ...rij(2), datum: rij(1).datum }]);
+  assert.equal(anders.rows.length, 2);
+  assert.equal(anders.ingehouden, 0);
+});
+
+test('zonder catalogus publiceert de plaat niets — fail-closed, niet fail-open', () => {
+  // De kern van de omslag: valt de catalogus weg, dan is élke rij onbeoordeeld. Er verschijnt dan
+  // niets, mét reden — in plaats van terugvallen op vrije brontekst die niemand heeft gelezen.
+  for (const zonder of [null, undefined, { geladen: false, reden: 'CATALOGUS_ONLEESBAAR', regels: new Map() }]) {
+    const dto = toPublicKanaalpost(bron([rij(1), rij(2)]), zonder);
+    assert.equal(dto.available, false);
+    assert.equal(dto.reason, 'CATALOGUS_ONBESCHIKBAAR');
+    assert.deepEqual(dto.rows, []);
+    assert.equal(dto.ingehouden, 2, 'wat niet verschijnt hoort geteld te worden, ook hier');
+  }
 });
