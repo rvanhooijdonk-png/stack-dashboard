@@ -64,10 +64,17 @@ export function parseTrackDefs(entries) {
   const cleanSlugs = (raw) => raw.map((s) => String(s).toLowerCase()).filter((s) => s.length >= 2);
   return (entries ?? [])
     .map((e) => {
-      if (typeof e === 'string') return { name: e, slugs: cleanSlugs([e]) };
+      if (typeof e === 'string') return { name: e, slugs: cleanSlugs([e]), kanaal: [] };
       if (e && typeof e === 'object' && typeof e.name === 'string') {
         const slugs = Array.isArray(e.slugs) && e.slugs.length ? cleanSlugs(e.slugs) : cleanSlugs([e.name]);
-        return { name: e.name, slugs };
+        // `kanaal`: de tabnamen waarmee deze track zich in de vloot-kanaalpost meldt. Niet elke
+        // track schrijft klaar-rapporten in CONTROL/RAPPORTEN — NQ-RADAR levert zijn bewijs in een
+        // eigen repo en meldt af via de kanaalpost. Zonder deze koppeling leest zo'n track als
+        // "geen bewijs van werk" terwijl hij dagelijks levert; dat is geen eerlijke leegte maar een
+        // verkeerde bron.
+        const kanaal = (Array.isArray(e.kanaal) ? e.kanaal : [])
+          .map((k) => String(k).trim().toLowerCase()).filter((k) => k.length >= 2);
+        return { name: e.name, slugs, kanaal };
       }
       return null;
     })
@@ -321,11 +328,17 @@ export function isEchteDatum(ymd) {
 }
 
 /**
- * Pure koppeling track ↔ rapporten, los van de `gh`-call zodat de segment-match, de datumkeuring
+ * Pure koppeling track ↔ bewijs, los van de `gh`-call zodat de segment-match, de datumkeuring
  * en de type-filter getest kunnen worden zonder netwerk. `listing` is de contents-API-uitvoer
- * (`[{name, type}]`). Geeft per track `{track, lastReportAt, reportCount, trust}` — nooit een naam.
+ * (`[{name, type}]`); `kanaalRijen` zijn de al gelezen kanaalpost-rijen (`[{tab, datum}]`).
+ *
+ * Twee bewijsbronnen, want een track levert op twee manieren aantoonbaar werk op: een klaar-rapport
+ * in CONTROL/RAPPORTEN, óf een eigen afmelding in de vloot-kanaalpost. Alleen de eerste tellen gaf
+ * een verkeerd beeld: een track die in een eigen repo werkt en via de kanaalpost afmeldt, las als
+ * "geen bewijs van werk". Geeft per track `{track, lastReportAt, reportCount, trust}` — nooit een
+ * bestandsnaam en nooit de tekst van een kanaalpost-rij, alleen een datum en een telling.
  */
-export function tracksFromListing(defs, listing) {
+export function tracksFromListing(defs, listing, kanaalRijen = []) {
   const rapporten = (Array.isArray(listing) ? listing : [])
     .filter((f) => (f?.type === undefined || f.type === 'file')
       && typeof f.name === 'string' && /^\d{4}-\d{2}-\d{2}-.+\.md$/.test(f.name)
@@ -334,17 +347,24 @@ export function tracksFromListing(defs, listing) {
       datum: f.name.slice(0, 10),
       segmenten: new Set(f.name.slice(11, -3).toLowerCase().split('-').filter(Boolean)),
     }));
+  // Alleen datum en tab van een kanaalpost-rij worden hier gebruikt; de vrije tekst blijft buiten
+  // beeld, precies zoals de rapport-bestandsnaam dat blijft.
+  const posten = (Array.isArray(kanaalRijen) ? kanaalRijen : [])
+    .filter((r) => typeof r?.tab === 'string' && typeof r?.datum === 'string' && isEchteDatum(r.datum.slice(0, 10)))
+    .map((r) => ({ tab: r.tab.trim().toLowerCase(), datum: r.datum.slice(0, 10) }));
   return defs.map((def) => {
     const matches = rapporten.filter((r) => def.slugs.some((s) => r.segmenten.has(s)));
-    matches.sort((a, b) => b.datum.localeCompare(a.datum));
-    // Rapporten dragen een dagdatum, geen tijd; middernacht-UTC is de eerlijke ondergrens.
-    const lastReportAt = matches.length ? `${matches[0].datum}T00:00:00Z` : null;
+    const kanaal = (def.kanaal ?? []).length
+      ? posten.filter((p) => def.kanaal.includes(p.tab)) : [];
+    const datums = [...matches.map((m) => m.datum), ...kanaal.map((k) => k.datum)].sort((a, b) => b.localeCompare(a));
+    // Rapporten en kanaalpost-rijen dragen een dagdatum; middernacht-UTC is de eerlijke ondergrens.
+    const lastReportAt = datums.length ? `${datums[0]}T00:00:00Z` : null;
     return {
       track: def.name,
       lastReportAt,
-      reportCount: matches.length,
+      reportCount: datums.length,
       // Geen rapport = geen bewijs, geen groen. Wél of niet vers volgt daarna uit de leeftijd.
-      trust: matches.length ? ageTrust(lastReportAt).trust : 'UNVERIFIED',
+      trust: datums.length ? ageTrust(lastReportAt).trust : 'UNVERIFIED',
     };
   });
 }
@@ -358,7 +378,7 @@ export function tracksFromListing(defs, listing) {
  * maar een eerlijke leegte: `lastReportAt=null`, trust `UNVERIFIED` ("geen bewijs van werk"),
  * geen gecachte groene stand.
  */
-export async function collectTracks() {
+export async function collectTracks(kanaalRijen = []) {
   const listing = await gh([
     'api', `repos/${OWNER}/${CONTROL_REPO}/contents/${RAPPORTEN_PATH}?ref=${seg(RAPPORTEN_REF)}`,
   ]);
@@ -375,7 +395,7 @@ export async function collectTracks() {
   // De koppeling (segment-match, datumkeuring, type-filter) zit in `tracksFromListing` — puur en
   // los van de `gh`-call, zodat de reviewbevindingen (segment i.p.v. substring, kalenderdatum,
   // alleen echte bestanden; Codex + Gemini 24-07-2026) een eigen regressietest hebben.
-  const tracks = tracksFromListing(publicTrackDefs, listing.data);
+  const tracks = tracksFromListing(publicTrackDefs, listing.data, kanaalRijen);
 
   // Eén track zonder recent bewijs maakt de sectie niet groen — zelfde eerlijkheidsregel als de
   // documentbronnen. "geen rapport" en "verouderd rapport" zijn allebei geen VERIFIED_CURRENT.

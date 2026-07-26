@@ -67,7 +67,7 @@ test('een slug van één teken wordt op élke route geweigerd — string, fallba
   assert.deepEqual(parseTrackDefs([{ name: 'C' }]), [], 'object-fallback op de naam ook niet');
   assert.deepEqual(parseTrackDefs([{ name: 'COA', slugs: ['c'] }]), [], 'expliciete 1-letter-slug ook niet');
   // Een geldige slug blijft wél staan.
-  assert.deepEqual(parseTrackDefs([{ name: 'COA', slugs: ['coa', 'x'] }]), [{ name: 'COA', slugs: ['coa'] }]);
+  assert.deepEqual(parseTrackDefs([{ name: 'COA', slugs: ['coa', 'x'] }]), [{ name: 'COA', slugs: ['coa'], kanaal: [] }]);
 });
 
 test('slug-matching koppelt op hele segmenten, niet op substrings', () => {
@@ -113,4 +113,40 @@ test('tracksFromListing lekt nooit een bestandsnaam of onderwerp', () => {
   assert.equal(json.includes('geheim'), false);
   assert.equal(json.includes('.md'), false);
   assert.equal(uit[0].reportCount, 1, 'de telling klopt wél');
+});
+
+test('een track meldt zich ook via de kanaalpost, niet alleen via een klaar-rapport', () => {
+  // ROOD vóór deze koppeling: NQ-RADAR werkt in een eigen repo en schrijft geen rapport in
+  // CONTROL/RAPPORTEN. De plaat las dat als "geen bewijs van werk" terwijl de track dagelijks
+  // aftekent in de kanaalpost — een verkeerde bron, geen eerlijke leegte.
+  const defs = parseTrackDefs([{ name: 'NQ', slugs: ['nq'], kanaal: ['NQ-RADAR'] }]);
+  assert.deepEqual(defs[0].kanaal, ['nq-radar'], 'tabnamen worden hoofdletterongevoelig vergeleken');
+
+  const zonder = tracksFromListing(defs, [], []);
+  assert.equal(zonder[0].lastReportAt, null);
+  assert.equal(zonder[0].trust, 'UNVERIFIED');
+
+  const met = tracksFromListing(defs, [], [
+    { tab: 'NQ-RADAR', datum: '2026-07-26 05:00' },
+    { tab: 'DECK', datum: '2026-07-26 05:10' },
+  ]);
+  assert.equal(met[0].lastReportAt, '2026-07-26T00:00:00Z');
+  assert.equal(met[0].reportCount, 1, 'alleen de eigen tab telt mee');
+});
+
+test('rapport en kanaalpost tellen samen; de nieuwste datum wint', () => {
+  const defs = parseTrackDefs([{ name: 'DECK', slugs: ['deck'], kanaal: ['DECK'] }]);
+  const uit = tracksFromListing(
+    defs,
+    [{ name: '2026-07-20-deck-slot.md', type: 'file' }],
+    [{ tab: 'DECK', datum: '2026-07-25 04:52' }, { tab: 'DECK', datum: 'nietsdatum' }],
+  );
+  assert.equal(uit[0].reportCount, 2, 'de onzin-datum telt niet mee');
+  assert.equal(uit[0].lastReportAt, '2026-07-25T00:00:00Z');
+});
+
+test('een track zonder kanaal-koppeling raapt geen vreemde kanaalpost-rijen op', () => {
+  const defs = parseTrackDefs([{ name: 'COA', slugs: ['coa'] }]);
+  const uit = tracksFromListing(defs, [], [{ tab: 'COA', datum: '2026-07-26' }]);
+  assert.equal(uit[0].reportCount, 0, 'zonder expliciete kanaal-lijst blijft de koppeling dicht');
 });

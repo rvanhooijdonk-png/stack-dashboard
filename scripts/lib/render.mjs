@@ -393,10 +393,10 @@ function tracks(tr) {
       <td>${esc(t.track)}</td>
       <td class="num">${num(t.reportCount)}</td>
       <td class="nowrap">${t.lastReportAt ? esc(dt(t.lastReportAt)) : '<span class="muted">—</span>'}</td>
-      <td class="muted nowrap">${t.lastReportAt ? esc(ago(t.lastReportAt)) : 'geen rapport'}</td></tr>`).join('\n');
-  return section('tracks', 'Tracks — leeftijd laatste klaar-rapport', tr.evidence, `
-  <p class="lead muted">Per track de datum van het meest recente klaar-rapport (CONTROL/RAPPORTEN). Geen bestandsnaam — die kan een project- of klantnaam dragen. Een track zonder rapport is geen groen: er is geen bewijs van werk.</p>
-  <div class="scroll"><table><thead><tr><th>Track</th><th class="num">rapporten</th><th>laatste</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`);
+      <td class="muted nowrap">${t.lastReportAt ? esc(ago(t.lastReportAt)) : 'geen bewijs'}</td></tr>`).join('\n');
+  return section('tracks', 'Tracks — leeftijd laatste bewijs', tr.evidence, `
+  <p class="lead muted">Per track de datum van het meest recente bewijs van afgerond werk: een klaar-rapport (CONTROL/RAPPORTEN) óf een eigen afmelding in de kanaalpost hierboven. Niet elke track schrijft rapporten — wie in een eigen repo werkt meldt af via de kanaalpost, en dat is net zo goed bewijs. Geen bestandsnaam en geen rijtekst — die kunnen een project- of klantnaam dragen. Een track zonder bewijs is geen groen.</p>
+  <div class="scroll"><table><thead><tr><th>Track</th><th class="num">bewijzen</th><th>laatste</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 
 function logbook(l) {

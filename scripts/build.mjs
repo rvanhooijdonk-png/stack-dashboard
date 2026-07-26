@@ -347,9 +347,14 @@ export async function buildSnapshot() {
   // Bron wisselt naar de rapporten-branch zodra TRECHTER's echte bestand er staat.
   const planning = parsePlanning(await readText('data/planning.json'));
 
-  const [pullRequests, merged, tracker, decisions, tracks, logbook, ci, kanaalpost] = await Promise.all([
+  // De kanaalpost gaat vóór, want hij is de tweede bewijsbron van de tracks: een track die in een
+  // eigen repo werkt en via de kanaalpost afmeldt, las anders als "geen bewijs van werk". Is de
+  // kanaalpost onbereikbaar, dan krijgt `collectTracks` een lege lijst en valt hij fail-closed terug
+  // op de klaar-rapporten — geen oude kopie, geen geraden datum.
+  const kanaalpost = await collectKanaalpost();
+  const [pullRequests, merged, tracker, decisions, tracks, logbook, ci] = await Promise.all([
     collectPullRequests(), collectMergedRecent(7), collectTracker(),
-    collectDecisions(), collectTracks(), collectLogbook(), collectCi(ciRepos), collectKanaalpost(),
+    collectDecisions(), collectTracks(kanaalpost.rows), collectLogbook(), collectCi(ciRepos),
   ]);
 
   return {

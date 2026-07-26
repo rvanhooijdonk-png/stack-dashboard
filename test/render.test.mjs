@@ -204,13 +204,15 @@ test('een ingehouden titel wordt een streepje, geen "null"', () => {
 
 // --- v2.1 (24-07-2026): tracks-blok (klaar-rapport-leeftijd) + categoriechips ---
 
-test('het tracks-blok toont leeftijd en telling, en "geen rapport" als eerlijke leegte', () => {
+test('het tracks-blok toont leeftijd en telling, en "geen bewijs" als eerlijke leegte', () => {
   const html = renderHtml(fixture);
-  assert.match(html, /Tracks — leeftijd laatste klaar-rapport/);
+  assert.match(html, /Tracks — leeftijd laatste bewijs/);
+  // Twee bewijsbronnen: een klaar-rapport óf een eigen afmelding in de kanaalpost.
+  assert.match(html, /klaar-rapport \(CONTROL\/RAPPORTEN\) óf een eigen afmelding in de kanaalpost/);
   assert.match(html, /VOORBEELD/);
   assert.match(html, /ZONDER-RAPPORT/);
   // De track zonder rapport toont geen groen en geen datum, maar een expliciete leegte.
-  assert.match(html, /geen rapport/);
+  assert.match(html, /geen bewijs/);
 });
 
 test('rendert het afgeleide categorielabel als chip, ook bij ingehouden tekst', () => {
