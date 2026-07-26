@@ -11,6 +11,7 @@
     "overallStatus",
     "sources",
     "planning",
+    "kanaalpost",
     "workstreams",
     "pullRequests",
     "merged",
@@ -23,7 +24,7 @@
   "properties": {
     "contractVersion": {
       "type": "string",
-      "const": "2.2.0",
+      "const": "2.3.0",
       "description": "Vastgepind: een DTO die zich niet als exact deze contractversie meldt, hoort niet bij dit schema. Bump dit samen met CONTRACT_VERSION in scripts/build.mjs."
     },
     "generatedAt": {
@@ -62,13 +63,12 @@
     },
     "planning": {
       "type": "object",
-      "description": "v2.2: de planning-plaat. Gereduceerde, schoon-gepoorte bouwlijst (TRECHTER levert de rauwe machine-leesbare vorm). `available: false` met reason LEEG/CORRUPT is een geldige fail-closed eindstand — de plaat toont dan een melding en de rest van de pagina blijft staan. Planning staat bewust niet in `sources`: een lege of corrupte bouwlijst degradeert de overall-status niet.",
+      "description": "v2.3 (de kanaalpost-rijen zijn hier weg — die komen sinds v2.3 uit het vloot-brede doorgeefluik, zie het top-level `kanaalpost`-blok): de planning-plaat. Gereduceerde, schoon-gepoorte bouwlijst (TRECHTER levert de rauwe machine-leesbare vorm). `available: false` met reason LEEG/CORRUPT is een geldige fail-closed eindstand — de plaat toont dan een melding en de rest van de pagina blijft staan. Planning staat bewust niet in `sources`: een lege of corrupte bouwlijst degradeert de overall-status niet.",
       "required": [
         "available",
         "reason",
         "features",
-        "counters",
-        "kanaalpost"
+        "counters"
       ],
       "additionalProperties": false,
       "properties": {
@@ -93,9 +93,18 @@
           ],
           "additionalProperties": false,
           "properties": {
-            "afSindsGisteren": { "type": "integer", "minimum": 0 },
-            "draaitNu": { "type": "integer", "minimum": 0 },
-            "wachtOpRichard": { "type": "integer", "minimum": 0 }
+            "afSindsGisteren": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "draaitNu": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "wachtOpRichard": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         },
         "features": {
@@ -170,48 +179,81 @@
               }
             }
           }
+        }
+      }
+    },
+    "kanaalpost": {
+      "type": "object",
+      "description": "v2.3: de VLOOT-kanaalpost — de laatste vijftien rijen van CONTROL/KANAALPOST.md op de rapporten-branch, nieuwste boven. Elke rij is vrije tekst van een ander venster en gaat daarom per cel door een publish-poort: een cel met een herkend patroon houdt de HELE rij tegen (geteld in `ingehouden`), want een half geredigeerde melding is onleesbaar én verhult dat er iets misging. `available: false` met reason LEEG/BRON_ONBEREIKBAAR/INGEHOUDEN is een geldige fail-closed eindstand. Staat bewust niet in `sources`: een onbereikbaar doorgeefluik degradeert de rest van de pagina niet.",
+      "required": [
+        "available",
+        "reason",
+        "rows",
+        "ingehouden"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "type": "boolean"
         },
-        "kanaalpost": {
+        "reason": {
+          "description": "Waarom de sectie leeg is; null als hij gevuld is. Gesloten lijst, nooit vrije tekst.",
+          "enum": [
+            null,
+            "LEEG",
+            "BRON_ONBEREIKBAAR",
+            "INGEHOUDEN"
+          ]
+        },
+        "ingehouden": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Aantal rijen dat de publish-poort niet haalde. Zichtbaar op de plaat: inhouden mag, stilzwijgend inhouden niet."
+        },
+        "rows": {
           "type": "array",
-          "description": "De laatste tien logboek-rijen. Vrije `onderwerp`-tekst gaat langs de sanitize-gate.",
           "items": {
             "type": "object",
             "required": [
-              "datum",
-              "doelchat",
+              "tab",
               "onderwerp",
-              "status"
+              "status",
+              "datum"
             ],
             "additionalProperties": false,
             "properties": {
-              "datum": {
+              "tab": {
                 "type": [
                   "string",
                   "null"
                 ],
-                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
-              },
-              "doelchat": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "pattern": "^[0-9]{2}$"
+                "description": "Naam van het venster/spoor dat meldt; gecapt en gekeurd op naamvorm."
               },
               "onderwerp": {
                 "type": [
                   "string",
                   "null"
-                ]
+                ],
+                "description": "Wat er klaar is, in één regel (gecapt op 200 tekens)."
               },
               "status": {
                 "type": [
                   "string",
                   "null"
-                ]
+                ],
+                "description": "Wat Richard of Fable moet doen: een merge, een GO, of niets."
+              },
+              "datum": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}( [0-9]{2}:[0-9]{2})?$",
+                "description": "Datum-tijd (UTC) uit de bron; de tijd is optioneel."
               }
             }
-          }
+          },
+          "description": "Maximaal vijftien rijen, nieuwste boven (grens en volgorde staan in build.mjs, met test)."
         }
       }
     },

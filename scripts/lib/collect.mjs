@@ -392,6 +392,101 @@ export async function collectTracks() {
   };
 }
 
+/**
+ * VLOOT-KANAALPOST — het gedeelde doorgeefluik van álle vensters, op dezelfde rapporten-branch.
+ * Elke afronding is daar één tabelrij met vijf velden (D-0026): tab · wat klaar is · sha ·
+ * wat Richard of Fable moet doen · datum-tijd (UTC).
+ *
+ * Deze parser is bewust streng en puur. Streng, want een rij die niet exact vijf velden heeft is
+ * geen kanaalpost-rij maar een tabel die er toevallig op lijkt — of een cel met een losse `|` erin;
+ * dan half raden welke cel welk veld is, is erger dan de rij overslaan. Puur, zodat de vorm-eisen
+ * getest kunnen worden zonder netwerk (zelfde patroon als `tracksFromListing`).
+ *
+ * De sha-kolom wordt niet overgenomen: hij draagt repo-namen en voegt op de plaat niets toe aan
+ * de vraag "wat is klaar en wat moet er nog gebeuren".
+ */
+const KANAALPOST_PATH = 'CONTROL/KANAALPOST.md';
+/**
+ * Datum-tijd-cel: kale dagdatum, eventueel gevolgd door HH:MM (UTC) — en verder niets. Het
+ * eind-anker en de uur-/minuutgrenzen zijn geen muggenzifterij: zonder anker matchte
+ * `2026-07-25 /Users/iemand/geheim.md` gewoon, waarna de parser de rest van de cel weggooide en de
+ * rij als geldig doorliet (review Codex + Gemini). Een cel met rommel erachter is geen datum, dus
+ * valt de hele rij af.
+ */
+const KANAAL_DATUM = /^(\d{4}-\d{2}-\d{2})(?:\s+([01]?\d|2[0-3]):([0-5]\d))?$/;
+/** Een tabnaam is een naam, geen zin en geen markup. */
+const KANAAL_TAB = /^[A-Za-z0-9 ()._/-]{1,40}$/;
+/**
+ * Markdown-nadruk weghalen zodat de plaat gewone tekst toont. Bewust NIET `_`: dat zou
+ * `SERVICE_TOKEN` tot `SERVICETOKEN` maken en daarmee juist het secret-naam-patroon blind maken.
+ */
+const kaal = (s) => String(s).replace(/[`*]+/g, '').replace(/\s+/g, ' ').trim();
+
+/** Een kanaalpost-kop: eerste kolom `tab`, laatste kolom `datum…`. Alleen dán volgen er rijen. */
+const KANAAL_KOP = (cellen) =>
+  cellen[0].toLowerCase() === 'tab' && cellen[4].toLowerCase().startsWith('datum');
+
+export function kanaalpostUitTekst(tekst) {
+  const rijen = [];
+  let kopGezien = false;
+  for (const regel of String(tekst ?? '').split('\n')) {
+    const r = regel.trim();
+    if (!r.startsWith('|') || !r.endsWith('|')) continue;
+    const cellen = r.slice(1, -1).split('|').map((c) => c.trim());
+    if (cellen.length !== 5) continue;
+    if (cellen.every((c) => /^:?-{3,}:?$/.test(c))) continue;      // scheidingsregel
+    if (KANAAL_KOP(cellen)) { kopGezien = true; continue; }         // kopregel
+    // Pas rijen aannemen ná een herkende kanaalpost-kop. Zonder die poort werd élke vijfkolomstabel
+    // in het bestand als kanaalpost gelezen — een tabel met een andere kolomvolgorde schoof dan
+    // interne velden naar `onderwerp`/`status` (review Codex, bewezen probe).
+    if (!kopGezien) continue;
+    const d = KANAAL_DATUM.exec(cellen[4]);
+    if (!d || !isEchteDatum(d[1])) continue;
+    const tab = kaal(cellen[0]);
+    const onderwerp = kaal(cellen[1]);
+    if (!KANAAL_TAB.test(tab) || !onderwerp) continue;
+    rijen.push({
+      tab,
+      onderwerp,
+      status: kaal(cellen[3]),
+      // Een handgeschreven `9:05` telt mee maar wordt als `09:05` getoond: de kolom moet
+      // uitlijnen, en een rij stil laten wegvallen op een ontbrekende nul is te streng (review Gemini).
+      datum: d[2] ? `${d[1]} ${d[2].padStart(2, '0')}:${d[3]}` : d[1],
+    });
+  }
+  return rijen;
+}
+
+/**
+ * De kanaalpost staat op de rapporten-branch en is append-only: nieuwste onderaan. Fail-closed in
+ * twee smaken, want ze vragen om een andere melding: de bron is niet te lezen (BRON_ONBEREIKBAAR)
+ * of hij is leesbaar maar levert geen enkele herkende rij (LEEG — dan is de parser verdacht, niet
+ * de vloot). De sectie staat hierom bewust niet in `sources`: een onbereikbaar doorgeefluik zet de
+ * hele pagina niet op DEGRADED, hij toont zijn eigen melding.
+ */
+export async function collectKanaalpost() {
+  const proof = `${repoUrl(CONTROL_REPO)}/blob/${RAPPORTEN_REF}/${KANAALPOST_PATH}`;
+  const src = `${CONTROL_REPO} / kanaalpost`;
+  const tekst = await fileFromRepo(CONTROL_REPO, KANAALPOST_PATH, RAPPORTEN_REF);
+  if (tekst === null) {
+    return {
+      available: false, reason: 'BRON_ONBEREIKBAAR', rows: [],
+      evidence: evidence(src, RAPPORTEN_REF, 'SOURCE_UNAVAILABLE', proof, 'Kanaalpost niet leesbaar.'),
+    };
+  }
+  const rows = kanaalpostUitTekst(tekst);
+  if (!rows.length) {
+    return {
+      available: false, reason: 'LEEG', rows: [],
+      evidence: evidence(src, RAPPORTEN_REF, 'UNVERIFIED', proof, parserNote(0)),
+    };
+  }
+  return {
+    available: true, reason: null, rows,
+    evidence: evidence(src, RAPPORTEN_REF, 'VERIFIED_CURRENT', proof, null),
+  };
+}
+
 /** Journaal — alleen de kopregels van de laatste entries. */
 export async function collectLogbook() {
   const proof = `${repoUrl(CONTROL_REPO)}/blob/main/CONTROL/FABLE-JOURNAAL.md`;

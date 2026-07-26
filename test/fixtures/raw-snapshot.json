@@ -52,22 +52,33 @@
         "af_sinds": "2026-07-22",
         "afhankelijkheid": null
       }
-    ],
-    "kanaalpost": [
+    ]
+  },
+  "kanaalpost": {
+    "available": true,
+    "reason": null,
+    "rows": [
       {
-        "datum": "2026-07-23",
-        "doelchat": "02",
-        "onderwerp": "Kwartierrun ingesteld",
-        "status": "gemerged",
-        "internPad": "CONTROL/RAPPORTEN/geheim.md"
+        "tab": "DASHBOARD",
+        "onderwerp": "Eerste melding",
+        "status": "Niets — gemerged",
+        "datum": "2026-07-25 10:05"
       },
       {
-        "datum": "niet-een-datum",
-        "doelchat": "kwaad",
-        "onderwerp": "Regel met ongeldige datum en doelchat",
-        "status": "in-bouw"
+        "tab": "CONTROL",
+        "onderwerp": "Tweede melding met intern pad /Users/iemand/INTERN/PAD.md",
+        "status": "Richard: kijken",
+        "datum": "2026-07-25 20:12"
       }
-    ]
+    ],
+    "evidence": {
+      "source": "stack-control / kanaalpost",
+      "retrievedAt": "2026-07-23T02:00:00.000Z",
+      "sourceRef": "rapporten",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "https://intern.example/kanaalpost",
+      "error": null
+    }
   },
   "pullRequests": {
     "available": true,

@@ -175,28 +175,6 @@ test('de kop-band telt draait-nu, wacht-op-Richard en af-sinds-gisteren', () => 
   assert.deepEqual(planningCounters(features, BUILD), { afSindsGisteren: 1, draaitNu: 2, wachtOpRichard: 1 });
 });
 
-// --- kanaalpost: laatste tien, ongeldige velden fail-closed naar null ---
-
-test('kanaalpost toont alleen de laatste tien rijen', () => {
-  const rijen = Array.from({ length: 14 }, (_, i) => ({ datum: '2026-07-25', doelchat: '02', onderwerp: `r${i}`, status: 'x' }));
-  const dto = toPublicPlanning(parsePlanning(JSON.stringify({
-    features: [{ feature_label: 'x', status: 'gepland' }], kanaalpost: rijen,
-  })), BUILD);
-  assert.equal(dto.kanaalpost.length, 10);
-  assert.equal(dto.kanaalpost[0].onderwerp, 'r4');
-  assert.equal(dto.kanaalpost[9].onderwerp, 'r13');
-});
-
-test('een ongeldige datum of doelchat in kanaalpost wordt null, niet doorgelaten', () => {
-  const dto = toPublicPlanning(parsePlanning(JSON.stringify({
-    features: [{ feature_label: 'x', status: 'gepland' }],
-    kanaalpost: [{ datum: 'niet-een-datum', doelchat: 'kwaad', onderwerp: 'o', status: 's' }],
-  })), BUILD);
-  assert.equal(dto.kanaalpost[0].datum, null);
-  assert.equal(dto.kanaalpost[0].doelchat, null);
-  assert.equal(dto.kanaalpost[0].onderwerp, 'o');
-});
-
 test('isYmd keurt vorm én echte datum, en weigert onzin', () => {
   assert.equal(isYmd('2026-07-25'), true);
   assert.equal(isYmd('2026-13-40'), false);
@@ -206,14 +184,16 @@ test('isYmd keurt vorm én echte datum, en weigert onzin', () => {
 
 // --- render: de plaat staat op de pagina, fail-closed toont een melding, XSS wordt geëscaped ---
 
-test('de planning-plaat rendert met kop-band, features en kanaalpost', () => {
+test('de planning-plaat rendert met kop-band en features', () => {
   const html = renderHtml(fixture);
   assert.match(html, /id="planning"/);
   assert.match(html, /Af sinds gisteren/);
   assert.match(html, /Draait nu/);
   assert.match(html, /Wacht op Richard/);
   assert.match(html, /Planning-plaat op het dashboard/);
-  assert.match(html, /Kanaalpost — laatste/);
+  // De kanaalpost hoort sinds contract 2.3.0 NIET meer bij deze sectie: hij heeft een eigen bron
+  // (het vloot-brede doorgeefluik) en dus een eigen sectie, met een eigen fail-closed melding.
+  assert.equal(/id="planning"[\s\S]*?Kanaalpost/.test(html.split('id="kanaalpost"')[0]), false);
 });
 
 test('een lege bouwlijst toont een nette melding op de plaat, geen kapotte pagina', () => {

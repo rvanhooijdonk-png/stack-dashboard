@@ -14,13 +14,14 @@ import { mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { assertPublishable, loadDenyTerms } from './lib/sanitize.mjs';
+import { assertPublishable, denyTermsMaxLen, loadDenyTerms, sanitizeString } from './lib/sanitize.mjs';
 import { renderHtml } from './lib/render.mjs';
 import { validate } from './lib/validate.mjs';
 import { parsePlanning, toPublicPlanning } from './lib/planning.mjs';
 import {
   collectPullRequests, collectMergedRecent, collectTracker,
-  collectDecisions, collectTracks, collectLogbook, collectCi, setPublicRepos, setPublicTracks,
+  collectDecisions, collectTracks, collectLogbook, collectCi, collectKanaalpost,
+  setPublicRepos, setPublicTracks,
   CATEGORIEEN,
 } from './lib/collect.mjs';
 
@@ -31,8 +32,12 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  * 2.2.0: planning-plaat (bouwlijst met status + op throughput herrekende oplevering + kanaalpost).
  *        Planning staat bewust NIET in `sources`: een lege/corrupte bouwlijst degradeert de hele
  *        pagina niet, hij toont zijn eigen nette melding (fail-closed per sectie).
+ * 2.3.0: kanaalpost wordt een eigen blok, gevoed door het VLOOT-brede CONTROL/KANAALPOST.md op de
+ *        rapporten-branch i.p.v. de kanaalpost-rijen uit de eigen bouwlijst. Reden: het doorgeefluik
+ *        is stackbreed; een venster dat alleen zijn eigen meldingen toont, sluit Richards check-keten
+ *        niet. Eén bron, geen tweede stille route — daarom is `planning.kanaalpost` vervallen.
  */
-const CONTRACT_VERSION = '2.2.0';
+const CONTRACT_VERSION = '2.3.0';
 const REFRESH_SECONDS = 900;
 /** Een titel is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
 const MAX_TITLE = 80;
@@ -126,6 +131,82 @@ function publicWorkstream(w, index) {
   return { id, title, estimate };
 }
 
+/** De plaat toont het staartstuk van het doorgeefluik: de laatste vijftien rijen, nieuwste boven. */
+const KANAAL_RIJEN = 15;
+const MAX_KANAAL_TAB = 40;
+const MAX_KANAAL_ONDERWERP = 200;
+const MAX_KANAAL_STATUS = 160;
+/**
+ * Vensterbreedte voor de publish-poort. `sanitizeString` kapt zelf af boven 2000 tekens en scant
+ * dan NIET meer — dus wie een lange kanaalpost-regel in één keer aanbiedt, krijgt "oversized" terug
+ * en heeft de patronen nooit gezien. Daarom wordt de volledige cel in overlappende vensters
+ * gescand: de overlap is ruim groter dan het langste deny-patroon, zodat een sleutel die op een
+ * vensterrand valt niet tussen twee vensters door glipt.
+ */
+const KANAAL_VENSTER = 1500;
+const KANAAL_OVERLAP = 300;
+
+/**
+ * Is deze vrije tekst publiceerbaar? Geen bevinding = ja. Dit is bewust een JA/NEE-poort en geen
+ * redactie: een kanaalpost-rij met `[REDACTED]` erin is voor Richard onleesbaar én verhult dat er
+ * iets misging bij het venster dat hem schreef. Een verdachte rij wordt ingehouden en geteld.
+ *
+ * Volgorde is hier de hele truc: eerst scannen op de VOLLEDIGE tekst, pas daarna cappen. Andersom
+ * (cappen, dan scannen) publiceert de eerste 200 tekens van een regel waarvan het geheim op teken
+ * 2500 staat — en ziet dat geheim nooit.
+ */
+export function publishVeilig(tekst) {
+  const s = String(tekst ?? '');
+  // De overlap moet minstens zo breed zijn als het langste patroon dat over een naad kan vallen.
+  // Alle regex-patronen zijn begrensd en ruim onder 300; alleen een deny-term is vrije tekst en
+  // kan langer zijn — die meet de gate daarom zelf op (review Codex).
+  const overlap = Math.min(Math.max(KANAAL_OVERLAP, denyTermsMaxLen()), KANAAL_VENSTER - 1);
+  const stap = KANAAL_VENSTER - overlap;
+  for (let i = 0; i === 0 || i < s.length; i += stap) {
+    if (sanitizeString(s.slice(i, i + KANAAL_VENSTER)).findings.length > 0) return false;
+  }
+  return true;
+}
+
+/**
+ * Reduceer de vloot-kanaalpost tot de publieke plaat-DTO: laatste vijftien rijen, nieuwste boven,
+ * elke rij door de publish-poort en daarna gecapt.
+ *
+ * De volgorde is de BRONVOLGORDE omgedraaid, niet een sortering op de datumkolom. Het logboek is
+ * append-only ("nieuwste onderaan"), dus de laatste vijftien regels zijn per afspraak de laatste
+ * vijftien meldingen; een venster dat een rij met een oudere tijd aanvult, hoort niet ineens
+ * bovenaan te springen.
+ *
+ * Fail-closed met drie te onderscheiden eindstanden — de plaat moet kunnen zeggen wát er mis is:
+ * bron onbereikbaar, bron leeg/parser stuk, of: er wás post maar geen enkele rij was publiceerbaar.
+ */
+export function toPublicKanaalpost(raw) {
+  const leeg = (reason, ingehouden = 0) => ({ available: false, reason, rows: [], ingehouden });
+  if (!raw || raw.available !== true || !Array.isArray(raw.rows)) {
+    return leeg(raw?.reason === 'LEEG' ? 'LEEG' : 'BRON_ONBEREIKBAAR');
+  }
+  const cap = (v, max) => {
+    const s = typeof v === 'string' ? v.trim() : '';
+    return s ? s.slice(0, max) : null;
+  };
+  const rows = [];
+  let ingehouden = 0;
+  for (const r of raw.rows.slice(-KANAAL_RIJEN).reverse()) {
+    if (!publishVeilig(r?.tab) || !publishVeilig(r?.onderwerp) || !publishVeilig(r?.status)) {
+      ingehouden += 1;
+      continue;
+    }
+    rows.push({
+      tab: cap(r?.tab, MAX_KANAAL_TAB),
+      onderwerp: cap(r?.onderwerp, MAX_KANAAL_ONDERWERP),
+      status: cap(r?.status, MAX_KANAAL_STATUS),
+      datum: cap(r?.datum, 16),
+    });
+  }
+  if (!rows.length) return leeg(ingehouden ? 'INGEHOUDEN' : 'LEEG', ingehouden);
+  return { available: true, reason: null, rows, ingehouden };
+}
+
 /**
  * Reduceer de interne snapshot tot wat de pagina toont — veld voor veld, met de hand.
  * Er is bewust geen spread: een nieuw veld in een collector verschijnt hier niet vanzelf.
@@ -184,6 +265,9 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
     // uit het THROUGHPUT-LOG dat in de bouwlijst zit — geen tweede meetsysteem. Planning is geen
     // `sources`-bron: fail-closed op deze sectie neemt de rest van de pagina niet mee.
     planning: toPublicPlanning(raw.planning, raw.generatedAt),
+    // Vloot-breed doorgeefluik, zelfde fail-closed-per-sectie-regel als planning: geen `sources`-bron,
+    // dus een onbereikbare kanaalpost degradeert de rest van de pagina niet.
+    kanaalpost: toPublicKanaalpost(raw.kanaalpost),
     workstreams: raw.workstreams.map((w, i) => publicWorkstream(w, i)),
     pullRequests: {
       available: raw.pullRequests.available,
@@ -263,15 +347,16 @@ export async function buildSnapshot() {
   // Bron wisselt naar de rapporten-branch zodra TRECHTER's echte bestand er staat.
   const planning = parsePlanning(await readText('data/planning.json'));
 
-  const [pullRequests, merged, tracker, decisions, tracks, logbook, ci] = await Promise.all([
+  const [pullRequests, merged, tracker, decisions, tracks, logbook, ci, kanaalpost] = await Promise.all([
     collectPullRequests(), collectMergedRecent(7), collectTracker(),
-    collectDecisions(), collectTracks(), collectLogbook(), collectCi(ciRepos),
+    collectDecisions(), collectTracks(), collectLogbook(), collectCi(ciRepos), collectKanaalpost(),
   ]);
 
   return {
     generatedAt: new Date().toISOString(),
     workstreams,
     planning,
+    kanaalpost,
     pullRequests, merged, tracker, decisions, tracks, logbook, ci,
   };
 }

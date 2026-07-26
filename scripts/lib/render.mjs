@@ -436,8 +436,10 @@ function workstreams(ws) {
 /**
  * PLANNING-PLAAT — de bouwlijst. Kop-band (af-sinds-gisteren · draait-nu · wacht-op-Richard),
  * daaronder per feature de naam, status, de op het THROUGHPUT-LOG herrekende oplevering en de
- * afhankelijkheid, en tot slot de laatste tien kanaalpost-rijen. Fail-closed: een lege of afgekeurde
- * bouwlijst toont hier een nette melding, nooit een lege of kapotte pagina.
+ * afhankelijkheid. De kanaalpost stond hier tot contract 2.2.0 onder; die heeft sinds 2.3.0 een eigen
+ * bron (het vloot-brede doorgeefluik) en dus een eigen sectie — anders zou een lege bouwlijst de
+ * kanaalpost van de héle vloot meenemen. Fail-closed: een lege of afgekeurde bouwlijst toont hier een
+ * nette melding, nooit een lege of kapotte pagina.
  */
 const PLANNING_STATUS_KLASSE = {
   gepland: '',
@@ -485,14 +487,6 @@ function planning(p) {
       <td class="nowrap">${opleveringTekst(f.oplevering)}</td>
       <td>${f.afhankelijkheid ? esc(f.afhankelijkheid) : '<span class="muted">—</span>'}</td></tr>`).join('\n');
 
-  const kanaalRows = p.kanaalpost.length
-    ? p.kanaalpost.map((k) => `<tr>
-      <td class="nowrap muted">${k.datum ? esc(k.datum) : '—'}</td>
-      <td class="nowrap"><span class="tag">${k.doelchat ? esc(k.doelchat) : '—'}</span></td>
-      <td>${k.onderwerp ? esc(k.onderwerp) : '<span class="muted">—</span>'}</td>
-      <td class="nowrap muted">${k.status ? esc(k.status) : '—'}</td></tr>`).join('\n')
-    : '';
-
   return `<section id="planning" class="card plaat">
   <h2>Planning-plaat</h2>
   <p class="lead muted">De bouwlijst: wat gepland staat, wat nu draait en wat op een akkoord wacht. De
@@ -503,10 +497,49 @@ function planning(p) {
     <thead><tr><th>Feature</th><th>status</th><th>rol</th><th>oplevering</th><th>afhankelijkheid</th></tr></thead>
     <tbody>${rows}</tbody>
   </table></div>
-  <h3>Kanaalpost — laatste ${num(p.kanaalpost.length)}</h3>
-  ${kanaalRows
-    ? `<div class="scroll"><table><thead><tr><th>datum</th><th>chat</th><th>onderwerp</th><th>status</th></tr></thead><tbody>${kanaalRows}</tbody></table></div>`
-    : '<p class="empty">Nog geen kanaalpost-rijen.</p>'}
+</section>`;
+}
+
+/**
+ * KANAALPOST — het doorgeefluik van de héle vloot (CONTROL/KANAALPOST.md op de rapporten-branch),
+ * niet alleen de meldingen van dit venster. Nieuwste boven, want wie hier kijkt wil weten wat er
+ * zojuist is afgerond en waar zijn tik op staat.
+ *
+ * Fail-closed met een eigen melding per eindstand — een onbereikbaar doorgeefluik hoort te zeggen
+ * dát hij onbereikbaar is, niet stilletjes een lege tabel te tonen die op "niets gebeurd" lijkt.
+ */
+const KANAAL_REDEN = {
+  LEEG: 'De kanaalpost is gelezen, maar er stond geen enkele herkende rij in — mogelijk is het formaat gewijzigd. Liever deze melding dan een lege tabel die op "niets gebeurd" lijkt.',
+  BRON_ONBEREIKBAAR: 'De kanaalpost kon niet gelezen worden. Er staat hier bewust geen oude kopie: geen bron is geen stand.',
+  INGEHOUDEN: 'Er was post, maar geen enkele rij kwam door de publicatie-poort. De rijen blijven leesbaar in de bron; hier verschijnen ze pas als ze publiceerbaar zijn.',
+};
+
+function kanaalpost(k) {
+  if (!k?.available) {
+    const aantal = Number(k?.ingehouden);
+    // Inhouden mag, stilzwijgend inhouden niet — ook als er niets overblijft hoort het aantal
+    // zichtbaar te zijn (review Gemini). Anders leest een volledig ingehouden post als "stil".
+    const telling = Number.isFinite(aantal) && aantal > 0 ? ` (${num(aantal)} rij(en))` : '';
+    const reden = (KANAAL_REDEN[k?.reason] ?? KANAAL_REDEN.BRON_ONBEREIKBAAR) + telling;
+    return `<section id="kanaalpost" class="card wide">
+  <h2>Kanaalpost — de hele vloot</h2>
+  <p class="empty">${esc(reden)}</p>
+</section>`;
+  }
+  const rows = k.rows.map((r) => `<tr>
+      <td class="nowrap"><span class="tag">${r.tab ? esc(r.tab) : '—'}</span></td>
+      <td>${r.onderwerp ? esc(r.onderwerp) : '<span class="muted">—</span>'}</td>
+      <td>${r.status ? esc(r.status) : '<span class="muted">—</span>'}</td>
+      <td class="nowrap muted">${r.datum ? esc(r.datum) : '—'}</td></tr>`).join('\n');
+  return `<section id="kanaalpost" class="card wide">
+  <h2>Kanaalpost — de hele vloot <span class="badge">laatste ${num(k.rows.length)}</span></h2>
+  <p class="lead muted">Elke tab meldt hier zijn afronding: wat klaar is en wat er van Richard of Fable
+  nodig is (een merge, een GO, of niets). Nieuwste boven.${
+  k.ingehouden ? ` <strong>${num(k.ingehouden)}</strong> rij(en) zijn niet getoond omdat ze de publicatie-poort niet haalden.` : ''}</p>
+  <div class="scroll"><table>
+    <thead><tr><th>tab</th><th>onderwerp</th><th>status</th><th>datum</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>
 </section>`;
 }
 
@@ -605,6 +638,8 @@ de leeftijd van déze kopie; losse brondata kan ouder zijn, dus lees ook de badg
 ${overzicht(s)}
 
 ${planning(s.planning)}
+
+${kanaalpost(s.kanaalpost)}
 
 <div class="grid">
   ${pullRequests(s.pullRequests)}

@@ -1,5 +1,5 @@
 {
-  "contractVersion": "2.2.0",
+  "contractVersion": "2.3.0",
   "generatedAt": "2026-07-23T12:00:00.000Z",
   "overallStatus": "DEGRADED",
   "sources": [
@@ -27,27 +27,57 @@
         "label": "Planning-plaat op het dashboard",
         "status": "in-bouw",
         "worker": "worker",
-        "oplevering": { "kind": "verwacht", "date": "2026-07-26" },
+        "oplevering": {
+          "kind": "verwacht",
+          "date": "2026-07-26"
+        },
         "afhankelijkheid": null
       },
       {
         "label": "Tijdstempel in Nederlandse tijd",
         "status": "wacht-op-Richard",
         "worker": "richard",
-        "oplevering": { "kind": "verwacht", "date": "2026-07-24" },
+        "oplevering": {
+          "kind": "verwacht",
+          "date": "2026-07-24"
+        },
         "afhankelijkheid": "wacht op merge-akkoord"
       },
       {
         "label": "Noodpagina bij een afgebroken build",
         "status": "live",
         "worker": "worker",
-        "oplevering": { "kind": "opgeleverd", "date": "2026-07-23" },
+        "oplevering": {
+          "kind": "opgeleverd",
+          "date": "2026-07-23"
+        },
         "afhankelijkheid": null
       }
-    ],
-    "kanaalpost": [
-      { "datum": "2026-07-23", "doelchat": "02", "onderwerp": "Kwartierrun ingesteld", "status": "gemerged" },
-      { "datum": "2026-07-25", "doelchat": "02", "onderwerp": "Tijdstempel in NL-tijd", "status": "mergeable" }
+    ]
+  },
+  "kanaalpost": {
+    "available": true,
+    "reason": null,
+    "ingehouden": 1,
+    "rows": [
+      {
+        "tab": "DASHBOARD",
+        "onderwerp": "Kanaalpost-sectie leest voortaan de hele vloot",
+        "status": "Richard: merge",
+        "datum": "2026-07-25 22:38"
+      },
+      {
+        "tab": "CONTROL",
+        "onderwerp": "TIKRONDE-voorziening: een commando bundelt de merge-klare PR’s",
+        "status": "Richard: run de tikronde",
+        "datum": "2026-07-25 22:20"
+      },
+      {
+        "tab": "TRECHTER",
+        "onderwerp": "Verrijkings-delta ingenomen, geen bouw-oordeel",
+        "status": "geen",
+        "datum": "2026-07-25 22:15"
+      }
     ]
   },
   "workstreams": [
