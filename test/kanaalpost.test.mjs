@@ -55,6 +55,8 @@ test('een rij met een andere kolomtelling wordt overgeslagen, niet half geraden'
 });
 
 test('een rij zonder echte datum telt niet mee (fail-closed op de datumkolom)', () => {
+  assert.equal(spiegelUitTekst(`${BRON}| 2026-02-30 10:00 | X | iets | AFGEROND | niemand |\n`).length, 3);
+  // en zonder kop levert dezelfde rij sowieso niets op
   assert.deepEqual(spiegelUitTekst('| 2026-02-30 10:00 | X | iets | AFGEROND | niemand |\n'), []);
 });
 
@@ -79,7 +81,38 @@ test('een vijfkolomstabel zonder spiegelkop levert geen rijen', () => {
 | 2026-07-25 | CONTROL | intern-adres | interne notitie | 2026-07-25 |
 `;
   assert.deepEqual(spiegelUitTekst(vreemd), []);
-  assert.equal(spiegelUitTekst(`${BRON}${vreemd}`).length, 4, 'ná een echte kop leest hij weer door');
+  // ROOD in de vorige ronde (Codex + Gemini, 26-07-2026): `kopGezien` bleef na één echte kop voor de
+  // rest van het bestand aan staan, waardoor ELKE latere vijfkolomstabel als kanaalpost werd gelezen.
+  // Dat leverde `intern-adres` als onderwerp op een openbare pagina op.
+  assert.equal(spiegelUitTekst(`${BRON}${vreemd}`).length, 3, 'een tweede tabel is geen kanaalpost');
+  assert.equal(spiegelUitTekst(`${BRON}\n## Interne tabel\n\n${vreemd}`).length, 3);
+  assert.equal(JSON.stringify(spiegelUitTekst(`${BRON}${vreemd}`)).includes('intern-adres'), false);
+});
+
+test('een rij in een HTML-commentaar of codeblok telt niet mee', () => {
+  // De parser kent geen markdown-structuur; de kop-poort doet het werk. Een commentaarregel is geen
+  // tabelregel, dus hij sluit de lopende tabel — en wat daarna komt heeft geen kop meer boven zich.
+  const verstopt = `${BRON}
+<!--
+| 2026-07-26 06:00 | GEHEIM | Niet voor publicatie bedoelde notitie | AFGEROND | niemand |
+-->
+`;
+  assert.equal(spiegelUitTekst(verstopt).length, 3);
+  assert.equal(JSON.stringify(spiegelUitTekst(verstopt)).includes('Niet voor publicatie'), false);
+});
+
+test('een ge-escapete pipe blijft in zijn eigen cel staan', () => {
+  // ROOD: hard splitsen op elke `|` gaf deze rij vijf cellen en schoof `AFGEROND` naar de
+  // actiekolom — kolom-specifieke controles zijn dan waardeloos (review Gemini, 26-07-2026).
+  const rijen = spiegelUitTekst(`${BRON}| 2026-07-26 06:00 | MARKT | keuze A \\| B gemaakt | AFGEROND | niemand |\n`);
+  assert.equal(rijen.length, 4);
+  assert.deepEqual(rijen[3], {
+    tab: 'MARKT',
+    onderwerp: 'keuze A | B gemaakt',
+    status: 'AFGEROND',
+    actie: 'niemand',
+    datum: '2026-07-26 06:00',
+  });
 });
 
 test('een uur zonder voorloopnul telt mee en wordt uitgelijnd getoond', () => {
@@ -120,7 +153,7 @@ test('een rij met een herkend patroon wordt ingehouden, de rest blijft staan', (
   const dto = toPublicKanaalpost(bron([
     rij(1),
     { ...rij(2), onderwerp: 'fix in /Users/iemand/geheim/pad.md' },
-    { ...rij(3), status: 'zet AWS_SECRET_KEY opnieuw' },
+    { ...rij(3), actie: 'zet AWS_SECRET_KEY opnieuw' },
   ]));
   assert.equal(dto.rows.length, 1);
   assert.equal(dto.ingehouden, 2);
@@ -163,10 +196,68 @@ test('alle rijen ingehouden is geen lege tabel maar een expliciete melding', () 
   assert.equal(dto.ingehouden, 1);
 });
 
-test('een lege plek in de rijenlijst laat de build niet omvallen', () => {
-  const dto = toPublicKanaalpost(bron([null, rij(1)]));
-  assert.equal(dto.rows.length, 2);
-  assert.deepEqual(dto.rows[1], { tab: null, onderwerp: null, status: null, actie: null, datum: null });
+test('een lege plek in de rijenlijst laat de build niet omvallen, maar wordt ook niet gepubliceerd', () => {
+  // ROOD: een `null`-rij werd een geldige publieke rij vol `—`. Corrupte invoer die geldige publieke
+  // data wordt, is fail-open op integriteit (review Codex, 26-07-2026). Nu: ingehouden en geteld.
+  const dto = toPublicKanaalpost(bron([null, rij(1), { tab: 'CONTROL' }]));
+  assert.equal(dto.rows.length, 1);
+  assert.equal(dto.ingehouden, 2);
+  assert.ok(dto.rows.every((r) => Object.values(r).every((v) => typeof v === 'string' && v !== '')));
+});
+
+test('een status buiten de gesloten lijst wordt ingehouden, niet stil gepubliceerd', () => {
+  const dto = toPublicKanaalpost(bron([rij(1), { ...rij(2), status: 'BIJNA KLAAR' }]));
+  assert.equal(dto.rows.length, 1);
+  assert.equal(dto.ingehouden, 1);
+  assert.equal(JSON.stringify(dto).includes('BIJNA KLAAR'), false);
+});
+
+test('een repo-achtig rollabel komt niet op de plaat', () => {
+  // Het rollabel hoort een ROL te zijn. `stack-control` is een repository — precies de waarde
+  // waarmee de review een lekrij opbouwde (Codex, 26-07-2026).
+  const dto = toPublicKanaalpost(bron([rij(1), { ...rij(2), tab: 'stack-control' }]));
+  assert.equal(dto.rows.length, 1);
+  assert.equal(dto.ingehouden, 1);
+  assert.equal(publishVeilig('COMMAND-CANON'), true);
+});
+
+test('onzichtbare tekens maken de poort niet blind', () => {
+  // ROOD: één U+200B midden in een sleutelnaam of een pad en geen enkel deny-patroon matcht nog,
+  // terwijl de browser vrijwel dezelfde tekst toont (review Codex + Gemini, 26-07-2026).
+  const zwsp = '\u200B';
+  assert.equal(publishVeilig(`sleutel AWS_SECRET_${zwsp}KEY roteren`), false);
+  assert.equal(publishVeilig(`pad /Users${zwsp}/iemand/geheim.md`), false);
+  assert.equal(publishVeilig(`mail iemand@voor${zwsp}beeld.nl`), false);
+  assert.equal(publishVeilig(`host 10.20.${zwsp}30.40`), false);
+  // en de gepubliceerde tekst is de tekst die gescand is — geen onzichtbare resten
+  const dto = toPublicKanaalpost(bron([{ ...rij(1), onderwerp: `net${zwsp}te tekst` }]));
+  assert.equal(dto.rows[0].onderwerp, 'nette tekst');
+});
+
+test('een patroon dat door witruimte uit elkaar is getrokken, wordt alsnog gezien', () => {
+  // ROOD: `password` + 1600 spaties + `: geheim` past nooit als hele match in één scanvenster.
+  // De normalisatie brengt witruimte terug tot één spatie, dus het patroon past weer (Codex).
+  assert.equal(publishVeilig(`password${' '.repeat(1600)}: geheimpje`), false);
+});
+
+test('een intern pad of telefoonnummer zonder home-prefix komt er ook niet door', () => {
+  // Geen `sanitize`-patroon raakt deze twee, terwijl de spiegel ze volgens zijn eigen kop niet mag
+  // dragen (review Codex + Gemini, 26-07-2026).
+  assert.equal(publishVeilig('bewijs in CONTROL/RAPPORTEN/verslag.md'), false);
+  assert.equal(publishVeilig('zie map/onder/diep'), false);
+  assert.equal(publishVeilig('bel 06 12345678 voor overleg'), false);
+  // en gewone tekst met een schuine streep tussen spaties blijft gewoon staan
+  assert.equal(publishVeilig('CHIEF / CONTROL pakt dit samen op'), true);
+  assert.equal(publishVeilig('voorstel #338 staat klaar voor de tikronde'), true);
+});
+
+test('de teller kijkt naar álle spiegelrijen, niet alleen naar de vijftien in beeld', () => {
+  // ROOD: eerst de laatste vijftien nemen en dán scannen, meldde `ingehouden: 0` terwijl een oudere
+  // rij nooit langs de poort was geweest — een geruststelling die niets bewees (Codex, 26-07-2026).
+  const rows = [{ ...rij(0), onderwerp: 'oud pad /Users/x/geheim.md' }, ...Array.from({ length: 16 }, (_, i) => rij(i + 1))];
+  const dto = toPublicKanaalpost(bron(rows));
+  assert.equal(dto.rows.length, 15);
+  assert.equal(dto.ingehouden, 1);
 });
 
 // --- render: eigen sectie, vaste kolomvolgorde, fail-closed melding ---

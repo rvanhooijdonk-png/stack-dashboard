@@ -306,7 +306,10 @@ async function main() {
   const outDir = join(ROOT, outName);
   const strict = !process.argv.includes('--no-strict');
 
-  const termCount = loadDenyTerms(join(ROOT, 'data/deny-terms.json'));
+  // Strikt: een ontbrekend of kapot policybestand stopt de bouw. Zonder dat draaide de publieke
+  // build stilzwijgend verder met een lege lijst — één ontbrekende komma in de JSON en elke naam
+  // die geweerd moest worden stond weer op de openbare pagina (review Codex, 26-07-2026).
+  const termCount = loadDenyTerms(join(ROOT, 'data/deny-terms.json'), { strict: true });
 
   const textPolicy = readTextPolicy(await readJson('data/publish-text.json', {}));
   const raw = await buildSnapshot();

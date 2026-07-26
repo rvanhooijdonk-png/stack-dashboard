@@ -60,15 +60,42 @@ const BASE64_BLOB = /\b[A-Za-z0-9+/]{40,}={0,2}\b/g;
 
 /** Eigennamen die weg moeten en die geen patroon kan raden. Beheerd door mensen. */
 let denyTerms = null;
-export function loadDenyTerms(path) {
+
+/**
+ * Bovengrens per term. Een term die niet in één scanvenster past (zie `kanaalpost.mjs`) kan nooit
+ * gevonden worden en zet de vensterscan bovendien op stap 1 — een bouw die praktisch stilstaat.
+ */
+const MAX_TERM = 150;
+
+/**
+ * Laad de deny-lijst. `strict` is bedoeld voor de publieke bouw: een ontbrekend of kapot
+ * policybestand mag daar geen stille lege lijst opleveren. Dat was fail-open — één ontbrekende
+ * komma in de JSON en elke naam op de lijst stond weer op de publieke pagina (review Codex,
+ * 26-07-2026). Een bewust lege lijst blijft mogelijk, maar alleen als geldige JSON: `{"terms": []}`.
+ */
+export function loadDenyTerms(path, { strict = false } = {}) {
+  let raw;
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8'));
-    denyTerms = (Array.isArray(raw) ? raw : raw.terms ?? [])
-      .filter((t) => typeof t === 'string' && t.trim().length >= 3)
-      .map((t) => t.trim().toLowerCase());
-  } catch {
+    raw = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    if (strict) throw new Error(`DENY-LIJST onleesbaar: ${path} (${err.code ?? 'parsefout'})`);
     denyTerms = [];
+    return 0;
   }
+  const lijst = Array.isArray(raw) ? raw : raw?.terms;
+  if (!Array.isArray(lijst)) {
+    if (strict) throw new Error(`DENY-LIJST heeft geen terms-array: ${path}`);
+    denyTerms = [];
+    return 0;
+  }
+  const teLang = lijst.filter((t) => typeof t === 'string' && t.trim().length > MAX_TERM);
+  if (teLang.length) {
+    // De term zelf nooit in de melding — hij staat op deze lijst omdat hij gevoelig is.
+    if (strict) throw new Error(`DENY-LIJST: ${teLang.length} term(en) langer dan ${MAX_TERM} tekens`);
+  }
+  denyTerms = lijst
+    .filter((t) => typeof t === 'string' && t.trim().length >= 3 && t.trim().length <= MAX_TERM)
+    .map((t) => t.trim().toLowerCase());
   return denyTerms.length;
 }
 

@@ -257,7 +257,7 @@
     },
     "kanaalpost": {
       "type": "object",
-      "description": "v2.4: de vloot-kanaalpost, gelezen uit de publieke spiegel `data/kanaalpost-publiek.md` in deze repo — niet uit het interne logboek. Laatste vijftien rijen, nieuwste boven. `available: false` met reason BRON_ONBEREIKBAAR/LEEG/INGEHOUDEN is een geldige fail-closed eindstand; net als planning staat deze sectie bewust niet in `sources`.",
+      "description": "v2.4: de vloot-kanaalpost, gelezen uit de publieke spiegel `data/kanaalpost-publiek.md` in deze repo — niet uit het interne logboek. Laatste vijftien rijen, nieuwste boven. `available: false` met reason BRON_ONBEREIKBAAR/LEEG/INGEHOUDEN is een geldige fail-closed eindstand; net als planning staat deze sectie bewust niet in `sources`. De rijvelden zijn sinds de dubbele review niet meer nullable: corrupte invoer wordt ingehouden en geteld, niet als geldige rij vol streepjes gepubliceerd. `ingehouden` telt ÁLLE rijen van de spiegel die niet door vorm- of publicatiepoort kwamen, niet alleen die binnen het venster van vijftien — anders zou 0 een geruststelling zijn die niets bewijst. Wat het schema niet kan afdwingen (de validator kent geen if/then, maxItems of maxLength): dat `available: true` een niet-lege rows impliceert en `available: false` een lege. De converter bewaakt dat, met tests erop.",
       "required": [
         "available",
         "reason",
@@ -296,41 +296,30 @@
             "additionalProperties": false,
             "properties": {
               "tab": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "pattern": "^[A-Za-z0-9 ()._/-]{1,40}$",
-                "description": "Neutraal rollabel van het meldende werkvenster. Geen persoon, geen repo."
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9]*(?:[ -][A-Z0-9]+)*$",
+                "description": "Neutraal rollabel van het meldende werkvenster, in kapitalen (CONTROL, COMMAND-CANON). Geen persoon en geen repository: repo-namen zijn kleingeschreven en vallen buiten dit patroon. Een rij met een afwijkend label wordt ingehouden en geteld, niet stil weggelaten."
               },
               "onderwerp": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "Wat er gebeurd is, in gewone taal. Al voor publiek geschreven in de spiegel en hier nogmaals langs de publish-poort; afgekapt op 600 tekens met een zichtbare `…`."
+                "type": "string",
+                "description": "Wat er gebeurd is, in gewone taal. Al voor publiek geschreven in de spiegel en hier nogmaals langs de publish-poort; afgekapt op 600 tekens met een zichtbare `…`. Nooit null: een rij zonder onderwerp is geen rij en wordt ingehouden (review Codex, 26-07-2026)."
               },
               "status": {
-                "type": [
-                  "string",
-                  "null"
+                "enum": [
+                  "AFGEROND",
+                  "WACHT OP AKKOORD",
+                  "GEBLOKKEERD"
                 ],
-                "description": "AFGEROND · WACHT OP AKKOORD · GEBLOKKEERD."
+                "description": "Gesloten lijst uit de kop van de spiegel zelf. De beschrijving wás de enige plek waar die lijst stond; nu dwingt het contract hem af."
               },
               "actie": {
-                "type": [
-                  "string",
-                  "null"
-                ],
+                "type": "string",
                 "description": "Wie aan zet is. Wordt in de statuskolom getoond, niet in een eigen kolom."
               },
               "datum": {
-                "type": [
-                  "string",
-                  "null"
-                ],
+                "type": "string",
                 "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}( [0-9]{2}:[0-9]{2})?$",
-                "description": "Wanneer de melding is geschreven: YYYY-MM-DD, eventueel met HH:MM."
+                "description": "Dagdatum, eventueel met tijd (Europe/Amsterdam), altijd tweecijferig. Ook deze cel gaat door de publish-poort."
               }
             }
           }
