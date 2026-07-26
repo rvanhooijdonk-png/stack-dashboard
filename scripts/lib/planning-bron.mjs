@@ -38,6 +38,7 @@
 
 import { DUUR_INDICATIES } from './planning.mjs';
 import { sanitizeString } from './sanitize.mjs';
+import { toetsLabel } from './labeltoets.mjs';
 
 /** De enige status die de backlog-feed kent. Iets anders = de feed betekent iets anders dan we denken. */
 export const BRON_STATUS_READY = 'READY';
@@ -183,7 +184,17 @@ export function vertaalBouwlijst(rawText) {
     // token middendoor, dan matcht het patroon niet meer en zou het verminkte restant alsnog op de
     // pagina komen — sanitize vóór afkappen, afkappen pas in `publicFeature` (review Codex + Gemini,
     // 25-07-2026).
-    const schoon = features.filter((f) => sanitizeString(f.feature_label).findings.length === 0);
+    //
+    // Daar bovenop de KRANT-TOETS (`labeltoets.mjs`, 26-07-2026). Bij het handmatig nalezen van alle
+    // 693 labels bleek de patroon-gate hier veel te dun: de feed bevat privé-, gezondheids-, woon-,
+    // geld- en klantregels die geen enkel patroon raken en die niemand op een openbare pagina wil
+    // zien. Een naam-blokkeerlijst alleen redt dat niet — de meeste van die regels bevatten geen
+    // eigennaam. Vandaar een volledige allowlist-poort: alleen labels waarvan élk woord vooraf
+    // beoordeeld is, gaan mee; één onbekend woord houdt de hele regel tegen.
+    // Gemeten op de feed van 26-07-2026: 328 van 693 door, 365 ingehouden en geteld.
+    const schoon = features.filter(
+      (f) => sanitizeString(f.feature_label).findings.length === 0 && toetsLabel(f.feature_label).ok,
+    );
     weggelaten = features.length - schoon.length;
     features = schoon;
     if (features.length === 0) {

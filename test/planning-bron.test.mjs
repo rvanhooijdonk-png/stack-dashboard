@@ -25,7 +25,9 @@ const BUILD = '2026-07-25T12:00:00.000Z';
 /** Eén geldige bron-taak, zoals TRECHTER die levert. Losse velden per test overschreven. */
 const taak = (over = {}) => ({
   task_id: 'T-0001',
-  feature_label: 'Voorbeeldregel uit de bouwlijst',
+  // Bewust een label dat óók de krant-toets (`labeltoets.mjs`) doorstaat: elk hoofdletterwoord staat
+  // op de allowlist. Een willekeurige verzonnen naam zou nu terecht door de publiceerpoort vallen.
+  feature_label: 'Dagelijkse automatische contentpublicatie',
   verwachte_duur: '1-2 dagen',
   richard_poort: 'geen',
   prioriteit_tier: 3,
@@ -217,6 +219,22 @@ test('de schoon-poort van de vertaler gooit ook eigennamen uit deny-terms weg', 
     // Terug naar geen termen, zodat de volgende tests in dit bestand niet op deze lijst draaien.
     loadDenyTerms(join(dir, 'bestaat-niet.json'));
   }
+});
+
+test('de vertaler past óók de krant-toets toe: een privé-regel zonder patroon valt weg en telt mee', () => {
+  // Rode proef voor de gaten die sanitize per definitie niet ziet: geen sleutel, geen mailadres,
+  // geen pad — gewoon een zin die niemand op een openbare pagina wil hebben. Zonder `labeltoets.mjs`
+  // stond deze regel er gewoon op.
+  const res = vertaalBouwlijst(feed([
+    taak(),
+    taak({ task_id: 'T-0002', feature_label: 'Verhuizing organiseren en begroten' }),
+    taak({ task_id: 'T-0003', feature_label: 'Koppeling met Zephyrion Holding bouwen' }),
+  ]));
+  assert.equal(res.available, true);
+  assert.equal(res.features.length, 1);
+  assert.equal(res.bron.weggelaten, 2);
+  assert.equal(JSON.stringify(res).includes('Zephyrion'), false);
+  assert.equal(JSON.stringify(res).includes('Verhuizing'), false);
 });
 
 test('valt ALLES weg door de schoon-poort, dan is de plaat CORRUPT, niet stil leeg', () => {
