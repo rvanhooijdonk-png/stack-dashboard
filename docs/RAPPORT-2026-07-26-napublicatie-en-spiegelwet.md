@@ -694,6 +694,11 @@ was de fout — en die was alleen te zien doordat de poort op zijn eigen werk ge
   `melden` slaat over omdat er geen afwijking is; dat is de bedoeling, maar het betekent ook dat de
   gerepareerde alarmpoort in CI zelf nog niet gedraaid heeft. Bewijs daarvoor is de lokale ronde met
   de zes varianten hierboven, gedraaid op de letterlijke code uit `waarnemer.yml`.
+  Op de eindkop **`22e9aa8`** (run 30208960595): **success** — `spiegelwet: success`, `toetsen: success`,
+  `poort: success`. Met echte uitvoer in het log, en dat is hier het punt (§6h): `de vorige stand van
+  deze tak: geen regel verdwenen, geen regel dubbel, 48 rij(en) publiek herkend`. De run daarvóór
+  (`3c7a56c`, run 30208787315) was **failure met nul regels uitvoer** — de nulmeting van §6h.
+  PR #27 staat op **MERGEABLE / CLEAN**, alle vier de controles groen.
 - stack-smoke: n.v.t. — niet geïnstalleerd in deze repo.
 - Secrets-scan: `gitleaks protect --staged` → `no leaks found` (laatste ronde: 24,01 KB).
 - Raakvlakken gecheckt: `publish.yml` (levert het referentiemoment; niet gewijzigd), `waarnemer.yml`
@@ -743,10 +748,26 @@ Aanvullend na §6c:
 - Veiligtakken vóór het herplaatsen: `reserve/waarnemer-voor-rebase` (730cfab) en
   `reserve/waarnemer-rebase-poging1` (c47fecf). Terugdraaien = de tak op een van die twee terugzetten.
 - Secrets-scan van deze ronde: `gitleaks protect --staged` → `no leaks found` (17,13 KB).
-- #24 vraagt geen tikregel meer: al samengevoegd als squash `1852c9c` (12:20:40Z), en de basis van #27
-  is daarbij door GitHub zelf naar `main` gezet.
+- #24 vraagt geen tikregel meer: al samengevoegd als squash `1852c9c` (12:20:39Z).
+
+Aanvullend na §6f–§6h:
+
+- **De basis van #27 is omgehangen naar de nieuwe main `3a72950`** (opdracht Fable, direct na de merge
+  van #24). Daarbij botste de spiegel echt: main en deze tak hadden allebei onderaan geschreven. Beide
+  rijen zijn blijven staan, die van main eerst. Verworpen alternatief: de eigen rij op zijn
+  chronologische plek tussenvoegen — de tabel is append-volgorde en geen sortering, dus dat zou een
+  herschikking zijn geweest van precies het soort dat §6e nu verbiedt.
+- Veiligtak vóór het omhangen: `backup/waarnemer-voor-rebase-d63255f`. Terugdraaien = de tak daarop
+  terugzetten.
+- Het vangnet van §6f fireert op "tabelregels aanwezig, publieke lezing leeg **en** niets ingehouden".
+  Die derde voorwaarde is bewust: zonder die voorwaarde zou een spiegel waarvan de publicatiepoort
+  toevallig alles tegenhoudt vals alarm geven. Verworpen alternatief: alleen op "geen rijen" afgaan.
+- De val op de uitgang van de stap (§6h) meldt alleen bij een **onverwacht** einde; het normale einde
+  zet `netjes=1`. Verworpen alternatief: `set +e` over de hele stap — dat zou álle mislukte commando's
+  onzichtbaar maken in plaats van alleen deze ene te repareren.
 
 Wacht op Richard: de vier beslispunten in §6, het NFKC/NFC-beslispunt in §6c, en een handtekening op
 #27. Voor CONTROL zit er één gemeten volgorde-eis bij: **#27 en #30 botsen** — beide raken het
 spiegelbestand en in beide richtingen ontstaat een conflict, dus wie als tweede gaat moet opnieuw
-aanleveren met een verse kop-SHA.
+aanleveren met een verse kop-SHA. De kop van #27 voor de tikronde is **`22e9aa8`**, staat op
+MERGEABLE / CLEAN, en gaat aan **zónder takverwijdering**.
