@@ -73,6 +73,17 @@ export function loadDenyTerms(path) {
 }
 
 /**
+ * Lengte van de langste geladen deny-term. Nodig voor wie deze gate in stukken over een lange tekst
+ * draait: elk ander patroon hier is begrensd, maar een deny-term is vrije mensentekst en kan dus
+ * breder zijn dan de overlap tussen twee vensters.
+ */
+export function denyTermsMaxLen() {
+  // Reduce in plaats van spread: een lijst van duizenden termen zou als argumentenlijst de stack
+  // overlopen.
+  return denyTerms?.length ? denyTerms.reduce((max, t) => (t.length > max ? t.length : max), 0) : 0;
+}
+
+/**
  * Redigeer één string. Geeft de gesaneerde tekst plus de gevonden patroon-id's terug.
  * De gevonden wáárden worden bewust niet teruggegeven — die willen we nergens loggen.
  */
