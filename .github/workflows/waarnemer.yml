@@ -101,12 +101,18 @@ jobs:
       - name: Alarmregel aan de publieke spiegel toevoegen
         env:
           RIJ_B64: ${{ needs.toetsen.outputs.rij_b64 }}
+          # `RUNNER_TEMP` en niet `/tmp`: dat laatste is een voorspelbaar pad in een map waar ook
+          # andere processen mogen schrijven, dus een vooraf gelegde symlink laat `cp` iets anders
+          # overschrijven, en op een self-hosted runner kunnen twee jobs elkaars snapshot pakken
+          # (Codex D, Gemini D). `RUNNER_TEMP` staat per job apart en wordt na de job opgeruimd.
+          SPIEGEL_VOOR: ${{ runner.temp }}/spiegel-voor.md
         run: |
           set -euo pipefail
           if [ -z "${RIJ_B64:-}" ]; then
             echo "::error::geen alarmregel doorgekregen van de toets-job — er wordt niets geschreven."
             exit 1
           fi
+          cp data/kanaalpost-publiek.md "$SPIEGEL_VOOR"
           printf '%s' "$RIJ_B64" | base64 -d >> data/kanaalpost-publiek.md
           tail -1 data/kanaalpost-publiek.md
           # Fail-closed: wat we net toevoegden moet ook echt als publieke rij terugkomen. Komt hij
@@ -115,22 +121,46 @@ jobs:
           node -e '
             const { readFileSync } = require("node:fs");
             const regel = Buffer.from(process.env.RIJ_B64, "base64").toString("utf8").trim();
-            Promise.all([import("./scripts/lib/kanaalpost.mjs"), import("./scripts/lib/waarnemer.mjs")])
-              .then(([{ kanaalpostUitTekst, toPublicKanaalpost }]) => {
-                const uit = toPublicKanaalpost(kanaalpostUitTekst(readFileSync("data/kanaalpost-publiek.md", "utf8")));
-                const bovenaan = uit.rows?.[0];
-                // Niet "er staat een WAARNEMER bovenaan" — dat kan een oudere melding zijn terwijl de
-                // nieuwe regel buiten de tabel viel. Het moet DEZE regel zijn, veld voor veld.
-                const cellen = regel.split("|").slice(1, -1).map((c) => c.trim());
-                const zelfde = bovenaan
-                  && bovenaan.tab === cellen[1] && bovenaan.onderwerp === cellen[2]
-                  && bovenaan.status === cellen[3] && bovenaan.datum === cellen[0];
-                if (!uit.available || !zelfde) {
-                  console.error("::error::de zojuist toegevoegde alarmregel komt niet als bovenste publieke rij terug.");
+            import("./scripts/lib/kanaalpost.mjs")
+              .then(({ kanaalpostUitTekst, toPublicKanaalpost }) => {
+                const projecteer = (tekst) => toPublicKanaalpost(kanaalpostUitTekst(tekst));
+                const lees = (p) => projecteer(readFileSync(p, "utf8"));
+                const na = lees("data/kanaalpost-publiek.md");
+                const voor = lees(process.env.SPIEGEL_VOOR);
+                const bovenaan = na.rows?.[0];
+                // Wat DEZE regel publiek hoort te worden: dezelfde regel, in zijn eentje, door dezelfde
+                // poort. Geen eigen markdown-lezer en geen eigen sterretjes-stripper — wat de poort er
+                // van maakt is per definitie de juiste publieke vorm. De eerste versie hiervan zette het
+                // RUWE onderwerp (met `**vet**`) naast de GEPUBLICEERDE tekst, waar de poort die
+                // sterretjes juist uit haalt: die twee zijn nooit gelijk, dus die controle kon niet
+                // slagen en de alarmregel kon niet geschreven worden — gemeten 26-07-2026. De versie
+                // daarna liet onderwerp en actiehouder dan maar helemaal buiten de vergelijking, en dat
+                // maakte precies de gaten die Codex C en Gemini C aanwezen: een verminkt of leeg
+                // onderwerp, of `niemand` in plaats van `Richard of Fable`, kwam er ongezien door. Deze
+                // vorm vergelijkt alle vijf velden zonder ergens langs de publicatievorm heen te kijken.
+                const KOP = "| datum-tijd | tab-rol | onderwerp | status | actie voor |\n|---|---|---|---|---|\n";
+                const verwacht = projecteer(KOP + regel + "\n").rows?.[0];
+                const vorm = (r) => (r ? JSON.stringify([r.datum, r.tab, r.onderwerp, r.status, r.actie]) : null);
+                const laatsteBronregel = readFileSync("data/kanaalpost-publiek.md", "utf8")
+                  .split("\n").map((r) => r.trim()).filter(Boolean).pop();
+                const eisen = {
+                  poort_open: na.available,
+                  regel_staat_onderaan: laatsteBronregel === regel,
+                  // Slaagt deze niet, dan is de regel geen geldige vijfkolomsrij — dat vangt ook de
+                  // misvormde-kolommen en escape-pariteit-gevallen die Codex E noemde, zonder zelf
+                  // op pipes te splitsen.
+                  regel_is_publiceerbaar: Boolean(verwacht),
+                  rij_is_waarnemer_alarm: verwacht?.tab === "WAARNEMER" && verwacht?.status === "GEBLOKKEERD",
+                  rij_klopt_veld_voor_veld: Boolean(verwacht) && vorm(bovenaan) === vorm(verwacht),
+                  bovenste_rij_is_nieuw: vorm(bovenaan) !== vorm(voor.rows?.[0]),
+                };
+                const gezakt = Object.entries(eisen).filter(([, v]) => !v).map(([k]) => k);
+                if (gezakt.length) {
+                  console.error(`::error::de zojuist toegevoegde alarmregel komt niet als bovenste publieke rij terug (${gezakt.join(", ")}).`);
                   process.exit(1);
                 }
                 console.log("alarmregel staat bovenaan de publieke stand.");
-              }).catch(() => { console.error("::error::poortcontrole mislukt"); process.exit(1); });
+              }).catch((e) => { console.error(`::error::poortcontrole mislukt: ${e.message}`); process.exit(1); });
           '
           git config user.name  'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -187,6 +217,9 @@ jobs:
       - name: De publieke spiegel is alleen aangevuld, nooit gewijzigd
         env:
           VOOR: ${{ github.event.before }}
+          # Zie de toelichting bij `SPIEGEL_VOOR` in de melden-job: een voorspelbaar pad in `/tmp`
+          # is symlink-gevoelig en op een self-hosted runner deelbaar tussen jobs.
+          SPIEGEL_OUD: ${{ runner.temp }}/spiegel-oud.md
         run: |
           set -uo pipefail
           leeg=0000000000000000000000000000000000000000
@@ -195,15 +228,15 @@ jobs:
             # hoop gooien zou een leesfout als een lege oude spiegel behandelen, en dan is elke
             # verwijdering ineens toegestaan (bevinding Codex, 26-07-2026).
             if git cat-file -e "$1:data/kanaalpost-publiek.md" 2>/dev/null; then
-              if ! git show "$1:data/kanaalpost-publiek.md" > /tmp/spiegel-oud.md; then
+              if ! git show "$1:data/kanaalpost-publiek.md" > "$SPIEGEL_OUD"; then
                 echo "::error::de spiegel van $2 is niet te lezen — dat is rood, niet leeg."
                 return 1
               fi
             else
               echo "$2: de spiegel bestond daar nog niet."
-              : > /tmp/spiegel-oud.md
+              : > "$SPIEGEL_OUD"
             fi
-            OUD=/tmp/spiegel-oud.md WAT="$2" node -e '
+            OUD="$SPIEGEL_OUD" WAT="$2" node -e '
               const { readFileSync } = require("node:fs");
               import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld }) => {
                 const r = alleenAangevuld(readFileSync(process.env.OUD, "utf8"), readFileSync("data/kanaalpost-publiek.md", "utf8"));

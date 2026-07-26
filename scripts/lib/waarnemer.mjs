@@ -185,9 +185,19 @@ export function eersteKanaalpostRij(sectieHtml) {
   if (!body) return null;
   const rij = body[1].match(/<tr>([\s\S]*?)<\/tr>/);
   if (!rij) return null;
-  const cellen = [...rij[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => ontdaan(unesc(ZONDER_TAGS(m[1]))));
+  const ruw = [...rij[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1]);
+  const cel = (h) => ontdaan(unesc(ZONDER_TAGS(h)));
+  const cellen = ruw.map(cel);
   if (cellen.length < 4 || cellen.slice(0, 4).some((c) => c === '')) return null;
-  return { tab: cellen[0], onderwerp: cellen[1], status: cellen[2], datum: cellen[3] };
+  // De statuskolom draagt TWEE dingen: de stand, en achter een `<br>` de actiehouder in een grijze
+  // span (zie `render.mjs`: "actie voor staat in dezelfde cel als de status"). Alles plat slaan maakt
+  // van `AFGEROND` + actiehouder één lange string, die per definitie nooit gelijk is aan de `AFGEROND`
+  // uit de bron. Gevolg: elke rij MET actiehouder gaf een onterecht rood. Gemeten op de echte plaat,
+  // 26-07-2026: `status` kwam terug als "AFGEROND Richard: één keuze. Ga ik door met…".
+  // `<br\b[^>]*>` en niet `<br\s*\/?>`: zodra `render.mjs` ooit `<br class="…">` schrijft, splitst de
+  // strakke vorm niet meer en is de actiehouder wéér onderdeel van de status — vals rood (Codex E,
+  // Gemini E2). De losse vorm splitst elke schrijfwijze van hetzelfde element.
+  return { tab: cellen[0], onderwerp: cellen[1], status: cel(ruw[2].split(/<br\b[^>]*>/i)[0]), datum: cellen[3] };
 }
 
 /**
@@ -281,8 +291,27 @@ export function toets({
       // Ook de status vergelijken: een pagina die een AFGEROND-melding als GEBLOKKEERD toont (of
       // andersom) toont de verkeerde werkelijkheid, ook al klopt de tekst. De actiehouder blijft
       // buiten de vergelijking — die staat in de gerenderde tabel niet als eigen kolom.
-      const zelfde = (a, b) => a && b && a.tab === b.tab && a.datum === b.datum
-        && a.onderwerp === b.onderwerp && a.status === b.status;
+      // Eén verschil egaliseren, niet de hele normalisatie. `ontdaan` doet NFKC, en NFKC maakt van het
+      // afkap-teken `…` de drie punten `...`. De bron krijgt haar `…` er ná de normalisatie op (`cap()`
+      // in kanaalpost.mjs), de pagina gaat er nog een keer door — dus liep elke AFGEKAPTE rij uiteen op
+      // precies het laatste teken. Gemeten op de echte plaat, 26-07-2026: pagina "…bel uit..." tegen
+      // bron "…bel uit…", eerste verschil op teken 599 van 600.
+      // Waarom NIET `ontdaan(x) === ontdaan(y)`, wat de eerste reparatie deed: beide velden zijn al
+      // genormaliseerd (de bron in de parser, de pagina in `eersteKanaalpostRij`), dus een tweede
+      // `ontdaan` erover repareert niets extra en voegt wél iets toe — `ontdaan` doet eerst NFKC en
+      // strípt daarna onzichtbare tekens, en is in die volgorde niet universeel idempotent, zoals Codex
+      // aanwees met `A​̊`. Alleen het afkap-teken hoefde tolerantie. Elk ander verschil dat
+      // hierna overblijft wordt ROOD, niet groen; die kant mag de fout op.
+      // Wat deze regel NIET oplost, expliciet: `eersteKanaalpostRij` normaliseert de paginakant met
+      // NFKC, en NFKC is niet injectief — een pagina die `10²` toont waar de bron `102` zegt, of `ﬀ`
+      // waar `ff` staat, wordt gelijk genoemd. Die tolerantie zat er al vóór deze ronde in en wordt
+      // erdoor niet groter. Ze is begrensd doordat de pagina uit diezelfde genormaliseerde bron wordt
+      // gerenderd; de tekens kunnen daar niet ongelijk in terechtkomen zonder een fout in `render.mjs`.
+      // Als open punt naar Richard/Fable, niet stil weggelaten (zie §6 van het rapport).
+      const ellips = (v) => String(v ?? '').replaceAll('…', '...');
+      const gelijk = (x, y) => ellips(x) === ellips(y);
+      const zelfde = (a, b) => Boolean(a) && Boolean(b) && gelijk(a.tab, b.tab) && gelijk(a.datum, b.datum)
+        && gelijk(a.onderwerp, b.onderwerp) && gelijk(a.status, b.status);
       const treffer = publiek.rows.slice(0, respijt + 1).some((r) => zelfde(paginaRij, r));
       if (!treffer) meld('PAGINA_TOONT_OUDE_DATA', `de pagina toont bovenaan een melding van ${paginaRij.datum || 'onbekende datum'}`);
     }

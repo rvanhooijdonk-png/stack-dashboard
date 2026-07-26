@@ -130,7 +130,131 @@ Niet overgenomen, met reden:
 - **Branchbescherming op `main`** (Codex: `main` is onbeschermd, dus een rode job draait een geland
   commit niet terug). Terecht, maar dat is een repo-instelling en geen code; zie beslispunt 2.
 
-## 5. Open beslispunten voor Fable
+## 5. Wat de push zelf blootlegde: de waarnemer piepte onterecht
+
+De push van deze tak maakte de `waarnemer`-run **rood** (run 30202331603, jobs `melden` en `poort`).
+Niet weggeschreven maar uitgezocht, want dit is precies het geval waar het besluit voor waarschuwt: een
+bewaker die onterecht rood gaat, gaat uit. Drie afzonderlijke fouten, alle drie van mij, alle drie
+gemeten en niet beredeneerd. De nieuwe `napublicatie`-controle stond in dezelfde push op **groen**.
+
+**Aanleiding.** Een ander spoor zette rond 14:35 een rij op `main` met een onderwerp van 1432 tekens en
+een actiehouder van 439 tekens. De publicatiepoort kapte netjes af, en toen liep de vergelijking uiteen.
+Reproduceerbaar tegen de echte plaat:
+
+```
+bron bovenaan:  TRECHTER 2026-07-26 14:35
+plaat bovenaan: TRECHTER 2026-07-26 14:35
+AFWIJKING PAGINA_TOONT_OUDE_DATA
+```
+
+Dezelfde tab, dezelfde datum, en toch een afwijking.
+
+**Fout 1 — de statuskolom draagt twee dingen.** `render.mjs` zet de actiehouder bewust in de statuscel,
+achter een `<br>` in een grijze span. De waarnemer sloeg die cel plat en las:
+
+```
+pagina status: "AFGEROND Richard: één keuze. Ga ik door met de inhoudelijke verwerking van C en D — drie..."
+bron   status: "AFGEROND"
+```
+
+Dat is nooit gelijk. Gevolg: **elke rij met een actiehouder gaf een onterecht rood.** De extractie
+knipt die cel nu af op de eerste `<br>`.
+
+**Fout 2 — de normalisatie sloopt het afkap-teken.** `ontdaan()` doet NFKC, en NFKC maakt van `…`
+(U+2026) de drie tekens `...`. De bron krijgt haar `…` er ná de normalisatie op (`cap()` in
+`kanaalpost.mjs`), de paginakant gaat er nog een keer door. Op codepoint-niveau gemeten:
+
+```
+pagina staart: "l uit..."   6c 20 75 69 74 2e 2e 2e
+bron   staart: "bel uit…"   62 65 6c 20 75 69 74 2026
+```
+
+Gevolg: **elke rij langer dan 600 tekens gaf een onterecht rood**, op precies het laatste teken. De
+vergelijking egaliseert nu dat ene teken: `…` tegen `...`, aan beide kanten, en verder niets. Mijn
+eerste reparatie liet béide kanten nog een keer door `ontdaan()` gaan; beide reviewers wezen daar
+onafhankelijk hetzelfde gat in aan (zie §5b), dus die is teruggedraaid naar de smalle vorm.
+
+**Fout 3 — de alarmpoort kon niet slagen.** De `melden`-job zette het RUWE onderwerp (met `**vet**`)
+naast de GEPUBLICEERDE tekst, waar de poort die sterretjes juist weghaalt. Reproductie:
+
+```
+bovenaan.onderwerp: "De automatische controle ziet de openbare plaat afwijken van de bron. de bovenst"
+cel2              : "**De automatische controle ziet de openbare plaat afwijken van de bron.** de bov"
+onderwerp gelijk: false
+```
+
+Deze controle kon dus **nooit** slagen: de bewaker kon zijn eigen alarmregel niet in de spiegel
+schrijven. Dat is de ernstigste van de drie — precies de stille uitval die de spiegel moet uitsluiten.
+
+Mijn eerste reparatie liet onderwerp en actiehouder dan maar buiten de vergelijking. Dat werkte, en het
+maakte een nieuw gat dat Codex en Gemini beide aanwezen: een verminkt onderwerp (`controle mislukt` in
+plaats van de hele alarmtekst) of een verminkte actiehouder (`niemand` in plaats van `Richard of Fable`)
+kwam er ongezien door. De poort in deze ronde vergelijkt **alle vijf velden**, en berekent de verwachte
+publieke vorm door dezelfde regel in zijn eentje door dezelfde publicatiepoort te halen — geen eigen
+markdown-lezer, geen eigen sterretjes-stripper, dus geen tweede plek die kan gaan afwijken. Zes eisen:
+poort open, ruwe regel staat onderaan, regel is publiceerbaar, het is een `WAARNEMER`/`GEBLOKKEERD`-rij,
+alle vijf velden kloppen, en de bovenste publieke rij is echt veranderd.
+
+Gedraaid tegen de exacte alarmregel die de vorige poort afwees, plus vijf saboteerde varianten:
+
+```
+1. eerlijke ronde                → alarmregel staat bovenaan de publieke stand.   exit=0
+2. verminkt onderwerp            → rood (regel_staat_onderaan, rij_klopt_veld_voor_veld)   exit=1
+3. actiehouder "niemand"         → rood (regel_staat_onderaan, rij_klopt_veld_voor_veld)   exit=1
+4. regel niet geschreven         → rood (…, bovenste_rij_is_nieuw)                exit=1
+5. gewone AFGEROND-rij i.p.v. alarm → rood (rij_is_waarnemer_alarm)               exit=1
+6. misvormde regel (kolom te weinig) → rood (regel_is_publiceerbaar, …)           exit=1
+```
+
+**Waarom de bestaande tests dit niet vonden.** Ze voedden de waarnemer met een zelfgeschreven stukje
+HTML. Daarmee bewees de test dat de waarnemer zijn eigen nepagina kan lezen. `test/waarnemer-rondgang.test.mjs`
+gaat nu langs de echte keten — bron → publicatiepoort → `renderHtml` → uit de pagina teruglezen →
+vergelijken. Nulmeting van die tests tegen de ongerepareerde waarnemer: **2 van 5 rood**, met precies
+de productiesymptomen (`actual: 'WACHT OP AKKOORD Richard: één keuze, ga ik door'` en
+`actual: [ 'PAGINA_TOONT_OUDE_DATA' ]`). Beide oorzaken zijn apart bewezen: er is een aparte test met
+een afgekapte rij zónder actiehouder, die alleen op het ellips-teken kan vallen.
+
+Na de reparatie, tegen de echte live plaat:
+
+```
+$ BASE_URL=… SPIEGEL_URL=… node scripts/waarnemer.mjs
+bron bovenaan: TRECHTER 2026-07-26 14:35
+plaat bovenaan: TRECHTER 2026-07-26 14:35
+✓ geen afwijking: de plaat komt overeen met de bron.
+```
+
+## 5b. Dubbele review van de fixronde — de reparatie is zelf nagekeken
+
+De drie fixes hierboven zijn opnieuw langs Codex en Gemini gegaan, met vijf gerichte vragen (A: wordt de
+bewaker te mild? B: is de nieuwe vergelijking symmetrisch/idempotent en ontstaat er vals groen? C: is de
+nieuwe alarmpoort fail-closed? D: risico's van `/tmp`? E: echte bugs). Beide vonden hetzelfde hoofdpunt,
+onafhankelijk van elkaar.
+
+| Bevinding | Bron | Verwerking |
+|---|---|---|
+| De alarmpoort is niet meer fail-closed op inhoud: verminkt onderwerp of verminkte actiehouder glipt erdoor | **Codex C + Gemini C** | Overgenomen. Alle vijf velden vergeleken tegen de verwachte publieke vorm, berekend door dezelfde poort. Zes saboteerde varianten gedraaid, alle rood. |
+| `ontdaan()` aan beide kanten opent een nieuwe klasse vals groen: NFKC is niet injectief (`10²`≡`102`, `ﬀ`≡`ff`, `Ⅰ`≡`I`) | **Codex B + Gemini B** | Overgenomen. Alleen het afkap-teken wordt geëgaliseerd. Extra test: een plaat met `..` in plaats van `…` blijft rood, dus de tolerantie loopt niet uit. |
+| `/<br\s*\/?>/i` splitst niet op `<br class="…">` → vals rood zodra de opmaak verandert | **Codex E + Gemini E2** | Overgenomen: `/<br\b[^>]*>/i`. Nulmeting: met de strakke vorm faalt de nieuwe test, met de losse slaagt hij. |
+| `/tmp/spiegel-voor.md` is een voorspelbaar pad: symlink-risico, en op een self-hosted runner deelbaar tussen jobs | **Codex D + Gemini D** | Overgenomen: `${{ runner.temp }}`, per job en opgeruimd na de job. Ook in de `spiegelwet`-job. |
+| Splitsen op `/(?<!\\)\|/` heeft een verkeerde escape-pariteit; `cellen` wordt niet op vijf velden gecheckt | Codex E | Overgenomen door het weg te halen: de poort splitst niet meer zelf op pipes maar laat de publicatiepoort de regel lezen. Een misvormde regel is daardoor rood (variant 6). |
+| `ontdaan()` is niet universeel idempotent (NFKC vóór onzichtbaar-strippen) | Codex E/B | Erkend, niet gerepareerd in deze ronde: het staat buiten de diff en het effect valt naar **rood**, niet naar groen. Als los punt genoteerd. |
+
+Niet overgenomen, met reden:
+
+- **Gemini E1: `gelijk()` crasht op `undefined`.** Weerlegd door meting: `ontdaan()` begint met
+  `String(waarde ?? '')`, en de nieuwe `ellips()` doet hetzelfde. Er is geen pad naar een `TypeError`.
+- **Codex A: alles ná de eerste `<br>` wordt blind genegeerd, dus een tweede zichtbare status glipt door.**
+  Deels waar en bewust: de status wordt vergeleken met de bron, dus een verkeerde stand vóór de `<br>` is
+  rood en een lege status is rood. Een pagina die ná de actiehouder nóg een status bijzet is een fout in
+  `render.mjs` en geen afwijking tussen plaat en bron; die hoort niet in deze bewaker thuis.
+- **Codex C, restgat: als `RIJ_B64` zélf al fout is, noemt de poort die regel canoniek.** Klopt en is
+  onvermijdelijk in deze vorm — de regel komt uit `alarmRij()` in de `toetsen`-job en gaat ongewijzigd
+  (base64) door. De eis `rij_is_waarnemer_alarm` dekt nu wel af dat er geen ándere soort rij als alarm
+  langs komt.
+
+Geen onenigheid tussen Codex en Gemini in deze ronde, dus geen escalatie naar Fable.
+
+## 6. Open beslispunten voor Fable
 
 1. **De 8 minuten zijn te kort volgens beide reviewers.** GitHub zegt zelf dat een Pages-wijziging tot
    tien minuten kan duren, en in deze repo is gemeten dat de query-string geen cachesleutel is. Een
@@ -141,23 +265,41 @@ Niet overgenomen, met reden:
 2. **`main` is niet beschermd** (geen branch protection, geen rulesets, force-push mogelijk). Elke
    poort in dit voorstel is daarmee een controle achteraf. Dit is een repo-instelling; wil je die aan,
    dan is het één handeling van Richard of de aangewezen merger.
+3. **De spiegelwet ziet de push van de bot zelf niet.** Een push met `GITHUB_TOKEN` start geen workflow —
+   daar is de `verversen`-job voor. Gevolg: juist de schrijfactie van de waarnemer wordt niet door de
+   append-only-poort gehaald. Binnen de job wordt hij wel gecontroleerd (de zes eisen hierboven), maar
+   niet door de wet. Repareren kost een tweede identiteit (app-token of deploy key) — dat is een
+   toegangsbeslissing, geen code, dus het ligt bij Richard.
+4. **De vergelijking tolereert NFKC-gelijken op de paginakant.** `eersteKanaalpostRij` normaliseert met
+   NFKC, dus een plaat die `10²` toont waar de bron `102` zegt wordt gelijk genoemd. Dit zat er al vóór
+   deze ronde in en is er niet groter door geworden; het is begrensd doordat de pagina uit diezelfde
+   genormaliseerde bron gerenderd wordt. Wegnemen betekent de HTML-kant zonder NFKC teruglezen, en dat
+   raakt de hele terugleesketen — te groot voor dit voorstel, dus expliciet als punt neergelegd.
 
 ## AFSLUITING
 
-- Tests groen: `npm test` → `tests 299 / pass 299 / fail 0`. Nulmeting vóór de bouw: `pass 276 / fail 1`.
+- Tests groen: `npm test` → `tests 306 / pass 306 / fail 0`. Nulmeting vóór de bouw: `pass 276 / fail 1`.
+  Nulmeting van de rondgang-tests tegen de ongerepareerde waarnemer: `pass 6 / fail 1` op de `<br>`-fix,
+  en eerder `2 van 5 rood` op de twee productiefouten.
 - Rollback/additief geborgd: alles nieuwe bestanden plus één job en één trigger-pad in `waarnemer.yml`;
   terugdraaien = de commit terugdraaien. De spiegel is alleen aangevuld.
 - Live bewijs: groene ronde tegen de echte plaat (stempel `2026-07-26T12:21:34.624Z`) en rode ronde met
-  sabotage, exitcode 1. De workflow-kant is nog niet in GitHub Actions gedraaid → dat gebeurt bij de
-  push van deze tak.
+  sabotage, exitcode 1. Daarna: de `waarnemer`-run op de eerste push van deze tak liep écht rood
+  (run 30202331603) — uitgezocht, drie fouten gemeten en gerepareerd (§5), en de gerepareerde waarnemer
+  loopt groen tegen dezelfde live plaat. De alarmpoort is gedraaid op de exacte regel die hij eerder
+  afwees: groen, plus vijf saboteerde varianten rood.
 - stack-smoke: n.v.t. — niet geïnstalleerd in deze repo.
 - Secrets-scan: `gitleaks protect --staged` → `no leaks found` (39,17 KB).
 - Raakvlakken gecheckt: `publish.yml` (levert het referentiemoment; niet gewijzigd), `waarnemer.yml`
   (job + trigger-pad erbij), `data/kanaalpost-publiek.md` (drie regels aangevuld, door de
   publicatiepoort gehaald: 277/519/532 tekens, geen afkapping), `lib/kanaalpost.mjs` (ongewijzigd,
   alleen gelezen).
-- Codex: ja — afwijzen tot herstel; negen punten verwerkt, twee als beslispunt doorgezet.
-- Gemini: ja — vier punten, waarvan één (force-push op main) overgenomen en één (typo) weerlegd.
+- Codex: ja — twee ronden. Eerste ronde: afwijzen tot herstel, negen punten verwerkt, twee als beslispunt
+  doorgezet. Fixronde (A–E): vijf punten overgenomen, één erkend-maar-niet-gerepareerd met reden, één
+  weerlegd (§5b).
+- Gemini: ja — twee ronden. Eerste ronde: vier punten, één overgenomen (force-push op main), één weerlegd
+  (typo). Fixronde: vier punten, waarvan drie samenvallen met Codex en overgenomen zijn; E1 weerlegd door
+  meting. Geen onenigheid tussen de twee, dus geen escalatie.
 - Fable: ja — het besluit over ritme, "nooit onbekend" en het uitgestelde publieke alarm komt van
   Fable; de twee beslispunten hierboven gaan terug naar Fable.
 
@@ -172,4 +314,4 @@ Beslissingen die niet letterlijk in de opdracht stonden:
 - Referentiemoment bij handmatige of push-runs: de laatst geslaagde publicatie. Verworpen alternatief:
   de controle daar niet laten draaien, waardoor een wijziging aan de bewaker ongetest blijft.
 
-Wacht op Richard: de twee beslispunten in §5, en een handtekening op #27 (en op #24 als basis).
+Wacht op Richard: de vier beslispunten in §6, en een handtekening op #27 (en op #24 als basis).
