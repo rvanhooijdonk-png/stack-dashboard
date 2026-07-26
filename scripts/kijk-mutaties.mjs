@@ -81,6 +81,50 @@ const MUTATIES = [
     van: "    return uit('GEEN OORDEEL');\n  }\n  gemeten.kopSha = lezing.sha;",
     naar: "    return uit('GROEN'); // mutatie: onwetendheid doet zich voor als kennis\n  }\n  gemeten.kopSha = lezing.sha;",
   },
+  // ── de zes reparaties uit de dubbele review op kop 579ad57. Codex' punt was expliciet dat de acht
+  // mutaties hierboven de ANKERS bewijzen en niet het fail-closed-contract; deze zes sluiten dat gat.
+  {
+    proef: '1 (reviewgat)',
+    raakt: 'reviewgat 1',
+    wat: 'een toestand zonder enig spoor telt weer als een gezonde lege toestand',
+    van: "    fouten.push('GEEN_SPOREN');",
+    naar: '    /* mutatie: nul sporen is weer geen bevinding */',
+  },
+  {
+    proef: '2 (reviewgat)',
+    raakt: 'reviewgat 2',
+    wat: 'een weggelaten manifest of weggelaten bytes slaat de hashcontrole weer stilzwijgend over',
+    van: '  if (!state || !manifest || !stateBytes) {',
+    naar: '  if (false) { // mutatie: ontbrekend bewijs mag weer doorlopen',
+  },
+  {
+    proef: '3 (reviewgat)',
+    raakt: 'reviewgat 3',
+    wat: 'de bytes worden niet meer aan déze toestand vastgemaakt',
+    van: '  if (!kanoniekeBytes(state).equals(Buffer.from(stateBytes))) {',
+    naar: '  if (false) { // mutatie: bytes van A mogen weer bij toestand B',
+  },
+  {
+    proef: '4 (reviewgat)',
+    raakt: 'reviewgat 4',
+    wat: 'de sleutellijst van de toestand is niet meer gesloten',
+    van: "  if (Object.keys(state).some((k) => !STATE_SLEUTELS.includes(k))) fouten.push('VELD_NIET_GESLOTEN');",
+    naar: '  /* mutatie: onbekende velden bovenin de toestand mogen weer */',
+  },
+  {
+    proef: '5 (reviewgat)',
+    raakt: 'reviewgat 5',
+    wat: 'de absolute vloer onder de totale uitval vervalt',
+    van: '  if (nu !== null && momenten.length && nu - Math.max(...momenten) > stilMs) {',
+    naar: '  if (false) { // mutatie: alles tegelijk stil is weer groen',
+  },
+  {
+    proef: '6 (reviewgat)',
+    raakt: 'reviewgat 6',
+    wat: 'de kalenderterugrekening vervalt, dus 30 februari wordt weer een geldig moment',
+    van: '  if (d.getUTCFullYear() !== +jj || d.getUTCMonth() !== +mm - 1 || d.getUTCDate() !== +dd',
+    naar: '  if (false && d.getUTCFullYear() !== +jj || false && d.getUTCMonth() !== +mm - 1 || false && d.getUTCDate() !== +dd',
+  },
 ];
 
 /** Draai de suite en geef terug welke proeven faalden. */
@@ -124,6 +168,6 @@ for (const m of MUTATIES) {
 const na = gefaaldeProeven();
 console.log(`\nna herstel is de suite weer groen: ${na.length === 0}`);
 console.log(alleAangeslagen
-  ? '\nAlle acht mechanismen zijn aantoonbaar nodig: haal er één weg en de bijbehorende proef valt om.'
+  ? `\nAlle ${MUTATIES.length} mechanismen zijn aantoonbaar nodig: haal er één weg en de bijbehorende proef valt om.`
   : '\nLET OP: niet elke mutatie sloeg aan — dat is een bevinding, geen detail.');
 process.exit(alleAangeslagen && na.length === 0 ? 0 : 1);

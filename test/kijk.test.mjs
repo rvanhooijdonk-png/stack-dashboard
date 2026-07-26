@@ -453,3 +453,99 @@ test('verouderde sporen worden aan het jongste spoor gemeten, niet aan de klok',
   assert.deepEqual(verouderdeLanes(state), ['MINI']);
   assert.deepEqual(verouderdeLanes(state, 12 * 3600 * 1000), []);
 });
+
+// ──────────────────────────────────────────────────────── de reviewronde op 579ad57
+// Wat hieronder staat komt niet uit de opdracht maar uit de dubbele review op kop 579ad57. Codex gaf
+// BLOKKEREND ("een onleesbare bron kan als geldige lege state eindigen en uiteindelijk GROEN worden"),
+// Gemini wees op dezelfde familie langs een andere weg (een weggelaten manifest sloeg de hele
+// hashcontrole stil over). Beide zijn eerst nagespeeld en klopten. Elke reparatie krijgt hier zijn
+// eigen proef, want een mutatieproef bewijst dat de acht ankers dragen — niet dat het gat dicht is.
+
+test('reviewgat 1 — een onleesbare of lege bron eindigt nooit als groene lege toestand', () => {
+  // Codex' geval, letterlijk: een bron waar geen enkele regel uit te halen valt. Dat is geen systeem
+  // waarin niets gebeurde; het is een lezing die mislukte, en die twee mogen niet op elkaar lijken.
+  for (const tekst of ['dit is geen tabel en zal het ook nooit worden', '', '   \n\n  ']) {
+    const { state } = kijkStateUitSpiegel(tekst, { commitSha: KOP_A });
+    const { manifest, bytes } = manifestVoor(state, { bronCommitSha: KOP_A, generatedAt: '2026-07-26T18:45:00.000Z' });
+    const o = oordeel({
+      lezing: { ok: true, sha: KOP_A, tekst, blobSha: null, pogingen: 1, geprobeerd: [] },
+      paginaHerkomst: { commitSha: KOP_A, stateSha256: manifest.stateSha256, eventHighWatermark: 0 },
+      state, manifest, stateBytes: bytes,
+    });
+    assert.notEqual(o.uitkomst, 'GROEN', `deze bron mag geen groen opleveren: ${JSON.stringify(tekst)}`);
+    assert.equal(o.uitkomst, 'ROOD');
+    assert.ok(o.redenen.includes('GEEN_SPOREN'), `verwacht GEEN_SPOREN, kreeg ${o.redenen.join(', ')}`);
+  }
+});
+
+test('reviewgat 2 — een weggelaten bewijsstuk slaat geen controle over maar stopt het oordeel', () => {
+  // Gemini's geval. De hashcontroles stonden achter `if (manifest && stateBytes && …)`, dus wie het
+  // manifest wegliet kreeg een pagina met een verzonnen toestandshash alsnog groen terug. Onwetendheid
+  // die zich als kennis voordoet is precies wat deze hele lezer moest afschaffen.
+  const g = opstelling(DRIE_LANES);
+  const verzonnen = { commitSha: KOP_A, stateSha256: 'f'.repeat(64), eventHighWatermark: g.state.eventHighWatermark };
+  for (const weggelaten of [{ manifest: null }, { stateBytes: null }, { state: null }]) {
+    const o = oordeel({
+      lezing: g.lezing, paginaHerkomst: verzonnen, state: g.state, manifest: g.manifest, stateBytes: g.bytes,
+      ...weggelaten,
+    });
+    assert.equal(o.uitkomst, 'GEEN OORDEEL', `weglaten van ${Object.keys(weggelaten)[0]} gaf ${o.uitkomst}`);
+    assert.ok(o.redenen.includes('BEWIJS_ONVOLLEDIG'));
+  }
+  // En mét alle stukken is diezelfde verzonnen hash gewoon rood — het gat zat in het weglaten, niet
+  // in de vergelijking zelf.
+  assert.equal(g.kijk({ paginaHerkomst: verzonnen }).uitkomst, 'ROOD');
+});
+
+test('reviewgat 3 — de bytes zijn aan DEZE toestand vastgemaakt, niet aan een toestand', () => {
+  // De hashketen klopte van manifest tot bytes, maar nergens was vastgelegd dat het object dat
+  // beoordeeld werd hetzelfde object was als de bytes die gehasht zijn. Aanleveren van de bytes van A
+  // bij de toestand van B liet de hele ketting kloppen.
+  const a = opstelling(DRIE_LANES);
+  const b = opstelling(spiegelMet(rij('2026-07-26 17:20', 'CONTROL', 'Een andere bron.')));
+  const o = oordeel({
+    lezing: a.lezing, paginaHerkomst: a.paginaHerkomst, state: b.state, manifest: a.manifest, stateBytes: a.bytes,
+  });
+  assert.equal(o.uitkomst, 'GEEN OORDEEL');
+  assert.ok(o.redenen.includes('TOESTAND_NIET_BIJ_BYTES'));
+});
+
+test('reviewgat 4 — een veld dat het schema niet kent is rood, ook als het onschuldig oogt', () => {
+  // Zonder gesloten sleutellijst kon er een veld bijkomen dat de keuring niet toetst. Dat is de weg
+  // waarlangs vrije tekst binnenkomt langs een veld dat "technisch" heet.
+  const g = opstelling(DRIE_LANES);
+  const extraBovenin = { ...g.state, notitie: 'klant Van der Berg belde' };
+  assert.deepEqual(keurState(extraBovenin).fouten, ['VELD_NIET_GESLOTEN']);
+  const extraInLane = {
+    ...g.state,
+    lanes: { ...g.state.lanes, CONTROL: { ...g.state.lanes.CONTROL, opmerking: '/Users/richard/geheim' } },
+  };
+  assert.deepEqual(keurState(extraInLane).fouten, ['VELD_NIET_GESLOTEN']);
+});
+
+test('reviewgat 5 — valt ALLES tegelijk stil, dan is de onderlinge afstand nul en toch niet groen', () => {
+  // De onderlinge meting is bewust relatief, en juist daardoor blind voor de totale uitval: stoppen
+  // alle sporen op hetzelfde moment, dan is er geen enkel verouderd spoor. Beide reviewers wezen hier
+  // onafhankelijk op. De absolute vloer geldt alleen mét een meegegeven klok.
+  const g = opstelling(DRIE_LANES);
+  const jongste = Math.max(...Object.values(g.state.lanes).map((l) => Date.parse(l.momentUtc)));
+  const veelLater = jongste + 30 * 3600 * 1000;
+  const stil = g.kijk({ nu: veelLater });
+  assert.equal(stil.uitkomst, 'PARTIAL');
+  assert.ok(stil.redenen.includes('ALLES_STIL'));
+  assert.deepEqual(stil.gemeten.verouderdeLanes, ['AUTOPILOT', 'CONTROL', 'MINI']);
+  // Kort na de laatste melding is het gewoon groen, en zónder klok wordt er geen uitspraak over de
+  // klok gedaan — dat blijft het gedrag van vandaag, niet stilzwijgend rood.
+  assert.equal(g.kijk({ nu: jongste + 60 * 1000 }).uitkomst, 'GROEN');
+  assert.equal(g.kijk().uitkomst, 'GROEN');
+});
+
+test('reviewgat 6 — een datum die niet bestaat levert geen tijdstip op', () => {
+  // `new Date('2026-02-30T…')` rolt stilzwijgend door naar 2 maart. Een niet-bestaande datum werd zo
+  // een geldig moment, en dat moment kon een teller of een stiltemeting sturen.
+  assert.equal(momentUitNlTijd('2026-02-30 12:00'), null);
+  assert.equal(momentUitNlTijd('2026-13-01 12:00'), null);
+  assert.equal(momentUitNlTijd('2026-07-26 25:00'), null);
+  assert.equal(momentUitNlTijd('2026-07-26 12:61'), null);
+  assert.equal(momentUitNlTijd('2026-07-26 12:00'), Date.parse('2026-07-26T10:00:00.000Z'));
+});

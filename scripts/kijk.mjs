@@ -131,7 +131,10 @@ if (staleReplay) {
   console.log(`  actuele kop: ${lezing.sha} · teller ${state.eventHighWatermark} · hash ${manifest.stateSha256.slice(0, 16)}…`);
 }
 
-const o = oordeel({ lezing, paginaHerkomst, state, manifest, stateBytes: bytes });
+// `nu` is de klok van de uitvoerder, en die hoort hier thuis en niet in de bibliotheek: alleen wie de
+// kijk daadwerkelijk draait weet wanneer dat is. Zonder deze regel blijft de totale-uitvalvloer dood
+// (reviewgat 5) — de sporen staan dan onderling perfect gelijk terwijl er al een dag niets gebeurt.
+const o = oordeel({ lezing, paginaHerkomst, state, manifest, stateBytes: bytes, nu: Date.now() });
 const regel = publiekeRegel({ uitkomst: o.uitkomst, redenen: o.redenen, lanes: o.gemeten.verouderdeLanes });
 console.log(`\nuitkomst: ${o.uitkomst}`);
 console.log(`publieke regel: ${regel.uitleg}`);

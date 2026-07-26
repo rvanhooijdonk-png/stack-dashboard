@@ -65,6 +65,10 @@ export const REDENEN = {
   TOESTAND_WISSELT_BIJ_GELIJKE_STAND: 'de bron veranderde zonder dat de teller meebewoog',
   LANE_VEROUDERD: 'een spoor meldt al langer niets terwijl andere sporen doormelden',
   VELD_NIET_GESLOTEN: 'de bron bevat een veld dat niet uit een vastgelegde lijst komt',
+  BEWIJS_ONVOLLEDIG: 'niet alle bewijsstukken zijn aangeleverd, dus er valt niets vast te stellen',
+  GEEN_SPOREN: 'de bron leverde geen enkel spoor op',
+  TOESTAND_NIET_BIJ_BYTES: 'de aangeleverde toestand hoort niet bij de aangeleverde bytes',
+  ALLES_STIL: 'alle sporen zwijgen al langer dan afgesproken',
   TOESTAND_ONBEKEND: 'de bron noemt een toestand die niet in de vastgelegde lijst staat',
   HASHFOUT: 'de meegeleverde controlesom hoort niet bij de inhoud',
 };
@@ -145,6 +149,14 @@ export function momentUitNlTijd(datum) {
   const [, jj, mm, dd, hh = '00', mi = '00'] = m;
   const alsUtc = Date.UTC(+jj, +mm - 1, +dd, +hh, +mi, 0);
   if (Number.isNaN(alsUtc)) return null;
+  // `Date.UTC` rekent een onmogelijke kalenderdatum stilzwijgend om: 30 februari wordt 2 maart, en 32
+  // januari wordt 1 februari. Zonder deze controle zou een verzonnen datum dus gewoon een geldig
+  // moment opleveren. De heenweg wordt daarom teruggerekend en moet exact opleveren wat er stond.
+  const d = new Date(alsUtc);
+  if (d.getUTCFullYear() !== +jj || d.getUTCMonth() !== +mm - 1 || d.getUTCDate() !== +dd
+    || d.getUTCHours() !== +hh || d.getUTCMinutes() !== +mi) {
+    return null;
+  }
   // Twee stappen: schat de verschuiving op het geschatte moment, corrigeer, en meet opnieuw. De
   // tweede meting vangt de overgangsnacht, waarin de eerste schatting er een uur naast kan zitten.
   let t = alsUtc;
@@ -271,10 +283,14 @@ export function kijkStateUitSpiegel(tekst, { commitSha = null } = {}) {
   let teller = 0;
 
   if (raw.available !== true || !Array.isArray(raw.rows)) {
+    // De onleesbare bron leverde eerder een keurige lege toestand op: nul sporen, nul fouten in de
+    // toestand zelf, en dus een oordeel dat GROEN kon worden. De reviewronde op kop 579ad57 wees dit
+    // aan als de zwaarste fail-open van het geheel — "ik kon de bron niet lezen" kwam eruit als "er is
+    // niets aan de hand". De mislukking staat nu IN de toestand, zodat hij niet te negeren is.
     return {
       state: {
         schemaVersie: KIJK_SCHEMA, bronSoort: OVERGANG_MERK, bronCommitSha: commitSha,
-        eventHighWatermark: 0, eventCount: 0, lanes: {},
+        eventHighWatermark: 0, eventCount: 0, verworpenRijen: 1, lanes: {},
       },
       fouten: [raw.reason === 'LEEG' ? 'BRON_LEEG' : 'BRON_ONLEESBAAR'],
     };
@@ -329,10 +345,26 @@ export const KIJK_SCHEMA = '1.0.0';
  * fout, ook als het er onschuldig uitziet: een onbekend spoor is geen nieuw spoor maar een gat in de
  * lijst, en dat hoort iemand te repareren in plaats van dat de kijk het stilzwijgend accepteert.
  */
+/** Precies de sleutels die een kijk-state mag hebben, en precies die van één spoor. */
+const STATE_SLEUTELS = ['schemaVersie', 'bronSoort', 'bronCommitSha', 'eventHighWatermark', 'eventCount', 'verworpenRijen', 'lanes'];
+const LANE_SLEUTELS = ['laneId', 'sequence', 'objectId', 'toestand', 'eventUitkomst', 'momentUtc'];
+
 export function keurState(state) {
   const fouten = [];
   if (!state || typeof state !== 'object') return { ok: false, fouten: ['BRON_ONLEESBAAR'] };
   if (state.schemaVersie !== KIJK_SCHEMA) fouten.push('VELD_NIET_GESLOTEN');
+
+  // Onbekende velden worden GEWEIGERD, niet genegeerd. Zonder deze regel rust de belofte "geen vrije
+  // publieke tekst" alleen op de huidige vertaler: wie er een `onderwerp` met brontekst bij zet, kreeg
+  // een geldig verklaarde toestand die gehasht en weggeschreven werd. Het schema hoort de garantie te
+  // dragen, niet de ene functie die hem nu toevallig invult.
+  if (Object.keys(state).some((k) => !STATE_SLEUTELS.includes(k))) fouten.push('VELD_NIET_GESLOTEN');
+
+  // Een toestand zonder enig spoor is geen gezonde toestand maar een mislukte lezing. Er valt niets te
+  // vergelijken, dus er valt niets goed te keuren.
+  if (!state.lanes || typeof state.lanes !== 'object' || Object.keys(state.lanes).length === 0) {
+    fouten.push('GEEN_SPOREN');
+  }
   if (!Number.isInteger(state.eventHighWatermark) || state.eventHighWatermark < 0) fouten.push('VELD_NIET_GESLOTEN');
   // Verworpen rijen zijn een schemafout van de BRON, geen ruis van de lezer: er staat iets in de
   // spiegel dat het gesloten schema niet kent, en zolang dat zo is dekt de state de bron niet.
@@ -340,6 +372,7 @@ export function keurState(state) {
   if (!Number.isInteger(verworpen) || verworpen < 0 || verworpen > 0) fouten.push('VELD_NIET_GESLOTEN');
   for (const [sleutel, lane] of Object.entries(state.lanes ?? {})) {
     if (!LANES.includes(sleutel) || lane?.laneId !== sleutel) { fouten.push('VELD_NIET_GESLOTEN'); continue; }
+    if (Object.keys(lane).some((k) => !LANE_SLEUTELS.includes(k))) fouten.push('VELD_NIET_GESLOTEN');
     if (!TOESTANDEN.includes(lane.toestand)) fouten.push('TOESTAND_ONBEKEND');
     if (!EVENT_UITKOMSTEN.includes(lane.eventUitkomst)) fouten.push('VELD_NIET_GESLOTEN');
     if (!Number.isInteger(lane.sequence) || lane.sequence < 1) fouten.push('VELD_NIET_GESLOTEN');
@@ -423,7 +456,7 @@ export function verouderdeLanes(state, stilMs = LANE_STIL_UREN * UUR) {
  */
 export function oordeel({
   lezing, paginaHerkomst = null, state = null, manifest = null, stateBytes = null,
-  getuigenis = null, stilMs = LANE_STIL_UREN * UUR,
+  getuigenis = null, stilMs = LANE_STIL_UREN * UUR, nu = null,
 } = {}) {
   const redenen = [];
   const gemeten = {
@@ -439,9 +472,32 @@ export function oordeel({
   }
   gemeten.kopSha = lezing.sha;
 
-  // ── 2. dekt het manifest de state-bytes die erbij geleverd zijn?
-  if (manifest && stateBytes && !manifestDekt(manifest, stateBytes)) {
+  // ── 2. is het bewijs überhaupt compleet aangeleverd?
+  //
+  // Dit is de reparatie van een fail-open die de reviewronde op kop 579ad57 blootlegde. De hash- en
+  // manifestcontroles hieronder stonden onder `if (manifest && stateBytes && …)`, en die voorwaarde
+  // sloeg de controle stilzwijgend over wanneer een aanroeper het manifest of de bytes wegliet. Een
+  // pagina met een verzonnen toestandshash kwam er dan als GROEN uit — gemeten, niet vermoed. Een
+  // ontbrekend bewijsstuk is onwetendheid, en onwetendheid hoort hier één uitkomst te hebben.
+  if (!state || !manifest || !stateBytes) {
+    redenen.push('BEWIJS_ONVOLLEDIG');
+    return uit('GEEN OORDEEL');
+  }
+
+  // ── 2b. dekt het manifest exact deze state-bytes?
+  if (!manifestDekt(manifest, stateBytes)) {
     redenen.push('HASHFOUT');
+    return uit('GEEN OORDEEL');
+  }
+
+  // ── 2c. horen de bytes ook echt bij DEZE toestand?
+  //
+  // Het manifest bewijst iets over de bytes, en de bytes bewijzen iets over zichzelf — maar tot hier
+  // bewees niets dat het object dat straks beoordeeld wordt dezelfde toestand is als de bytes die
+  // gehasht zijn. Een aanroeper kon de bytes van toestand A aanleveren en toestand B laten beoordelen,
+  // en de hele hashketen bleef kloppen. De ketting was dus nergens aan de toestand vastgemaakt.
+  if (!kanoniekeBytes(state).equals(Buffer.from(stateBytes))) {
+    redenen.push('TOESTAND_NIET_BIJ_BYTES');
     return uit('GEEN OORDEEL');
   }
   gemeten.stateSha256 = manifest?.stateSha256 ?? null;
@@ -480,6 +536,22 @@ export function oordeel({
   }
 
   if (redenen.length) return uit('ROOD');
+
+  // ── 5b. staat ALLES stil?
+  //
+  // De onderlinge meting hieronder heeft een blinde vlek waar beide reviewers onafhankelijk op wezen:
+  // stoppen alle sporen tegelijk — de orchestrator valt om, de stroom valt weg — dan is hun onderlinge
+  // afstand nul en is er dus geen enkel verouderd spoor. Precies de totale uitval kwam er zo als GROEN
+  // uit. Daarom is er één absolute vloer, en die geldt alleen als de aanroeper een moment meegeeft:
+  // zonder klok wordt er geen uitspraak over de klok gedaan.
+  const momenten = Object.values(state.lanes)
+    .map((l) => (l.momentUtc ? Date.parse(l.momentUtc) : null))
+    .filter((t) => t !== null && !Number.isNaN(t));
+  if (nu !== null && momenten.length && nu - Math.max(...momenten) > stilMs) {
+    redenen.push('ALLES_STIL');
+    gemeten.verouderdeLanes = Object.keys(state.lanes).sort();
+    return uit('PARTIAL');
+  }
 
   // ── 6. pas als alles hierboven klopt is een stil spoor het onderwerp. Eerder zou het een bijzaak
   // zijn naast een echte fout, en dan verdwijnt het uit beeld.
