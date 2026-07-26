@@ -79,6 +79,7 @@ export const CODES = {
   STEMPEL_ONLEESBAAR: 'de bouwstempel op de pagina was niet te lezen',
   STEMPEL_INCONSISTENT: 'de twee tijdsvermeldingen op de pagina spreken elkaar tegen',
   STEMPEL_TE_OUD: 'de pagina is ouder dan de afgesproken drempel en zegt dat zelf niet',
+  STEMPEL_IN_TOEKOMST: 'de bouwstempel op de pagina ligt in de toekomst, dus de leeftijd klopt niet',
   SPIEGEL_ONBEREIKBAAR: 'het openbare logboek was niet op te halen',
   SPIEGEL_ONLEESBAAR: 'in het openbare logboek stond geen enkele leesbare regel',
   KANAALPOST_ONTBREEKT: 'de logboek-sectie ontbreekt op de pagina',
@@ -91,6 +92,18 @@ export const CODES = {
 
 const UUR = 3600 * 1000;
 const MIN = 60 * 1000;
+
+/** Klokverschil tussen bouwmachine en controlemachine dat we normaal vinden. Alles daarbuiten in de
+ *  toekomst is geen speling meer maar een kapotte stempel. */
+const KLOKSPELING_MS = 5 * MIN;
+
+/**
+ * Hoe ver in de "toekomst" een spiegelrij mag liggen voordat we hem als verzonnen beschouwen. Ruimer
+ * dan de klokspeling, en met opzet: de datumkolom is NL-tijd zonder zone en wordt hier behoudend als
+ * UTC gelezen (zie `rijMoment`), waardoor een verse regel tot twee uur in de toekomst lijkt te
+ * liggen. Drie uur laat die zomertijd-speling toe; een regel uit 2099 valt er ruim buiten.
+ */
+const ZONE_SPELING_MS = 3 * UUR;
 
 /** Versievergelijking op drie getallen; alles wat niet leesbaar is telt als "ouder dan". */
 export function versieMinstens(gevonden, minimaal) {
@@ -114,17 +127,26 @@ export function versieMinstens(gevonden, minimaal) {
  */
 export function stempelUitHtml(html) {
   const s = String(html ?? '');
-  const buster = s.match(/url=\.\/\?v=(\d{17})\b/);
+  // Alleen in de kop zoeken, en precies één treffer eisen. Anders kan de INHOUD van de plaat de
+  // stempel namaken: één kanaalpost-regel die letterlijk `url=./?v=<17 cijfers>` bevat zou een
+  // weggevallen refresh-tag maskeren, en dat is precies het soort groen dat niets bewijst.
+  const kopEind = s.indexOf('</head>');
+  const kop = kopEind === -1 ? '' : s.slice(0, kopEind);
+  const busters = [...kop.matchAll(/url=\.\/\?v=(\d{17})\b/g)];
+  const buster = busters.length === 1 ? busters[0] : null;
   const leesbaar = s.match(/class="stamp">Laatst bijgewerkt: <strong>gebouwd om (\d{2}):(\d{2}) NL-tijd \((\d{2}):(\d{2}) UTC\)<\/strong>/);
-  if (!buster && !leesbaar) return { gevonden: false, iso: null, utcHhmm: null, leesbaar: null };
-  if (!buster || !leesbaar) return { gevonden: true, iso: null, utcHhmm: null, leesbaar: Boolean(leesbaar) };
+  const zicht = leesbaar
+    ? { utcHhmm: `${leesbaar[3]}:${leesbaar[4]}`, nlHhmm: `${leesbaar[1]}:${leesbaar[2]}` }
+    : { utcHhmm: null, nlHhmm: null };
+  if (!busters.length && !leesbaar) return { gevonden: false, iso: null, ...zicht, leesbaar: null };
+  if (!buster || !leesbaar) return { gevonden: true, iso: null, ...zicht, leesbaar: Boolean(leesbaar) };
   const d = buster[1];
   const iso = `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}T${d.slice(8, 10)}:${d.slice(10, 12)}:${d.slice(12, 14)}.${d.slice(14, 17)}Z`;
   const t = new Date(iso);
   if (Number.isNaN(t.getTime()) || t.toISOString() !== iso) {
-    return { gevonden: true, iso: null, utcHhmm: `${leesbaar[3]}:${leesbaar[4]}`, leesbaar: true };
+    return { gevonden: true, iso: null, ...zicht, leesbaar: true };
   }
-  return { gevonden: true, iso, utcHhmm: `${leesbaar[3]}:${leesbaar[4]}`, leesbaar: true };
+  return { gevonden: true, iso, ...zicht, leesbaar: true };
 }
 
 /**
@@ -133,8 +155,11 @@ export function stempelUitHtml(html) {
  */
 export function sectieUitHtml(html, id) {
   const s = String(html ?? '');
-  const start = s.indexOf(`<section id="${id}"`);
-  if (start === -1) return null;
+  // Niet vastpinnen op de volgorde van de attributen: een sectie die morgen `<section class="card"
+  // id="planning">` heet is dezelfde sectie, en een waarnemer die daarop rood wordt roept vals alarm.
+  const treffer = s.match(new RegExp(`<section\\s[^>]*\\bid="${id}"[^>]*>`, 'i'));
+  if (!treffer) return null;
+  const start = treffer.index;
   const eind = s.indexOf('</section>', start);
   return eind === -1 ? null : s.slice(start, eind);
 }
@@ -154,12 +179,14 @@ export function unesc(v) {
  * bron, zodat de vergelijking op inhoud gaat en niet op opmaak.
  */
 export function eersteKanaalpostRij(sectieHtml) {
-  const body = String(sectieHtml ?? '').match(/<tbody>([\s\S]*?)<\/table>/);
+  // Sluiten op `</tbody>`, niet op `</table>`: anders leest een tabel zonder sluitende tbody alsnog
+  // "goed" en kan een anders opgebouwde tabel inhoud van buiten de body meenemen.
+  const body = String(sectieHtml ?? '').match(/<tbody>([\s\S]*?)<\/tbody>/);
   if (!body) return null;
   const rij = body[1].match(/<tr>([\s\S]*?)<\/tr>/);
   if (!rij) return null;
   const cellen = [...rij[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => ontdaan(unesc(ZONDER_TAGS(m[1]))));
-  if (cellen.length < 4) return null;
+  if (cellen.length < 4 || cellen.slice(0, 4).some((c) => c === '')) return null;
   return { tab: cellen[0], onderwerp: cellen[1], status: cellen[2], datum: cellen[3] };
 }
 
@@ -206,9 +233,16 @@ export function toets({
   else {
     gemeten.stempelIso = stempel.iso;
     // 2 — leeftijd onder de drempel, óf de pagina zegt zelf dat ze verouderd is.
+    // De zichtbare tijd wordt aan BEIDE kanten gecontroleerd: de UTC-tijd tegen de stempel, en de
+    // NL-tijd tegen diezelfde stempel omgerekend naar Amsterdam. Anders blijft een pagina die "00:00
+    // NL-tijd (11:55 UTC)" toont groen, terwijl de mens juist naar die eerste tijd kijkt.
     if (stempel.utcHhmm && stempel.utcHhmm !== stempel.iso.slice(11, 16)) meld('STEMPEL_INCONSISTENT');
+    else if (stempel.nlHhmm && stempel.nlHhmm !== nlTijd(Date.parse(stempel.iso)).slice(11, 16)) meld('STEMPEL_INCONSISTENT');
     const leeftijd = Number(nu) - Date.parse(stempel.iso);
     gemeten.leeftijdMs = leeftijd;
+    // Een stempel in de toekomst is nooit "vers": zo'n negatieve leeftijd zou elke drempel passeren
+    // en de leeftijdstoets permanent uitschakelen. Een paar minuten klokverschil mag.
+    if (leeftijd < -KLOKSPELING_MS) meld('STEMPEL_IN_TOEKOMST');
     if (leeftijd > drempelMs && !html.includes(VEROUDERD_MARKER)) {
       meld('STEMPEL_TE_OUD', leeftijd < UUR
         ? `leeftijd ongeveer ${Math.round(leeftijd / MIN)} minuten`
@@ -244,7 +278,11 @@ export function toets({
         if (moment === null || Number(nu) - moment > graceMs) break;
         respijt += 1;
       }
-      const zelfde = (a, b) => a && b && a.tab === b.tab && a.datum === b.datum && a.onderwerp === b.onderwerp;
+      // Ook de status vergelijken: een pagina die een AFGEROND-melding als GEBLOKKEERD toont (of
+      // andersom) toont de verkeerde werkelijkheid, ook al klopt de tekst. De actiehouder blijft
+      // buiten de vergelijking — die staat in de gerenderde tabel niet als eigen kolom.
+      const zelfde = (a, b) => a && b && a.tab === b.tab && a.datum === b.datum
+        && a.onderwerp === b.onderwerp && a.status === b.status;
       const treffer = publiek.rows.slice(0, respijt + 1).some((r) => zelfde(paginaRij, r));
       if (!treffer) meld('PAGINA_TOONT_OUDE_DATA', `de pagina toont bovenaan een melding van ${paginaRij.datum || 'onbekende datum'}`);
     }
@@ -255,8 +293,12 @@ export function toets({
   for (const id of verplicht) {
     const inhoud = sectieUitHtml(html, id);
     if (inhoud === null) { meld('SECTIE_ONTBREEKT', `sectie ${id}`); continue; }
-    const heeftUitleg = inhoud.includes('class="empty"');
-    if (!heeftUitleg && !inhoud.includes('<tr') && ZONDER_TAGS(inhoud).length < 40) meld('SECTIE_LEEG', `sectie ${id}`);
+    // Een markering is nog geen inhoud: `<p class="empty"></p>` en `<tr></tr>` zijn allebei leeg.
+    // Daarom wordt er op zichtbare tekst geoordeeld, met de kop eraf — die staat er altijd.
+    const zonderKop = inhoud.replace(/<h2\b[\s\S]*?<\/h2>/i, ' ');
+    const zichtbaar = ZONDER_TAGS(zonderKop);
+    const heeftCel = /<td[^>]*>\s*(?:<[^>]+>\s*)*[^\s<]/.test(zonderKop);
+    if (!heeftCel && zichtbaar.length < 12) meld('SECTIE_LEEG', `sectie ${id}`);
   }
   const spoor = KAPOT_SPOREN.find((k) => html.includes(k));
   if (spoor) meld('PAGINA_KAPOT');
@@ -317,13 +359,24 @@ export function alarmRijPubliceerbaar(rij) {
  */
 export function magAppenden(spiegelTekst, codes, nu, vensterMs = HERHAAL_UREN * UUR) {
   const doel = [...new Set(codes.map(codeWoord))].sort().join(',');
-  const rijen = kanaalpostUitTekst(String(spiegelTekst ?? '')).rows ?? [];
-  const laatste = [...rijen].reverse().find((r) => ontdaan(r.tab) === 'WAARNEMER');
-  if (!laatste) return { mag: true, reden: 'eerste melding van de waarnemer in de spiegel' };
-  const eerder = String(laatste.onderwerp ?? '').match(/\(controlepunten: ([a-z0-9,\s-]+)\)/);
-  const zelfde = eerder ? eerder[1].split(',').map((x) => x.trim()).filter(Boolean).sort().join(',') === doel : false;
-  const moment = rijMoment(laatste.datum);
-  const oud = moment === null || Number(nu) - moment > vensterMs;
-  if (zelfde && !oud) return { mag: false, reden: 'dezelfde melding staat al in de spiegel binnen het herhaalvenster' };
-  return { mag: true, reden: zelfde ? 'zelfde melding, maar het herhaalvenster is verstreken' : 'andere combinatie van controlepunten dan de vorige melding' };
+  // Alleen regels die zelf door de publicatiepoort komen tellen mee, en alleen regels met een
+  // geloofwaardig moment: anders kan één handgeschreven WAARNEMER-regel met een datum in 2099 alle
+  // toekomstige alarmen voorgoed monddood maken.
+  const publiek = toPublicKanaalpost(kanaalpostUitTekst(String(spiegelTekst ?? '')));
+  const binnenVenster = (publiek.rows ?? []).filter((r) => {
+    if (ontdaan(r.tab) !== 'WAARNEMER') return false;
+    const moment = rijMoment(r.datum);
+    if (moment === null) return false;
+    const ouderdom = Number(nu) - moment;
+    return ouderdom >= -ZONE_SPELING_MS && ouderdom <= vensterMs;
+  });
+  if (!binnenVenster.length) return { mag: true, reden: 'geen eerdere melding van de waarnemer binnen het herhaalvenster' };
+  // Niet alleen tegen de láátste melding vergelijken: twee storingen die elkaar afwisselen zouden
+  // elkaar dan om beurten "nieuw" maken en de spiegel eindeloos volschrijven.
+  const zelfde = binnenVenster.some((r) => {
+    const eerder = String(r.onderwerp ?? '').match(/\(controlepunten: ([a-z0-9,\s-]+)\)/);
+    return eerder ? eerder[1].split(',').map((x) => x.trim()).filter(Boolean).sort().join(',') === doel : false;
+  });
+  if (zelfde) return { mag: false, reden: 'dezelfde melding staat al in de spiegel binnen het herhaalvenster' };
+  return { mag: true, reden: 'andere combinatie van controlepunten dan de meldingen binnen het venster' };
 }

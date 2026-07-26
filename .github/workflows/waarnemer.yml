@@ -86,11 +86,11 @@ jobs:
     if: ${{ !cancelled() && needs.toetsen.outputs.afwijking == 'ja' && needs.toetsen.outputs.appenden == 'ja' && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     permissions:
+      # Bewust GEEN `actions: write` hier: deze job haalt de repo op en voert er code uit. Zou hij
+      # ook workflows mogen starten, annuleren of uitzetten, dan zou iedereen met pushrecht op een
+      # tak dat recht in één push naar zich toe kunnen trekken. Het starten van een verse publicatie
+      # gebeurt daarom in `verversen`, hieronder, zonder checkout en alleen op de hoofdtak.
       contents: write
-      # Alleen om na het aanvullen een verse publicatie te starten: een push met GITHUB_TOKEN start
-      # zelf geen workflow, dus zonder deze zet zou de alarmregel pas bij de volgende bouw op de
-      # plaat verschijnen — en dat is precies wat deze workflow bestrijdt.
-      actions: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -112,15 +112,23 @@ jobs:
           # laten die de plaat stilletjes weglaat.
           node -e '
             const { readFileSync } = require("node:fs");
-            import("./scripts/lib/kanaalpost.mjs").then(({ kanaalpostUitTekst, toPublicKanaalpost }) => {
-              const uit = toPublicKanaalpost(kanaalpostUitTekst(readFileSync("data/kanaalpost-publiek.md", "utf8")));
-              const bovenaan = uit.rows?.[0];
-              if (!uit.available || bovenaan?.tab !== "WAARNEMER") {
-                console.error("::error::de toegevoegde alarmregel komt niet als publieke rij terug.");
-                process.exit(1);
-              }
-              console.log("alarmregel staat bovenaan de publieke stand.");
-            }).catch((e) => { console.error("::error::poortcontrole mislukt"); process.exit(1); });
+            const regel = Buffer.from(process.env.RIJ_B64, "base64").toString("utf8").trim();
+            Promise.all([import("./scripts/lib/kanaalpost.mjs"), import("./scripts/lib/waarnemer.mjs")])
+              .then(([{ kanaalpostUitTekst, toPublicKanaalpost }]) => {
+                const uit = toPublicKanaalpost(kanaalpostUitTekst(readFileSync("data/kanaalpost-publiek.md", "utf8")));
+                const bovenaan = uit.rows?.[0];
+                // Niet "er staat een WAARNEMER bovenaan" — dat kan een oudere melding zijn terwijl de
+                // nieuwe regel buiten de tabel viel. Het moet DEZE regel zijn, veld voor veld.
+                const cellen = regel.split("|").slice(1, -1).map((c) => c.trim());
+                const zelfde = bovenaan
+                  && bovenaan.tab === cellen[1] && bovenaan.onderwerp === cellen[2]
+                  && bovenaan.status === cellen[3] && bovenaan.datum === cellen[0];
+                if (!uit.available || !zelfde) {
+                  console.error("::error::de zojuist toegevoegde alarmregel komt niet als bovenste publieke rij terug.");
+                  process.exit(1);
+                }
+                console.log("alarmregel staat bovenaan de publieke stand.");
+              }).catch(() => { console.error("::error::poortcontrole mislukt"); process.exit(1); });
           '
           git config user.name  'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -136,10 +144,19 @@ jobs:
           echo "::error::de alarmregel kon niet naar de tak worden geschreven."
           exit 1
 
+  # Losse job met precies één recht en geen repo-code: een push met GITHUB_TOKEN start zelf geen
+  # workflow, dus zonder deze zet zou de alarmregel pas bij de volgende bouw op de plaat verschijnen.
+  verversen:
+    needs: melden
+    if: ${{ needs.melden.result == 'success' && github.ref_name == 'main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
       - name: Verse publicatie starten zodat de melding op de plaat komt
-        if: ${{ github.ref_name == 'main' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: gh workflow run publish.yml --ref main
 
   # De run is pas rood NA het melden. Deze poort bestaat apart zodat "zichtbaar maken" en "falen"

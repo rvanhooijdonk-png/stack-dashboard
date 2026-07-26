@@ -337,3 +337,68 @@ test('na het herhaalvenster mag dezelfde melding opnieuw', () => {
 test('zonder eerdere waarnemer-regel mag de eerste melding altijd', () => {
   assert.equal(magAppenden(basisSpiegel, ['STEMPEL_TE_OUD'], NU).mag, true);
 });
+
+// --- aanscherpingen na de dubbele review (Codex + Gemini) ---
+// Elk van deze tests staat voor één manier waarop de waarnemer groen kón blijven terwijl er iets
+// mis was. Ze horen bij elkaar: een bewaker die te bedriegen is, is geen bewaker.
+
+test('een bouwstempel in de toekomst is geen "verse" pagina', () => {
+  const html = pagina(basisSpiegel, { generatedAt: '2099-01-01T00:00:00.000Z' });
+  const r = toets({
+    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: KANAALPOST_VANAF, nu: NU,
+  });
+  assert.ok(r.bevindingen.some((b) => b.code === 'STEMPEL_IN_TOEKOMST'));
+});
+
+test('de zichtbare NL-tijd wordt óók tegen de stempel gehouden, niet alleen de UTC-tijd', () => {
+  const html = pagina(basisSpiegel).replace('gebouwd om 13:55 NL-tijd', 'gebouwd om 00:00 NL-tijd');
+  const r = toets({
+    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: KANAALPOST_VANAF, nu: NU,
+  });
+  assert.ok(r.bevindingen.some((b) => b.code === 'STEMPEL_INCONSISTENT'));
+});
+
+test('inhoud van de plaat kan de machinale stempel niet namaken', () => {
+  // Een kanaalpost-regel die letterlijk de cache-buster-vorm bevat, terwijl de echte stempel in de
+  // kop weg is: dat mag nooit als "stempel gevonden" tellen.
+  const vals = spiegelMet(rij('2026-07-26 09:00', 'CONTROL', 'letterlijke url=./?v=20260726115500000 in de tekst'));
+  const html = pagina(vals).replace(/<meta http-equiv="refresh"[^>]*>/, '');
+  const s = stempelUitHtml(html);
+  assert.equal(s.iso, null);
+  const r = toets({ paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: vals, contractVersie: KANAALPOST_VANAF, nu: NU });
+  assert.ok(r.bevindingen.some((b) => b.code === 'STEMPEL_ONLEESBAAR'));
+});
+
+test('een sectie vinden hangt niet aan de volgorde van de attributen', () => {
+  const html = '<section class="card" id="ci"><h2>CI</h2><p>inhoud die er toe doet</p></section>';
+  assert.match(sectieUitHtml(html, 'ci') ?? '', /inhoud die er toe doet/);
+});
+
+test('een lege markering telt niet als eerlijke uitleg', () => {
+  const kaal = '<section id="ci" class="card"><h2>CI</h2><p class="empty"></p></section>';
+  const html = pagina(basisSpiegel).replace(/<section id="ci"[\s\S]*?<\/section>/, kaal);
+  const r = toets({ paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: KANAALPOST_VANAF, nu: NU });
+  assert.ok(r.bevindingen.some((b) => b.code === 'SECTIE_LEEG'));
+});
+
+test('een tabel met alleen lege cellen telt niet als inhoud', () => {
+  assert.equal(eersteKanaalpostRij('<table><tbody><tr><td></td><td></td><td></td><td></td></tr></tbody></table>'), null);
+});
+
+test('een verkeerde status op de pagina is een afwijking, ook bij dezelfde tekst', () => {
+  const html = pagina(basisSpiegel).replace('AFGEROND', 'GEBLOKKEERD');
+  const r = toets({ paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: KANAALPOST_VANAF, nu: NU });
+  assert.ok(r.bevindingen.some((b) => b.code === 'PAGINA_TOONT_OUDE_DATA'));
+});
+
+test('twee storingen die elkaar afwisselen schrijven de spiegel niet vol', () => {
+  // Zonder deze regel zou A de melding van B "nieuw" maken en B die van A, eindeloos heen en weer.
+  const a = alarmRij({ bevindingen: [{ code: 'STEMPEL_TE_OUD', uitleg: 'te oud' }], nu: NU - 2 * 3600 * 1000 });
+  const b = alarmRij({ bevindingen: [{ code: 'PAGINA_ONBEREIKBAAR', uitleg: 'niet op te halen' }], nu: NU - 3600 * 1000 });
+  assert.equal(magAppenden(spiegelMet(a, b), ['STEMPEL_TE_OUD'], NU).mag, false);
+});
+
+test('een verzonnen waarnemer-regel uit de verre toekomst legt de waarnemer niet stil', () => {
+  const ver = alarmRij({ bevindingen: [{ code: 'STEMPEL_TE_OUD', uitleg: 'te oud' }], nu: Date.parse('2099-01-01T00:00:00Z') });
+  assert.equal(magAppenden(spiegelMet(ver), ['STEMPEL_TE_OUD'], NU).mag, true);
+});

@@ -60,7 +60,11 @@ const uitvoer = (sleutel, waarde) => {
 };
 
 const [pagina, spiegel] = await Promise.all([haal(BASE_URL), haal(SPIEGEL_URL)]);
-const contract = pagina.tekst.match(/\(contract ([0-9]+\.[0-9]+\.[0-9]+)\)/)?.[1] ?? null;
+// Bewust de volledige voettekstvorm, niet de eerste losse "(contract x.y.z)" in het document: de
+// INHOUD van de plaat kan die haakjes ook bevatten, en een lager gelezen versienummer zou de
+// zelf-bewapening van toets 3 stilletjes uitzetten.
+const contract = pagina.tekst
+  .match(/Gegenereerd door <code>stack-dashboard<\/code> \(contract ([0-9]+\.[0-9]+\.[0-9]+)\)/)?.[1] ?? null;
 const nu = Date.now();
 
 // De sabotage grijpt precies één toets aan en verandert verder niets: de drempel gaat naar nul, dus
