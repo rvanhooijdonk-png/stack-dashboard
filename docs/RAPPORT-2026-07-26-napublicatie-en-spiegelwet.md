@@ -288,6 +288,11 @@ Geen onenigheid tussen Codex en Gemini in deze ronde, dus geen escalatie naar Fa
   (run 30202331603) — uitgezocht, drie fouten gemeten en gerepareerd (§5), en de gerepareerde waarnemer
   loopt groen tegen dezelfde live plaat. De alarmpoort is gedraaid op de exacte regel die hij eerder
   afwees: groen, plus vijf saboteerde varianten rood.
+- In GitHub Actions, op de push van de reparatie (`f350fd3`, run 30203461722): **success** —
+  `spiegelwet: success`, `toetsen: success`, `poort: success`, `melden: skipped`, `verversen: skipped`.
+  `melden` slaat over omdat er geen afwijking is; dat is de bedoeling, maar het betekent ook dat de
+  gerepareerde alarmpoort in CI zelf nog niet gedraaid heeft. Bewijs daarvoor is de lokale ronde met
+  de zes varianten hierboven, gedraaid op de letterlijke code uit `waarnemer.yml`.
 - stack-smoke: n.v.t. — niet geïnstalleerd in deze repo.
 - Secrets-scan: `gitleaks protect --staged` → `no leaks found` (39,17 KB).
 - Raakvlakken gecheckt: `publish.yml` (levert het referentiemoment; niet gewijzigd), `waarnemer.yml`
