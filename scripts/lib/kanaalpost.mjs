@@ -201,9 +201,25 @@ export function spiegelScan(tekst) {
   const regels = String(tekst ?? '').split('\n');
   const kandidaten = [];
   let inTabel = false;
+  let inCommentaar = false;
   for (let i = 0; i < regels.length; i += 1) {
+    // HTML-commentaar is GEEN gegeven. Zonder deze scope werd een volledige tabel tussen `<!--` en
+    // `-->` gewoon meegelezen: de commentaaropener sloot de tabel, maar de exacte kop op de regel
+    // erna opende hem weer. Gemeten: een verborgen MINI-rij kwam als echt spoor in de toestand en de
+    // uitkomst was GROEN. Uitgecommentarieerde tekst die als waarheid wordt gelezen is de omgekeerde
+    // fout van een rij die stil verdwijnt, en even erg.
+    if (inCommentaar) {
+      if (regels[i].includes('-->')) inCommentaar = false;
+      inTabel = false;
+      continue;
+    }
+    if (regels[i].includes('<!--') && !regels[i].includes('-->')) {
+      inCommentaar = true;
+      inTabel = false;
+      continue;
+    }
     const c = cellenVan(regels[i]);
-    // Elke niet-tabelregel — lege regel, kop, proza, `<!--` — sluit de lopende tabel.
+    // Elke niet-tabelregel — lege regel, kop, proza — sluit de lopende tabel.
     if (!c) { inTabel = false; continue; }
     if (isKop(c)) {
       const volgende = cellenVan(regels[i + 1]);
@@ -213,7 +229,17 @@ export function spiegelScan(tekst) {
       if (inTabel) i += 1;
       continue;
     }
-    if (!inTabel) continue;
+    // Buiten een tabel telt een regel die er precies uitziet als een SPIEGELRIJ — vijf kolommen, geen
+    // kop, geen scheiding — als afkeuring en niet als niets. Reden: een lege regel of een prozaregel
+    // sloot de tabel, en elke rij daarna verdween spoorloos. Gemeten: kop, één CONTROL-rij, een lege
+    // regel, een MINI-rij → `eventCount: 1`, `verworpenRijen: 0`, uitkomst GROEN. Dezelfde stille
+    // verdwijning als bij een kapotte rij, alleen met de lege regel als oorzaak.
+    // Andere tabellen blijven buiten beeld doordat de toets op EXACT vijf kolommen staat: de
+    // kolom-uitleg bovenaan het bestand heeft er twee en raakt hierdoor niets.
+    if (!inTabel) {
+      if (c.length === KOPNAMEN.length && !isScheiding(c)) kandidaten.push(null);
+      continue;
+    }
     // Een tweede scheidingsregel is het begin van een andere tabel: sluiten, niet raden.
     if (isScheiding(c)) { inTabel = false; continue; }
     // Een afwijkend kolomaantal sloot hier eerst óók de tabel, en dat was een stille verdwijning van

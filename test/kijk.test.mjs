@@ -151,7 +151,7 @@ test('proef 3 — het productiegeval: 18:40 in de bron, 14:16 op de pagina, mag 
 });
 
 // ────────────────────────────────────────────── proef 3b (de twee stukjes jaar zonder klok)
-test('proef 3b — de zomertijdovergang levert geen sprong achteruit en geen uur uit het niets', () => {
+test('proef 3b — de zomertijdovergang levert geen verzonnen moment op', () => {
   // Twee keer per jaar bestaat een uur niet en bestaat een uur twee keer. Een omrekening die daar
   // struikelt, geeft precies dezelfde soort fout als de oude rijMoment(): een moment dat verder in de
   // toekomst ligt dan het echt is. Daarom staat het gedrag hier vast in plaats van dat het per
@@ -159,29 +159,43 @@ test('proef 3b — de zomertijdovergang levert geen sprong achteruit en geen uur
   const ms = (s) => momentUitNlTijd(s);
   const iso = (s) => new Date(ms(s)).toISOString();
 
-  // Sprong vooruit, nacht van 29 maart 2026: 02:00 wordt 03:00, dus 02:30 bestaat niet.
+  // Gewone uren aan beide kanten van beide overgangen: gewoon omgerekend, zomertijd én wintertijd.
   assert.equal(iso('2026-03-29 01:59'), '2026-03-29T00:59:00.000Z');
   assert.equal(iso('2026-03-29 03:00'), '2026-03-29T01:00:00.000Z');
-  // De niet-bestaande tijd verdwijnt niet stil in null en schuift ook niet vóórbij 03:00: het hele
-  // ontbrekende uur wordt vastgezet op het moment waarop de klok verspringt.
-  assert.equal(iso('2026-03-29 02:30'), '2026-03-29T01:00:00.000Z');
-  assert.equal(iso('2026-03-29 02:00'), iso('2026-03-29 03:00'));
-
-  // Sprong terug, nacht van 25 oktober 2026: 02:30 bestaat twee keer. Er wordt consequent de LATE
-  // lezing gekozen (CET, +01:00). Dat is een keuze, geen toeval: de vroege lezing zou een rij een uur
-  // ouder maken dan hij is, en "ouder" is de kant die stilte-alarm afgaat.
-  assert.equal(iso('2026-10-25 02:30'), '2026-10-25T01:30:00.000Z');
+  assert.equal(iso('2026-10-25 01:00'), '2026-10-24T23:00:00.000Z', 'nog zomertijd: de klok gaat pas om 03:00 terug');
   assert.equal(iso('2026-10-25 03:00'), '2026-10-25T02:00:00.000Z');
 
-  // Het eigenlijke contract: over beide overgangen heen loopt de tijd vooruit. Zonder dit zou een
-  // latere rij een eerder moment kunnen krijgen, en dan is elke uitspraak over volgorde waardeloos.
+  // DIT IS DE KERN, en het is een herziening van wat hier eerst stond. De vorige opzet gaf de twee
+  // stukjes jaar zonder klok tóch een antwoord: het niet-bestaande 02:30 werd op de sprong vastgezet
+  // (01:00 UTC) en het dubbele 02:30 kreeg stilzwijgend de late lezing (01:30 UTC), met als
+  // verantwoording dat de reeks dan niet achteruit loopt. Dat verruilde één fout voor een ergere: de
+  // bron zegt niet WELKE van de twee, en bij een gat zegt de bron iets dat niet bestaat, dus beide
+  // antwoorden waren verzonnen — en een uur ernaast is precies genoeg om een spoor "vers" te noemen
+  // dat het niet is. Gemeten uitwerking van het oude gedrag: beide rijen werden zonder één opmerking
+  // geaccepteerd, verworpen 0. Onwetendheid hoort hier hetzelfde te doen als overal elders in deze
+  // module: zich melden.
+  assert.equal(ms('2026-03-29 02:30'), null, 'die tijd heeft nooit bestaan');
+  assert.equal(ms('2026-10-25 02:30'), null, 'die tijd bestond twee keer');
+
+  // En dat blijft niet binnen de omrekening hangen: de rij wordt VERWORPEN, telt zichtbaar mee als
+  // afkeuring, en daarmee wordt de uitkomst rood in plaats van dat er een uur wordt gegokt.
+  for (const wandklok of ['2026-03-29 02:30', '2026-10-25 02:30']) {
+    const { state } = kijkStateUitSpiegel(spiegelMet(rij(wandklok, 'CONTROL', 'Een rij zonder klok.')), { commitSha: KOP_A });
+    assert.equal(state.verworpenRijen, 1, `${wandklok} hoort verworpen te zijn`);
+    assert.equal(state.lanes.CONTROL, undefined);
+  }
+
+  // Het contract dat overblijft: over beide overgangen heen loopt de tijd vooruit voor élk moment dat
+  // wél bestaat. Zonder dit zou een latere rij een eerder moment kunnen krijgen, en dan is elke
+  // uitspraak over volgorde waardeloos.
   const reeksen = [
-    ['2026-03-29 01:00', '2026-03-29 01:59', '2026-03-29 02:30', '2026-03-29 03:00', '2026-03-29 04:00'],
-    ['2026-10-25 01:00', '2026-10-25 02:00', '2026-10-25 02:30', '2026-10-25 03:00', '2026-10-25 04:00'],
+    ['2026-03-29 01:00', '2026-03-29 01:59', '2026-03-29 03:00', '2026-03-29 04:00'],
+    ['2026-10-25 01:00', '2026-10-25 01:30', '2026-10-25 03:00', '2026-10-25 04:00'],
   ];
   for (const reeks of reeksen) {
     for (let i = 1; i < reeks.length; i += 1) {
-      assert.ok(ms(reeks[i]) >= ms(reeks[i - 1]), `${reeks[i]} mag niet vóór ${reeks[i - 1]} liggen`);
+      assert.ok(ms(reeks[i]) !== null, `${reeks[i]} bestaat en hoort een moment te hebben`);
+      assert.ok(ms(reeks[i]) > ms(reeks[i - 1]), `${reeks[i]} mag niet vóór ${reeks[i - 1]} liggen`);
     }
   }
 
@@ -338,7 +352,11 @@ test('proef 7 — een dalende teller is ROOD, ook als bron en pagina overeenkome
   const o = opstelling(DRIE_LANES);
   assert.equal(o.kijk().uitkomst, 'GROEN', 'zonder getuige is dit dezelfde situatie als in de nulmeting');
 
-  const gedaald = o.kijk({ getuigenis: { sequence: o.state.eventHighWatermark + 5, commitSha: KOP_B, stateSha256: 'x' } });
+  // De hash hieronder is een echte hash en niet meer de plaatshouder `'x'` die hier eerst stond: een
+  // getuigenis is bewijs, en onleesbaar bewijs wordt sinds deze ronde geweigerd (zie reviewgat 21).
+  const gedaald = o.kijk({
+    getuigenis: { sequence: o.state.eventHighWatermark + 5, commitSha: KOP_B, stateSha256: sha256(Buffer.from('vorige keer')) },
+  });
   assert.equal(gedaald.uitkomst, 'ROOD');
   assert.deepEqual(gedaald.redenen, ['WATERMERK_DAALT']);
   assert.equal(gedaald.gemeten.getuigeAanwezig, true);
@@ -736,9 +754,12 @@ test('reviewgat 13 — een kapotte rij midden in de tabel neemt niet alles erond
   assert.equal(state.eventCount, 3, 'en de kapotte rij is geteld, niet weggelaten');
   assert.equal(state.verworpenRijen, 1);
   assert.equal(state.lanes.MINI.sequence, 3, 'MINI houdt zijn eigen plaats, hij schuift niet op');
-  // Alleen een regel die géén tabelregel meer is sluit de tabel nog.
+  // Een lege regel sluit de tabel nog steeds — maar wat DAARNA komt verdwijnt niet meer. Hier stond
+  // eerst `['CONTROL']`, en dat was precies de fout die de vierde ronde blootlegde: een rij die
+  // buiten de tabel viel werd nul, niet afkeuring, en de plaat kwam er GROEN uit terwijl er een
+  // volwaardige spiegelrij ongelezen bleef. Zie reviewgat 20 voor de meting.
   const erna = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Eerste.'), '', rij('2026-07-26 17:10', 'MINI', 'Andere tabel.')].join('\n');
-  assert.deepEqual(spiegelScan(erna).kandidaten.map((k) => k && k.tab), ['CONTROL']);
+  assert.deepEqual(spiegelScan(erna).kandidaten.map((k) => k && k.tab), ['CONTROL', null]);
 });
 
 test('reviewgat 14 — de toestand moet uit de GELEZEN tekst volgen, niet slechts hetzelfde etiket dragen', () => {
@@ -881,4 +902,201 @@ test('de aanwezigheid van de klok blijft zichtbaar in de meting, en de uitvoerde
   assert.equal(g.kijk().gemeten.klokAanwezig, true);
   const uitvoerder = readFileSync(new URL('../scripts/kijk.mjs', import.meta.url), 'utf8');
   assert.match(uitvoerder, /oordeel\(\{[^}]*nu: Date\.now\(\)/, 'de uitvoerder geeft altijd een klok mee');
+});
+
+// ── VIERDE REVIEWRONDE (kop 4deb499). Codex meldde acht routes buiten de dekking; alle acht zijn hier
+// eerst nagemeten voordat er iets veranderde. Zeven bleken echt en staan hieronder als proef. De
+// achtste is weerlegd, en die weerlegging staat er óók — met de reden, want een afgewezen bevinding
+// die niet is vastgelegd komt volgende ronde ongewijzigd terug.
+
+test('reviewgat 20 — een spiegelrij buiten de tabel of in commentaar telt, of wordt afgekeurd, maar verdwijnt nooit', () => {
+  // GEMETEN VÓÓR DE FIX, drie vormen, alle drie GROEN met één spoor en nul afkeuringen:
+  //   a) kop, rij, LEGE REGEL, rij            → sporen ["CONTROL"], eventCount 1, verworpen 0
+  //   b) kop, rij, gewone zin, rij            → idem
+  //   c) een complete tabel binnen <!-- -->    → sporen ["CONTROL","MINI"], want commentaar werd gelezen
+  // a en b zijn de gevaarlijkste: er stáát een volwaardige spiegelrij en die werd nul. c is de
+  // spiegelbeeldige fout: er staat GEEN geldende rij en die werd wél toestand. Beide keren beslist de
+  // opmaak eromheen wat de bron zegt, en dat is precies wat een bronvaste lezer niet mag toestaan.
+  const na = (tekst) => {
+    const { state } = kijkStateUitSpiegel(tekst, { commitSha: KOP_A });
+    return { sporen: Object.keys(state.lanes).sort(), telling: state.eventCount, verworpen: state.verworpenRijen };
+  };
+
+  const legeRegel = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Eerste.'), '',
+    rij('2026-07-26 17:10', 'MINI', 'Wees niet weg.')].join('\n');
+  assert.deepEqual(na(legeRegel), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
+
+  const proza = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Eerste.'), 'Een gewone zin ertussen.',
+    rij('2026-07-26 17:10', 'MINI', 'Wees niet weg.')].join('\n');
+  assert.deepEqual(na(proza), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
+
+  // Een verweesde rij wordt dus een AFKEURING, geen toestand: hij houdt zijn plaats in de telling en
+  // maakt de uitkomst rood, in plaats van dat hij stil wegvalt.
+  const o = opstelling(legeRegel);
+  assert.equal(o.kijk().uitkomst, 'ROOD');
+  assert.ok(o.kijk().redenen.includes('VELD_NIET_GESLOTEN'));
+
+  // En commentaar is géén gegeven. Een verborgen tabel levert geen enkel spoor op.
+  const verborgen = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'De echte rij.'), '',
+    '<!--', KOPREGELS, rij('2026-07-26 17:10', 'MINI', 'Ik sta in commentaar.'), '-->'].join('\n');
+  assert.deepEqual(na(verborgen), { sporen: ['CONTROL'], telling: 1, verworpen: 0 });
+
+  // De toets staat op EXACT vijf kolommen, en dat is waarom de kolom-uitleg bovenaan de echte spiegel
+  // (twee kolommen) hier niets raakt — anders zou elke andere tabel in het bestand afkeuringen worden.
+  const andereTabel = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'De echte rij.'), '',
+    '| kolom | betekenis |', '| --- | --- |', '| datum-tijd | wanneer |'].join('\n');
+  assert.deepEqual(na(andereTabel), { sporen: ['CONTROL'], telling: 1, verworpen: 0 });
+});
+
+test('reviewgat 21 — een onleesbare getuigenis is geen getuige maar een gat in de bewaking', () => {
+  // GEMETEN VÓÓR DE FIX: `{ sequence: 'geen getal', stateSha256: null }` gaf `getuigeAanwezig: true`,
+  // uitkomst GROEN, redenen []. De twee toetsen die geheugen nodig hebben stonden achter
+  // `Number.isInteger(...)` en sloegen zichzelf stilzwijgend over. Dat is de ergste soort: de meting
+  // meldt dat er een getuige is, terwijl er niets is getoetst.
+  const o = opstelling(DRIE_LANES);
+  const goed = { sequence: o.state.eventHighWatermark, commitSha: KOP_B, stateSha256: o.manifest.stateSha256 };
+  assert.equal(o.kijk({ getuigenis: goed }).uitkomst, 'GROEN', 'een volledige, kloppende getuigenis laat door');
+
+  for (const [wat, kapot] of [
+    ['sequence is geen getal', { ...goed, sequence: 'geen getal' }],
+    ['sequence ontbreekt', { commitSha: KOP_B, stateSha256: goed.stateSha256 }],
+    ['sequence is negatief', { ...goed, sequence: -1 }],
+    ['commit is een prefix', { ...goed, commitSha: '4deb499' }],
+    ['hash ontbreekt', { sequence: goed.sequence, commitSha: KOP_B, stateSha256: null }],
+    ['hash is een plaatshouder', { ...goed, stateSha256: 'x' }],
+    ['het is een lijst', [goed]],
+    ['het is een tekst', 'ik heb het gezien'],
+    ['het is een getal', 42],
+  ]) {
+    const r = o.kijk({ getuigenis: kapot });
+    assert.equal(r.uitkomst, 'GEEN OORDEEL', `${wat} hoort geen oordeel op te leveren`);
+    assert.deepEqual(r.redenen, ['GETUIGE_ONBRUIKBAAR'], wat);
+  }
+
+  // Géén getuigenis blijft toegestaan — de getuige draait buiten deze repo en is nog niet geactiveerd
+  // (taak EQ-e2bc34e069cd). Dat verschil is zichtbaar in de meting, en dat is het punt: niets weten
+  // mag, doen alsof je iets weet niet.
+  assert.equal(o.kijk({ getuigenis: null }).gemeten.getuigeAanwezig, false);
+  assert.equal(o.kijk({ getuigenis: null }).uitkomst, 'GROEN');
+});
+
+test('reviewgat 22 — de stiltedrempel kan de versheidsmeting niet stilletjes uitzetten', () => {
+  // GEMETEN VÓÓR DE FIX, op exact dezelfde bytes: normaal PARTIAL met ALLES_STIL, met `stilMs: NaN`
+  // GROEN met lege redenen, met `Infinity` GROEN met lege redenen. NaN maakt elke vergelijking onwaar
+  // en Infinity maakt geen stilte ooit lang genoeg — twee manieren om de meting van buitenaf uit te
+  // zetten zonder één zichtbaar spoor. Dezelfde fout als bij de klok, en dus dezelfde uitkomst.
+  const oud = spiegelMet(rij('2026-01-02 09:00', 'CONTROL', 'Oud.'), rij('2026-01-02 09:10', 'MINI', 'Ook oud.'));
+  const o = opstelling(oud);
+  assert.equal(o.kijk().uitkomst, 'PARTIAL');
+  assert.ok(o.kijk().redenen.includes('ALLES_STIL'));
+
+  for (const drempel of [NaN, Infinity, -Infinity, -1, 'zes uur', null]) {
+    const r = o.kijk({ stilMs: drempel });
+    assert.equal(r.uitkomst, 'GEEN OORDEEL', `drempel ${String(drempel)}`);
+    assert.deepEqual(r.redenen, ['DREMPEL_ONBRUIKBAAR'], String(drempel));
+  }
+
+  // Nul is wél een drempel: "geen respijt". Een geldige waarde blijft dus gewoon meten.
+  assert.equal(o.kijk({ stilMs: 0 }).uitkomst, 'PARTIAL');
+  assert.ok(o.kijk({ stilMs: 0 }).redenen.includes('ALLES_STIL'));
+});
+
+test('reviewgat 23 — de bronblob van het manifest wordt tegen de lezing gehouden', () => {
+  // GEMETEN VÓÓR DE FIX: lezing met blob cccc…, manifest met blob bbbb… → GROEN, redenen []. Het veld
+  // werd geschreven en nooit gelezen. De commit zegt uit welke wereld de bron komt; de blob zegt welk
+  // BESTAND daarin gelezen is, en zonder die tweede binding kan een cache of proxy andere bytes
+  // doorgeven dan de boom van die commit declareert.
+  const tekst = spiegelMet(rij('2026-07-26 17:00', 'CONTROL', 'De gelezen bron.'));
+  const { state } = kijkStateUitSpiegel(tekst, { commitSha: KOP_A });
+  const beoordeel = (lezingBlob, manifestBlob) => {
+    const m = manifestVoor(state, { bronCommitSha: KOP_A, bronBlobSha: manifestBlob, generatedAt: '2026-07-26T18:45:00.000Z' });
+    return oordeel({
+      lezing: { ok: true, sha: KOP_A, tekst, blobSha: lezingBlob, pogingen: 1, geprobeerd: [] },
+      paginaHerkomst: { commitSha: KOP_A, stateSha256: m.manifest.stateSha256, eventHighWatermark: state.eventHighWatermark },
+      state, manifest: m.manifest, stateBytes: m.bytes, nu: NU,
+    });
+  };
+  const BLOB = 'b'.repeat(40);
+  const ANDER = 'c'.repeat(40);
+
+  assert.equal(beoordeel(BLOB, BLOB).uitkomst, 'GROEN', 'dezelfde blob aan beide kanten laat door');
+  const scheef = beoordeel(ANDER, BLOB);
+  assert.equal(scheef.uitkomst, 'GEEN OORDEEL');
+  assert.deepEqual(scheef.redenen, ['TOESTAND_NIET_BIJ_BRON']);
+
+  // Ontbreekt één van de twee, dan is er niets vergeleken en wordt er ook niets beweerd. Dat is geen
+  // gat maar het eerlijke antwoord: de OVERGANG-herleiding (stap 2e) draagt zolang de spiegel de bron
+  // is, en zodra dat merk vervalt is deze vergelijking de binding die ervoor in de plaats komt.
+  assert.equal(beoordeel(null, BLOB).uitkomst, 'GROEN');
+  assert.equal(beoordeel(BLOB, null).uitkomst, 'GROEN');
+
+  // De uitvoerder rekent zijn kant ZELF uit — `blob <lengte>\0` plus de bytes, zoals git het doet — en
+  // haalt de andere kant uit de boom van diezelfde commit. Twee onafhankelijke bronnen, anders zou de
+  // vergelijking een getal met zichzelf vergelijken.
+  const uitvoerder = readFileSync(new URL('../scripts/kijk.mjs', import.meta.url), 'utf8');
+  assert.match(uitvoerder, /blob \$\{inhoud\.length\}\\0/, 'de uitvoerder rekent de blob zelf uit');
+  assert.match(uitvoerder, /bronBlobSha: await declaredBlobVan\(lezing\.sha\)/, 'en haalt de declaratie uit de boom');
+});
+
+test('reviewgat 24 — de gesloten lijsten zijn ook echt gesloten, niet alleen zo genoemd', () => {
+  // GEMETEN VÓÓR DE FIX: `REDENEN.ALLES_STIL = 'incident bij klant Voorbeeld op /vrij/pad'` en die zin
+  // rolde letterlijk uit `publiekeRegel` de publieke plaat op; `LANES.push('VRIJE TEKST ALS SPOOR')`
+  // werkte net zo goed. `const` bindt de naam, niet de inhoud. Dat was de laatste route waarlangs
+  // vrije publieke tekst nog bestond, en de hele opdracht draait om het sluiten daarvan.
+  for (const lijst of [REDENEN, LANES, TOESTANDEN, UITKOMSTEN]) {
+    assert.ok(Object.isFrozen(lijst), 'een gesloten lijst hoort bevroren te zijn');
+  }
+  const oudeRegel = publiekeRegel({ uitkomst: 'PARTIAL', redenen: ['ALLES_STIL'] }).uitleg;
+  assert.throws(() => { 'use strict'; REDENEN.ALLES_STIL = 'incident bij klant Voorbeeld op /vrij/pad'; });
+  assert.throws(() => { 'use strict'; LANES.push('VRIJE TEKST ALS SPOOR'); });
+  assert.equal(publiekeRegel({ uitkomst: 'PARTIAL', redenen: ['ALLES_STIL'] }).uitleg, oudeRegel);
+});
+
+test('reviewgat 25 — een gooiende ophaler levert een uitkomst op, geen uitzondering', () => {
+  // GEMETEN VÓÓR DE FIX: een `kopVan` die gooit gaf `Error kapot` in plaats van een reden — de belofte
+  // werd verworpen en er bestond helemaal geen uitkomst meer om over te oordelen. Proef 8 dekte de
+  // vier storingsvormen die netjes een status teruggeven; dit is de vorm waarin `fetch` zelf omvalt
+  // (DNS, afgebroken verbinding, tijdslimiet), en juist die is in productie de gewoonste.
+  const goed = { ok: true, sha: KOP_A };
+  const gooi = () => { throw new Error('kapot'); };
+  const gevallen = [
+    ['de kop gooit meteen', { kopVan: gooi, inhoudVan: async () => ({ ok: true, tekst: 'x' }) }, 'KOP_ONBEPAALBAAR'],
+    ['de inhoud gooit', { kopVan: async () => goed, inhoudVan: gooi }, 'BRON_ONBEREIKBAAR'],
+    ['de tweede kopmeting gooit', {
+      kopVan: (() => { let n = 0; return async () => { n += 1; if (n > 1) gooi(); return goed; }; })(),
+      inhoudVan: async () => ({ ok: true, tekst: 'x' }),
+    }, 'KOP_ONBEPAALBAAR'],
+  ];
+  return Promise.all(gevallen.map(async ([wat, haken, reden]) => {
+    const lezing = await leesBronvast(haken);
+    assert.equal(lezing.ok, false, wat);
+    assert.equal(lezing.reden, reden, wat);
+    // En de uitkomst is GEEN OORDEEL, nooit gecacht groen — dezelfde eis als rode proef 8.
+    assert.equal(oordeel({ lezing, nu: NU }).uitkomst, 'GEEN OORDEEL', wat);
+    // De fout zelf gaat niet mee naar buiten: hij kan een adres of een responsdeel bevatten.
+    assert.equal(JSON.stringify(lezing).includes('kapot'), false, `${wat}: geen fouttekst naar buiten`);
+  }));
+});
+
+test('weerlegging — AFGEROND wordt LEEG, en dat is de bedoeling, geen fout', () => {
+  // Dit is de ACHTSTE bevinding van de vierde ronde, en de enige die is afgewezen. Codex las het zo:
+  // een spiegelrij met status AFGEROND komt als toestand LEEG in de kijk-state, LEEG is de toestand
+  // "niet klaar", en toch is de uitkomst GROEN — dus zou de plaat afgerond werk als leeg tonen.
+  //
+  // Twee redenen waarom dat niet klopt, en ze staan hier vast zodat de bevinding niet elke ronde
+  // terugkomt. EEN: LEEG is precies de juiste vertaling. De werkwijze-regels noemen zes toegestane
+  // standen en zeggen erbij dat iets anders invullen — "klaar", "afgerond", "voltooid" — een LEGE
+  // stand ís. De spiegel onderscheidt MERGEABLE, MERGED en EFFECT-BEWEZEN niet, dus élke keuze uit die
+  // drie zou een bewering verzinnen die in de bron niet staat. TWEE: deze module meet niet of het WERK
+  // af is, maar of de WAARNEMING klopt. GROEN betekent hier "wat ik lees is aantoonbaar de actuele
+  // bron", niet "alles is af". Een kijk die rood werd van onafgerond werk zou permanent rood staan.
+  const o = opstelling(spiegelMet(rij('2026-07-26 17:30', 'CONTROL', 'Een afgeronde regel.', 'AFGEROND')));
+  assert.equal(o.state.lanes.CONTROL.toestand, 'LEEG');
+  // En het tweede veld laat zien waarom LEEG hier geen bewering over het werk is: de spiegel kan de
+  // uitkomst van de GEBEURTENIS niet zeggen, dus daar staat GEEN — expliciet onbekend, niet verzonnen.
+  assert.equal(o.state.lanes.CONTROL.eventUitkomst, 'GEEN');
+  assert.equal(o.kijk().uitkomst, 'GROEN');
+  // Dat onderscheid is de kern: de uitkomst van de gebeurtenis staat los van de toestand van het werk.
+  // Zodra de exporter uit task_events publiceert komt de echte toestand mee en vervalt de vertaling.
+  assert.equal(o.state.bronSoort, OVERGANG_MERK);
 });

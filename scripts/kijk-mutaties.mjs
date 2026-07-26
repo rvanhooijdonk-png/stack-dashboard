@@ -38,56 +38,56 @@ const lees = (rel) => {
 const MUTATIES = [
   {
     proef: 1,
-    raakt: 'proef 1',
+    raakt: 'proef 1 —',
     wat: 'de vergelijking van de paginacommit met de actuele kop vervalt',
     van: "if (paginaHerkomst.commitSha !== lezing.sha) redenen.push('PAGINA_ANDERE_COMMIT');",
     naar: '/* mutatie: commitvergelijking weg */',
   },
   {
     proef: 2,
-    raakt: 'proef 2',
+    raakt: 'proef 2 —',
     wat: 'de kop wordt na het ophalen niet opnieuw gelezen',
-    van: '    const naKop = await kopVan();',
+    van: "    const naKop = await veilig(() => kopVan(), 'KOP_ONBEPAALBAAR');",
     naar: '    const naKop = { ok: true, sha: kop.sha }; // mutatie: nooit opnieuw lezen',
   },
   {
     proef: 3,
-    raakt: 'proef 3',
+    raakt: 'proef 3 —',
     wat: 'de NL-kolom wordt weer als UTC gelezen, zoals de oude rijMoment deed',
-    van: '  let t = alsUtc;',
-    naar: '  return alsUtc; let t = alsUtc; // mutatie: zone niet opzoeken',
+    van: '  const kandidaten = new Set([zoneVerschuiving(alsUtc - 12 * UUR), zoneVerschuiving(alsUtc + 12 * UUR)]);',
+    naar: '  return alsUtc; // mutatie: zone niet opzoeken\n  const kandidaten = new Set();',
   },
   {
     proef: 4,
-    raakt: 'proef 4',
+    raakt: 'proef 4 —',
     wat: 'de toestandshash van de pagina wordt niet meer vergeleken',
     van: "    if (manifest && paginaHerkomst.stateSha256 !== manifest.stateSha256) redenen.push('PAGINA_ANDERE_TOESTAND');",
     naar: '    /* mutatie: hashvergelijking weg */',
   },
   {
     proef: 5,
-    raakt: 'proef 5',
+    raakt: 'proef 5 —',
     wat: 'stille sporen worden niet meer opgespoord',
     van: '  const lanes = Object.values(state?.lanes ?? {});\n  const momenten',
     naar: '  const lanes = []; const _weg = Object.values(state?.lanes ?? {});\n  const momenten',
   },
   {
     proef: 6,
-    raakt: 'proef 6',
+    raakt: 'proef 6 —',
     wat: 'de publieke toestand krijgt er één vrij tekstveld bij',
     van: '      eventUitkomst: \'GEEN\',',
     naar: '      eventUitkomst: \'GEEN\',\n      onderwerp: r.onderwerp, // mutatie: vrije tekst in de publieke toestand',
   },
   {
     proef: 7,
-    raakt: 'proef 7',
+    raakt: 'proef 7 —',
     wat: 'het geheugen van de getuige wordt niet meer geraadpleegd',
     van: '  if (getuigenis && state) {',
     naar: '  if (false && getuigenis && state) { // mutatie: getuige genegeerd',
   },
   {
     proef: 8,
-    raakt: 'proef 8',
+    raakt: 'proef 8 —',
     wat: 'een mislukte lezing levert weer een gewoon oordeel in plaats van GEEN OORDEEL',
     van: "    return uit('GEEN OORDEEL');\n  }\n  gemeten.kopSha = lezing.sha;",
     naar: "    return uit('GROEN'); // mutatie: onwetendheid doet zich voor als kennis\n  }\n  gemeten.kopSha = lezing.sha;",
@@ -96,42 +96,42 @@ const MUTATIES = [
   // mutaties hierboven de ANKERS bewijzen en niet het fail-closed-contract; deze zes sluiten dat gat.
   {
     proef: '1 (reviewgat)',
-    raakt: 'reviewgat 1',
+    raakt: 'reviewgat 1 —',
     wat: 'een toestand zonder enig spoor telt weer als een gezonde lege toestand',
     van: "    fouten.push('GEEN_SPOREN');",
     naar: '    /* mutatie: nul sporen is weer geen bevinding */',
   },
   {
     proef: '2 (reviewgat)',
-    raakt: 'reviewgat 2',
+    raakt: 'reviewgat 2 —',
     wat: 'een weggelaten manifest of weggelaten bytes slaat de hashcontrole weer stilzwijgend over',
     van: '  if (!state || !manifest || !stateBytes) {',
     naar: '  if (false) { // mutatie: ontbrekend bewijs mag weer doorlopen',
   },
   {
     proef: '3 (reviewgat)',
-    raakt: 'reviewgat 3',
+    raakt: 'reviewgat 3 —',
     wat: 'de bytes worden niet meer aan déze toestand vastgemaakt',
     van: '  if (!kanoniekeBytes(state).equals(Buffer.from(stateBytes))) {',
     naar: '  if (false) { // mutatie: bytes van A mogen weer bij toestand B',
   },
   {
     proef: '4 (reviewgat)',
-    raakt: 'reviewgat 4',
+    raakt: 'reviewgat 4 —',
     wat: 'de sleutellijst van de toestand is niet meer gesloten',
     van: "  if (Object.keys(state).some((k) => !STATE_SLEUTELS.includes(k))) fouten.push('VELD_NIET_GESLOTEN');",
     naar: '  /* mutatie: onbekende velden bovenin de toestand mogen weer */',
   },
   {
     proef: '5 (reviewgat)',
-    raakt: 'reviewgat 5',
+    raakt: 'reviewgat 5 —',
     wat: 'de absolute vloer onder de totale uitval vervalt',
     van: '  const allesStil = momenten.length > 0 && nu - Math.max(...momenten) > stilMs;',
     naar: '  const allesStil = false; // mutatie: alles tegelijk stil is weer groen',
   },
   {
     proef: '6 (reviewgat)',
-    raakt: 'reviewgat 6',
+    raakt: 'reviewgat 6 —',
     wat: 'de kalenderterugrekening vervalt, dus 30 februari wordt weer een geldig moment',
     van: '  if (d.getUTCFullYear() !== +jj || d.getUTCMonth() !== +mm - 1 || d.getUTCDate() !== +dd',
     naar: '  if (false && d.getUTCFullYear() !== +jj || false && d.getUTCMonth() !== +mm - 1 || false && d.getUTCDate() !== +dd',
@@ -141,14 +141,14 @@ const MUTATIES = [
   // proef omvergooit, meet die proef het contract en niet alleen zijn eigen anker.
   {
     proef: '7 (reviewgat)',
-    raakt: 'reviewgat 7',
+    raakt: 'reviewgat 7 —',
     wat: 'een rij die de vormtoets niet haalt telt weer niet mee, dus schuift alles erna een plaats op',
     van: "    if (r === null) { fouten.push('VELD_NIET_GESLOTEN'); continue; }",
     naar: '    if (r === null) { teller -= 1; continue; } // mutatie: stille verdwijning vóór de teller',
   },
   {
     proef: '8 (reviewgat)',
-    raakt: 'reviewgat 8',
+    raakt: 'reviewgat 8 —',
     wat: 'een aangeleverd spoor mag zijn tijd weer missen, en dan meet geen enkele stiltemeting iets',
     // Bewust NIET geankerd op de gelijknamige wacht in `kijkStateUitSpiegel`: de vormtoets van de
     // spiegel keurt datum en tijd al even streng, dus die tak is via de spiegel niet te bereiken en een
@@ -168,28 +168,28 @@ const MUTATIES = [
   },
   {
     proef: '9 (reviewgat)',
-    raakt: 'reviewgat 9',
+    raakt: 'reviewgat 9 —',
     wat: 'de bewijsketen wordt niet meer aan de gelezen bron vastgemaakt',
     van: '  if (state.bronCommitSha !== lezing.sha || manifest.bronCommitSha !== lezing.sha) {',
     naar: '  if (false) { // mutatie: een bewijs dat alleen zichzelf bewijst mag weer',
   },
   {
     proef: '10 (reviewgat)',
-    raakt: 'reviewgat 10',
+    raakt: 'reviewgat 10 —',
     wat: 'de toegestane sleutels krijgen hun waardedomein niet meer gecontroleerd',
     van: "  if (state.bronSoort !== OVERGANG_MERK) fouten.push('VELD_NIET_GESLOTEN');",
     naar: '  /* mutatie: gesloten sleutel, vrije waarde */',
   },
   {
     proef: '11 (reviewgat)',
-    raakt: 'reviewgat 11',
+    raakt: 'reviewgat 11 —',
     wat: 'de absolute vloer krijgt haar oude eigen return terug en maskeert de onderlinge meting weer',
     van: "  if (allesStil) redenen.push('ALLES_STIL');",
     naar: "  if (allesStil) { redenen.push('ALLES_STIL'); return uit('PARTIAL'); } // mutatie: (a) verbergt (b)",
   },
   {
     proef: '12 (reviewgat)',
-    raakt: 'reviewgat 12',
+    raakt: 'reviewgat 12 —',
     wat: 'een tijdstip uit de toekomst is weer geen bevinding, en zet daarmee de stiltemeting uit',
     van: "  if (momenten.some((t) => t > nu + TOEKOMST_MARGE)) redenen.push('TIJD_UIT_DE_TOEKOMST');",
     naar: '  /* mutatie: volgende maand telt weer als recent */',
@@ -198,7 +198,7 @@ const MUTATIES = [
   // BLOKKEREND. Eén ervan zit buiten kijk.mjs, in de gedeelde lezer — vandaar `bestand`.
   {
     proef: '13 (reviewgat)',
-    raakt: 'reviewgat 13',
+    raakt: 'reviewgat 13 —',
     bestand: 'scripts/lib/kanaalpost.mjs',
     wat: 'een rij met een afwijkend kolomaantal sluit de tabel weer, dus alles erna verdwijnt stil',
     van: '    if (c.length !== KOPNAMEN.length) { kandidaten.push(null); continue; }',
@@ -206,21 +206,21 @@ const MUTATIES = [
   },
   {
     proef: '14 (reviewgat)',
-    raakt: 'reviewgat 14',
+    raakt: 'reviewgat 14 —',
     wat: 'de toestand hoeft niet meer uit de GELEZEN tekst te volgen; een gelijk etiket volstaat weer',
     van: '  if (state.bronSoort === OVERGANG_MERK) {',
     naar: '  if (false) { // mutatie: etiketgelijkheid gaat weer door voor inhoudsbinding',
   },
   {
     proef: '15 (reviewgat)',
-    raakt: 'reviewgat 15',
+    raakt: 'reviewgat 15 —',
     wat: 'het manifest gaat publiek zonder dat zijn eigen schema gekeurd is',
     van: '  const manifestKeuring = keurManifest(manifest, state);',
     naar: '  const manifestKeuring = { ok: true, fouten: [] }; // mutatie: manifest ongekeurd publiek',
   },
   {
     proef: '16 (reviewgat)',
-    raakt: 'reviewgat 16',
+    raakt: 'reviewgat 16 —',
     wat: 'de stiltemeting leest de sporen weer zonder vangnet, dus een kapotte toestand gooit een uitzondering',
     // GEMETEN: deze mutatie slaat NIET aan, en dat is hier geen zwakke proef maar een gevolg van de
     // volgorde. Elke route die een kapotte `lanes` tot híér kan brengen wordt eerder gesloten: bij het
@@ -237,24 +237,80 @@ const MUTATIES = [
   },
   {
     proef: '17 (reviewgat)',
-    raakt: 'reviewgat 17',
+    raakt: 'reviewgat 17 —',
     wat: 'verworpenRijen mag weer ontbreken en krijgt er stilzwijgend een nul bij',
     van: '  const verworpen = state.verworpenRijen;',
     naar: '  const verworpen = state.verworpenRijen ?? 0; // mutatie: het meldveld mag zelf ontbreken',
   },
   {
     proef: '18 (reviewgat)',
-    raakt: 'reviewgat 18',
+    raakt: 'reviewgat 18 —',
     wat: 'alléén de kalenderterugrekening op een aangeleverd spoor vervalt; de vormtoets blijft staan',
     van: '      || new Date(Date.parse(lane.momentUtc)).toISOString() !== lane.momentUtc) {',
     naar: '      || false) { // mutatie: 30 februari mag weer door de vormtoets heen',
   },
   {
     proef: '19 (reviewgat)',
-    raakt: 'reviewgat 19',
+    raakt: 'reviewgat 19 —',
     wat: 'de klok is weer optioneel, dus een weglating bepaalt de uitkomst in plaats van de meting',
     van: '  if (!Number.isFinite(nu)) {',
     naar: '  if (false) { // mutatie: zonder klok toch een oordeel',
+  },
+  // ── de zeven reparaties uit de VIERDE dubbele review, op kop 4deb499. Codex gaf BLOKKEREND met acht
+  // routes, Gemini gaf AKKOORD. Die twee zijn niet tegen elkaar weggestreept maar nagemeten: zeven van
+  // de acht routes bleken echt en staan hieronder, de achtste is weerlegd en staat als weerlegging in
+  // de suite. Twee mutaties wijzen naar de GEDEELDE lezer, waar ook de waarnemer en de publicatieweg
+  // op leunen.
+  {
+    proef: '20a (reviewgat)',
+    raakt: 'reviewgat 20 —',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'een rij buiten de tabel verdwijnt weer stil in plaats van te worden afgekeurd',
+    van: '      if (c.length === KOPNAMEN.length && !isScheiding(c)) kandidaten.push(null);',
+    naar: '      /* mutatie: een verweesde spiegelrij telt weer als niets */',
+  },
+  {
+    proef: '20b (reviewgat)',
+    raakt: 'reviewgat 20 —',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'wat in HTML-commentaar staat telt weer als gegeven',
+    van: '    if (regels[i].includes(\'<!--\') && !regels[i].includes(\'-->\')) {',
+    naar: '    if (false) { // mutatie: verborgen tabellen worden weer gelezen',
+  },
+  {
+    proef: '21 (reviewgat)',
+    raakt: 'reviewgat 21 —',
+    wat: 'een onleesbare getuigenis meldt zich weer als aanwezige getuige zonder iets te toetsen',
+    van: '  if (getuigenis !== null) {\n    const leesbaar =',
+    naar: '  if (false) { // mutatie: onleesbaar bewijs telt weer als bewaking\n    const leesbaar =',
+  },
+  {
+    proef: '22 (reviewgat)',
+    raakt: 'reviewgat 22 —',
+    wat: 'de stiltedrempel mag weer NaN of oneindig zijn, en dan meet de versheidsmeting niets',
+    van: '  if (!Number.isFinite(stilMs) || stilMs < 0) {',
+    naar: '  if (false) { // mutatie: de meting is van buitenaf uit te zetten',
+  },
+  {
+    proef: '23 (reviewgat)',
+    raakt: 'reviewgat 23 —',
+    wat: 'de bronblob van het manifest wordt weer nergens tegen de lezing gehouden',
+    van: '  if (manifest.bronBlobSha && lezing.blobSha && manifest.bronBlobSha !== lezing.blobSha) {',
+    naar: '  if (false) { // mutatie: het blobveld wordt weer geschreven en nooit gelezen',
+  },
+  {
+    proef: '24 (reviewgat)',
+    raakt: 'reviewgat 24 —',
+    wat: 'de gesloten redenenlijst is weer muteerbaar, dus vrije publieke tekst kan er weer in',
+    van: 'export const REDENEN = Object.freeze({',
+    naar: 'export const REDENEN = ({ // mutatie: gesloten in naam, open in werking',
+  },
+  {
+    proef: '25 (reviewgat)',
+    raakt: 'reviewgat 25 —',
+    wat: 'een ophaler die gooit laat de lezer weer verwerpen in plaats van een reden op te leveren',
+    van: '    const kop = await veilig(() => kopVan(), \'KOP_ONBEPAALBAAR\');',
+    naar: '    const kop = await kopVan(); // mutatie: geen vangnet om de ophaal',
   },
 ];
 
@@ -291,6 +347,9 @@ for (const m of MUTATIES) {
   const gefaald = gefaaldeProeven();
   writeFileSync(doel, origineel, 'utf8');
 
+  // De naamvergelijking loopt tot en met het liggende streepje, niet tot de spatie ervoor. Zonder dat
+  // streepje zou `reviewgat 2` ook `reviewgat 20` t/m `reviewgat 25` opeisen en `proef 3` ook `proef
+  // 3b` — dan lijkt een mutatie aan te slaan terwijl een heel andere proef omvalt.
   const geraakt = gefaald.filter((naam) => naam.startsWith(m.raakt));
   const aangeslagen = geraakt.length > 0;
   // Eén mutatie is vooraf als ONBEREIKBAAR aangemerkt: een vangnet waar geen route meer naartoe loopt

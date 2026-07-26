@@ -30,7 +30,7 @@ import { createHash } from 'node:crypto';
 import { kanaalpostUitTekst, spiegelScan, ontdaan } from './kanaalpost.mjs';
 
 /** De zes canonieke toestanden van een WERKOBJECT. Gesloten lijst; een zevende waarde is een fout. */
-export const TOESTANDEN = ['MERGEABLE', 'WACHT OP AKKOORD', 'GEBLOKKEERD', 'MERGED', 'EFFECT-BEWEZEN', 'LEEG'];
+export const TOESTANDEN = Object.freeze(['MERGEABLE', 'WACHT OP AKKOORD', 'GEBLOKKEERD', 'MERGED', 'EFFECT-BEWEZEN', 'LEEG']);
 
 /**
  * De uitkomst van één EVENT, streng gescheiden van de toestand van het werkobject. Dat onderscheid is
@@ -38,18 +38,24 @@ export const TOESTANDEN = ['MERGEABLE', 'WACHT OP AKKOORD', 'GEBLOKKEERD', 'MERG
  * platte lijst hetzelfde uit, en juist daar ontstaat het valse groen — een afgebroken meting die als
  * een gezonde toestand wordt gelezen.
  */
-export const EVENT_UITKOMSTEN = ['GEACCEPTEERD', 'GEWEIGERD', 'AFGEBROKEN', 'GEEN'];
+export const EVENT_UITKOMSTEN = Object.freeze(['GEACCEPTEERD', 'GEWEIGERD', 'AFGEBROKEN', 'GEEN']);
 
 /** Wat de kijk als geheel kan zeggen. GEEN OORDEEL is een volwaardige uitkomst, geen foutafhandeling. */
-export const UITKOMSTEN = ['GROEN', 'PARTIAL', 'ROOD', 'GEEN OORDEEL'];
+export const UITKOMSTEN = Object.freeze(['GROEN', 'PARTIAL', 'ROOD', 'GEEN OORDEEL']);
 
 /**
  * Gesloten lijst met redenen, elk met één zin in gewone taal. Deze zinnen mogen publiek worden, dus
  * er staat geen pad, geen adres en geen naam in — en er is geen enkele manier om er vrije tekst aan
  * toe te voegen. Dat is precies de eis "geen vrije publieke tekst: alleen gesloten velden en
  * goedgekeurde reasonCodes".
+ *
+ * De lijst is BEVROREN, en dat is geen stijlkeuze. `const` bindt de naam, niet de inhoud: één regel
+ * `REDENEN.ALLES_STIL = 'incident bij klant X op /vrij/pad'` in dezelfde procesruimte en die tekst
+ * rolt letterlijk uit `publiekeRegel` de publieke plaat op. Gemeten, en daarmee de laatste route
+ * waarlangs vrije publieke tekst nog bestond. Om dezelfde reden is elke andere gesloten lijst in dit
+ * bestand bevroren: `LANES.push('VRIJE TEKST ALS SPOOR')` werkte net zo goed.
  */
-export const REDENEN = {
+export const REDENEN = Object.freeze({
   KOP_ONBEPAALBAAR: 'de actuele kop van de hoofdtak was niet vast te stellen',
   KOP_BEWOOG: 'de hoofdtak bewoog tijdens het lezen, dus de lezing is niet één samenhangend moment',
   KOP_ONGELDIG: 'de opgegeven kop is geen volledige commit-aanduiding',
@@ -74,7 +80,9 @@ export const REDENEN = {
   TIJD_UIT_DE_TOEKOMST: 'de bron draagt een tijdstip dat nog niet geweest is',
   TOESTAND_ONBEKEND: 'de bron noemt een toestand die niet in de vastgelegde lijst staat',
   HASHFOUT: 'de meegeleverde controlesom hoort niet bij de inhoud',
-};
+  GETUIGE_ONBRUIKBAAR: 'de onafhankelijke getuige leverde iets aan dat niet te lezen is',
+  DREMPEL_ONBRUIKBAAR: 'de afgesproken stiltedrempel is geen bruikbaar aantal milliseconden',
+});
 
 /**
  * Sporen die een eigen stand hebben. Gesloten lijst: een onbekend spoor is een fout, geen nieuw spoor.
@@ -86,10 +94,10 @@ export const REDENEN = {
  * weggevallen rij de uitkomst rood (zie `kijkStateUitSpiegel` en `oordeel`). Een nieuw spoor kost dus
  * één regel hier; hem vergeten kost een rode plaat, niet een stille.
  */
-export const LANES = [
+export const LANES = Object.freeze([
   'ARCHEOLOGIE', 'AUTOPILOT', 'CHIEF', 'COMMAND-CANON', 'CONTENT', 'CONTROL', 'DASHBOARD',
   'INSTROOM', 'MARKT', 'MINI', 'NQ-RADAR', 'ORCHESTRATOR', 'PRESENTATIES', 'TRECHTER', 'WAARNEMER',
-];
+]);
 
 const UUR = 3600 * 1000;
 
@@ -118,9 +126,13 @@ export const TOEKOMST_MARGE = 5 * 60 * 1000;
 export const KIJK_SLO_MINUTEN = 20;
 
 const HEX40 = /^[0-9a-f]{40}$/;
+const HEX64 = /^[0-9a-f]{64}$/;
 
 /** Is dit een volledige commit-aanduiding? Zeven tekens is geen bewijs: een prefix kan botsen. */
 export const volledigeSha = (v) => typeof v === 'string' && HEX40.test(v);
+
+/** Is dit een volledige toestandshash? */
+export const volledigeStateSha = (v) => typeof v === 'string' && HEX64.test(v);
 
 /** SHA-256 over exact deze bytes. Geen JSON-herserialisatie onderweg: de bytes zijn het bewijs. */
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -168,36 +180,28 @@ export function momentUitNlTijd(datum) {
     || d.getUTCHours() !== +hh || d.getUTCMinutes() !== +mi) {
     return null;
   }
-  // Twee stappen: schat de verschuiving op het geschatte moment, corrigeer, en meet opnieuw. De
-  // tweede meting vangt de overgangsnacht, waarin de eerste schatting er een uur naast kan zitten.
-  let t = alsUtc;
-  let vorige = alsUtc;
-  for (let i = 0; i < 2; i += 1) {
-    vorige = t;
-    const verschuiving = zoneVerschuiving(t);
-    t = alsUtc - verschuiving;
+  // Zoek NIET één antwoord, maar TEL de antwoorden. De twee verschuivingen die rond dit moment kunnen
+  // gelden staan een halve dag ervoor en erna; elke kandidaat levert een moment op, en dat moment telt
+  // alleen mee als de zone dáár ook echt die verschuiving heeft. Zo komt het aantal geldige momenten
+  // eruit rollen in plaats van dat er één gekozen moet worden.
+  const kandidaten = new Set([zoneVerschuiving(alsUtc - 12 * UUR), zoneVerschuiving(alsUtc + 12 * UUR)]);
+  const momenten = new Set();
+  for (const verschuiving of kandidaten) {
+    const t = alsUtc - verschuiving;
+    if (zoneVerschuiving(t) === verschuiving) momenten.add(t);
   }
 
-  // Controleer of het antwoord de gevraagde wandklok ECHT teruggeeft. Zo niet, dan bestond die
-  // lokale tijd niet: het is de nacht waarin 02:00 meteen 03:00 wordt, en 02:30 heeft nooit bestaan.
-  //
-  // Zonder deze stap schuift zo'n niet-bestaande tijd een uur vooruit en komt hij NA 03:00 te liggen,
-  // terwijl hij in de kolom ervóór staat. Dan loopt de tijd achteruit, en een reeks waarin de tijd
-  // achteruit loopt maakt elke uitspraak over volgorde waardeloos — precies wat de teller en het
-  // stilte-alarm nodig hebben. Daarom wordt de hele ontbrekende uurgap op één moment vastgezet: het
-  // moment waarop de klok verspringt. Alles in het gat krijgt dus dezelfde tijd als 03:00, en de
-  // reeks loopt niet meer achteruit.
-  if (zoneVerschuiving(t) !== alsUtc - t) {
-    let lo = Math.min(vorige, t);
-    let hi = Math.max(vorige, t);
-    const verschuivingLo = zoneVerschuiving(lo);
-    while (hi - lo > 1) {
-      const mid = lo + Math.floor((hi - lo) / 2);
-      if (zoneVerschuiving(mid) === verschuivingLo) lo = mid; else hi = mid;
-    }
-    return hi;
-  }
-  return t;
+  // GEEN of TWEE antwoorden is geen antwoord, en dat is een verandering ten opzichte van de vorige
+  // opzet. Die zette een niet-bestaande tijd (02:30 in de nacht waarin 02:00 meteen 03:00 wordt) vast
+  // op het moment van de sprong, en gaf een dubbele tijd (02:30 in de nacht die twee keer voorkomt)
+  // stilzwijgend de eerste van de twee. Beide zijn een VERZONNEN moment: de bron zegt niet welk van de
+  // twee, en bij een gat zegt de bron iets dat niet bestaat. Gemeten uitwerking van het oude gedrag:
+  // `2026-10-25 02:30` werd 01:30 UTC terwijl 00:30 UTC even goed kon, en de rij werd zonder één
+  // opmerking geaccepteerd — verworpen: 0. Een uur ernaast is genoeg om een spoor "vers" te noemen dat
+  // het niet is. Hier levert het `null`, en `kijkStateUitSpiegel` verwerpt de rij; verwerping is
+  // zichtbaar (`verworpenRijen`) en maakt de uitkomst rood, dus onwetendheid wordt niet stil.
+  if (momenten.size !== 1) return null;
+  return [...momenten][0];
 }
 
 /**
@@ -233,17 +237,32 @@ function zoneVerschuiving(tRuw) {
  */
 export async function leesBronvast({ kopVan, inhoudVan, pogingen = 3 } = {}) {
   const geprobeerd = [];
+  // Een geworpen fout is GEEN gesloten uitkomst. Zonder dit vangnet verwierp deze functie bij de
+  // eerste netwerkstoring de belofte, en dan bestaat er helemaal geen uitkomst meer om over te
+  // oordelen: de aanroeper valt om, en wat de aanroeper daarna met die fout doet is niet hier
+  // vastgelegd. Gemeten: een `kopVan` die gooit gaf `Error kapot` in plaats van een reden. Precies de
+  // route uit rode proef 8 (API-timeout/403/404) waarvan de opdracht eist dat hij op GEEN OORDEEL
+  // uitkomt en nooit op gecacht groen. Elke wacht hieronder loopt daarom door hetzelfde net.
+  const veilig = async (fn, reden) => {
+    try {
+      return await fn();
+    } catch {
+      // De fout zelf gaat niet mee naar buiten: hij kan een adres, een token of een responsdeel
+      // bevatten, en alles wat deze functie teruggeeft kan publiek worden.
+      return { ok: false, reden };
+    }
+  };
   for (let poging = 1; poging <= pogingen; poging += 1) {
-    const kop = await kopVan();
+    const kop = await veilig(() => kopVan(), 'KOP_ONBEPAALBAAR');
     if (!kop || kop.ok !== true) return { ok: false, reden: 'KOP_ONBEPAALBAAR', pogingen: poging, geprobeerd };
     if (!volledigeSha(kop.sha)) return { ok: false, reden: 'KOP_ONGELDIG', pogingen: poging, geprobeerd };
 
-    const inhoud = await inhoudVan(kop.sha);
+    const inhoud = await veilig(() => inhoudVan(kop.sha), 'ONBEREIKBAAR');
     if (!inhoud || inhoud.ok !== true) {
       return { ok: false, reden: inhoud?.reden === 'LEEG' ? 'BRON_LEEG' : 'BRON_ONBEREIKBAAR', pogingen: poging, geprobeerd };
     }
 
-    const naKop = await kopVan();
+    const naKop = await veilig(() => kopVan(), 'KOP_ONBEPAALBAAR');
     if (!naKop || naKop.ok !== true) return { ok: false, reden: 'KOP_ONBEPAALBAAR', pogingen: poging, geprobeerd };
     geprobeerd.push({ voor: kop.sha, na: naKop.sha });
     if (naKop.sha === kop.sha) {
@@ -368,8 +387,8 @@ export const KIJK_SCHEMA = '1.0.0';
  * lijst, en dat hoort iemand te repareren in plaats van dat de kijk het stilzwijgend accepteert.
  */
 /** Precies de sleutels die een kijk-state mag hebben, en precies die van één spoor. */
-const STATE_SLEUTELS = ['schemaVersie', 'bronSoort', 'bronCommitSha', 'eventHighWatermark', 'eventCount', 'verworpenRijen', 'lanes'];
-const LANE_SLEUTELS = ['laneId', 'sequence', 'objectId', 'toestand', 'eventUitkomst', 'momentUtc'];
+const STATE_SLEUTELS = Object.freeze(['schemaVersie', 'bronSoort', 'bronCommitSha', 'eventHighWatermark', 'eventCount', 'verworpenRijen', 'lanes']);
+const LANE_SLEUTELS = Object.freeze(['laneId', 'sequence', 'objectId', 'toestand', 'eventUitkomst', 'momentUtc']);
 
 export function keurState(state) {
   const fouten = [];
@@ -588,6 +607,37 @@ export function oordeel({
     return uit('GEEN OORDEEL');
   }
 
+  // ── 2a-bis. de drempel is dat ook. Zonder deze toets kon de versheidsmeting van buitenaf worden
+  // uitgezet zonder één zichtbaar spoor: `stilMs: NaN` maakt elke vergelijking onwaar, en `Infinity`
+  // maakt geen enkele stilte lang genoeg. Gemeten op dezelfde bytes: normaal PARTIAL met ALLES_STIL,
+  // met NaN GROEN en met Infinity GROEN, redenen leeg. Dat is dezelfde fout als bij de klok — een
+  // ontbrekend of onbruikbaar bewijsstuk dat zich voordoet als een schone meting. Negatief is
+  // evenmin een drempel: dan is élk spoor per definitie te stil. Nul mag: dat betekent "geen respijt".
+  if (!Number.isFinite(stilMs) || stilMs < 0) {
+    redenen.push('DREMPEL_ONBRUIKBAAR');
+    return uit('GEEN OORDEEL');
+  }
+
+  // ── 2a-ter. en een aangeleverde getuigenis is ook bewijs, dus die moet leesbaar zijn.
+  //
+  // De vorige opzet gebruikte `Number.isInteger(...)` verderop als stille zeef: een getuigenis met
+  // `sequence: 'geen getal'` meldde `getuigeAanwezig: true`, deed vervolgens niets, en kwam er GROEN
+  // uit met lege redenen — gemeten. Dat is de gevaarlijkste vorm die er is, want de meting ziet er
+  // bewaakt uit terwijl de bewaking uit staat, en juist de twee toetsen die hij aanstuurt zijn de
+  // enige die bederf zien dat bron en pagina samen verbergen. Een getuige die nog niets weet hoort
+  // `null` te sturen, niet een half ingevuld geheugen. Alle drie de velden moeten er zijn: de opdracht
+  // vraagt de getuige de laatst geziene sequence, commit én hash te bewaren, en met twee ervan is de
+  // tweede toets blind.
+  if (getuigenis !== null) {
+    const leesbaar = typeof getuigenis === 'object' && !Array.isArray(getuigenis)
+      && Number.isInteger(getuigenis.sequence) && getuigenis.sequence >= 0
+      && volledigeSha(getuigenis.commitSha) && volledigeStateSha(getuigenis.stateSha256);
+    if (!leesbaar) {
+      redenen.push('GETUIGE_ONBRUIKBAAR');
+      return uit('GEEN OORDEEL');
+    }
+  }
+
   // ── 2b. dekt het manifest exact deze state-bytes?
   if (!manifestDekt(manifest, stateBytes)) {
     redenen.push('HASHFOUT');
@@ -613,6 +663,20 @@ export function oordeel({
   // als GROEN uit, want elke schakel klopte met de volgende. Een bewijs dat niet aan de bron vastzit
   // bewijst alleen zichzelf.
   if (state.bronCommitSha !== lezing.sha || manifest.bronCommitSha !== lezing.sha) {
+    redenen.push('TOESTAND_NIET_BIJ_BRON');
+    return uit('GEEN OORDEEL');
+  }
+
+  // ── 2d-bis. het manifest draagt óók een bronblob-SHA, en die werd nergens tegen de lezing gehouden.
+  //
+  // Het veld staat er niet voor niets: de commit zegt uit welke wereld de bron komt, de blob zegt welk
+  // BESTAND daarin gelezen is. Gemeten: een lezing met blob `cccc…` en een manifest met blob `bbbb…`
+  // kwam er GROEN uit, redenen leeg — het veld werd geschreven en daarna nooit gelezen. Zolang de
+  // spiegel de bron is dekt de herleiding hieronder dat af, maar zodra het OVERGANG-merk vervalt is
+  // deze vergelijking precies de binding die ervoor in de plaats komt (zie 2e). Hij weigert alleen als
+  // beide kanten iets te zeggen hebben: ontbreekt één van de twee, dan is er niets vergeleken en gaat
+  // die weglating verderop door de gewone weg.
+  if (manifest.bronBlobSha && lezing.blobSha && manifest.bronBlobSha !== lezing.blobSha) {
     redenen.push('TOESTAND_NIET_BIJ_BRON');
     return uit('GEEN OORDEEL');
   }
@@ -669,10 +733,10 @@ export function oordeel({
   // teller die daalt, en een toestand die verandert terwijl de teller stilstaat. Beide kunnen groen
   // ogen omdat bron en pagina onderling perfect overeenkomen.
   if (getuigenis && state) {
-    if (Number.isInteger(getuigenis.sequence) && state.eventHighWatermark < getuigenis.sequence) {
+    if (state.eventHighWatermark < getuigenis.sequence) {
       redenen.push('WATERMERK_DAALT');
-    } else if (Number.isInteger(getuigenis.sequence) && state.eventHighWatermark === getuigenis.sequence
-      && getuigenis.stateSha256 && manifest && getuigenis.stateSha256 !== manifest.stateSha256) {
+    } else if (state.eventHighWatermark === getuigenis.sequence
+      && manifest && getuigenis.stateSha256 !== manifest.stateSha256) {
       redenen.push('TOESTAND_WISSELT_BIJ_GELIJKE_STAND');
     }
   }

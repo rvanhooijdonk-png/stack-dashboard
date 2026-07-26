@@ -17,6 +17,7 @@
  * de repo is publiek). De waarde wordt nergens afgedrukt en belandt nergens in de uitvoer.
  */
 
+import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -59,12 +60,40 @@ async function kopVan() {
   }
 }
 
+/**
+ * De git-blob-aanduiding van deze bytes, ZELF gerekend. Git hasht niet de kale inhoud maar
+ * `blob <lengte>\0` gevolgd door de bytes; dat is de hele reden dat dit hier staat en niet elders
+ * wordt overgenomen. Een zelf gerekende hash is het enige getal in deze keten dat niemand onderweg
+ * kan aanleveren.
+ */
+function blobShaVan(tekst) {
+  const inhoud = Buffer.from(tekst, 'utf8');
+  return createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${inhoud.length}\0`), inhoud])).digest('hex');
+}
+
+/**
+ * Wat de boom van DEZE commit zegt dat het bestand is. Losstaand van wat `raw` teruggeeft, en dat is
+ * het punt: de ene kant zegt wat er in de commit hoort te staan, de andere levert bytes. Vallen die
+ * uiteen — een cache, een proxy, een spiegel die iets anders doorgeeft — dan is dat zichtbaar in
+ * plaats van onzichtbaar. Lukt het niet, dan is er niets vergeleken en blijft het veld leeg.
+ */
+async function declaredBlobVan(sha) {
+  const r = await haal(`https://api.github.com/repos/${REPO}/contents/${PAD}?ref=${sha}`);
+  if (r.status !== 200) return null;
+  try {
+    const s = JSON.parse(r.tekst)?.sha;
+    return typeof s === 'string' && /^[0-9a-f]{40}$/.test(s) ? s : null;
+  } catch {
+    return null;
+  }
+}
+
 /** De inhoud op exact deze commit. `raw` met een volledige SHA is inhoudsadressering, geen ref. */
 async function inhoudVan(sha) {
   const r = await haal(`https://raw.githubusercontent.com/${REPO}/${sha}/${PAD}`);
   if (r.status !== 200) return { ok: false, reden: `HTTP_${r.status}` };
   if (!r.tekst.trim()) return { ok: false, reden: 'LEEG' };
-  return { ok: true, tekst: r.tekst };
+  return { ok: true, tekst: r.tekst, blobSha: blobShaVan(r.tekst) };
 }
 
 const lezing = await leesBronvast({ kopVan, inhoudVan });
@@ -80,6 +109,7 @@ if (!lezing.ok) {
 const { state, fouten } = kijkStateUitSpiegel(lezing.tekst, { commitSha: lezing.sha });
 const { manifest, bytes } = manifestVoor(state, {
   bronCommitSha: lezing.sha,
+  bronBlobSha: await declaredBlobVan(lezing.sha),
   generatedAt: new Date().toISOString(),
 });
 
