@@ -288,14 +288,14 @@ const MUTATIES = [
     proef: '22 (reviewgat)',
     raakt: 'reviewgat 22 —',
     wat: 'de stiltedrempel mag weer NaN of oneindig zijn, en dan meet de versheidsmeting niets',
-    van: '  if (!Number.isFinite(stilMs) || stilMs < 0) {',
+    van: '  if (!Number.isFinite(stilMs) || stilMs < 0 || stilMs > DREMPEL_MAX_MS) {',
     naar: '  if (false) { // mutatie: de meting is van buitenaf uit te zetten',
   },
   {
     proef: '23 (reviewgat)',
     raakt: 'reviewgat 23 —',
     wat: 'de bronblob van het manifest wordt weer nergens tegen de lezing gehouden',
-    van: '  if (manifest.bronBlobSha && lezing.blobSha && manifest.bronBlobSha !== lezing.blobSha) {',
+    van: '  if (blobKanten === 2 && manifest.bronBlobSha !== lezing.blobSha) {',
     naar: '  if (false) { // mutatie: het blobveld wordt weer geschreven en nooit gelezen',
   },
   {
@@ -327,6 +327,20 @@ const MUTATIES = [
     wat: 'wat binnen het hek staat wordt stil overgeslagen in plaats van afgekeurd — verstoppen wordt gratis',
     van: '      if (cc && cc.length === KOPNAMEN.length && !isKop(cc) && !isScheiding(cc)) kandidaten.push(null);',
     naar: '      // mutatie: binnen het hek verdwijnt alles spoorloos',
+  },
+  {
+    proef: '27 (reviewgat 22, tweede meting)',
+    raakt: 'reviewgat 22 —',
+    wat: 'de bovengrens op de stiltedrempel vervalt, dus een drempel van duizend jaar mag weer',
+    van: '  if (!Number.isFinite(stilMs) || stilMs < 0 || stilMs > DREMPEL_MAX_MS) {',
+    naar: '  if (!Number.isFinite(stilMs) || stilMs < 0) { // mutatie: alleen de vorm, niet de betekenis',
+  },
+  {
+    proef: '28 (reviewgat 23, tweede meting)',
+    raakt: 'reviewgat 23 —',
+    wat: 'één kant van de bestandshash mag weer ontbreken zonder dat er iets wordt gemeld',
+    van: '  if (blobKanten === 1) {',
+    naar: '  if (false) { // mutatie: ontbrekend tegenbewijs gaat weer stil door',
   },
 ];
 

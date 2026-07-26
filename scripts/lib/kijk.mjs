@@ -82,6 +82,7 @@ export const REDENEN = Object.freeze({
   HASHFOUT: 'de meegeleverde controlesom hoort niet bij de inhoud',
   GETUIGE_ONBRUIKBAAR: 'de onafhankelijke getuige leverde iets aan dat niet te lezen is',
   DREMPEL_ONBRUIKBAAR: 'de afgesproken stiltedrempel is geen bruikbaar aantal milliseconden',
+  BLOB_ONVERGELEKEN: 'van de twee bronnen voor de bestandshash leverde er maar één iets, dus er is niets vergeleken',
 });
 
 /**
@@ -124,6 +125,16 @@ export const TOEKOMST_MARGE = 5 * 60 * 1000;
  * bij een kijk telt alleen of de kop, de toestand en de teller nú kloppen, en de tijd doet niet mee.
  */
 export const KIJK_SLO_MINUTEN = 20;
+
+/**
+ * De bovengrens van de stiltedrempel. `Infinity` en `NaN` werden al geweigerd, maar een drempel van
+ * duizend jaar is eindig, niet-negatief en zet de stiltemeting even volledig uit — gemeten:
+ * `stilMs: 1e12` gaf GROEN met lege redenen op dezelfde bytes die met de gewone drempel PARTIAL en
+ * LANE_VEROUDERD opleverden. Een grens die alleen op de VORM van het getal toetst en niet op de
+ * betekenis, is geen grens. Zeven dagen is ruim boven elke werkelijke instelling (de standaard is
+ * zes uur) en ruim onder elk getal waarmee de meting wordt uitgezet.
+ */
+export const DREMPEL_MAX_MS = 7 * 24 * UUR;
 
 const HEX40 = /^[0-9a-f]{40}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -613,7 +624,10 @@ export function oordeel({
   // met NaN GROEN en met Infinity GROEN, redenen leeg. Dat is dezelfde fout als bij de klok — een
   // ontbrekend of onbruikbaar bewijsstuk dat zich voordoet als een schone meting. Negatief is
   // evenmin een drempel: dan is élk spoor per definitie te stil. Nul mag: dat betekent "geen respijt".
-  if (!Number.isFinite(stilMs) || stilMs < 0) {
+  //
+  // De bovengrens erbij ná een tweede meting: `Infinity` werd geweigerd, `1e12` niet, en die twee doen
+  // hetzelfde. Zie DREMPEL_MAX_MS — een toets op de vorm van het getal is geen toets op de betekenis.
+  if (!Number.isFinite(stilMs) || stilMs < 0 || stilMs > DREMPEL_MAX_MS) {
     redenen.push('DREMPEL_ONBRUIKBAAR');
     return uit('GEEN OORDEEL');
   }
@@ -673,10 +687,23 @@ export function oordeel({
   // BESTAND daarin gelezen is. Gemeten: een lezing met blob `cccc…` en een manifest met blob `bbbb…`
   // kwam er GROEN uit, redenen leeg — het veld werd geschreven en daarna nooit gelezen. Zolang de
   // spiegel de bron is dekt de herleiding hieronder dat af, maar zodra het OVERGANG-merk vervalt is
-  // deze vergelijking precies de binding die ervoor in de plaats komt (zie 2e). Hij weigert alleen als
-  // beide kanten iets te zeggen hebben: ontbreekt één van de twee, dan is er niets vergeleken en gaat
-  // die weglating verderop door de gewone weg.
-  if (manifest.bronBlobSha && lezing.blobSha && manifest.bronBlobSha !== lezing.blobSha) {
+  // deze vergelijking precies de binding die ervoor in de plaats komt (zie 2e).
+  //
+  // "Ontbreekt één van de twee, dan gaat die weglating verderop door de gewone weg" stond hier eerst,
+  // en dat was een fail-open met een geruststellende zin eromheen. De twee blobs komen uit VERSCHILLENDE
+  // bronnen — de ene rekent de uitvoerder zelf uit de bytes, de andere zegt de boom van de commit — en
+  // dat is de hele waarde ervan. Valt de tweede weg (403, limiet, tijdslimiet), dan is er geen
+  // tegenbewijs meer en zou juist een tussenliggende cache of spiegel die andere bytes teruggeeft
+  // ongezien blijven. Gemeten: lezing mét blob, manifest zonder → geen enkele reden over de blob, en de
+  // uitkomst hing alleen nog aan de rest. Precies één kant is dus GEEN OORDEEL, geen stille overslag.
+  // Beide kanten leeg blijft toegestaan: dan is er niets beweerd (en de uitvoerder rekent zijn kant
+  // altijd zelf uit, dus in productie kan dat geval niet ontstaan).
+  const blobKanten = [manifest.bronBlobSha, lezing.blobSha].filter(Boolean).length;
+  if (blobKanten === 1) {
+    redenen.push('BLOB_ONVERGELEKEN');
+    return uit('GEEN OORDEEL');
+  }
+  if (blobKanten === 2 && manifest.bronBlobSha !== lezing.blobSha) {
     redenen.push('TOESTAND_NIET_BIJ_BRON');
     return uit('GEEN OORDEEL');
   }

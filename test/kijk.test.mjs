@@ -19,6 +19,7 @@ import {
   leesBronvast, kijkStateUitSpiegel, keurState, keurManifest, manifestVoor, manifestDekt, oordeel,
   momentUitNlTijd, verouderdeLanes, publiekeRegel, kanoniekeBytes, sha256, volledigeSha,
   TOESTANDEN, UITKOMSTEN, LANES, REDENEN, OVERGANG_MERK, KIJK_SCHEMA, KIJK_SLO_MINUTEN,
+  DREMPEL_MAX_MS, LANE_STIL_UREN,
 } from '../scripts/lib/kijk.mjs';
 import { DREMPEL_UREN } from '../scripts/lib/waarnemer.mjs';
 import { spiegelScan } from '../scripts/lib/kanaalpost.mjs';
@@ -999,6 +1000,23 @@ test('reviewgat 22 — de stiltedrempel kan de versheidsmeting niet stilletjes u
   // Nul is wél een drempel: "geen respijt". Een geldige waarde blijft dus gewoon meten.
   assert.equal(o.kijk({ stilMs: 0 }).uitkomst, 'PARTIAL');
   assert.ok(o.kijk({ stilMs: 0 }).redenen.includes('ALLES_STIL'));
+
+  // RONDE 5, tweede meting op ditzelfde punt: `Infinity` werd geweigerd, `1e12` niet — en die twee doen
+  // hetzelfde. GEMETEN, op bytes met één spoor van dagen stil naast een vers spoor:
+  //   stilMs = 6 uur           → PARTIAL, LANE_VEROUDERD, verouderd ["CONTROL"]
+  //   stilMs = 1e12            → GROEN, redenen []
+  //   stilMs = MAX_SAFE_INTEGER → GROEN, redenen []
+  // Een toets op de VORM van het getal (eindig, niet-negatief) is dus geen toets op de BETEKENIS. De
+  // bovengrens staat op zeven dagen: ruim boven elke werkelijke instelling, ruim onder elk getal
+  // waarmee de meting wordt uitgezet.
+  for (const drempel of [DREMPEL_MAX_MS + 1, 1e12, Number.MAX_SAFE_INTEGER]) {
+    const r = o.kijk({ stilMs: drempel });
+    assert.equal(r.uitkomst, 'GEEN OORDEEL', `drempel ${String(drempel)}`);
+    assert.deepEqual(r.redenen, ['DREMPEL_ONBRUIKBAAR'], String(drempel));
+  }
+  // En de grens zelf ligt er nog binnen: precies zeven dagen is een drempel, geen weigering.
+  assert.notEqual(o.kijk({ stilMs: DREMPEL_MAX_MS }).uitkomst, 'GEEN OORDEEL');
+  assert.equal(DREMPEL_MAX_MS > LANE_STIL_UREN * 3600 * 1000, true, 'de grens ligt boven de standaarddrempel');
 });
 
 test('reviewgat 23 — de bronblob van het manifest wordt tegen de lezing gehouden', () => {
@@ -1024,11 +1042,23 @@ test('reviewgat 23 — de bronblob van het manifest wordt tegen de lezing gehoud
   assert.equal(scheef.uitkomst, 'GEEN OORDEEL');
   assert.deepEqual(scheef.redenen, ['TOESTAND_NIET_BIJ_BRON']);
 
-  // Ontbreekt één van de twee, dan is er niets vergeleken en wordt er ook niets beweerd. Dat is geen
-  // gat maar het eerlijke antwoord: de OVERGANG-herleiding (stap 2e) draagt zolang de spiegel de bron
-  // is, en zodra dat merk vervalt is deze vergelijking de binding die ervoor in de plaats komt.
-  assert.equal(beoordeel(null, BLOB).uitkomst, 'GROEN');
-  assert.equal(beoordeel(BLOB, null).uitkomst, 'GROEN');
+  // Hier stond eerst: "ontbreekt één van de twee, dan is er niets vergeleken en wordt er ook niets
+  // beweerd" — mét een GROEN eronder. Dat was een fail-open met een geruststellende zin eromheen, en
+  // ronde 5 wees hem aan. De waarde van deze toets zit er juist in dat de twee getallen uit
+  // VERSCHILLENDE bronnen komen: de uitvoerder rekent er zelf één uit de bytes, de boom van de commit
+  // declareert de andere. Valt de declaratie weg (403, limiet, tijdslimiet), dan is er geen
+  // tegenbewijs meer, en juist dán zou een cache of proxy die andere bytes teruggeeft ongezien blijven.
+  // Precies één kant is dus GEEN OORDEEL. GEMETEN VÓÓR DEZE FIX: lezing mét blob, manifest zonder →
+  // geen enkele reden over de blob; de uitkomst hing alleen nog aan de rest van de keten.
+  for (const [wat, l, m] of [['alleen de lezing rekent', BLOB, null], ['alleen de boom declareert', null, BLOB]]) {
+    const half = beoordeel(l, m);
+    assert.equal(half.uitkomst, 'GEEN OORDEEL', wat);
+    assert.deepEqual(half.redenen, ['BLOB_ONVERGELEKEN'], wat);
+  }
+
+  // Beide kanten leeg blijft door: dan is er niets beweerd. In productie kan dat geval niet ontstaan,
+  // want de uitvoerder rekent zijn kant altijd zelf uit — en dát wordt hieronder afgedwongen.
+  assert.equal(beoordeel(null, null).uitkomst, 'GROEN');
 
   // De uitvoerder rekent zijn kant ZELF uit — `blob <lengte>\0` plus de bytes, zoals git het doet — en
   // haalt de andere kant uit de boom van diezelfde commit. Twee onafhankelijke bronnen, anders zou de
@@ -1050,6 +1080,23 @@ test('reviewgat 24 — de gesloten lijsten zijn ook echt gesloten, niet alleen z
   assert.throws(() => { 'use strict'; REDENEN.ALLES_STIL = 'incident bij klant Voorbeeld op /vrij/pad'; });
   assert.throws(() => { 'use strict'; LANES.push('VRIJE TEKST ALS SPOOR'); });
   assert.equal(publiekeRegel({ uitkomst: 'PARTIAL', redenen: ['ALLES_STIL'] }).uitleg, oudeRegel);
+
+  // RONDE 5 noemde hier een derde route: de bevriezing zou ondiep zijn en de prototypeketen zou vrije
+  // tekst naar buiten kunnen dragen. NAGEMETEN en NIET reproduceerbaar — daarom staat het hier vast in
+  // plaats van dat het elke ronde terugkomt. De vier lijsten zijn platte lijsten van tekst, dus ondiep
+  // bevriezen ís hier volledig bevriezen. En met `Object.prototype.VERVUILD = '…'` actief bleef de
+  // uitkomst PARTIAL zoals ervoor, kwam VERVUILD niet in de sporen en niet in de publieke bytes: de
+  // toestand wordt opgebouwd uit eigen sleutels en de uitvoer is gesloten op waarde, niet op opzoeking.
+  assert.ok([...LANES, ...TOESTANDEN, ...UITKOMSTEN].every((v) => typeof v === 'string'));
+  assert.ok(Object.values(REDENEN).every((v) => typeof v === 'string'));
+  try {
+    Object.prototype.VERVUILD = 'vrije tekst via de prototypeketen';
+    const vervuild = opstelling(spiegelMet(rij('2026-07-26 17:30', 'CONTROL', 'Een gewone regel.')));
+    assert.equal(Object.keys(vervuild.state.lanes).includes('VERVUILD'), false);
+    assert.equal(kanoniekeBytes(vervuild.state).includes('VERVUILD'), false);
+  } finally {
+    delete Object.prototype.VERVUILD;
+  }
 });
 
 test('reviewgat 25 — een gooiende ophaler levert een uitkomst op, geen uitzondering', () => {
