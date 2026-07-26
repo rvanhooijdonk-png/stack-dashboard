@@ -142,6 +142,47 @@ test('proef 3 — het productiegeval: 18:40 in de bron, 14:16 op de pagina, mag 
   assert.equal(new Date(momentUitNlTijd('2026-01-15 18:40')).toISOString(), '2026-01-15T17:40:00.000Z');
 });
 
+// ────────────────────────────────────────────── proef 3b (de twee stukjes jaar zonder klok)
+test('proef 3b — de zomertijdovergang levert geen sprong achteruit en geen uur uit het niets', () => {
+  // Twee keer per jaar bestaat een uur niet en bestaat een uur twee keer. Een omrekening die daar
+  // struikelt, geeft precies dezelfde soort fout als de oude rijMoment(): een moment dat verder in de
+  // toekomst ligt dan het echt is. Daarom staat het gedrag hier vast in plaats van dat het per
+  // toeval goed gaat.
+  const ms = (s) => momentUitNlTijd(s);
+  const iso = (s) => new Date(ms(s)).toISOString();
+
+  // Sprong vooruit, nacht van 29 maart 2026: 02:00 wordt 03:00, dus 02:30 bestaat niet.
+  assert.equal(iso('2026-03-29 01:59'), '2026-03-29T00:59:00.000Z');
+  assert.equal(iso('2026-03-29 03:00'), '2026-03-29T01:00:00.000Z');
+  // De niet-bestaande tijd verdwijnt niet stil in null en schuift ook niet vóórbij 03:00: het hele
+  // ontbrekende uur wordt vastgezet op het moment waarop de klok verspringt.
+  assert.equal(iso('2026-03-29 02:30'), '2026-03-29T01:00:00.000Z');
+  assert.equal(iso('2026-03-29 02:00'), iso('2026-03-29 03:00'));
+
+  // Sprong terug, nacht van 25 oktober 2026: 02:30 bestaat twee keer. Er wordt consequent de LATE
+  // lezing gekozen (CET, +01:00). Dat is een keuze, geen toeval: de vroege lezing zou een rij een uur
+  // ouder maken dan hij is, en "ouder" is de kant die stilte-alarm afgaat.
+  assert.equal(iso('2026-10-25 02:30'), '2026-10-25T01:30:00.000Z');
+  assert.equal(iso('2026-10-25 03:00'), '2026-10-25T02:00:00.000Z');
+
+  // Het eigenlijke contract: over beide overgangen heen loopt de tijd vooruit. Zonder dit zou een
+  // latere rij een eerder moment kunnen krijgen, en dan is elke uitspraak over volgorde waardeloos.
+  const reeksen = [
+    ['2026-03-29 01:00', '2026-03-29 01:59', '2026-03-29 02:30', '2026-03-29 03:00', '2026-03-29 04:00'],
+    ['2026-10-25 01:00', '2026-10-25 02:00', '2026-10-25 02:30', '2026-10-25 03:00', '2026-10-25 04:00'],
+  ];
+  for (const reeks of reeksen) {
+    for (let i = 1; i < reeks.length; i += 1) {
+      assert.ok(ms(reeks[i]) >= ms(reeks[i - 1]), `${reeks[i]} mag niet vóór ${reeks[i - 1]} liggen`);
+    }
+  }
+
+  // En een kolom die geen tijd is, levert null — niet een stilzwijgende nul die als 1970 leest.
+  assert.equal(momentUitNlTijd('binnenkort'), null);
+  assert.equal(momentUitNlTijd(''), null);
+  assert.equal(momentUitNlTijd(null), null);
+});
+
 // ───────────────────────────────────────────────────────────────────── proef 4
 test('proef 4 — een verse pagina met de verkeerde commit of statehash is ROOD', () => {
   // NULMETING: GEEN MECHANISME — `stempelUitHtml()` leverde alleen tijdvelden (iso/utcHhmm/nlHhmm),

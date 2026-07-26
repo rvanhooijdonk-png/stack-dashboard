@@ -148,15 +148,45 @@ export function momentUitNlTijd(datum) {
   // Twee stappen: schat de verschuiving op het geschatte moment, corrigeer, en meet opnieuw. De
   // tweede meting vangt de overgangsnacht, waarin de eerste schatting er een uur naast kan zitten.
   let t = alsUtc;
+  let vorige = alsUtc;
   for (let i = 0; i < 2; i += 1) {
+    vorige = t;
     const verschuiving = zoneVerschuiving(t);
     t = alsUtc - verschuiving;
+  }
+
+  // Controleer of het antwoord de gevraagde wandklok ECHT teruggeeft. Zo niet, dan bestond die
+  // lokale tijd niet: het is de nacht waarin 02:00 meteen 03:00 wordt, en 02:30 heeft nooit bestaan.
+  //
+  // Zonder deze stap schuift zo'n niet-bestaande tijd een uur vooruit en komt hij NA 03:00 te liggen,
+  // terwijl hij in de kolom ervóór staat. Dan loopt de tijd achteruit, en een reeks waarin de tijd
+  // achteruit loopt maakt elke uitspraak over volgorde waardeloos — precies wat de teller en het
+  // stilte-alarm nodig hebben. Daarom wordt de hele ontbrekende uurgap op één moment vastgezet: het
+  // moment waarop de klok verspringt. Alles in het gat krijgt dus dezelfde tijd als 03:00, en de
+  // reeks loopt niet meer achteruit.
+  if (zoneVerschuiving(t) !== alsUtc - t) {
+    let lo = Math.min(vorige, t);
+    let hi = Math.max(vorige, t);
+    const verschuivingLo = zoneVerschuiving(lo);
+    while (hi - lo > 1) {
+      const mid = lo + Math.floor((hi - lo) / 2);
+      if (zoneVerschuiving(mid) === verschuivingLo) lo = mid; else hi = mid;
+    }
+    return hi;
   }
   return t;
 }
 
-/** Hoeveel ligt Europe/Amsterdam op dit moment vóór op UTC, in milliseconden. */
-function zoneVerschuiving(t) {
+/**
+ * Hoeveel ligt Europe/Amsterdam op dit moment vóór op UTC, in milliseconden.
+ *
+ * Het moment wordt eerst op hele seconden afgerond. De formatter kent geen milliseconden, dus zonder
+ * die afronding lekt het millisecondendeel van `t` in het antwoord en is de verschuiving geen veelvoud
+ * van een uur meer. Twee verschuivingen zijn dan bijna nooit gelijk, en dat breekt elke vergelijking
+ * die erop steunt — zoals de zoektocht naar het moment waarop de klok verspringt.
+ */
+function zoneVerschuiving(tRuw) {
+  const t = Math.floor(tRuw / 1000) * 1000;
   const f = new Intl.DateTimeFormat('en-US', {
     timeZone: 'Europe/Amsterdam',
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
