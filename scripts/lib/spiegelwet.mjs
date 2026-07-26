@@ -21,6 +21,8 @@
  * dus gemeld, niet bestraft.
  */
 
+import { bevatOnzichtbaar } from './kanaalpost.mjs';
+
 const regels = (tekst) => String(tekst ?? '').replace(/\n+$/, '').split('\n');
 const isLeeg = (r) => r.length === 0 || (r.length === 1 && r[0] === '');
 
@@ -55,4 +57,116 @@ export function alleenAangevuld(oud, nieuw) {
     if (nieuweRegels[i] !== oudeRegels[i]) { eerste = i + 1; break; }
   }
   return { ok: verdwenen === 0, verdwenen, opOrde: eerste === null, eerste };
+}
+
+/**
+ * DE SCHRIJFKANT — één canonieke vorm in de spiegel zelf (besluit Fable, 26-07-2026, punt 3).
+ *
+ * De leeskant mág normaliseren: de waarnemer vergelijkt pagina en bron met NFKC-genormaliseerde tekst,
+ * anders valt hij over het afkap-teken. Maar NFKC is niet injectief — `10²` en `102` worden daar gelijk,
+ * net als `ﬀ` en `ff`. Op de leeskant is dat een tolerantie die je niet weg krijgt zonder de hele
+ * terugleesketen om te bouwen. Op de SCHRIJFkant is het simpel: laat die vormen er niet in.
+ *
+ * Wat "canoniek" hier betekent, en niet meer dan dat:
+ *  - de regel is gelijk aan zijn eigen NFKC-vorm (dus geen compatibiliteitstekens die later stilletjes
+ *    iets anders worden), en
+ *  - de regel bevat geen onzichtbare tekens — dezelfde verzameling die de leeskant al weghaalt: zero-
+ *    width, bidi-overrides, variation selectors, stuurtekens, soft hyphen, BOM. Die zijn in een
+ *    verslag nooit bedoeld en maken twee ogenschijnlijk gelijke regels ongelijk.
+ *
+ * TWEE STRENGTES, bewust: wat er NIEUW bij komt wordt geweigerd (`nieuweNietCanoniekeRegels`), wat er
+ * al stond wordt gemeld (`nietCanoniekeRegels`). Zie de uitleg bij de poort hieronder — samen met
+ * append-only zou één harde eis op het hele bestand de deur permanent op slot kunnen zetten.
+ *
+ * Nulmeting bij invoering: alle 44 regels in `data/kanaalpost-publiek.md` die met een pipe beginnen
+ * voldeden al — dat zijn de 35 publieke spiegelrijen plus de kop, de scheidingsregel en de zeven
+ * regels van het verklarende tabelletje erboven. De eis legt dus niets recht met terugwerkende kracht;
+ * hij houdt de vorm vast die er nu is.
+ */
+// De verzameling onzichtbare tekens komt uit `kanaalpost.mjs`, waar de leeskant hem al gebruikt om ze
+// weg te halen. De eerste versie hier had zijn eigen, veel kortere lijstje - en twee definities van
+// "onzichtbaar" betekent dat de schrijfkant doorlaat wat de leeskant stilletjes weghaalt, precies het
+// verschil waarmee twee ogenschijnlijk gelijke regels ongelijk worden (bevinding Codex, 26-07-2026).
+
+/**
+ * Is deze tekst al zijn eigen canonieke vorm?
+ *
+ * EERLIJKE GRENS: dit is geen neutrale "Unicode-canonicalisatie" maar een huisstijl. NFKC keurt naast
+ * onzichtbare tekens ook `…`, `½`, `²`, `Ĳ`, `ﬁ` en losse NFD-accenten af, terwijl gedachtestreepjes
+ * en samengestelde accenten gewoon door mogen. Dat is bewust — de spiegel is een regelbestand, geen
+ * zetwerk — maar het hoort er zo te staan, want wie uit Word plakt begrijpt anders niet waarom zijn
+ * regel rood is (bevinding Codex, 26-07-2026).
+ */
+export function canoniek(waarde) {
+  const t = String(waarde ?? '');
+  return t.normalize('NFKC') === t && !bevatOnzichtbaar(t);
+}
+
+/**
+ * Ziet deze regel eruit als een tabelregel? Bewust ruimer dan de parser, die ook een sluitende pipe
+ * eist: wat er als spiegelrij UITZIET moet door de vormcontrole, ook als de parser hem later weggooit.
+ * De selectie kijkt door onzichtbare tekens heen, want een regel die met een zero-width space begint
+ * is voor het oog een rij en zou anders volledig buiten de controle vallen (bevinding Codex).
+ */
+const isTabelregel = (ruw) => {
+  const r = String(ruw ?? '').replace(/\r$/, '');
+  const kop = r.slice(0, r.indexOf('|') === -1 ? r.length : r.indexOf('|'));
+  return r.includes('|') && kop.split('').every((c) => /\s/.test(c) || bevatOnzichtbaar(c));
+};
+
+/** Welke tekens maken deze regel niet-canoniek — en als het geen los teken is, zeg dát dan. */
+const bevinding = (ruw, i) => {
+  // Per teken kijken lukt niet altijd: bij een NFD-accent (`e` + combining acute) is élk codepoint op
+  // zichzelf canoniek en de regel toch niet. Zonder terugval stond er `regel 12 ()` in de foutmelding
+  // en wist niemand wat er mis was (bevinding Codex, 26-07-2026).
+  const tekens = [...new Set([...String(ruw)].filter((c) => !canoniek(c)))]
+    .map((c) => `U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`);
+  return { regel: i + 1, tekens: tekens.length ? tekens : ['samengesteld teken (NFD-accent of ligatuur)'] };
+};
+
+/**
+ * AUDIT — álle tabelregels in het bestand die niet canoniek zijn, met regelnummer en de tekens die het
+ * veroorzaken. Leeg = de spiegel voldoet. Proza, kop en uitleg vallen erbuiten.
+ *
+ * De RUWE regel wordt beoordeeld en niet de getrimde: `trim()` haalt in JavaScript óók een BOM en een
+ * harde spatie weg, dus een regel die met een BOM begint zou getrimd slagen terwijl de parser hem
+ * daarna gewoon publiceert (bevinding Codex, 26-07-2026). Selecteren mag op de ontdane vorm; oordelen
+ * niet.
+ */
+export function nietCanoniekeRegels(tekst) {
+  const gevonden = [];
+  String(tekst ?? '').split('\n').forEach((ruw, i) => {
+    const r = ruw.replace(/\r$/, '');
+    if (!isTabelregel(r) || canoniek(r)) return;
+    gevonden.push(bevinding(r, i));
+  });
+  return gevonden;
+}
+
+/**
+ * DE POORT — alleen de tabelregels die in `nieuw` staan en niet in `oud`. Dit is wat hard geweigerd
+ * wordt; de audit hierboven is wat gemeld wordt.
+ *
+ * Waarom dat onderscheid er moet zijn. Append-only en een harde eis op het HELE bestand sluiten elkaar
+ * op zodra er ooit één vuile regel doorheen glipt: herstellen mag niet (de oude regel zou verdwijnen),
+ * en laten staan houdt élke volgende commit rood — ook die van iemand die de spiegel niet aanraakt.
+ * Datzelfde gebeurt zodra deze eis ooit strenger wordt. Beide reviewers wezen dat aan (Codex D,
+ * Gemini D). Het besluit van Fable gaat over de SCHRIJFkant, en dat is precies deze verzameling: wat
+ * er nieuw in komt. Wat er al stond blijft zichtbaar als waarschuwing — niet stil, maar ook geen
+ * dichtgeslagen deur voor een ander.
+ */
+export function nieuweNietCanoniekeRegels(oud, nieuw) {
+  const telling = new Map();
+  for (const r of String(oud ?? '').split('\n')) telling.set(r, (telling.get(r) ?? 0) + 1);
+  const gevonden = [];
+  String(nieuw ?? '').split('\n').forEach((ruw, i) => {
+    const n = telling.get(ruw) ?? 0;
+    // Stond deze regel er al letterlijk zo in, dan is hij niet nieuw — tellen, zodat twee gelijke
+    // regels niet één oude regel als dekmantel delen.
+    if (n > 0) { telling.set(ruw, n - 1); return; }
+    const r = ruw.replace(/\r$/, '');
+    if (!isTabelregel(r) || canoniek(r)) return;
+    gevonden.push(bevinding(r, i));
+  });
+  return gevonden;
 }

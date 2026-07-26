@@ -97,6 +97,10 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.ref_name }}
+          # Volledige historie, net als in de `spiegelwet`-job hieronder. Deze job doet bij een botsing
+          # `git pull --rebase`, en een rebase in een ondiepe kloon kan het gemeenschappelijke punt
+          # missen; dan zou de alarmregel niet geschreven kunnen worden (bevinding Gemini, 26-07-2026).
+          fetch-depth: 0
 
       - name: Alarmregel aan de publieke spiegel toevoegen
         env:
@@ -166,12 +170,64 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add data/kanaalpost-publiek.md
           git commit -m 'chore(waarnemer): automatische GEBLOKKEERD-melding — de plaat wijkt af van de bron'
+          # DE SPIEGELWET GELDT OOK VOOR DE WAARNEMER ZELF (besluit Fable, 26-07-2026, punt 2). Een push
+          # met GITHUB_TOKEN start geen workflow, dus de `spiegelwet`-job draait NIET op deze commit —
+          # precies de schrijfactie van de bewaker zou daarmee buiten de poort vallen. Geen uitzondering
+          # dus: dezelfde wet, hier in de job zelf, vóór elke push en opnieuw na elke herplaatsing.
+          #
+          # DRIE toetsen, en de eerste is de belangrijkste. Alleen tegen `HEAD~1` meten is na een rebase
+          # de VERKEERDE basis: zou de tak intussen een regel kwijtgeraakt zijn, dan is die verdwijning
+          # al in de nieuwe voorganger verwerkt en houdt de bot zich er keurig aan — en publiceert
+          # vervolgens die verminkte stand, zonder dat er nog een spiegelwet-run op volgt (bevinding
+          # Codex, 26-07-2026, hoog). Daarom óók tegen de stand waarvan deze job vertrok, en daarom een
+          # aparte controle dat de alarmregel zelf de rebase heeft overleefd.
+          spiegelwet() {
+            node -e '
+              const { execFileSync } = require("node:child_process");
+              const { readFileSync } = require("node:fs");
+              // Zonder ruime `maxBuffer` loopt een append-only bestand ooit tegen de standaardgrens van
+              // ~1 MiB en stopt de bewaker (bevinding Codex). Fail-closed, maar onnodig.
+              const lees = (rev) => execFileSync("git", ["show", `${rev}:data/kanaalpost-publiek.md`], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+              const regel = Buffer.from(process.env.RIJ_B64, "base64").toString("utf8").trim();
+              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld, nietCanoniekeRegels, nieuweNietCanoniekeRegels }) => {
+                const nu = lees("HEAD");
+                const vertrek = readFileSync(process.env.SPIEGEL_VOOR, "utf8");
+                for (const [wat, oud] of [["de stand waarvan deze job vertrok", vertrek], ["de voorganger van deze commit", lees("HEAD~1")]]) {
+                  const r = alleenAangevuld(oud, nu);
+                  if (!r.ok) {
+                    console.error(`::error::t.o.v. ${wat} zouden ${r.verdwenen} regel(s) verdwijnen — de waarnemer publiceert dat niet.`);
+                    process.exit(1);
+                  }
+                }
+                // Een rebase kan de eigen commit laten vallen. Dan zou de job groen doorlopen en een
+                // stand pushen zonder alarm — het alarm is dan stil, en stil is precies wat niet mag.
+                if (!nu.split("\n").map((r) => r.trim()).includes(regel)) {
+                  console.error("::error::de alarmregel staat na het herplaatsen niet meer in de spiegel — geweigerd.");
+                  process.exit(1);
+                }
+                const vuilNieuw = nieuweNietCanoniekeRegels(vertrek, nu);
+                if (vuilNieuw.length) {
+                  console.error(`::error::niet-canonieke NIEUWE regel(s) in de spiegel: ${vuilNieuw.map((v) => `regel ${v.regel} (${v.tekens.join(" ")})`).join("; ")}.`);
+                  process.exit(1);
+                }
+                const oudVuil = nietCanoniekeRegels(nu).length - vuilNieuw.length;
+                if (oudVuil > 0) console.log(`::warning::${oudVuil} bestaande regel(s) in de spiegel zijn niet canoniek; die blokkeren niet, maar horen opgeruimd te worden.`);
+                console.log("spiegelwet op de eigen commit: niets verdwenen, alarm aanwezig, vorm canoniek.");
+                process.exit(0);
+              }).catch((e) => { console.error(`::error::spiegelwet niet te draaien: ${e.message}`); process.exit(1); });
+            '
+          }
+          spiegelwet
           # Een gelijktijdige push mag deze melding niet laten verdampen: opnieuw ophalen, erbovenop
-          # zetten, nog eens proberen.
+          # zetten, nog eens proberen. Na het herplaatsen staat er een ANDERE voorganger onder de commit,
+          # dus de wet wordt opnieuw getoetst — anders zou een herplaatsing de poort omzeilen. Na de
+          # LAATSTE mislukte poging niet meer herplaatsen: daar komt geen push meer achteraan.
           for poging in 1 2 3; do
             if git push origin "HEAD:${GITHUB_REF_NAME}"; then exit 0; fi
+            if [ "${poging}" = 3 ]; then break; fi
             echo "push-poging ${poging} mislukt — opnieuw ophalen en herplaatsen"
             git pull --rebase origin "${GITHUB_REF_NAME}"
+            spiegelwet
           done
           echo "::error::de alarmregel kon niet naar de tak worden geschreven."
           exit 1
@@ -267,6 +323,33 @@ jobs:
             exit 1
           fi
           toets "${BASIS}" "het aftakpunt met main" || fout=1
+          # DE SCHRIJFKANT (besluit Fable, 26-07-2026, punt 3). De leeskant mag normaliseren om te kunnen
+          # vergelijken; de spiegel zelf houdt één vorm aan, zodat er geen twee schrijfwijzen van dezelfde
+          # regel kunnen bestaan die de leeskant later gelijk noemt.
+          #
+          # HARD op wat deze tak NIEUW toevoegt, WAARSCHUWING op wat er al stond. Een harde eis op het
+          # hele bestand klinkt strenger maar slaat de deur dicht: append-only verbiedt een vuile
+          # historische regel te herstellen, dus die ene regel zou élke volgende commit rood houden —
+          # ook van iemand die de spiegel niet aanraakt (Codex D, Gemini D, onafhankelijk). De vorm-eis
+          # gaat over schrijven, dus toetst hij wat er geschreven wordt. `$SPIEGEL_OUD` bevat hier de
+          # stand van het aftakpunt, van de laatste `toets` hierboven. Nulmeting bij invoering: alle 44
+          # tabelregels voldeden al, dus deze eis legt niets recht met terugwerkende kracht.
+          OUD="$SPIEGEL_OUD" node -e '
+            const { readFileSync } = require("node:fs");
+            import("./scripts/lib/spiegelwet.mjs").then(({ nietCanoniekeRegels, nieuweNietCanoniekeRegels }) => {
+              const nu = readFileSync("data/kanaalpost-publiek.md", "utf8");
+              const oud = readFileSync(process.env.OUD, "utf8");
+              const nieuw = nieuweNietCanoniekeRegels(oud, nu);
+              const bestaand = nietCanoniekeRegels(nu).length - nieuw.length;
+              if (bestaand > 0) console.log(`::warning::${bestaand} regel(s) die er al stonden zijn niet canoniek; die blokkeren niet, maar horen opgeruimd te worden.`);
+              if (nieuw.length) {
+                console.error(`::error::de spiegel eist één canonieke vorm; nieuw en niet-canoniek: ${nieuw.map((v) => `regel ${v.regel} (${v.tekens.join(" ")})`).join("; ")}. Schrijf gewone tekens (bijvoorbeeld ... in plaats van het afkap-teken) en geen onzichtbare tekens.`);
+                process.exit(1);
+              }
+              console.log(`canonieke vorm van de nieuwe regels: in orde.`);
+              process.exit(0);
+            }).catch((e) => { console.error(`::error::vormcontrole niet te draaien: ${e.message}`); process.exit(1); });
+          ' || fout=1
           exit "${fout}"
 
   # De run is pas rood NA het melden. Deze poort bestaat apart zodat "zichtbaar maken" en "falen"

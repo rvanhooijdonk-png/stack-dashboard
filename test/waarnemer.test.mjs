@@ -284,7 +284,11 @@ test('de alarmregel noemt de controlepunten en blijft binnen de publicatiegrens'
   }));
   const r = alarmRij({ bevindingen, nu: NU });
   assert.match(r, /\(controlepunten: sectie-leeg\)/);
-  assert.match(r, /…/, 'te lange tekst hoort zichtbaar afgekapt te zijn');
+  // Drie punten en niet het teken `…`: de spiegel eist op de schrijfkant één canonieke vorm, en `…`
+  // is niet zijn eigen NFKC-vorm (besluit Fable 26-07-2026, punt 3). De waarnemer krijgt daar geen
+  // uitzondering op — zie `test/spiegelwet.test.mjs` voor de eis zelf.
+  assert.match(r, /\.\.\./, 'te lange tekst hoort zichtbaar afgekapt te zijn');
+  assert.equal(r.includes('…'), false);
   assert.equal(alarmRijPubliceerbaar(r), true);
 });
 

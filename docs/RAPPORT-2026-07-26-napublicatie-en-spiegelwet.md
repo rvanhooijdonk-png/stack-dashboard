@@ -254,31 +254,114 @@ Niet overgenomen, met reden:
 
 Geen onenigheid tussen Codex en Gemini in deze ronde, dus geen escalatie naar Fable.
 
-## 6. Open beslispunten voor Fable
+## 6. De vier punten — besluit van Fable en wat ermee gedaan is
 
-1. **De 8 minuten zijn te kort volgens beide reviewers.** GitHub zegt zelf dat een Pages-wijziging tot
-   tien minuten kan duren, en in deze repo is gemeten dat de query-string geen cachesleutel is. Een
-   uitrol die technisch klopt kan dus binnen 8 minuten onzichtbaar blijven — dat wordt dan onterecht
-   rood. Advies van beide: 12 tot 15 minuten, gerekend vanaf de geslaagde uitrol. **Ik heb 8 minuten
-   laten staan omdat dat het besluit was**, en meld dit in plaats van het stil te veranderen. Het
-   publieke alarm staat uit, dus een onterecht rood blijft voorlopig binnen de bouw.
-2. **`main` is niet beschermd** (geen branch protection, geen rulesets, force-push mogelijk). Elke
-   poort in dit voorstel is daarmee een controle achteraf. Dit is een repo-instelling; wil je die aan,
-   dan is het één handeling van Richard of de aangewezen merger.
-3. **De spiegelwet ziet de push van de bot zelf niet.** Een push met `GITHUB_TOKEN` start geen workflow —
-   daar is de `verversen`-job voor. Gevolg: juist de schrijfactie van de waarnemer wordt niet door de
-   append-only-poort gehaald. Binnen de job wordt hij wel gecontroleerd (de zes eisen hierboven), maar
-   niet door de wet. Repareren kost een tweede identiteit (app-token of deploy key) — dat is een
-   toegangsbeslissing, geen code, dus het ligt bij Richard.
-4. **De vergelijking tolereert NFKC-gelijken op de paginakant.** `eersteKanaalpostRij` normaliseert met
-   NFKC, dus een plaat die `10²` toont waar de bron `102` zegt wordt gelijk genoemd. Dit zat er al vóór
-   deze ronde in en is er niet groter door geworden; het is begrensd doordat de pagina uit diezelfde
-   genormaliseerde bron gerenderd wordt. Wegnemen betekent de HTML-kant zonder NFKC teruglezen, en dat
-   raakt de hele terugleesketen — te groot voor dit voorstel, dus expliciet als punt neergelegd.
+Fable heeft op 26-07-2026 op alle vier beslist. Hieronder per punt het besluit en de uitvoering.
+
+**1. De 8 minuten blijven.** Grond van Fable: het publieke alarm staat toch uit tot tien schone ronden,
+dus onterecht rood kost nu niets; kom na die proefperiode terug met meetdata als 8 te krap blijkt.
+Uitvoering: niets gewijzigd, `DEADLINE_MS` staat op 8 minuten. Wat ik ga meten in de proefperiode: per
+ronde het aantal navragen tot een verse stempel, zodat "8 is te krap" straks met getallen komt en niet
+met een aanname.
+
+**2. Geen bot-uitzondering op de spiegelwet.** Besluit: de poort wordt niet omzeild, ook niet door onze
+eigen waarnemer. Uitvoering: de wet draait nu IN de `melden`-job, vóór de push en opnieuw na elke
+herplaatsing — `alleenAangevuld(HEAD~1, HEAD)` plus de vormcontrole. Dat repareert het gat dat er zat
+doordat een push met `GITHUB_TOKEN` geen workflow start, zonder tweede identiteit en zonder uitzondering.
+Gedraaid in een schone testrepo met de letterlijke code uit `waarnemer.yml`:
+
+```
+1. nette aanvulling            → spiegelwet op de eigen commit: niets verdwenen, vorm canoniek.  exit=0
+2. bot haalt zelf een regel weg → ::error::de waarnemer zou zelf 1 regel(s) laten verdwijnen.     exit=1
+3. bot schrijft 10² in de spiegel → ::error::niet-canonieke regel(s): regel 5 (U+00B2).           exit=1
+```
+
+**3. NFKC: normaliseren mag op de leeskant, de spiegel eist op de schrijfkant één canonieke vorm.**
+Uitvoering: `canoniek()` en `nietCanoniekeRegels()` in `scripts/lib/spiegelwet.mjs`, gehandhaafd in de
+`spiegelwet`-job én in de `melden`-job. Een tabelregel moet gelijk zijn aan zijn eigen NFKC-vorm en mag
+geen onzichtbare tekens bevatten. Daarmee kan de tolerantie op de leeskant geen twee schrijfwijzen meer
+tegenkomen die zij gelijk noemt: die vormen komen er niet meer in.
+
+- **Nulmeting:** alle 44 tabelregels in `data/kanaalpost-publiek.md` voldeden al. De eis legt niets recht
+  met terugwerkende kracht; hij houdt vast wat er nu staat. Vastgezet in een test die op het echte
+  bestand draait.
+- **De waarnemer krijgt geen uitzondering:** `alarmRij` kapte af met `…`, en dat teken is zelf niet
+  canoniek. Nu `...`. `alarmRijPubliceerbaar` weigert bovendien een niet-canonieke regel, zodat een
+  alarm dat in CI zou blijven steken niet eens geschreven wordt.
+
+**4. Takbescherming op `main`: hier niet beslissen.** Genoteerd als punt voor de GitHub-plan-beslissessie.
+Ik laat het staan zoals het is en meld alleen wat het betekent: elke poort in dit voorstel is een
+controle achteraf zolang `main` onbeschermd is.
+
+## 6b. Dubbele review van de besluitenronde — en het gat dat daar nog in zat
+
+De uitvoering van punt 2 en 3 hierboven is opnieuw langs Codex en Gemini gegaan, vóór de commit. Codex'
+oordeel was **niet aannemen**, met één hoge bevinding die klopt, en die ik zelf niet had gezien.
+
+**A (Codex, hoog) — na een herplaatsing bewaakte de wet de verkéérde basis.** De controle mat
+`HEAD~1 → HEAD`. Botst de push, dan zet `git pull --rebase` de alarmcommit boven op de nieuwe stand van
+de tak, en is `HEAD~1` díe nieuwe stand. Was daar intussen een regel uit verdwenen, dan is de botcommit
+er keurig een aanvulling op — en publiceert de waarnemer de verminkte stand, waarna er géén
+spiegelwet-run meer volgt, want een push met `GITHUB_TOKEN` start geen workflow. Gemeten met de oude
+code op precies dat scenario:
+
+```
+OUDE controle: niets verdwenen, vorm canoniek.        exit=0
+X staat nog in de spiegel: 0                          ← de regel was wél weg
+```
+
+Gerepareerd: de wet meet nu tegen **twee** standen — de stand waarvan de job vertrok (`SPIEGEL_VOOR`,
+die al bestond maar na de eerste controle ongebruikt bleef) én de voorganger van de commit — en
+controleert apart dat de alarmregel de herplaatsing heeft overleefd, want een rebase kan de eigen commit
+laten vallen. Vijf scenario's, gedraaid met de letterlijke node-code uit `waarnemer.yml` in schone
+scratch-repo's:
+
+```
+1. nette aanvulling                → niets verdwenen, alarm aanwezig, vorm canoniek        exit=0
+2. rebase op een stand die X kwijt is → t.o.v. de stand waarvan deze job vertrok zouden 1
+                                      regel(s) verdwijnen — de waarnemer publiceert dat niet exit=1
+3. eigen alarmcommit weggevallen   → de alarmregel staat na het herplaatsen niet meer in de
+                                      spiegel — geweigerd                                    exit=1
+4. nieuwe regel met 10² erin       → niet-canonieke NIEUWE regel(s): regel 5 (U+00B2)         exit=1
+5. OUDE vuile regel, nieuwe schoon → ::warning:: 1 bestaande regel(s) … blokkeren niet        exit=0
+```
+
+**B (beiden) — de onzichtbare-tekenlijst was te kort, en er waren er twee.** `kanaalpost.mjs` had al een
+veel bredere verzameling (bidi-overrides, variation selectors, C1-stuurtekens); mijn spiegelwet had zijn
+eigen korte lijstje. Twee definities van "onzichtbaar" betekent dat de schrijfkant doorlaat wat de
+leeskant weghaalt. Nu één bron: `bevatOnzichtbaar()` uit `kanaalpost.mjs`, door beide kanten gebruikt.
+Nulmeting met de bredere verzameling: 0 van de 44 regels wordt er alsnog door afgekeurd.
+
+**C (Codex) — `trim()` was een omweg.** JavaScript's `trim()` haalt óók een BOM en een harde spatie weg,
+dus een regel die met een BOM begint werd getrimd canoniek genoemd terwijl de parser hem daarna gewoon
+publiceert. De controle beoordeelt nu de **ruwe** regel; alleen de selectie kijkt door witruimte en
+onzichtbare tekens heen. Drie tests leggen dat vast (BOM ervoor, harde spatie erachter, zero-width
+ervoor). Codex' andere C-punt — selecteer via de tabel-state-machine in plaats van op de pipe — heb ik
+**niet** overgenomen: de huidige selectie is rúimer dan de parser (44 regels tegen 35 echte rijen), en
+ruimer is aan de veilige kant. Gemini's spiegelbeeld-punt (een rij zónder beginpipe zou ontsnappen) is
+weerlegd door meting: `cellenVan` in `kanaalpost.mjs:142` eist een begin- én een sluitpipe, dus zo'n
+regel wordt nooit een publieke rij.
+
+**D (beiden, onafhankelijk) — hard op het hele bestand kan de deur permanent op slot zetten.** Glipt er
+ooit één vuile regel doorheen, dan mag append-only hem niet herstellen én houdt hij elke volgende commit
+rood, ook van iemand die de spiegel niet aanraakt. Overgenomen in deze vorm: **hard op wat er nieuw bij
+komt** (`nieuweNietCanoniekeRegels`, dat is precies de schrijfkant waar het besluit over gaat),
+**waarschuwing op wat er al stond**. Scenario 5 hierboven is daar het bewijs van.
+
+**E (Codex) — vier punten in plaats van drie.** De afkapping zette `...` en de zin zette er daarna nog
+een punt achter: `....`. De test keek met `includes('...')` en zag dat niet. Gerepareerd (de punt hoort
+binnen de keuze) en de test kijkt nu ook op `....`. Verder overgenomen: `maxBuffer` op `git show` (de
+standaard van ~1 MiB wordt in een append-only bestand ooit een harde stop), geen zinloze herplaatsing
+na de laatste mislukte push, en `fetch-depth: 0` op de checkout van de `melden`-job (Gemini: een rebase
+in een ondiepe kloon kan het gemeenschappelijke punt missen).
+
+**Niet gerepareerd, wel gemeld:** de `melden`-job draait `node` zonder `setup-node`, dus de versie is
+daar niet gepind. Dat is bestaand gedrag van vóór deze ronde en raakt de wet niet; het hoort in een
+eigen wijziging thuis.
 
 ## AFSLUITING
 
-- Tests groen: `npm test` → `tests 306 / pass 306 / fail 0`. Nulmeting vóór de bouw: `pass 276 / fail 1`.
+- Tests groen: `npm test` → `tests 321 / pass 321 / fail 0`. Nulmeting vóór de bouw: `pass 276 / fail 1`.
   Nulmeting van de rondgang-tests tegen de ongerepareerde waarnemer: `pass 6 / fail 1` op de `<br>`-fix,
   en eerder `2 van 5 rood` op de twee productiefouten.
 - Rollback/additief geborgd: alles nieuwe bestanden plus één job en één trigger-pad in `waarnemer.yml`;
@@ -294,17 +377,21 @@ Geen onenigheid tussen Codex en Gemini in deze ronde, dus geen escalatie naar Fa
   gerepareerde alarmpoort in CI zelf nog niet gedraaid heeft. Bewijs daarvoor is de lokale ronde met
   de zes varianten hierboven, gedraaid op de letterlijke code uit `waarnemer.yml`.
 - stack-smoke: n.v.t. — niet geïnstalleerd in deze repo.
-- Secrets-scan: `gitleaks protect --staged` → `no leaks found` (39,17 KB).
+- Secrets-scan: `gitleaks protect --staged` → `no leaks found` (laatste ronde: 24,01 KB).
 - Raakvlakken gecheckt: `publish.yml` (levert het referentiemoment; niet gewijzigd), `waarnemer.yml`
   (job + trigger-pad erbij), `data/kanaalpost-publiek.md` (drie regels aangevuld, door de
   publicatiepoort gehaald: 277/519/532 tekens, geen afkapping), `lib/kanaalpost.mjs` (ongewijzigd,
   alleen gelezen).
-- Codex: ja — twee ronden. Eerste ronde: afwijzen tot herstel, negen punten verwerkt, twee als beslispunt
+- Codex: ja — drie ronden. Eerste ronde: afwijzen tot herstel, negen punten verwerkt, twee als beslispunt
   doorgezet. Fixronde (A–E): vijf punten overgenomen, één erkend-maar-niet-gerepareerd met reden, één
-  weerlegd (§5b).
-- Gemini: ja — twee ronden. Eerste ronde: vier punten, één overgenomen (force-push op main), één weerlegd
+  weerlegd (§5b). Besluitenronde: oordeel *niet aannemen*; de hoge bevinding (rebase bewaakte de
+  verkeerde basis) is gemeten, gerepareerd en met vijf scenario's bewezen, plus vier kleinere; één
+  punt beargumenteerd niet overgenomen, één als bestaand gedrag gemeld (§6b).
+- Gemini: ja — drie ronden. Eerste ronde: vier punten, één overgenomen (force-push op main), één weerlegd
   (typo). Fixronde: vier punten, waarvan drie samenvallen met Codex en overgenomen zijn; E1 weerlegd door
-  meting. Geen onenigheid tussen de twee, dus geen escalatie.
+  meting. Besluitenronde: vier punten, waarvan er drie samenvallen met Codex (tekenverzameling te
+  kort, hele-bestandscontrole, `fetch-depth`) en zijn overgenomen; het punt over rijen zonder
+  beginpipe is weerlegd door meting. Geen onenigheid tussen de twee, dus geen escalatie.
 - Fable: ja — het besluit over ritme, "nooit onbekend" en het uitgestelde publieke alarm komt van
   Fable; de twee beslispunten hierboven gaan terug naar Fable.
 

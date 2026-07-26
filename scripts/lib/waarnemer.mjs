@@ -29,6 +29,7 @@
  */
 
 import { kanaalpostUitTekst, toPublicKanaalpost, ontdaan } from './kanaalpost.mjs';
+import { canoniek } from './spiegelwet.mjs';
 
 /** Vanaf deze contractversie MOET de pagina een kanaalpost-sectie hebben. */
 export const KANAALPOST_VANAF = '2.4.0';
@@ -362,8 +363,14 @@ export function alarmRij({ bevindingen, nu, sabotage = false, maxOnderwerp = 560
   const test = sabotage ? ' Dit is een geplande sabotagetest van de waarnemer zelf, geen echte storing.' : '';
   const kop = '**De automatische controle ziet de openbare plaat afwijken van de bron.**';
   const ruimte = maxOnderwerp - kop.length - test.length - staart.length - 2;
-  const kern = zinnen.length > ruimte ? `${zinnen.slice(0, Math.max(0, ruimte - 1)).trimEnd()}…` : zinnen;
-  const onderwerp = `${kop} ${kern}.${test}${staart}`;
+  // Afkappen met drie punten en niet met het teken `…`: de spiegel eist op de schrijfkant één
+  // canonieke vorm (besluit Fable, punt 3), en `…` is niet zijn eigen NFKC-vorm. De waarnemer krijgt
+  // daar geen uitzondering op — juist de bewaker moet door de poort die hij bewaakt.
+  // De punt hoort BINNEN deze keuze, niet erachter: met een punt erachter eindigde een afgekapte tekst
+  // op vier punten (`....`), en de eerste test hierop keek met `includes('...')` en zag dat niet
+  // (bevinding Codex, 26-07-2026).
+  const kern = zinnen.length > ruimte ? `${zinnen.slice(0, Math.max(0, ruimte - 3)).trimEnd()}...` : `${zinnen}.`;
+  const onderwerp = `${kop} ${kern}${test}${staart}`;
   return `| ${nlTijd(nu)} | WAARNEMER | ${onderwerp} | GEBLOKKEERD | Richard of Fable |`;
 }
 
@@ -377,7 +384,10 @@ export function alarmRijPubliceerbaar(rij) {
   const proef = ['| datum-tijd | tab-rol | onderwerp | status | actie voor |',
     '| --- | --- | --- | --- | --- |', String(rij ?? '')].join('\n');
   const uit = toPublicKanaalpost(kanaalpostUitTekst(proef));
-  return uit.available === true && uit.rows.length === 1 && uit.ingehouden === 0;
+  // Ook de schrijfkant-eis, hier al: een regel die de spiegelwet later toch tegenhoudt hoort niet eens
+  // uit deze functie te komen. Anders schrijft de waarnemer een alarm dat in CI blijft steken, en dat
+  // is precies de stille uitval waar hij tegen is.
+  return canoniek(rij) && uit.available === true && uit.rows.length === 1 && uit.ingehouden === 0;
 }
 
 /**

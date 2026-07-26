@@ -90,12 +90,23 @@ const TAB_PUBLIEK = /^[A-Z][A-Z0-9]*(?:[ -][A-Z0-9]+)*$/;
  * 26-07-2026). Ze worden daarom verwijderd vóór er gescand én vóór er getoond wordt: gescand
  * wordt precies wat er op de plaat komt.
  */
-const ONZICHTBAAR = new RegExp(
-  '[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u115F\\u1160'
+export const ONZICHTBARE_KLASSE = '[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u115F\\u1160'
   + '\\u17B4\\u17B5\\u180B-\\u180E\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u206F'
-  + '\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0]',
-  'g',
-);
+  + '\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0]';
+
+const ONZICHTBAAR = new RegExp(ONZICHTBARE_KLASSE, 'g');
+
+/**
+ * Dezelfde verzameling, als vraag in plaats van als schrapper — voor de schrijfkant (`spiegelwet.mjs`).
+ * Bewust hier en niet daar: de eerste versie van de spiegelwet had zijn eigen, veel kortere lijstje, en
+ * twee definities van "onzichtbaar" betekent dat de ene poort doorlaat wat de andere verwijdert
+ * (bevinding Codex, 26-07-2026). Eén bron, twee gebruiken.
+ *
+ * GEEN gedeelde regex met `g`: die onthoudt `lastIndex` tussen aanroepen en geeft dan om en om
+ * true en false op dezelfde invoer.
+ */
+const ONZICHTBAAR_EEN = new RegExp(ONZICHTBARE_KLASSE);
+export const bevatOnzichtbaar = (tekst) => ONZICHTBAAR_EEN.test(String(tekst ?? ''));
 
 /**
  * Normaliseer vrije tekst tot de vorm waarop we oordelen: NFKC (zodat breedbeeld-varianten van
