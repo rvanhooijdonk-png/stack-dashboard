@@ -67,6 +67,7 @@ export const REDENEN = {
   VELD_NIET_GESLOTEN: 'de bron bevat een veld dat niet uit een vastgelegde lijst komt',
   BEWIJS_ONVOLLEDIG: 'niet alle bewijsstukken zijn aangeleverd, dus er valt niets vast te stellen',
   GEEN_SPOREN: 'de bron leverde geen enkel spoor op',
+  KLOK_ONBEKEND: 'er is geen betrouwbaar tijdstip om de versheid aan te meten',
   TOESTAND_NIET_BIJ_BYTES: 'de aangeleverde toestand hoort niet bij de aangeleverde bytes',
   ALLES_STIL: 'alle sporen zwijgen al langer dan afgesproken',
   TOESTAND_NIET_BIJ_BRON: 'de aangeleverde toestand hoort niet bij de bron die is gelezen',
@@ -391,16 +392,23 @@ export function keurState(state) {
 
   // Een toestand zonder enig spoor is geen gezonde toestand maar een mislukte lezing. Er valt niets te
   // vergelijken, dus er valt niets goed te keuren.
-  if (!state.lanes || typeof state.lanes !== 'object' || Object.keys(state.lanes).length === 0) {
+  // `Array.isArray` staat er expliciet bij: een array is ook een object, en `state.lanes = []` haalde
+  // daardoor de vormtoets. Wat daarna volgt rekent op sleutels die een spoor heten.
+  if (!state.lanes || typeof state.lanes !== 'object' || Array.isArray(state.lanes)
+    || Object.keys(state.lanes).length === 0) {
     fouten.push('GEEN_SPOREN');
   }
   if (!Number.isInteger(state.eventHighWatermark) || state.eventHighWatermark < 0) fouten.push('VELD_NIET_GESLOTEN');
   // Verworpen rijen zijn een schemafout van de BRON, geen ruis van de lezer: er staat iets in de
   // spiegel dat het gesloten schema niet kent, en zolang dat zo is dekt de state de bron niet.
-  const verworpen = state.verworpenRijen ?? 0;
-  if (!Number.isInteger(verworpen) || verworpen < 0 || verworpen > 0) fouten.push('VELD_NIET_GESLOTEN');
+  // `?? 0` stond hier en dat maakte het veld optioneel: een toestand zónder `verworpenRijen` kreeg er
+  // stilzwijgend een nul bij en haalde de keuring. Precies het veld dat moet melden dát er iets is
+  // afgekeurd, mocht dus ontbreken. Het is nu verplicht aanwezig en verplicht nul.
+  const verworpen = state.verworpenRijen;
+  if (!Number.isInteger(verworpen) || verworpen !== 0) fouten.push('VELD_NIET_GESLOTEN');
   for (const [sleutel, lane] of Object.entries(state.lanes ?? {})) {
-    if (!LANES.includes(sleutel) || lane?.laneId !== sleutel) { fouten.push('VELD_NIET_GESLOTEN'); continue; }
+    if (!lane || typeof lane !== 'object' || Array.isArray(lane)) { fouten.push('VELD_NIET_GESLOTEN'); continue; }
+    if (!LANES.includes(sleutel) || lane.laneId !== sleutel) { fouten.push('VELD_NIET_GESLOTEN'); continue; }
     if (Object.keys(lane).some((k) => !LANE_SLEUTELS.includes(k))) fouten.push('VELD_NIET_GESLOTEN');
     if (!TOESTANDEN.includes(lane.toestand)) fouten.push('TOESTAND_ONBEKEND');
     if (!EVENT_UITKOMSTEN.includes(lane.eventUitkomst)) fouten.push('VELD_NIET_GESLOTEN');
@@ -413,8 +421,13 @@ export function keurState(state) {
     // waarin ze allemaal ontbreken meet niets en komt als GROEN naar buiten — gemeten: twee sporen van
     // een halfjaar oud, `momentUtc` op null, uitkomst GROEN met een lege redenenlijst. De vorm alléén
     // controleren volstond niet, want de afwezigheid glipte langs de vormtoets heen.
+    // De vorm alléén volstaat niet: `Date.parse` rekent 30 februari stilzwijgend om naar 2 maart, dus
+    // een onmogelijke kalenderdatum haalde de toets en kwam in de publieke toestand terecht. De
+    // heenweg wordt daarom teruggerekend en moet exact opleveren wat er stond — dezelfde eis die
+    // `momentUitNlTijd` aan de bronkant al stelt.
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(String(lane.momentUtc))
-      || Number.isNaN(Date.parse(lane.momentUtc))) {
+      || Number.isNaN(Date.parse(lane.momentUtc))
+      || new Date(Date.parse(lane.momentUtc)).toISOString() !== lane.momentUtc) {
       fouten.push('VELD_NIET_GESLOTEN');
     }
   }
@@ -441,6 +454,47 @@ export function manifestVoor(state, { bronCommitSha, bronBlobSha = null, generat
     },
     bytes,
   };
+}
+
+const MANIFEST_SLEUTELS = ['schemaVersie', 'bronSoort', 'bronCommitSha', 'bronBlobSha',
+  'eventHighWatermark', 'eventCount', 'generatedAt', 'stateSha256'];
+
+/**
+ * Het manifest wordt naast de toestand gepubliceerd en werd nergens gekeurd — alleen de hash erin
+ * werd gebruikt. Gemeten: een manifest met een klantnaam in `generatedAt` en een lokaal pad in
+ * `bronBlobSha` kwam er als GROEN uit, want `manifestDekt` kijkt naar één veld. Het manifest gaat de
+ * publieke kant op en heeft dus hetzelfde gesloten schema nodig als de toestand zelf.
+ */
+export function keurManifest(manifest, state = null) {
+  const fouten = [];
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    return { ok: false, fouten: ['BRON_ONLEESBAAR'] };
+  }
+  if (Object.keys(manifest).some((k) => !MANIFEST_SLEUTELS.includes(k))) fouten.push('VELD_NIET_GESLOTEN');
+  if (manifest.schemaVersie !== KIJK_SCHEMA) fouten.push('VELD_NIET_GESLOTEN');
+  if (manifest.bronSoort !== OVERGANG_MERK) fouten.push('VELD_NIET_GESLOTEN');
+  if (!volledigeSha(manifest.bronCommitSha)) fouten.push('VELD_NIET_GESLOTEN');
+  if (manifest.bronBlobSha !== null && !volledigeSha(manifest.bronBlobSha)) fouten.push('VELD_NIET_GESLOTEN');
+  if (!Number.isInteger(manifest.eventHighWatermark) || manifest.eventHighWatermark < 0) fouten.push('VELD_NIET_GESLOTEN');
+  if (!Number.isInteger(manifest.eventCount) || manifest.eventCount < 0) fouten.push('VELD_NIET_GESLOTEN');
+  if (typeof manifest.stateSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(manifest.stateSha256)) {
+    fouten.push('VELD_NIET_GESLOTEN');
+  }
+  // `generatedAt` is de enige vrije-ogende tekst in het manifest en dus de plek waar een klantnaam of
+  // een incidentregel binnenkomt. Een tijdstempel is geen vrij veld: hij moet exact terugrekenen.
+  if (typeof manifest.generatedAt !== 'string'
+    || Number.isNaN(Date.parse(manifest.generatedAt))
+    || new Date(Date.parse(manifest.generatedAt)).toISOString() !== manifest.generatedAt) {
+    fouten.push('VELD_NIET_GESLOTEN');
+  }
+  // Waar manifest en toestand hetzelfde beweren, moeten ze het ook eens zijn. Twee bewijsstukken die
+  // uiteenlopen zijn geen twee bewijzen maar één tegenspraak.
+  if (state) {
+    if (manifest.eventHighWatermark !== state.eventHighWatermark) fouten.push('VELD_NIET_GESLOTEN');
+    if (manifest.eventCount !== state.eventCount) fouten.push('VELD_NIET_GESLOTEN');
+    if (manifest.bronSoort !== state.bronSoort) fouten.push('VELD_NIET_GESLOTEN');
+  }
+  return { ok: fouten.length === 0, fouten: [...new Set(fouten)] };
 }
 
 /**
@@ -520,6 +574,20 @@ export function oordeel({
     return uit('GEEN OORDEEL');
   }
 
+  // ── 2a. de klok is óók een bewijsstuk, en zonder klok is er geen uitspraak over versheid mogelijk.
+  //
+  // Hier stond eerst een optionele klok, waarbij de afwezigheid alleen in `gemeten.klokAanwezig` werd
+  // gemeld. De twee reviewfamilies waren het daar aanvankelijk oneens over en zijn dat na deze ronde
+  // niet meer: beide wijzen het af, en met dezelfde meting. Een halfjaar oude toestand gaf zónder klok
+  // GROEN en mét klok PARTIAL/ALLES_STIL, dus de uitkomst hing af van een weglating. `NaN` was nog
+  // erger: dat meldde `klokAanwezig: true` én GROEN, want elke vergelijking met NaN is onwaar. Een
+  // ontbrekend bewijsstuk hoort in GEEN OORDEEL te landen — dat is de hele regel, en de klok is geen
+  // uitzondering erop.
+  if (!Number.isFinite(nu)) {
+    redenen.push('KLOK_ONBEKEND');
+    return uit('GEEN OORDEEL');
+  }
+
   // ── 2b. dekt het manifest exact deze state-bytes?
   if (!manifestDekt(manifest, stateBytes)) {
     redenen.push('HASHFOUT');
@@ -546,6 +614,32 @@ export function oordeel({
   // bewijst alleen zichzelf.
   if (state.bronCommitSha !== lezing.sha || manifest.bronCommitSha !== lezing.sha) {
     redenen.push('TOESTAND_NIET_BIJ_BRON');
+    return uit('GEEN OORDEEL');
+  }
+
+  // ── 2e. en dat was NOG steeds een vergelijking van etiketten, niet van inhoud.
+  //
+  // Twee claims die hetzelfde commitlabel dragen bewijzen alleen dat iemand tweemaal hetzelfde heeft
+  // opgeschreven. Gemeten: een toestand afgeleid uit bron B, gestempeld met de SHA van de zojuist
+  // gelezen bron A, met een intern kloppend manifest en een kloppende pagina — uitkomst GROEN, terwijl
+  // de toestand nergens uit de gelezen tekst volgde. Zolang de spiegel de bron IS, moet de toestand
+  // exact uit de gelezen tekst te herleiden zijn; dat is de enige binding die niet op een etiket rust.
+  //
+  // De toets hangt aan het OVERGANG-merk: zodra de exporter uit task_events publiceert komt de
+  // toestand niet meer uit deze tekst, en dan hoort hier de bron-blobhash van het manifest te worden
+  // vergeleken in plaats van een herleiding. Tot die tijd geldt de strengere eis.
+  if (state.bronSoort === OVERGANG_MERK) {
+    const herleid = kijkStateUitSpiegel(lezing.tekst, { commitSha: lezing.sha }).state;
+    if (!kanoniekeBytes(herleid).equals(kanoniekeBytes(state))) {
+      redenen.push('TOESTAND_NIET_BIJ_BRON');
+      return uit('GEEN OORDEEL');
+    }
+  }
+
+  // ── 2f. en het manifest zelf gaat óók publiek, dus het heeft hetzelfde gesloten schema nodig.
+  const manifestKeuring = keurManifest(manifest, state);
+  if (!manifestKeuring.ok) {
+    redenen.push(...manifestKeuring.fouten);
     return uit('GEEN OORDEEL');
   }
   gemeten.stateSha256 = manifest?.stateSha256 ?? null;
@@ -586,10 +680,15 @@ export function oordeel({
   // ── 5c. draagt de bron een tijdstip dat nog niet geweest is? Dat is geen stilte maar een onmogelijke
   // meting, en zonder deze toets is het bovendien de goedkoopste manier om de stiltemeting uit te
   // zetten: één rij met een tijd van volgende maand maakt elk werkelijk stilstaand spoor "recent".
-  const momenten = Object.values(state.lanes)
-    .map((l) => (l.momentUtc ? Date.parse(l.momentUtc) : null))
+  // `state.lanes` wordt hier gelezen terwijl de keuring erboven al kan hebben gefaald, en die keuring
+  // schrijft alleen een reden op zonder terug te keren. Met `lanes: null` of één spoor op `null` gooide
+  // dit een TypeError — en een lezer die fail-closed hoort te zijn maar een uitzondering gooit heeft
+  // helemaal geen uitkomst: wat de aanroeper daarmee doet ligt buiten dit contract. Vandaar de
+  // vraagtekens; de keuring zelf houdt de bevinding vast.
+  const momenten = Object.values(state.lanes ?? {})
+    .map((l) => (l?.momentUtc ? Date.parse(l.momentUtc) : null))
     .filter((t) => t !== null && !Number.isNaN(t));
-  if (nu !== null && momenten.some((t) => t > nu + TOEKOMST_MARGE)) redenen.push('TIJD_UIT_DE_TOEKOMST');
+  if (momenten.some((t) => t > nu + TOEKOMST_MARGE)) redenen.push('TIJD_UIT_DE_TOEKOMST');
 
   if (redenen.length) return uit('ROOD');
 
@@ -598,18 +697,17 @@ export function oordeel({
   // (a) Staat alles stil? De onderlinge meting hieronder heeft een blinde vlek waar beide reviewers
   //     onafhankelijk op wezen: stoppen alle sporen tegelijk — de orchestrator valt om, de stroom valt
   //     weg — dan is hun onderlinge afstand nul en is er dus geen enkel verouderd spoor. Precies de
-  //     totale uitval kwam er zo als GROEN uit. Vandaar één absolute vloer, en die geldt alleen als de
-  //     aanroeper een moment meegeeft; zonder klok wordt er geen uitspraak over de klok gedaan, en dát
-  //     staat in `gemeten.klokAanwezig` in plaats van dat het nergens blijkt.
+  //     totale uitval kwam er zo als GROEN uit. Vandaar één absolute vloer. Dat de klok er is, is
+  //     hierboven bij stap 2a al afgedwongen: zonder klok is er geen oordeel, dus ook geen groen.
   // (b) Zwijgt één spoor terwijl de rest doormeldt?
   //
   // Eerst stond (a) vóór (b) met een eigen `return`, en dat maskeerde (b): bij totale uitval verdween
   // de bevinding dat MINI daarbovenop al acht uur langer zweeg dan de rest. Twee verschillende
   // waarnemingen horen niet om voorrang te strijden; ze horen allebei in dezelfde uitkomst te staan.
-  const allesStil = nu !== null && momenten.length > 0 && nu - Math.max(...momenten) > stilMs;
+  const allesStil = momenten.length > 0 && nu - Math.max(...momenten) > stilMs;
   const stil = verouderdeLanes(state, stilMs);
   gemeten.verouderdeLanes = allesStil
-    ? [...new Set([...Object.keys(state.lanes), ...stil])].sort()
+    ? [...new Set([...Object.keys(state.lanes ?? {}), ...stil])].sort()
     : stil;
   if (allesStil) redenen.push('ALLES_STIL');
   if (stil.length) redenen.push('LANE_VEROUDERD');

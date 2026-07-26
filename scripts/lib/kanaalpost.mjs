@@ -214,9 +214,15 @@ export function spiegelScan(tekst) {
       continue;
     }
     if (!inTabel) continue;
-    // Een afwijkend kolomaantal of een tweede scheidingsregel is een andere tabel: sluiten, niet
-    // raden welke cel welk veld is. Dit is géén afgekeurde rij maar het einde van deze tabel.
-    if (isScheiding(c) || c.length !== KOPNAMEN.length) { inTabel = false; continue; }
+    // Een tweede scheidingsregel is het begin van een andere tabel: sluiten, niet raden.
+    if (isScheiding(c)) { inTabel = false; continue; }
+    // Een afwijkend kolomaantal sloot hier eerst óók de tabel, en dat was een stille verdwijning van
+    // de ergste soort: gemeten met een geldige rij, een rij met twee kolommen en dan weer een geldige
+    // rij bleef er één kandidaat over, nul afkeuringen, `eventCount: 1` en de uitkomst GROEN. Niet
+    // alleen de kapotte rij verdween, alles eráchter verdween mee — precies de vorm waarin ooit 41 van
+    // de 54 regels wegvielen. Een regel die nog steeds een tabelregel ís hoort een AFGEKEURDE rij te
+    // zijn die zijn plaats houdt; alleen een regel die geen tabelregel meer is sluit de tabel.
+    if (c.length !== KOPNAMEN.length) { kandidaten.push(null); continue; }
     kandidaten.push(rijUitCellen(c));
   }
   return { kandidaten, afgekeurd: kandidaten.filter((r) => r === null).length };

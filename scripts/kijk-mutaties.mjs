@@ -19,9 +19,20 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const DOEL = join(ROOT, 'scripts/lib/kijk.mjs');
 const SUITE = join(ROOT, 'test/kijk.test.mjs');
-const ORIGINEEL = readFileSync(DOEL, 'utf8');
+
+/**
+ * Het standaarddoel is de kijk-module zelf. Eén reparatie zit echter in de GEDEELDE lezer
+ * (`scripts/lib/kanaalpost.mjs`), waar de waarnemer en de publicatieweg ook op leunen; die mutatie
+ * wijst met `bestand` naar dat bestand. Zonder die uitbreiding zou juist de reparatie met de grootste
+ * raakvlakken de enige zijn die niet bewezen werd.
+ */
+const STANDAARDDOEL = 'scripts/lib/kijk.mjs';
+const bronnen = new Map();
+const lees = (rel) => {
+  if (!bronnen.has(rel)) bronnen.set(rel, readFileSync(join(ROOT, rel), 'utf8'));
+  return bronnen.get(rel);
+};
 
 /** Per proef: waar hij over gaat, en welke ingreep het mechanisme eronder weghaalt. */
 const MUTATIES = [
@@ -115,7 +126,7 @@ const MUTATIES = [
     proef: '5 (reviewgat)',
     raakt: 'reviewgat 5',
     wat: 'de absolute vloer onder de totale uitval vervalt',
-    van: '  const allesStil = nu !== null && momenten.length > 0 && nu - Math.max(...momenten) > stilMs;',
+    van: '  const allesStil = momenten.length > 0 && nu - Math.max(...momenten) > stilMs;',
     naar: '  const allesStil = false; // mutatie: alles tegelijk stil is weer groen',
   },
   {
@@ -144,11 +155,13 @@ const MUTATIES = [
     // mutatie erop zou groen blijven zonder dat dat iets zegt. Hij blijft als tweede riem staan voor het
     // geval de twee lezers ooit uiteenlopen. De tak die WEL bereikbaar is, is deze: `oordeel()` krijgt
     // de toestand aangeleverd, en daar liet de vormtoets een lege tijd door.
-    // De twee helften vangen elk apart een lege tijd (`String(null)` haalt de vorm niet én
+    // De helften vangen elk apart een lege tijd (`String(null)` haalt de vorm niet én
     // `Date.parse(null)` is NaN), dus één regel wegnemen laat de controle staan. De hele toets moet
-    // eruit om te bewijzen dat de proef hem meet.
+    // eruit om te bewijzen dat de proef hem meet. Codex vroeg in de derde ronde om een APARTE mutant
+    // per helft; die staat hieronder als reviewgat 18, en die haalt alléén de kalenderterugrekening weg.
     van: "    if (!/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$/.test(String(lane.momentUtc))\n"
-      + '      || Number.isNaN(Date.parse(lane.momentUtc))) {\n'
+      + '      || Number.isNaN(Date.parse(lane.momentUtc))\n'
+      + '      || new Date(Date.parse(lane.momentUtc)).toISOString() !== lane.momentUtc) {\n'
       + "      fouten.push('VELD_NIET_GESLOTEN');\n"
       + '    }',
     naar: '    /* mutatie: een aangeleverd spoor mag zijn tijd weer missen */',
@@ -178,8 +191,70 @@ const MUTATIES = [
     proef: '12 (reviewgat)',
     raakt: 'reviewgat 12',
     wat: 'een tijdstip uit de toekomst is weer geen bevinding, en zet daarmee de stiltemeting uit',
-    van: "  if (nu !== null && momenten.some((t) => t > nu + TOEKOMST_MARGE)) redenen.push('TIJD_UIT_DE_TOEKOMST');",
+    van: "  if (momenten.some((t) => t > nu + TOEKOMST_MARGE)) redenen.push('TIJD_UIT_DE_TOEKOMST');",
     naar: '  /* mutatie: volgende maand telt weer als recent */',
+  },
+  // ── de zeven reparaties uit de DERDE dubbele review, op kop e9f1d19. Beide families gaven opnieuw
+  // BLOKKEREND. Eén ervan zit buiten kijk.mjs, in de gedeelde lezer — vandaar `bestand`.
+  {
+    proef: '13 (reviewgat)',
+    raakt: 'reviewgat 13',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'een rij met een afwijkend kolomaantal sluit de tabel weer, dus alles erna verdwijnt stil',
+    van: '    if (c.length !== KOPNAMEN.length) { kandidaten.push(null); continue; }',
+    naar: '    if (c.length !== KOPNAMEN.length) { inTabel = false; continue; } // mutatie: kapotte rij kapt de tabel af',
+  },
+  {
+    proef: '14 (reviewgat)',
+    raakt: 'reviewgat 14',
+    wat: 'de toestand hoeft niet meer uit de GELEZEN tekst te volgen; een gelijk etiket volstaat weer',
+    van: '  if (state.bronSoort === OVERGANG_MERK) {',
+    naar: '  if (false) { // mutatie: etiketgelijkheid gaat weer door voor inhoudsbinding',
+  },
+  {
+    proef: '15 (reviewgat)',
+    raakt: 'reviewgat 15',
+    wat: 'het manifest gaat publiek zonder dat zijn eigen schema gekeurd is',
+    van: '  const manifestKeuring = keurManifest(manifest, state);',
+    naar: '  const manifestKeuring = { ok: true, fouten: [] }; // mutatie: manifest ongekeurd publiek',
+  },
+  {
+    proef: '16 (reviewgat)',
+    raakt: 'reviewgat 16',
+    wat: 'de stiltemeting leest de sporen weer zonder vangnet, dus een kapotte toestand gooit een uitzondering',
+    // GEMETEN: deze mutatie slaat NIET aan, en dat is hier geen zwakke proef maar een gevolg van de
+    // volgorde. Elke route die een kapotte `lanes` tot híér kan brengen wordt eerder gesloten: bij het
+    // OVERGANG-merk herleidt stap 2e de toestand uit de gelezen tekst (een met de hand aangepaste
+    // toestand valt daar om), en zonder dat merk keurt stap 2f het manifest af, want `bronSoort` moet
+    // het merk dragen. Het vangnet is dus een tweede riem zonder bereikbaar gat. Het blijft staan omdat
+    // de volgorde van die poorten kan veranderen en een fail-closed lezer die een uitzondering gooit
+    // helemaal geen uitkomst heeft. Dat het onbereikbaar is, staat hier expliciet in plaats van dat het
+    // als "20/20" wordt weggeschreven — een niet-aanslaande mutatie verzwijgen is precies de fout die
+    // deze hele proefopstelling moet voorkomen.
+    bereikbaar: false,
+    van: '  const momenten = Object.values(state.lanes ?? {})\n    .map((l) => (l?.momentUtc ? Date.parse(l.momentUtc) : null))',
+    naar: '  const momenten = Object.values(state.lanes)\n    .map((l) => (l.momentUtc ? Date.parse(l.momentUtc) : null))',
+  },
+  {
+    proef: '17 (reviewgat)',
+    raakt: 'reviewgat 17',
+    wat: 'verworpenRijen mag weer ontbreken en krijgt er stilzwijgend een nul bij',
+    van: '  const verworpen = state.verworpenRijen;',
+    naar: '  const verworpen = state.verworpenRijen ?? 0; // mutatie: het meldveld mag zelf ontbreken',
+  },
+  {
+    proef: '18 (reviewgat)',
+    raakt: 'reviewgat 18',
+    wat: 'alléén de kalenderterugrekening op een aangeleverd spoor vervalt; de vormtoets blijft staan',
+    van: '      || new Date(Date.parse(lane.momentUtc)).toISOString() !== lane.momentUtc) {',
+    naar: '      || false) { // mutatie: 30 februari mag weer door de vormtoets heen',
+  },
+  {
+    proef: '19 (reviewgat)',
+    raakt: 'reviewgat 19',
+    wat: 'de klok is weer optioneel, dus een weglating bepaalt de uitkomst in plaats van de meting',
+    van: '  if (!Number.isFinite(nu)) {',
+    naar: '  if (false) { // mutatie: zonder klok toch een oordeel',
   },
 ];
 
@@ -204,26 +279,39 @@ console.log('uitgangspunt: de suite is groen zonder mutaties.\n');
 
 let alleAangeslagen = true;
 for (const m of MUTATIES) {
-  if (!ORIGINEEL.includes(m.van)) {
-    console.log(`proef ${m.proef}: MUTATIE PAST NIET — het ankerfragment staat niet in kijk.mjs`);
+  const rel = m.bestand ?? STANDAARDDOEL;
+  const doel = join(ROOT, rel);
+  const origineel = lees(rel);
+  if (!origineel.includes(m.van)) {
+    console.log(`proef ${m.proef}: MUTATIE PAST NIET — het ankerfragment staat niet in ${rel}`);
     alleAangeslagen = false;
     continue;
   }
-  writeFileSync(DOEL, ORIGINEEL.replace(m.van, m.naar), 'utf8');
+  writeFileSync(doel, origineel.replace(m.van, m.naar), 'utf8');
   const gefaald = gefaaldeProeven();
-  writeFileSync(DOEL, ORIGINEEL, 'utf8');
+  writeFileSync(doel, origineel, 'utf8');
 
   const geraakt = gefaald.filter((naam) => naam.startsWith(m.raakt));
   const aangeslagen = geraakt.length > 0;
-  if (!aangeslagen) alleAangeslagen = false;
-  console.log(`proef ${m.proef}: ${aangeslagen ? 'ROOD zoals bedoeld' : 'BLEEF GROEN — de proef meet niets'}`);
+  // Eén mutatie is vooraf als ONBEREIKBAAR aangemerkt: een vangnet waar geen route meer naartoe loopt
+  // omdat eerdere poorten alles afvangen. Die mag groen blijven — maar dan wél als afwijking gemeld,
+  // en NIET als hij tegen de verwachting in tóch aanslaat, want dan is de route er wel degelijk.
+  const verwachtBereikbaar = m.bereikbaar !== false;
+  const inOrde = verwachtBereikbaar ? aangeslagen : !aangeslagen;
+  if (!inOrde) alleAangeslagen = false;
+  const oordeelRegel = verwachtBereikbaar
+    ? (aangeslagen ? 'ROOD zoals bedoeld' : 'BLEEF GROEN — de proef meet niets')
+    : (aangeslagen ? 'SLOEG AAN terwijl hij onbereikbaar heette — de aanname klopt niet' : 'BLEEF GROEN, zoals vooraf verklaard (vangnet zonder bereikbaar pad)');
+  console.log(`proef ${m.proef}: ${oordeelRegel}`);
   console.log(`   ingreep: ${m.wat}`);
   console.log(`   gevallen proeven: ${gefaald.length ? gefaald.map((n) => `"${n.slice(0, 60)}…"`).join(', ') : 'geen'}`);
 }
 
+const onbereikbaar = MUTATIES.filter((m) => m.bereikbaar === false).length;
 const na = gefaaldeProeven();
 console.log(`\nna herstel is de suite weer groen: ${na.length === 0}`);
 console.log(alleAangeslagen
-  ? `\nAlle ${MUTATIES.length} mechanismen zijn aantoonbaar nodig: haal er één weg en de bijbehorende proef valt om.`
-  : '\nLET OP: niet elke mutatie sloeg aan — dat is een bevinding, geen detail.');
+  ? `\n${MUTATIES.length - onbereikbaar} van de ${MUTATIES.length} mechanismen zijn aantoonbaar nodig: haal er één weg en de bijbehorende proef valt om.`
+    + `\n${onbereikbaar} staat er als vooraf verklaard vangnet zonder bereikbaar pad; de reden staat bij de mutatie zelf.`
+  : '\nLET OP: niet elke mutatie deed wat ervan verwacht werd — dat is een bevinding, geen detail.');
 process.exit(alleAangeslagen && na.length === 0 ? 0 : 1);
