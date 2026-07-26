@@ -263,7 +263,6 @@ test('de vertaalde feed levert een contract-geldige plaat: alles gepland, opleve
   assert.deepEqual(dto.counters, { afSindsGisteren: 0, draaitNu: 0, wachtOpRichard: 0, gepland: 3 });
   assert.equal(dto.features[0].tier0, true);
   assert.equal(dto.bron.spiegelAt, '2026-07-25T09:00:00.000Z');
-  assert.deepEqual(dto.kanaalpost, [], 'kanaalpost hoort bij de operationele stand, niet bij een backlog');
 
   // Het volledige gegenereerde §B-blok tegen het echte contract (review Codex, 25-07-2026).
   const snapshot = structuredClone(fixture);

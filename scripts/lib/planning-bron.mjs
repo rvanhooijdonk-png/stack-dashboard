@@ -49,7 +49,7 @@ export const PLAAT_STATUS_GEPLAND = 'gepland';
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 function onbeschikbaar(reason, note) {
-  return { available: false, reason, note, generatedAt: null, features: [], throughput: {}, kanaalpost: [] };
+  return { available: false, reason, note, generatedAt: null, features: [], throughput: {} };
 }
 
 /**
@@ -212,8 +212,6 @@ export function vertaalBouwlijst(rawText) {
     features,
     // Geen throughput-tabel in de backlog-feed: de oplevering blijft `onbekend` i.p.v. verzonnen.
     throughput: {},
-    // Kanaalpost hoort bij de operationele stand, niet bij een backlog.
-    kanaalpost: [],
     bron: {
       sha: korteSha(isObject(data.meetlat) ? data.meetlat.sha : null),
       bouwbaar,

@@ -38,8 +38,6 @@ export const DUUR_INDICATIES = ['2-4 uur', '1-2 dagen', '3-5 dagen', '1-2 weken'
 
 /** Een naam is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
 export const MAX_LABEL = 120;
-/** Een kanaalpost-onderwerp is een korte regel; de vrije tekst blijft door de sanitize-gate gaan. */
-const MAX_KANAAL = 200;
 const DAG_MS = 86400000;
 /**
  * Bovengrens op een gemeten doorlooptijd. Een lead van meer dan tien jaar is geen echte raming maar
@@ -60,7 +58,7 @@ export function isYmd(v) {
 }
 
 function unavailableParsed(reason, note) {
-  return { available: false, reason, note, generatedAt: null, features: [], throughput: {}, kanaalpost: [] };
+  return { available: false, reason, note, generatedAt: null, features: [], throughput: {} };
 }
 
 /**
@@ -91,7 +89,6 @@ export function parsePlanning(rawText) {
     generatedAt: typeof data.generatedAt === 'string' ? data.generatedAt : null,
     features: data.features,
     throughput: isObject(data.throughput) ? data.throughput : {},
-    kanaalpost: Array.isArray(data.kanaalpost) ? data.kanaalpost : [],
   };
 }
 
@@ -165,18 +162,6 @@ export function publicFeature(f, index, throughput, buildIso) {
   };
 }
 
-/** Eén kanaalpost-rij, gestructureerd en gecapt. Vrije `onderwerp`-tekst blijft langs de sanitize-gate gaan. */
-function publicKanaal(r) {
-  const o = isObject(r) ? r : {};
-  const cap = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, MAX_KANAAL) : null);
-  return {
-    datum: isYmd(o.datum) ? o.datum : null,
-    doelchat: typeof o.doelchat === 'string' && /^\d{2}$/.test(o.doelchat) ? o.doelchat : null,
-    onderwerp: cap(o.onderwerp),
-    status: cap(o.status),
-  };
-}
-
 /** De kop-band: af-sinds-gisteren · draait-nu · wacht-op-Richard. Puur afgeleid, geen extra bron. */
 export function planningCounters(features, buildIso) {
   const base = new Date(buildIso);
@@ -211,7 +196,6 @@ function unavailableDto(reason) {
     reason,
     features: [],
     counters: { afSindsGisteren: 0, draaitNu: 0, wachtOpRichard: 0, gepland: 0 },
-    kanaalpost: [],
     bron: null,
   };
 }
@@ -251,13 +235,11 @@ export function toPublicPlanning(parsed, buildIso) {
   try {
     const throughput = isObject(parsed.throughput) ? parsed.throughput : {};
     const features = parsed.features.map((f, i) => publicFeature(f, i, throughput, buildIso));
-    const kanaalpost = (Array.isArray(parsed.kanaalpost) ? parsed.kanaalpost : []).slice(-10).map(publicKanaal);
     return {
       available: true,
       reason: null,
       features,
       counters: planningCounters(features, buildIso),
-      kanaalpost,
       // Herkomst; `null` voor een §B-bron die geen spiegel-provenance meelevert (het voorbeeldbestand).
       bron: publicBron(parsed.bron),
     };

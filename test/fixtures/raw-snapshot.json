@@ -52,20 +52,25 @@
         "af_sinds": "2026-07-22",
         "afhankelijkheid": null
       }
-    ],
-    "kanaalpost": [
+    ]
+  },
+  "kanaalpost": {
+    "available": true,
+    "reason": null,
+    "rows": [
       {
-        "datum": "2026-07-23",
-        "doelchat": "02",
-        "onderwerp": "Kwartierrun ingesteld",
-        "status": "gemerged",
-        "internPad": "CONTROL/RAPPORTEN/geheim.md"
+        "tab": "DASHBOARD",
+        "onderwerp": "Nette melding zonder geheimen.",
+        "status": "AFGEROND",
+        "actie": "niemand",
+        "datum": "2026-07-23 09:00"
       },
       {
-        "datum": "niet-een-datum",
-        "doelchat": "kwaad",
-        "onderwerp": "Regel met ongeldige datum en doelchat",
-        "status": "in-bouw"
+        "tab": "CONTROL",
+        "onderwerp": "Melding met een pad erin: /Users/iemand/geheim.md",
+        "status": "AFGEROND",
+        "actie": "niemand",
+        "datum": "2026-07-23 10:00"
       }
     ]
   },

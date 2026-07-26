@@ -146,3 +146,31 @@ test('deny-terms redigeren eigennamen die geen patroon kan raden', async () => {
   assert.ok(findings.some((f) => f.id === 'deny-term'));
   loadDenyTerms(join(dir, 'bestaat-niet.json'));
 });
+
+test('een ontbrekende of kapotte deny-lijst stopt de publieke bouw', async () => {
+  // ROOD: `loadDenyTerms` slikte elke lees- of parsefout en zette de lijst op leeg. Eén ontbrekende
+  // komma in de JSON en elke naam die geweerd moest worden stond weer op de openbare pagina
+  // (review Codex, 26-07-2026). Een bewust lege lijst mag, maar alleen als geldige JSON.
+  const { writeFile, mkdtemp } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(join(tmpdir(), 'dash-'));
+  const kapot = join(dir, 'kapot.json');
+  await writeFile(kapot, '{"terms":["Acme",]}');
+  assert.throws(() => loadDenyTerms(kapot, { strict: true }), /DENY-LIJST onleesbaar/);
+  assert.throws(() => loadDenyTerms(join(dir, 'weg.json'), { strict: true }), /DENY-LIJST onleesbaar/);
+
+  const geenArray = join(dir, 'vorm.json');
+  await writeFile(geenArray, '{"terms":"Acme"}');
+  assert.throws(() => loadDenyTerms(geenArray, { strict: true }), /geen terms-array/);
+
+  // Een term die niet in één scanvenster past, kan nooit gevonden worden en zet de vensterscan op
+  // stap 1 — een bouw die praktisch stilstaat (review Gemini, 26-07-2026).
+  const teLang = join(dir, 'lang.json');
+  await writeFile(teLang, JSON.stringify({ terms: ['x'.repeat(400)] }));
+  assert.throws(() => loadDenyTerms(teLang, { strict: true }), /langer dan 150 tekens/);
+
+  const leeg = join(dir, 'leeg.json');
+  await writeFile(leeg, '{"terms":[]}');
+  assert.equal(loadDenyTerms(leeg, { strict: true }), 0, 'een bewust lege lijst blijft toegestaan');
+});

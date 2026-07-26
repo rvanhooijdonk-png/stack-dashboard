@@ -19,6 +19,7 @@ import { renderHtml } from './lib/render.mjs';
 import { validate } from './lib/validate.mjs';
 import { toPublicPlanning } from './lib/planning.mjs';
 import { vertaalBouwlijst } from './lib/planning-bron.mjs';
+import { kanaalpostUitTekst, toPublicKanaalpost } from './lib/kanaalpost.mjs';
 import {
   collectPullRequests, collectMergedRecent, collectTracker,
   collectDecisions, collectTracks, collectLogbook, collectCi, collectBouwlijst,
@@ -38,8 +39,13 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  *        (herkomst + spiegelleeftijd), `counters.gepland` en per feature `tier0` + `duurIndicatie`.
  *        Overbrugging tot er een echte execution-queue-export in §B-vorm is; daarom staat alles op
  *        `gepland` en blijft de rol leeg — een backlog weet niet wat er draait.
+ * 2.4.0: kanaalpost wordt een eigen sectie met een eigen bron: de publieke spiegel
+ *        `data/kanaalpost-publiek.md`, waar élk venster van de vloot in meldt. Tot 2.3.0 hing de
+ *        kanaalpost aan de bouwlijst en toonde de plaat dus alleen de meldingen van dit venster —
+ *        een lege bouwlijst nam dan de post van de hele vloot mee. Daarom is `planning.kanaalpost`
+ *        vervallen: één bron, geen tweede stille route.
  */
-const CONTRACT_VERSION = '2.3.0';
+const CONTRACT_VERSION = '2.4.0';
 const REFRESH_SECONDS = 900;
 /** Een titel is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
 const MAX_TITLE = 80;
@@ -74,6 +80,11 @@ function arg(name, fallback = null) {
 
 const readJson = async (p, fallback) => {
   try { return JSON.parse(await readFile(join(ROOT, p), 'utf8')); } catch { return fallback; }
+};
+
+/** Rauwe tekst uit de repo. Onleesbaar ⇒ lege string: de sectie die hem leest is fail-closed. */
+const readText = async (p) => {
+  try { return await readFile(join(ROOT, p), 'utf8'); } catch { return ''; }
 };
 
 /**
@@ -186,6 +197,9 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
     // uit het THROUGHPUT-LOG dat in de bouwlijst zit — geen tweede meetsysteem. Planning is geen
     // `sources`-bron: fail-closed op deze sectie neemt de rest van de pagina niet mee.
     planning: toPublicPlanning(raw.planning, raw.generatedAt),
+    // Vloot-breed doorgeefluik, zelfde fail-closed-per-sectie-regel als planning: geen `sources`-bron,
+    // dus een onleesbare spiegel degradeert de rest van de pagina niet.
+    kanaalpost: toPublicKanaalpost(raw.kanaalpost),
     workstreams: raw.workstreams.map((w, i) => publicWorkstream(w, i)),
     pullRequests: {
       available: raw.pullRequests.available,
@@ -273,10 +287,16 @@ export async function buildSnapshot() {
   // Het spiegelmoment hoort bij de HERKOMST, niet bij de vertaling: de vertaler kent alleen de tekst.
   if (planning.bron) planning.bron.spiegelAt = bouwlijst.spiegelAt;
 
+  // De vloot-kanaalpost komt uit de publieke spiegel in DEZE repo, niet uit het interne logboek op de
+  // rapporten-branch: wat de plaat toont, hoort bij de commit die hem publiceerde, en de bron is al
+  // voor publiek geschreven. Ontbreekt of hapert het bestand, dan meldt de sectie dat zelf.
+  const kanaalpost = kanaalpostUitTekst(await readText('data/kanaalpost-publiek.md'));
+
   return {
     generatedAt: new Date().toISOString(),
     workstreams,
     planning,
+    kanaalpost,
     pullRequests, merged, tracker, decisions, tracks, logbook, ci,
   };
 }
@@ -286,7 +306,10 @@ async function main() {
   const outDir = join(ROOT, outName);
   const strict = !process.argv.includes('--no-strict');
 
-  const termCount = loadDenyTerms(join(ROOT, 'data/deny-terms.json'));
+  // Strikt: een ontbrekend of kapot policybestand stopt de bouw. Zonder dat draaide de publieke
+  // build stilzwijgend verder met een lege lijst — één ontbrekende komma in de JSON en elke naam
+  // die geweerd moest worden stond weer op de openbare pagina (review Codex, 26-07-2026).
+  const termCount = loadDenyTerms(join(ROOT, 'data/deny-terms.json'), { strict: true });
 
   const textPolicy = readTextPolicy(await readJson('data/publish-text.json', {}));
   const raw = await buildSnapshot();
