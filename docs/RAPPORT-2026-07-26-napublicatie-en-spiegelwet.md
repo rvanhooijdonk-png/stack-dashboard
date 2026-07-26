@@ -769,5 +769,7 @@ Aanvullend na §6f–§6h:
 Wacht op Richard: de vier beslispunten in §6, het NFKC/NFC-beslispunt in §6c, en een handtekening op
 #27. Voor CONTROL zit er één gemeten volgorde-eis bij: **#27 en #30 botsen** — beide raken het
 spiegelbestand en in beide richtingen ontstaat een conflict, dus wie als tweede gaat moet opnieuw
-aanleveren met een verse kop-SHA. De kop van #27 voor de tikronde is **`22e9aa8`**, staat op
-MERGEABLE / CLEAN, en gaat aan **zónder takverwijdering**.
+aanleveren met een verse kop-SHA. #27 staat op MERGEABLE / CLEAN en gaat aan **zónder takverwijdering**.
+De kop-SHA voor de tikregel is de takkop op het moment van aanmelden bij CONTROL — die staat in de
+aanmelding zelf, niet hier, omdat elke commit aan dit rapport hem opnieuw zou verzetten. `22e9aa8` is de
+laatste **code**-commit; alles daarna is uitsluitend dit document.
