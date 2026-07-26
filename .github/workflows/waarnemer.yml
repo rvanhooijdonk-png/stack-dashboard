@@ -1,0 +1,168 @@
+name: waarnemer
+
+# DE PLAAT BEWAAKT ZICHZELF.
+#
+# `publish.yml` bewijst dat een BOUW slaagde. Deze workflow bewijst iets anders: dat de PAGINA die
+# een bezoeker nu ophaalt ook klopt — bestaat, is vers genoeg, toont dezelfde laatste melding als de
+# bron, en heeft geen lege of kapotte blokken. Een geslaagde build naast een uren oude pagina is
+# precies de storing die niemand ziet; dit is de controle die haar wél ziet.
+#
+# Vier momenten:
+#  - na elke publicatie (workflow_run op `publish`), want dan hoort de plaat te zijn bijgewerkt;
+#  - op een klok, want een pagina kan ook oud worden zonder dat er iets draaide. Eén keer per uur,
+#    bewust niet vaker: in deze repo is gemeten (23-07-2026, vastgelegd in publish.yml) dat GitHub
+#    kwartiercrons hier in de praktijk overslaat. Een lage frequentie die wél vuurt is meer waard;
+#  - bij elke wijziging aan de waarnemer zelf, op welke tak dan ook — wie de bewaker verandert,
+#    laat de bewaker meteen draaien;
+#  - met de hand, met een sabotage-schakelaar voor het acceptatiebewijs.
+#
+# Een afwijking doet twee dingen tegelijk: de run wordt rood ÉN er komt een GEBLOKKEERD-regel in de
+# publieke spiegel. Alleen rood zijn is niet genoeg — dan staat het falen in een logboek dat niemand
+# opent, terwijl Richard naar de plaat kijkt.
+on:
+  workflow_run:
+    workflows: [publish]
+    types: [completed]
+  schedule:
+    - cron: '17 * * * *'
+  push:
+    paths:
+      - '.github/workflows/waarnemer.yml'
+      - 'scripts/waarnemer.mjs'
+      - 'scripts/lib/waarnemer.mjs'
+  workflow_dispatch:
+    inputs:
+      sabotage:
+        description: 'Acceptatietest: forceer één toets te falen (stempel = drempel op nul).'
+        type: choice
+        options: [geen, stempel]
+        default: geen
+
+# Standaard niets; elke job krijgt hieronder precies wat hij nodig heeft.
+permissions: {}
+
+# Niet annuleren: een lopende ronde die net de spiegel aan het aanvullen is, mag niet halverwege
+# worden afgekapt.
+concurrency:
+  group: waarnemer
+  cancel-in-progress: false
+
+jobs:
+  toetsen:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      afwijking: ${{ steps.toets.outputs.afwijking }}
+      appenden: ${{ steps.toets.outputs.appenden }}
+      rij_b64: ${{ steps.toets.outputs.rij_b64 }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+
+      # De toetsende stap mag de run NIET zelf rood maken: dan zou de melding-job zijn uitkomsten
+      # niet betrouwbaar kunnen lezen. De poort onderaan maakt de run rood, ná het melden. Zo is de
+      # volgorde vast: eerst zichtbaar maken waar Richard kijkt, dan pas falen.
+      - id: toets
+        continue-on-error: true
+        env:
+          BASE_URL: https://rvanhooijdonk-png.github.io/stack-dashboard/
+          SPIEGEL_URL: https://raw.githubusercontent.com/rvanhooijdonk-png/stack-dashboard/main/data/kanaalpost-publiek.md
+          # Twee wegen naar de sabotagetest. Met de hand (workflow_dispatch) kan pas als deze
+          # workflow op de hoofdtak staat; daarvóór — en later ook nog — kan het met een commit die
+          # `[sabotage]` in zijn bericht draagt. Zo is het acceptatiebewijs op ELKE tak te herhalen,
+          # ook op de tak waarop de waarnemer wordt ingevoerd. Bewust zichtbaar en niet stiekem: de
+          # alarmregel die eruit komt zegt in de spiegel zelf dat hij een test is.
+          SABOTAGE: ${{ inputs.sabotage || (contains(github.event.head_commit.message || '', '[sabotage]') && 'stempel' || 'geen') }}
+        run: node scripts/waarnemer.mjs
+
+  # Falen hoort zichtbaar te zijn op de plek waar Richard kijkt. Deze job heeft als enige
+  # schrijfrechten, en doet als enige één ding: de al door de publicatiepoort gehaalde alarmregel
+  # onderaan de publieke spiegel zetten.
+  melden:
+    needs: toetsen
+    if: ${{ !cancelled() && needs.toetsen.outputs.afwijking == 'ja' && needs.toetsen.outputs.appenden == 'ja' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Alleen om na het aanvullen een verse publicatie te starten: een push met GITHUB_TOKEN start
+      # zelf geen workflow, dus zonder deze zet zou de alarmregel pas bij de volgende bouw op de
+      # plaat verschijnen — en dat is precies wat deze workflow bestrijdt.
+      actions: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Alarmregel aan de publieke spiegel toevoegen
+        env:
+          RIJ_B64: ${{ needs.toetsen.outputs.rij_b64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RIJ_B64:-}" ]; then
+            echo "::error::geen alarmregel doorgekregen van de toets-job — er wordt niets geschreven."
+            exit 1
+          fi
+          printf '%s' "$RIJ_B64" | base64 -d >> data/kanaalpost-publiek.md
+          tail -1 data/kanaalpost-publiek.md
+          # Fail-closed: wat we net toevoegden moet ook echt als publieke rij terugkomen. Komt hij
+          # niet door de poort, dan draaien we de wijziging terug in plaats van een regel achter te
+          # laten die de plaat stilletjes weglaat.
+          node -e '
+            const { readFileSync } = require("node:fs");
+            import("./scripts/lib/kanaalpost.mjs").then(({ kanaalpostUitTekst, toPublicKanaalpost }) => {
+              const uit = toPublicKanaalpost(kanaalpostUitTekst(readFileSync("data/kanaalpost-publiek.md", "utf8")));
+              const bovenaan = uit.rows?.[0];
+              if (!uit.available || bovenaan?.tab !== "WAARNEMER") {
+                console.error("::error::de toegevoegde alarmregel komt niet als publieke rij terug.");
+                process.exit(1);
+              }
+              console.log("alarmregel staat bovenaan de publieke stand.");
+            }).catch((e) => { console.error("::error::poortcontrole mislukt"); process.exit(1); });
+          '
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/kanaalpost-publiek.md
+          git commit -m 'chore(waarnemer): automatische GEBLOKKEERD-melding — de plaat wijkt af van de bron'
+          # Een gelijktijdige push mag deze melding niet laten verdampen: opnieuw ophalen, erbovenop
+          # zetten, nog eens proberen.
+          for poging in 1 2 3; do
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then exit 0; fi
+            echo "push-poging ${poging} mislukt — opnieuw ophalen en herplaatsen"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+          done
+          echo "::error::de alarmregel kon niet naar de tak worden geschreven."
+          exit 1
+
+      - name: Verse publicatie starten zodat de melding op de plaat komt
+        if: ${{ github.ref_name == 'main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish.yml --ref main
+
+  # De run is pas rood NA het melden. Deze poort bestaat apart zodat "zichtbaar maken" en "falen"
+  # niet om dezelfde exitcode hoeven te vechten.
+  poort:
+    needs: [toetsen, melden]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Afwijking = rode run
+        env:
+          AFWIJKING: ${{ needs.toetsen.outputs.afwijking }}
+          GEMELD: ${{ needs.melden.result }}
+        run: |
+          set -uo pipefail
+          if [ "${AFWIJKING:-}" = "nee" ]; then
+            echo "✓ de openbare plaat komt overeen met de bron."
+            exit 0
+          fi
+          if [ "${AFWIJKING:-}" = "ja" ]; then
+            echo "::error::de openbare plaat wijkt af van de bron (spiegelmelding: ${GEMELD})."
+            exit 1
+          fi
+          echo "::error::de waarnemer heeft geen uitkomst opgeleverd — dat is zelf een afwijking."
+          exit 1
