@@ -166,3 +166,11 @@ jobs:
           fi
           echo "::error::de waarnemer heeft geen uitkomst opgeleverd — dat is zelf een afwijking."
           exit 1
+
+# ACCEPTATIE — het bewijs dat deze bewaker echt bijt.
+# Een bewaker die nooit heeft gepiept is niet bewezen stil, alleen ongetest. Daarom is de
+# sabotagetest onderdeel van dit bestand en niet van een eenmalig verslag: zet `[sabotage]` in een
+# commit-bericht dat een van de waarnemer-bestanden raakt (of kies `stempel` bij een handmatige
+# start), en de stempeltoets krijgt drempel nul. Verwachte uitkomst: rode run, plus één
+# GEBLOKKEERD-regel in de publieke spiegel die er zelf bij zegt dat hij een test is. Herhaalbaar,
+# op elke tak, ook lang nadat iedereen deze PR vergeten is.
