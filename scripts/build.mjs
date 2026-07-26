@@ -17,10 +17,12 @@ import { fileURLToPath } from 'node:url';
 import { assertPublishable, loadDenyTerms } from './lib/sanitize.mjs';
 import { renderHtml } from './lib/render.mjs';
 import { validate } from './lib/validate.mjs';
-import { parsePlanning, toPublicPlanning } from './lib/planning.mjs';
+import { toPublicPlanning } from './lib/planning.mjs';
+import { vertaalBouwlijst } from './lib/planning-bron.mjs';
 import {
   collectPullRequests, collectMergedRecent, collectTracker,
-  collectDecisions, collectTracks, collectLogbook, collectCi, setPublicRepos, setPublicTracks,
+  collectDecisions, collectTracks, collectLogbook, collectCi, collectBouwlijst,
+  setPublicRepos, setPublicTracks,
   CATEGORIEEN,
 } from './lib/collect.mjs';
 
@@ -31,8 +33,13 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  * 2.2.0: planning-plaat (bouwlijst met status + op throughput herrekende oplevering + kanaalpost).
  *        Planning staat bewust NIET in `sources`: een lege/corrupte bouwlijst degradeert de hele
  *        pagina niet, hij toont zijn eigen nette melding (fail-closed per sectie).
+ * 2.3.0: de plaat leest de ECHTE bouwlijst — TRECHTER's backlog-feed, gespiegeld op de rapporten-branch
+ *        en via `planning-bron.mjs` vertaald naar het §B-schema. Nieuw in het contract: `planning.bron`
+ *        (herkomst + spiegelleeftijd), `counters.gepland` en per feature `tier0` + `duurIndicatie`.
+ *        Overbrugging tot er een echte execution-queue-export in §B-vorm is; daarom staat alles op
+ *        `gepland` en blijft de rol leeg — een backlog weet niet wat er draait.
  */
-const CONTRACT_VERSION = '2.2.0';
+const CONTRACT_VERSION = '2.3.0';
 const REFRESH_SECONDS = 900;
 /** Een titel is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
 const MAX_TITLE = 80;
@@ -67,11 +74,6 @@ function arg(name, fallback = null) {
 
 const readJson = async (p, fallback) => {
   try { return JSON.parse(await readFile(join(ROOT, p), 'utf8')); } catch { return fallback; }
-};
-
-/** Rúwe tekst lezen (voor bestanden die hun eigen fail-closed parser hebben, zoals de bouwlijst). */
-const readText = async (p) => {
-  try { return await readFile(join(ROOT, p), 'utf8'); } catch { return ''; }
 };
 
 /**
@@ -258,15 +260,18 @@ export async function buildSnapshot() {
   setPublicTracks((await readJson('data/public-tracks.json', {})).tracks ?? []);
   const workstreams = (await readJson('data/workstreams.json', {})).workstreams ?? [];
   const ciRepos = await readJson('data/ci-repos.json', ['stack-control']);
-  // De bouwlijst als rúwe tekst lezen en fail-closed parsen: een ontbrekend of onleesbaar bestand
-  // wordt LEEG/CORRUPT (nette melding op de plaat), nooit een throw die de hele build sloopt.
-  // Bron wisselt naar de rapporten-branch zodra TRECHTER's echte bestand er staat.
-  const planning = parsePlanning(await readText('data/planning.json'));
-
-  const [pullRequests, merged, tracker, decisions, tracks, logbook, ci] = await Promise.all([
+  const [pullRequests, merged, tracker, decisions, tracks, logbook, ci, bouwlijst] = await Promise.all([
     collectPullRequests(), collectMergedRecent(7), collectTracker(),
-    collectDecisions(), collectTracks(), collectLogbook(), collectCi(ciRepos),
+    collectDecisions(), collectTracks(), collectLogbook(), collectCi(ciRepos), collectBouwlijst(),
   ]);
+
+  // De bouwlijst komt uit de SPIEGEL op de rapporten-branch en gaat door de vertaler (backlog → §B).
+  // Fail-closed en zonder terugval op het oude voorbeeldbestand: onleesbaar of onvertaalbaar wordt
+  // LEEG/CORRUPT met een nette melding op de plaat. Vijf verzonnen features tonen omdat de echte bron
+  // even niet leesbaar is, zou de plaat laten liegen — en de plaat is er juist tegen dat misverstand.
+  const planning = vertaalBouwlijst(bouwlijst.text ?? '');
+  // Het spiegelmoment hoort bij de HERKOMST, niet bij de vertaling: de vertaler kent alleen de tekst.
+  if (planning.bron) planning.bron.spiegelAt = bouwlijst.spiegelAt;
 
   return {
     generatedAt: new Date().toISOString(),

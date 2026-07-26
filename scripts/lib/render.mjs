@@ -452,6 +452,58 @@ const PLANNING_REDEN = {
   CORRUPT: 'De geleverde bouwlijst kon niet veilig worden gelezen en wordt daarom niet getoond — liever een lege plaat dan een onbetrouwbare.',
 };
 
+const DAG_MS = 86400000;
+
+/**
+ * Herkomst-regel van de bouwlijst. De plaat leest niet de bron zelf maar een SPIEGEL op de
+ * rapporten-branch (het bewezen-leesbare afleverkanaal), dus de pagina moet dat zichtbaar zeggen:
+ * welke bron-commit, hoe oud de spiegel is, en hoeveel regels onderweg zijn weggelaten. Zonder deze
+ * regel zou een verouderde spiegel als actuele stand lezen — precies de misleiding die de plaat
+ * hoort te voorkomen. Leeftijd in hele DAGEN: een backlog-spiegel meet je niet in minuten, en een
+ * kale klok op de pagina is al eens voor "oud" aangezien.
+ *
+ * Woordkeus bewust precies (review Codex, 25-07-2026): `sha` is de MEETLAT-commit uit de feed zelf, niet
+ * aantoonbaar de commit waarin de bouwlijst is gegenereerd; en `spiegelAt` is het moment van de laatste
+ * INHOUDELIJKE wijziging van het spiegelbestand, niet van de laatste geslaagde spiegelrun. Een spiegel die
+ * ongewijzigd opnieuw wordt geplaatst schuift die datum dus niet op — de pagina belooft daarom niet meer
+ * dan dat.
+ */
+
+/** Kalenderdagen in UTC, niet blokken van 24 uur: 23 uur over een dagovergang is "1 dag oud". */
+const utcDagStart = (d) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+
+function bronTekst(b, buildIso) {
+  if (!b) return '';
+  const delen = [];
+  delen.push(b.sha
+    ? `Bron: TRECHTER-bouwlijst, meetlat-commit <code>${esc(b.sha)}</code>`
+    : 'Bron: TRECHTER-bouwlijst, meetlat-commit <em>onbekend</em>');
+  const base = new Date(buildIso);
+  const sp = b.spiegelAt ? new Date(b.spiegelAt) : null;
+  const dagen = sp && !Number.isNaN(sp.getTime()) && !Number.isNaN(base.getTime())
+    ? Math.round((utcDagStart(base) - utcDagStart(sp)) / DAG_MS)
+    : null;
+  if (dagen === null) {
+    delen.push('spiegel op de rapporten-branch van stack-control (<em>spiegelmoment onbekend</em>)');
+  } else if (dagen < 0) {
+    // Een spiegelmoment ná de build kan niet kloppen (scheve klok of verkeerde bron). Dan géén
+    // geruststellende "vandaag gespiegeld" tonen, maar zeggen dat het moment niet te plaatsen is.
+    delen.push(`spiegel op de rapporten-branch van stack-control (${esc(b.spiegelAt.slice(0, 10))}, <em>spiegelmoment ligt ná deze build — niet te plaatsen</em>)`);
+  } else {
+    const leeftijd = dagen === 0 ? 'vandaag bijgewerkt' : dagen === 1 ? 'spiegel 1 dag oud' : `spiegel ${num(dagen)} dagen oud`;
+    delen.push(`spiegel laatst bijgewerkt op de rapporten-branch van stack-control (${esc(b.spiegelAt.slice(0, 10))}, ${leeftijd})`);
+  }
+  if (b.bouwbaar !== null) {
+    delen.push(b.publishVeilig !== null && b.publishVeilig !== b.bouwbaar
+      ? `${num(b.bouwbaar)} bouwbaar, waarvan ${num(b.publishVeilig)} publiceerbaar`
+      : `${num(b.bouwbaar)} bouwbaar`);
+  }
+  if (b.weggelaten > 0) delen.push(`${num(b.weggelaten)} regel(s) door de schoon-poort weggelaten`);
+  return `<p class="lead muted">${delen.join(' · ')}. Dit is de <strong>backlog</strong>, niet de
+  uitvoerings-stand: alles staat daarom op <em>gepland</em> en de rol blijft leeg tot een regel echt is
+  toegewezen.</p>`;
+}
+
 /** De oplevering als tekst — eerlijk over wat gemeten is en wat niet. */
 function opleveringTekst(o) {
   if (!o) return '<span class="muted">—</span>';
@@ -460,7 +512,7 @@ function opleveringTekst(o) {
   return `${ONBEKEND_WAARDE}`;
 }
 
-function planning(p) {
+function planning(p, buildIso) {
   if (!p?.available) {
     const reden = PLANNING_REDEN[p?.reason] ?? PLANNING_REDEN.LEEG;
     return `<section id="planning" class="card plaat">
@@ -468,7 +520,7 @@ function planning(p) {
   <p class="empty">${esc(reden)}</p>
 </section>`;
   }
-  const c = p.counters ?? { afSindsGisteren: 0, draaitNu: 0, wachtOpRichard: 0 };
+  const c = p.counters ?? { afSindsGisteren: 0, draaitNu: 0, wachtOpRichard: 0, gepland: 0 };
   const band = [
     stat('Af sinds gisteren', num(c.afSindsGisteren), '<span class="muted">live gegaan sinds gisteren</span>',
       c.afSindsGisteren > 0 ? 'ok' : ''),
@@ -476,13 +528,19 @@ function planning(p) {
       c.draaitNu > 0 ? 'ok' : ''),
     stat('Wacht op Richard', num(c.wachtOpRichard), '<span class="muted">features die op een akkoord staan</span>',
       c.wachtOpRichard > 0 ? 'warn' : ''),
+    // Vierde tegel: zonder deze staat de band met een backlog-bron op 0/0/0 terwijl er honderden regels
+    // wachten — waar, en toch een verkeerd beeld.
+    stat('Gepland', num(c.gepland ?? 0), '<span class="muted">bouwbaar, nog niet toegewezen</span>', ''),
   ].join('');
 
+  // Spoedspoor eerst is de bouwvolgorde van de BRON; die laten we staan (zelf hersorteren zou een
+  // tweede prioritering zijn). Het badge maakt alleen zichtbaar wat de bron al zei.
   const rows = p.features.map((f) => `<tr>
-      <td>${esc(f.label)}</td>
+      <td>${esc(f.label)}${f.tier0 ? ' <span class="badge bad">spoedspoor</span>' : ''}</td>
       <td class="nowrap"><span class="tag ${PLANNING_STATUS_KLASSE[f.status] ?? ''}">${esc(f.status)}</span></td>
       <td class="nowrap muted">${f.worker ? esc(f.worker) : '<span class="muted">—</span>'}</td>
       <td class="nowrap">${opleveringTekst(f.oplevering)}</td>
+      <td class="nowrap muted">${f.duurIndicatie ? esc(f.duurIndicatie) : '<span class="muted">—</span>'}</td>
       <td>${f.afhankelijkheid ? esc(f.afhankelijkheid) : '<span class="muted">—</span>'}</td></tr>`).join('\n');
 
   const kanaalRows = p.kanaalpost.length
@@ -497,10 +555,14 @@ function planning(p) {
   <h2>Planning-plaat</h2>
   <p class="lead muted">De bouwlijst: wat gepland staat, wat nu draait en wat op een akkoord wacht. De
   verwachte oplevering is herrekend op de gemeten doorlooptijd uit het throughput-log — geen tweede
-  meetsysteem, en een klasse zonder gemeten doorlooptijd staat op <em>onbekend</em>, nooit een verzonnen datum.</p>
+  meetsysteem, en een klasse zonder gemeten doorlooptijd staat op <em>onbekend</em>, nooit een verzonnen datum.
+  De kolom <em>indicatie duur (bron)</em> is de eigen startschatting van de bron en wordt nergens naar een
+  datum herrekend.</p>
+  ${bronTekst(p.bron, buildIso)}
   <ul class="stats">${band}</ul>
-  <div class="scroll"><table>
-    <thead><tr><th>Feature</th><th>status</th><th>rol</th><th>oplevering</th><th>afhankelijkheid</th></tr></thead>
+  <h3>Bouwlijst — ${num(p.features.length)} regels</h3>
+  <div class="scroll bouwlijst"><table>
+    <thead><tr><th>Feature</th><th>status</th><th>rol</th><th>oplevering</th><th>indicatie duur (bron)</th><th>afhankelijkheid</th></tr></thead>
     <tbody>${rows}</tbody>
   </table></div>
   <h3>Kanaalpost — laatste ${num(p.kanaalpost.length)}</h3>
@@ -533,6 +595,10 @@ tr:last-child td{border-bottom:0}
 .nowrap{white-space:nowrap}
 .muted{color:var(--mut)}
 .scroll{overflow-x:auto}
+/* De bouwlijst is honderden regels lang: eigen scrollvenster met meelopende kop, zodat de secties
+   eronder bereikbaar blijven. Puur CSS — de plaat blijft statisch en werkt zonder JavaScript. */
+.scroll.bouwlijst{max-height:70vh;overflow:auto}
+.scroll.bouwlijst thead th{position:sticky;top:0;background:var(--card);z-index:1}
 .list{margin:0;padding:0;list-style:none}
 .list li{padding:5px 0;border-bottom:1px solid var(--line)}
 .list li:last-child{border-bottom:0}
@@ -604,7 +670,7 @@ de leeftijd van déze kopie; losse brondata kan ouder zijn, dus lees ook de badg
 
 ${overzicht(s)}
 
-${planning(s.planning)}
+${planning(s.planning, s.generatedAt)}
 
 <div class="grid">
   ${pullRequests(s.pullRequests)}

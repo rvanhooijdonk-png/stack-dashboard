@@ -136,10 +136,14 @@ async function fileFromRepo(repo, path, ref = 'main') {
 const trustFor = (count) => (count > 0 ? 'VERIFIED_CURRENT' : 'UNVERIFIED');
 const parserNote = (count) => (count > 0 ? null : 'Bron gelezen, maar geen enkele regel herkend — parser mogelijk verouderd.');
 
-/** Laatste commitdatum van één bestand. Leeg = onbekend, en onbekend is niet "vers". */
-async function lastCommitDate(repo, path) {
+/**
+ * Laatste commitdatum van één bestand. Leeg = onbekend, en onbekend is niet "vers". `ref` kiest de
+ * branch; zonder ref kijkt de API naar de default branch (bestaand gedrag, ongewijzigd).
+ */
+async function lastCommitDate(repo, path, ref = null) {
   const res = await gh([
-    'api', `repos/${OWNER}/${seg(repo)}/commits?path=${path.split('/').map(seg).join('/')}&per_page=1`,
+    'api', `repos/${OWNER}/${seg(repo)}/commits?path=${path.split('/').map(seg).join('/')}&per_page=1${
+      ref ? `&sha=${seg(ref)}` : ''}`,
     '-q', '.[0].commit.committer.date',
   ], { json: false });
   const date = res.ok ? (res.data ?? '').trim() : '';
@@ -389,6 +393,30 @@ export async function collectTracks() {
     available: true,
     tracks: tracks.sort((a, b) => (b.lastReportAt ?? '').localeCompare(a.lastReportAt ?? '')),
     evidence: evidence(src, RAPPORTEN_REF, trust, proof, note),
+  };
+}
+
+/** De gespiegelde bouwlijst van TRECHTER staat op de rapporten-branch van de control-repo. */
+export const BOUWLIJST_PATH = 'CONTROL/PLANNING/planning-bouwlijst.json';
+
+/**
+ * BOUWLIJST — de rauwe tekst van de gespiegelde TRECHTER-bouwlijst plus het spiegelmoment.
+ *
+ * Waarom niet rechtstreeks uit de bron-repo: het workflow-token leest bewijsbaar deze control-repo
+ * (privé) maar zijn toegang tot de trechter-repo is ONBEWEZEN. Een gespiegelde kopie die zichtbaar
+ * een paar uur oud kan zijn is beter dan een plaat die leeg blijft op een tokenrecht (review Codex,
+ * 25-07-2026, optie B). Vandaar dat het spiegelmoment meekomt: de pagina moet kunnen zeggen hoe oud
+ * de spiegel is, anders leest een verouderde kopie als de actuele stand.
+ *
+ * Deze functie leest alleen; het vertalen naar het plaat-schema doet `planning-bron.mjs`.
+ */
+export async function collectBouwlijst() {
+  const text = await fileFromRepo(CONTROL_REPO, BOUWLIJST_PATH, RAPPORTEN_REF);
+  return {
+    text,
+    // Onbekend spiegelmoment blijft null: de plaat zegt dan "spiegelmoment onbekend" i.p.v. vers.
+    spiegelAt: text ? await lastCommitDate(CONTROL_REPO, BOUWLIJST_PATH, RAPPORTEN_REF) : null,
+    proofUrl: `${repoUrl(CONTROL_REPO)}/blob/${RAPPORTEN_REF}/${BOUWLIJST_PATH}`,
   };
 }
 

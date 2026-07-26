@@ -98,7 +98,9 @@ test('een onbeschikbare parsed-invoer geeft een geldige onbeschikbare DTO', () =
   const dto = toPublicPlanning(parsePlanning(''), BUILD);
   assert.equal(dto.available, false);
   assert.equal(dto.reason, 'LEEG');
-  assert.deepEqual(dto.counters, { afSindsGisteren: 0, draaitNu: 0, wachtOpRichard: 0 });
+  assert.deepEqual(dto.counters, { afSindsGisteren: 0, draaitNu: 0, wachtOpRichard: 0, gepland: 0 });
+  // Ook de herkomst-regel is dan leeg: geen bron betekent geen provenance om te tonen.
+  assert.equal(dto.bron, null);
 });
 
 test('interne velden lekken niet mee: alleen de whitelist blijft over', () => {
@@ -110,7 +112,8 @@ test('interne velden lekken niet mee: alleen de whitelist blijft over', () => {
   }));
   const dto = toPublicPlanning(parsed, BUILD);
   const f = dto.features[0];
-  assert.deepEqual(Object.keys(f).sort(), ['afhankelijkheid', 'label', 'oplevering', 'status', 'worker']);
+  assert.deepEqual(Object.keys(f).sort(),
+    ['afhankelijkheid', 'duurIndicatie', 'label', 'oplevering', 'status', 'tier0', 'worker']);
   assert.equal(JSON.stringify(dto).includes('Zephyr'), false);
   assert.equal(JSON.stringify(dto).includes('internNotitie'), false);
 });
@@ -164,15 +167,19 @@ test('af-sinds-gisteren telt een feature die gisteren live ging, ook bij een mid
 
 // --- kop-band-tellers ---
 
-test('de kop-band telt draait-nu, wacht-op-Richard en af-sinds-gisteren', () => {
+test('de kop-band telt draait-nu, wacht-op-Richard, af-sinds-gisteren en gepland', () => {
   const features = [
     { status: 'in-bouw', oplevering: { kind: 'verwacht', date: '2026-07-28' } },
     { status: 'in-bouw', oplevering: { kind: 'verwacht', date: '2026-07-28' } },
     { status: 'wacht-op-Richard', oplevering: { kind: 'onbekend', date: null } },
+    { status: 'gepland', oplevering: { kind: 'onbekend', date: null } },
+    { status: 'gepland', oplevering: { kind: 'onbekend', date: null } },
+    { status: 'gepland', oplevering: { kind: 'onbekend', date: null } },
     { status: 'live', oplevering: { kind: 'opgeleverd', date: '2026-07-25' } },
     { status: 'live', oplevering: { kind: 'opgeleverd', date: '2026-07-10' } },
   ];
-  assert.deepEqual(planningCounters(features, BUILD), { afSindsGisteren: 1, draaitNu: 2, wachtOpRichard: 1 });
+  assert.deepEqual(planningCounters(features, BUILD),
+    { afSindsGisteren: 1, draaitNu: 2, wachtOpRichard: 1, gepland: 3 });
 });
 
 // --- kanaalpost: laatste tien, ongeldige velden fail-closed naar null ---
