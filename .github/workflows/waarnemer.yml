@@ -30,6 +30,8 @@ on:
       - '.github/workflows/waarnemer.yml'
       - 'scripts/waarnemer.mjs'
       - 'scripts/lib/waarnemer.mjs'
+      - 'scripts/lib/spiegelwet.mjs'
+      - 'data/kanaalpost-publiek.md'
   workflow_dispatch:
     inputs:
       sabotage:
@@ -159,14 +161,101 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: gh workflow run publish.yml --ref main
 
+  # DE SPIEGELWET. Op 26-07-2026 heeft de waarnemer een GEBLOKKEERD-regel in de publieke spiegel
+  # gezet en heb ik die bij het opruimen weggehaald (commit 211faaf, één regel `-`). De spiegel is
+  # append-only; dat was dus een overtreding, hersteld met de regel teruggezet plus een correctie
+  # eronder. Deze job zorgt dat de volgende keer niet van oplettendheid afhangt: vergelijken gebeurt
+  # met de versie op het AFTAKPUNT, niet met de top van main — een tak die achterloopt mist regels
+  # zonder ze te hebben weggehaald, en dat is geen overtreding.
+  spiegelwet:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+      # TWEE vergelijkingen, want één is aantoonbaar niet genoeg. Mijn eigen overtreding zat binnen
+      # één tak: de bot voegde de regel toe (push 1), ik haalde hem weg (push 2). Tegen het aftakpunt
+      # gemeten is er dan niets verdwenen — die controle had mij dus niet gevangen. Daarom eerst de
+      # vergelijking met de VORIGE stand van deze tak (`before`), die precies dat geval ziet, en
+      # daarnaast het aftakpunt, dat een tak vangt die met opzet regels van main weglaat.
+      - name: De publieke spiegel is alleen aangevuld, nooit gewijzigd
+        env:
+          VOOR: ${{ github.event.before }}
+        run: |
+          set -uo pipefail
+          leeg=0000000000000000000000000000000000000000
+          toets() { # $1 = commit, $2 = omschrijving
+            # Onderscheid maken tussen "bestond nog niet" en "kon niet gelezen worden". Alles op één
+            # hoop gooien zou een leesfout als een lege oude spiegel behandelen, en dan is elke
+            # verwijdering ineens toegestaan (bevinding Codex, 26-07-2026).
+            if git cat-file -e "$1:data/kanaalpost-publiek.md" 2>/dev/null; then
+              if ! git show "$1:data/kanaalpost-publiek.md" > /tmp/spiegel-oud.md; then
+                echo "::error::de spiegel van $2 is niet te lezen — dat is rood, niet leeg."
+                return 1
+              fi
+            else
+              echo "$2: de spiegel bestond daar nog niet."
+              : > /tmp/spiegel-oud.md
+            fi
+            OUD=/tmp/spiegel-oud.md WAT="$2" node -e '
+              const { readFileSync } = require("node:fs");
+              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld }) => {
+                const r = alleenAangevuld(readFileSync(process.env.OUD, "utf8"), readFileSync("data/kanaalpost-publiek.md", "utf8"));
+                if (!r.ok) {
+                  console.error(`::error::append-only overtreden t.o.v. ${process.env.WAT}: ${r.verdwenen} regel(s) verdwenen. Zet terug wat er stond en schrijf de correctie eronder.`);
+                  process.exit(1);
+                }
+                if (!r.opOrde) console.log(`::warning::${process.env.WAT}: niets verdwenen, maar de volgorde wijkt af vanaf regel ${r.eerste} (samenvoeging?).`);
+                console.log(`${process.env.WAT}: geen regel verdwenen.`);
+                process.exit(0);
+              }).catch(() => { console.error("::error::spiegelwet niet te laden — dat is rood."); process.exit(1); });
+            '
+          }
+          fout=0
+          if [ -n "${VOOR:-}" ] && [ "${VOOR}" != "${leeg}" ] && git cat-file -e "${VOOR}^{commit}" 2>/dev/null; then
+            toets "${VOOR}" "de vorige stand van deze tak" || fout=1
+          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
+            # Op de hoofdtak is een ontbrekende vorige stand geen onschuldig geval: dat is een
+            # force-push of een herschreven historie, precies waar deze wet over gaat. Dus rood.
+            echo "::error::op main is er geen bruikbare vorige stand (force-push of herschreven historie) — niet te beoordelen, dus rood."
+            fout=1
+          else
+            echo "geen bruikbare vorige stand (nieuwe tak of force-push) — alleen tegen het aftakpunt getoetst."
+          fi
+          BASIS="$(git merge-base HEAD origin/main || true)"
+          if [ -z "${BASIS}" ]; then
+            echo "::error::geen gemeenschappelijk aftakpunt met main gevonden — niet te beoordelen, dus rood."
+            exit 1
+          fi
+          toets "${BASIS}" "het aftakpunt met main" || fout=1
+          exit "${fout}"
+
   # De run is pas rood NA het melden. Deze poort bestaat apart zodat "zichtbaar maken" en "falen"
   # niet om dezelfde exitcode hoeven te vechten.
   poort:
-    needs: [toetsen, melden]
+    needs: [toetsen, melden, spiegelwet]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions: {}
     steps:
+      # De spiegelwet hangt hieronder, niet ernaast: wordt ooit alleen `poort` als vereiste controle
+      # ingesteld, dan zou een rode spiegelwet naast een groene poort onzichtbaar blijven (bevinding
+      # Codex, 26-07-2026). `skipped` is hier geen fout — de job draait alleen op push.
+      - name: Spiegelwet meenemen
+        env:
+          SPIEGELWET: ${{ needs.spiegelwet.result }}
+        run: |
+          set -uo pipefail
+          case "${SPIEGELWET:-}" in
+            success|skipped) echo "spiegelwet: ${SPIEGELWET:-leeg}" ;;
+            *) echo "::error::de spiegelwet-controle is niet geslaagd (${SPIEGELWET:-leeg})."; exit 1 ;;
+          esac
       - name: Afwijking = rode run
         env:
           AFWIJKING: ${{ needs.toetsen.outputs.afwijking }}

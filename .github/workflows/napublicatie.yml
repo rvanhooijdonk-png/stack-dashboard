@@ -1,0 +1,137 @@
+name: napublicatie
+
+# STAAT WAT ER NET GEBOUWD IS OOK ÉCHT LIVE?
+#
+# `publish.yml` bewijst dat een bouw slaagde. `waarnemer.yml` bewijst dat de pagina die een bezoeker
+# ophaalt klopt. Daartussen zat één gat, door mij als beslispunt voorgelegd: een publicatie die klaar
+# meldt, is niet meteen zichtbaar. Direct kijken geeft onterecht rood; een uur later kijken laat een
+# mislukte uitrol een uur onopgemerkt.
+#
+# Besluit Fable (26-07-2026): HERHAALD NAVRAGEN — elke 30 seconden, hoogstens 8 minuten. Vers → groen,
+# meteen stoppen. Deadline verstreken zonder verse stempel → ROOD. Nooit "onbekend": een controle die
+# geen uitspraak deed is rood, en dat geldt ook voor overgeslagen en geannuleerd (zie de poort
+# onderaan, die dezelfde getoetste regel gebruikt als de code).
+#
+# HET PUBLIEKE ALARM STAAT HIER UIT. De waarnemer zet bij een afwijking een GEBLOKKEERD-regel in de
+# publieke spiegel en heeft dat met een sabotagetest bewezen. Deze controle heeft dat bewijs nog niet,
+# dus: rood in de bouw wel, publiek alarm nog niet. Aanzetten pas na tien ronden zonder onterecht
+# rood — te tellen met het commando in `scripts/lib/napublicatie.mjs`. Grond: bewijs vóór claim.
+on:
+  workflow_run:
+    workflows: [publish]
+    types: [completed]
+  push:
+    paths:
+      - '.github/workflows/napublicatie.yml'
+      - 'scripts/napublicatie.mjs'
+      - 'scripts/lib/napublicatie.mjs'
+  workflow_dispatch:
+    inputs:
+      sabotage:
+        description: 'Acceptatietest: zet het referentiemoment een uur vooruit, zodat de deadline rood oplevert.'
+        type: choice
+        options: [geen, napublicatie]
+        default: geen
+      zelftest:
+        description: 'Zelfde logica, 60x korter wachten (bewijs van de keten, niet van de tijd).'
+        type: boolean
+        default: false
+
+permissions: {}
+
+# Niet annuleren: een lopende wachtronde afkappen zou precies de "geen uitspraak" opleveren die deze
+# controle niet mag hebben.
+concurrency:
+  group: napublicatie
+  cancel-in-progress: false
+
+jobs:
+  controle:
+    runs-on: ubuntu-latest
+    # 8 minuten wachten + marge. Slaat de runner alsnog dood, dan is de uitkomst niet 'success' en
+    # maakt de poort hieronder de run rood — geen stille groene.
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+
+      # Het referentiemoment is het startmoment van de publicatie waar de plaat bij hoort. Bij een
+      # workflow_run staat dat in de gebeurtenis zelf. Bij een handmatige of push-run pakken we de
+      # laatst geslaagde publicatie: de plaat hoort minstens DIE bouw te tonen. Lukt dat niet, dan
+      # blijft het veld leeg — en een lege referentie is rood, niet overslaan.
+      - id: referentie
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          UIT_EVENT: ${{ github.event.workflow_run.run_started_at }}
+        run: |
+          set -uo pipefail
+          if [ -n "${UIT_EVENT:-}" ]; then
+            echo "moment=${UIT_EVENT}" >> "$GITHUB_OUTPUT"
+            echo "referentie uit de publicatie-gebeurtenis: ${UIT_EVENT}"
+            exit 0
+          fi
+          # Veldnaam nagemeten: `gh run list --json` kent `startedAt`; `runStartedAt` bestaat niet en
+          # gaf "Unknown JSON field" — dan was dit veld leeg gebleven en elke push-run rood zonder
+          # ooit te meten (bevinding Codex, nagemeten 26-07-2026).
+          MOMENT="$(gh run list --workflow publish.yml --status success --limit 1 --json startedAt --jq '.[0].startedAt // ""')"
+          echo "moment=${MOMENT}" >> "$GITHUB_OUTPUT"
+          echo "referentie uit de laatst geslaagde publicatie: ${MOMENT:-geen}"
+
+      - id: wachten
+        env:
+          BASE_URL: https://rvanhooijdonk-png.github.io/stack-dashboard/
+          REFERENTIE: ${{ steps.referentie.outputs.moment }}
+          # Twee wegen naar de acceptatietest, net als bij de waarnemer: met de hand, of met
+          # `[sabotage-napublicatie]` in een commit-bericht — zodat het bewijs op elke tak
+          # herhaalbaar is, ook op de tak waarop deze controle wordt ingevoerd.
+          SABOTAGE: ${{ github.event_name != 'workflow_run' && (inputs.sabotage || (contains(github.event.head_commit.message || '', '[sabotage-napublicatie]') && 'napublicatie' || 'geen')) || 'geen' }}
+          # De testschakelaars gelden NOOIT voor de echte ronde na een publicatie. Anders zouden tien
+          # versnelde of gesaboteerde runs kunnen doorgaan voor de tien schone ronden die het publieke
+          # alarm moeten vrijgeven, en dan bewijst dat bewijs niets (bevinding Codex, 26-07-2026).
+          ZELFTEST: ${{ github.event_name != 'workflow_run' && (inputs.zelftest || contains(github.event.head_commit.message || '', '[snel]')) && '1' || '0' }}
+        run: node scripts/napublicatie.mjs
+
+  # De poort past dezelfde regel toe als de code, en wel via die code: `jobUitkomstKleur` is
+  # unit-getest en kent één groene waarde. `always()` is hier bewust gekozen boven `!cancelled()` —
+  # een geannuleerde run moet juist wél langs deze poort, want geannuleerd is rood.
+  poort:
+    needs: controle
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+      - name: Geen uitspraak = rood
+        env:
+          UITKOMST: ${{ needs.controle.result }}
+        run: |
+          set -uo pipefail
+          node -e '
+            import("./scripts/lib/napublicatie.mjs").then(({ jobUitkomstKleur }) => {
+              const uitkomst = process.env.UITKOMST ?? "";
+              const kleur = jobUitkomstKleur(uitkomst);
+              console.log(`controle-uitkomst "${uitkomst || "leeg"}" → ${kleur}`);
+              if (kleur === "groen") process.exit(0);
+              console.error(`::error::de controle na de publicatie deed geen geslaagde uitspraak (${uitkomst || "leeg"}) — dat is rood, niet onbekend.`);
+              process.exit(1);
+            }).catch(() => {
+              console.error("::error::de poortregel kon niet geladen worden — dat is rood.");
+              process.exit(1);
+            });
+          '
+
+# ACCEPTATIE — het bewijs dat deze controle echt rood wordt.
+# Handmatig: start deze workflow met sabotage=napublicatie en zelftest=aan. Verwacht: 16 ronden in
+# ongeveer 8 seconden, geen verse stempel, code DEADLINE_ZONDER_VERSE_STEMPEL, rode run, en GEEN regel
+# in de publieke spiegel. Op een tak kan hetzelfde met `[sabotage-napublicatie] [snel]` in het
+# commit-bericht. Het tegenbewijs (groen) is de gewone ronde na een echte publicatie.
