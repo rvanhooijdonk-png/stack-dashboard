@@ -117,7 +117,18 @@ jobs:
             exit 1
           fi
           cp data/kanaalpost-publiek.md "$SPIEGEL_VOOR"
+          # Een append-only bestand moet op een regeleinde eindigen. Doet het dat niet, dan plakt deze
+          # rij achter de laatste rij aan: die gepubliceerde regel is dan stilletjes HERSCHREVEN en de
+          # nieuwe melding is er als aparte rij niet, terwijl het regelaantal gelijk blijft en geen van
+          # beide poorten iets ziet vertrekken (bevinding Gemini, 26-07-2026). `$(tail -c1 ...)` is leeg
+          # als de laatste byte een regeleinde is — commandosubstitutie knipt afsluitende regeleindes weg.
+          if [ -s data/kanaalpost-publiek.md ] && [ -n "$(tail -c1 data/kanaalpost-publiek.md)" ]; then
+            echo "::warning::de spiegel eindigde niet op een regeleinde — eerst rechtgezet, anders had deze rij aan de vorige vastgeplakt."
+            printf '\n' >> data/kanaalpost-publiek.md
+          fi
           printf '%s' "$RIJ_B64" | base64 -d >> data/kanaalpost-publiek.md
+          # En de eigen rij sluit óók af, zodat de volgende schrijver niet in dezelfde val loopt.
+          if [ -n "$(tail -c1 data/kanaalpost-publiek.md)" ]; then printf '\n' >> data/kanaalpost-publiek.md; fi
           tail -1 data/kanaalpost-publiek.md
           # Fail-closed: wat we net toevoegden moet ook echt als publieke rij terugkomen. Komt hij
           # niet door de poort, dan draaien we de wijziging terug in plaats van een regel achter te
@@ -189,13 +200,21 @@ jobs:
               // ~1 MiB en stopt de bewaker (bevinding Codex). Fail-closed, maar onnodig.
               const lees = (rev) => execFileSync("git", ["show", `${rev}:data/kanaalpost-publiek.md`], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
               const regel = Buffer.from(process.env.RIJ_B64, "base64").toString("utf8").trim();
-              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld, nietCanoniekeRegels, nieuweNietCanoniekeRegels }) => {
+              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld, nietCanoniekeRegels, nieuweNietCanoniekeRegels, nieuweDuplicaten }) => {
                 const nu = lees("HEAD");
                 const vertrek = readFileSync(process.env.SPIEGEL_VOOR, "utf8");
                 for (const [wat, oud] of [["de stand waarvan deze job vertrok", vertrek], ["de voorganger van deze commit", lees("HEAD~1")]]) {
                   const r = alleenAangevuld(oud, nu);
                   if (!r.ok) {
                     console.error(`::error::t.o.v. ${wat} zouden ${r.verdwenen} regel(s) verdwijnen — de waarnemer publiceert dat niet.`);
+                    process.exit(1);
+                  }
+                  // De andere helft van dezelfde wet: er mag ook niets stilletjes DUBBEL bij komen. Een
+                  // botsing die met `git pull --rebase` wordt opgelost zet de eigen rij er anders een
+                  // tweede keer bij, en "niets verdwenen" is dan nog steeds waar (bevinding Codex).
+                  const dubbel = nieuweDuplicaten(oud, nu);
+                  if (dubbel.length) {
+                    console.error(`::error::t.o.v. ${wat} komt/komen ${dubbel.length} regel(s) dubbel in de spiegel: ${dubbel.map((d) => `regel ${d.regel} (${d.aantal}x, mocht ${d.toegestaan}x)`).join("; ")}.`);
                     process.exit(1);
                   }
                 }
@@ -279,7 +298,7 @@ jobs:
         run: |
           set -uo pipefail
           leeg=0000000000000000000000000000000000000000
-          toets() { # $1 = commit, $2 = omschrijving
+          toets() { # $1 = commit, $2 = omschrijving, $3 = "zacht" → verdwenen regels zijn een waarschuwing
             # Onderscheid maken tussen "bestond nog niet" en "kon niet gelezen worden". Alles op één
             # hoop gooien zou een leesfout als een lege oude spiegel behandelen, en dan is elke
             # verwijdering ineens toegestaan (bevinding Codex, 26-07-2026).
@@ -292,30 +311,96 @@ jobs:
               echo "$2: de spiegel bestond daar nog niet."
               : > "$SPIEGEL_OUD"
             fi
-            OUD="$SPIEGEL_OUD" WAT="$2" node -e '
+            OUD="$SPIEGEL_OUD" WAT="$2" ZACHT="${3:-}" node -e '
               const { readFileSync } = require("node:fs");
-              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld }) => {
-                const r = alleenAangevuld(readFileSync(process.env.OUD, "utf8"), readFileSync("data/kanaalpost-publiek.md", "utf8"));
+              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld, nieuweDuplicaten }) => {
+                const oud = readFileSync(process.env.OUD, "utf8");
+                const nu = readFileSync("data/kanaalpost-publiek.md", "utf8");
+                const r = alleenAangevuld(oud, nu);
                 if (!r.ok) {
-                  console.error(`::error::append-only overtreden t.o.v. ${process.env.WAT}: ${r.verdwenen} regel(s) verdwenen. Zet terug wat er stond en schrijf de correctie eronder.`);
+                  // `zacht` bestaat voor precies één geval: een tak die herschreven is (rebase). Wat main
+                  // al publiceerde wordt dáár apart en hard getoetst; deze melding gaat over regels die
+                  // alleen als voorstel op de tak stonden. Zie de toelichting bij de aanroep.
+                  const hard = process.env.ZACHT !== "zacht";
+                  console[hard ? "error" : "log"](`::${hard ? "error" : "warning"}::append-only ${hard ? "overtreden" : "afwijking"} t.o.v. ${process.env.WAT}: ${r.verdwenen} regel(s) verdwenen, vanaf regel ${r.eerste}. ${hard ? "Zet terug wat er stond en schrijf de correctie eronder." : "Herschreven tak — controleer in de PR of dit alleen taktekst betreft."}`);
+                  if (hard) process.exit(1);
+                }
+                // De andere helft van dezelfde wet: net zo min als een regel mag verdwijnen, mag er een
+                // stilletjes DUBBEL bij komen. Een samenvoeging of rebase van dit bestand levert dat op,
+                // en "niets verdwenen" blijft dan waar — de plaat zou de melding twee keer laten zien
+                // en niemand ziet waaróm (bevinding Codex, 26-07-2026).
+                const dubbel = nieuweDuplicaten(oud, nu);
+                if (dubbel.length) {
+                  console.error(`::error::t.o.v. ${process.env.WAT} staat/staan ${dubbel.length} regel(s) dubbel in de spiegel: ${dubbel.map((d) => `regel ${d.regel} (${d.aantal}x, mocht ${d.toegestaan}x)`).join("; ")}. Eén rij, één keer; een rechtzetting krijgt haar eigen tekst.`);
                   process.exit(1);
                 }
-                if (!r.opOrde) console.log(`::warning::${process.env.WAT}: niets verdwenen, maar de volgorde wijkt af vanaf regel ${r.eerste} (samenvoeging?).`);
-                console.log(`${process.env.WAT}: geen regel verdwenen.`);
+                // Deze twee slotregels alleen als er ook niets verdwenen is. Anders sloot een zachte
+                // melding af met "niets verdwenen" pal onder "1 regel verdwenen" — twee uitspraken over
+                // dezelfde meting, waarvan één onwaar (gemeten in de lokale proef, 26-07-2026).
+                if (r.ok && !r.opOrde) console.log(`::warning::${process.env.WAT}: niets verdwenen, maar de volgorde wijkt af vanaf regel ${r.eerste} (samenvoeging?).`);
+                console.log(`${process.env.WAT}: ${r.ok ? "geen regel verdwenen" : `${r.verdwenen} regel(s) herschreven, toegestaan omdat de tak herschreven is`}, geen regel dubbel.`);
                 process.exit(0);
               }).catch(() => { console.error("::error::spiegelwet niet te laden — dat is rood."); process.exit(1); });
             '
           }
           fout=0
-          if [ -n "${VOOR:-}" ] && [ "${VOOR}" != "${leeg}" ] && git cat-file -e "${VOOR}^{commit}" 2>/dev/null; then
-            toets "${VOOR}" "de vorige stand van deze tak" || fout=1
-          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
-            # Op de hoofdtak is een ontbrekende vorige stand geen onschuldig geval: dat is een
-            # force-push of een herschreven historie, precies waar deze wet over gaat. Dus rood.
-            echo "::error::op main is er geen bruikbare vorige stand (force-push of herschreven historie) — niet te beoordelen, dus rood."
-            fout=1
+          # Main moet hier bekend zijn, anders vergelijkt alles hieronder met niets: `toets` zou een
+          # onbekende commit als "de spiegel bestond daar nog niet" behandelen en dan is elke verwijdering
+          # ineens toegestaan. Dus eerst ophalen, en anders rood.
+          if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+            git fetch --no-tags origin main:refs/remotes/origin/main 2>/dev/null || true
+          fi
+          if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+            echo "::error::main is in deze kloon niet bekend — er is niets om de spiegel tegen te houden, dus rood."
+            exit 1
+          fi
+          # De vorige stand is de belangrijkste van de twee vergelijkingen, dus wordt er ook echt moeite
+          # voor gedaan: staat `before` niet in de kloon (na een samenvoeging op main wijst hij naar een
+          # commit die niet in de eerstevoorouderlijn van deze tak ligt), dan halen we hem eerst apart op.
+          # Het oude gedrag liet dat geval stil door met alleen de aftakpunt-toets, en juist de overtreding
+          # die deze wet aanleiding gaf — toevoegen in push 1, weghalen in push 2 binnen één tak — is tegen
+          # het aftakpunt onzichtbaar. Fail-open op de scherpste toets dus (bevinding Codex, 26-07-2026, hoog).
+          heeft_voor() { git cat-file -e "${VOOR}^{commit}" 2>/dev/null; }
+          if [ -z "${VOOR:-}" ] || [ "${VOOR}" = "${leeg}" ]; then
+            # Geen `before` in de gebeurtenis: een verse tak, of een gebeurtenissoort die er geen heeft
+            # (schedule, workflow_run, handmatig). Dan bestaat er niets om tegen te meten.
+            if [ "${GITHUB_REF_NAME}" = "main" ] && [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+              echo "::error::een push op main zonder bruikbare vorige stand is een force-push of herschreven historie — niet te beoordelen, dus rood."
+              fout=1
+            else
+              echo "geen vorige stand in de gebeurtenis (${GITHUB_EVENT_NAME}, nieuwe tak of force-push) — alleen tegen het aftakpunt getoetst."
+            fi
           else
-            echo "geen bruikbare vorige stand (nieuwe tak of force-push) — alleen tegen het aftakpunt getoetst."
+            if ! heeft_voor; then
+              echo "de vorige stand ${VOOR} zit niet in de kloon — apart ophalen."
+              git fetch --no-tags --depth=1 origin "${VOOR}" 2>/dev/null \
+                || git fetch --no-tags origin "${VOOR}" 2>/dev/null \
+                || true
+            fi
+            if heeft_voor && git merge-base --is-ancestor "${VOOR}" HEAD 2>/dev/null; then
+              # Het gewone geval: de vorige stand ligt in de historie van deze stand. Volle, harde toets.
+              toets "${VOOR}" "de vorige stand van deze tak" || fout=1
+            elif heeft_voor && [ "${GITHUB_REF_NAME}" = "main" ]; then
+              # De vorige stand van main ligt NIET in haar eigen historie: main is herschreven. Dat is de
+              # aanval waar deze wet over gaat, en op main bestaat er geen goede reden voor. Rood.
+              echo "::error::main is herschreven — ${VOOR} ligt niet in de historie van deze stand. Een gepubliceerde regel kan zo verdwijnen zonder dat er iets aan het bestand te zien is."
+              fout=1
+            elif heeft_voor; then
+              # Een herschreven TAK (rebase, force-push) is wel legitiem: een voorstel mag herwoord worden,
+              # en deze ronde is daar het bewijs van — de foute tussenstap die een gepubliceerde regel
+              # weghaalde is er juist uit gehaald. Alleen: "voorstel" is geen vrijbrief. Wat main al
+              # publiceerde wordt daarom hard tegen main zelf getoetst (sterker dan het aftakpunt, want
+              # main groeit door), en de takeigen herwoording komt als waarschuwing in het log te staan.
+              echo "::warning::deze tak is herschreven (rebase of force-push): ${VOOR} ligt niet in haar historie. Regels die main al publiceerde worden hieronder hard getoetst."
+              toets "${VOOR}" "de herschreven vorige stand van deze tak" zacht || fout=1
+              toets "origin/main" "de huidige stand van main (harde eis bij een herschreven tak)" || fout=1
+            else
+              # Wél een `before` opgegeven, en tóch niet te lezen. Dat is geen onschuldig geval: de
+              # scherpste van de twee toetsen kan hier geen uitspraak doen, en een toets die niets zegt
+              # is rood — op elke tak, niet alleen op main.
+              echo "::error::de opgegeven vorige stand ${VOOR} is niet op te halen; deze tak kan niet tegen haar eigen vorige stand beoordeeld worden — dus rood."
+              fout=1
+            fi
           fi
           BASIS="$(git merge-base HEAD origin/main || true)"
           if [ -z "${BASIS}" ]; then

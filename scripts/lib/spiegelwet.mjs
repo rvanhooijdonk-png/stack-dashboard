@@ -114,14 +114,23 @@ const isTabelregel = (ruw) => {
   return r.includes('|') && kop.split('').every((c) => /\s/.test(c) || bevatOnzichtbaar(c));
 };
 
+const SAMENGESTELD = 'samengesteld teken (NFD-accent of ligatuur)';
+
 /** Welke tekens maken deze regel niet-canoniek — en als het geen los teken is, zeg dát dan. */
 const bevinding = (ruw, i) => {
   // Per teken kijken lukt niet altijd: bij een NFD-accent (`e` + combining acute) is élk codepoint op
   // zichzelf canoniek en de regel toch niet. Zonder terugval stond er `regel 12 ()` in de foutmelding
   // en wist niemand wat er mis was (bevinding Codex, 26-07-2026).
-  const tekens = [...new Set([...String(ruw)].filter((c) => !canoniek(c)))]
+  const t = String(ruw);
+  const tekens = [...new Set([...t].filter((c) => !canoniek(c)))]
     .map((c) => `U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`);
-  return { regel: i + 1, tekens: tekens.length ? tekens : ['samengesteld teken (NFD-accent of ligatuur)'] };
+  // En de twee soorten rommel worden ONAFHANKELIJK gemeld. Anders liftte een samengesteld teken mee
+  // op een los teken dat toch al in de lijst stond: zet naast een `…` ook een NFD-accent in dezelfde
+  // regel, en de melding bleef letterlijk `['U+2026']` — waardoor een test die op die uitkomst
+  // vertrouwt groen bleef terwijl de regel viezer werd (bewezen tegenvoorbeeld Codex, 26-07-2026).
+  const zonderLosseFouten = [...t].filter((c) => canoniek(c)).join('');
+  if (zonderLosseFouten.normalize('NFKC') !== zonderLosseFouten) tekens.push(SAMENGESTELD);
+  return { regel: i + 1, tekens: tekens.length ? tekens : [SAMENGESTELD] };
 };
 
 /**
@@ -155,6 +164,44 @@ export function nietCanoniekeRegels(tekst) {
  * er nieuw in komt. Wat er al stond blijft zichtbaar als waarschuwing — niet stil, maar ook geen
  * dichtgeslagen deur voor een ander.
  */
+/**
+ * DE ANDERE KANT VAN DEZELFDE WET — een regel mag er ook niet stilletjes BIJ komen.
+ *
+ * `alleenAangevuld` bewijst dat elke oude regel er nog minstens even vaak staat; een extra exemplaar
+ * blijft daar groen (bevinding Codex, 26-07-2026). Dat gat is niet theoretisch: bij het omhangen van
+ * de waarnemer-tak naar main plakte een samenvoeging dezelfde WAARNEMER-regel een tweede keer
+ * onderaan, en de append-only-poort zag daar niets van. Een verslag met dezelfde melding er twee keer
+ * in liegt net zo hard als een verslag waar er één uit is.
+ *
+ * Wat hier "nieuw duplicaat" heet: een tabelregel die in `nieuw` vaker voorkomt dan in `oud`, én
+ * vaker dan één keer. Stonden er in `oud` al twee gelijke regels, dan blijven die twee toegestaan —
+ * weghalen mag immers niet. Alleen het extra exemplaar is de overtreding.
+ */
+export function nieuweDuplicaten(oud, nieuw) {
+  const tel = (tekst) => {
+    const m = new Map();
+    for (const ruw of String(tekst ?? '').split('\n')) {
+      const r = ruw.replace(/\r$/, '');
+      if (!isTabelregel(r)) continue;
+      m.set(r, (m.get(r) ?? 0) + 1);
+    }
+    return m;
+  };
+  const oudeTelling = tel(oud);
+  const nieuweTelling = tel(nieuw);
+  const gevonden = [];
+  const regels = String(nieuw ?? '').split('\n');
+  for (const [regel, aantal] of nieuweTelling) {
+    const toegestaan = Math.max(oudeTelling.get(regel) ?? 0, 1);
+    if (aantal <= toegestaan) continue;
+    // Het regelnummer van het LAATSTE exemplaar: dat is het exemplaar dat erbij kwam.
+    let laatste = 0;
+    regels.forEach((ruw, i) => { if (ruw.replace(/\r$/, '') === regel) laatste = i + 1; });
+    gevonden.push({ regel: laatste, aantal, toegestaan });
+  }
+  return gevonden;
+}
+
 export function nieuweNietCanoniekeRegels(oud, nieuw) {
   const telling = new Map();
   for (const r of String(oud ?? '').split('\n')) telling.set(r, (telling.get(r) ?? 0) + 1);

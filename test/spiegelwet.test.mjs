@@ -13,8 +13,10 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { createHash } from 'node:crypto';
+
 import {
-  alleenAangevuld, canoniek, nietCanoniekeRegels, nieuweNietCanoniekeRegels,
+  alleenAangevuld, canoniek, nietCanoniekeRegels, nieuweNietCanoniekeRegels, nieuweDuplicaten,
 } from '../scripts/lib/spiegelwet.mjs';
 import { alarmRij, alarmRijPubliceerbaar } from '../scripts/lib/waarnemer.mjs';
 
@@ -116,10 +118,94 @@ test('alleen tabelregels tellen, met regelnummer en de tekens erbij', () => {
   ]);
 });
 
+// De uitzonderingen op de vormeis in het ECHTE bestand, elk vastgezet op de exacte regel.
+//
+// Waarom een hash en niet alleen het teken: bindt je de uitzondering aan "ergens één regel met een
+// U+2026", dan kan iemand de historische regel weghalen en elders een verse regel met een ellips
+// neerzetten — de telling blijft één en de test blijft groen (bevinding Gemini + Codex, 26-07-2026,
+// met een bewezen tegenvoorbeeld waarin een NFD-accent aan dezelfde regel werd toegevoegd). Met de
+// hash erbij is de uitzondering die ene regel, en niets anders.
+//
+// U+2026 is de horizontale ellips (…). NFKC maakt daar drie losse punten van, dus de ellips haalt de
+// schrijfeis niet. Deze regel van 14:10 stond al op de hoofdlijn toen de eis er kwam en mag daar niet
+// meer weg (append-only), dus hij blijft staan als waarschuwing. Nieuwe regels typen drie punten.
+// Dat de eis normale typografie raakt, is een openstaand punt voor Fable — zie het rapport.
+const UITZONDERINGEN = [
+  { regel: 68, tekens: ['U+2026'], sha256: 'c67cd796b0af5e0c4b7d6ab30f9a55ea637ec6896bd2e781cb824aaadcc2dbc9' },
+];
+
 test('de echte spiegel voldoet — de nulmeting die deze eis draagt', () => {
-  // Als deze test ooit rood wordt, is er een regel bijgekomen die de eis niet haalt; dan is de fout
-  // die regel en niet deze test.
-  assert.deepEqual(nietCanoniekeRegels(readFileSync(join(ROOT, 'data/kanaalpost-publiek.md'), 'utf8')), []);
+  // De harde eis geldt voor NIEUWE regels; een regel die al gepubliceerd is mag niet verdwijnen, dus
+  // een oude regel die de vorm niet haalt blijft staan en is een waarschuwing. Wordt deze test rood,
+  // dan is er een regel bijgekomen die de eis niet haalt, of is een uitzonderingsregel herschreven —
+  // in beide gevallen is de fout die regel en niet deze test.
+  const bestand = readFileSync(join(ROOT, 'data/kanaalpost-publiek.md'), 'utf8');
+  const regels = bestand.split('\n');
+  const gevonden = nietCanoniekeRegels(bestand);
+
+  assert.deepEqual(
+    gevonden.map((b) => ({ regel: b.regel, tekens: b.tekens })),
+    UITZONDERINGEN.map((u) => ({ regel: u.regel, tekens: u.tekens })),
+  );
+  for (const u of UITZONDERINGEN) {
+    const hash = createHash('sha256').update(regels[u.regel - 1] ?? '', 'utf8').digest('hex');
+    assert.equal(hash, u.sha256, `regel ${u.regel} is niet meer de regel waarvoor de uitzondering geldt`);
+  }
+});
+
+test('het bestand eindigt op een regeleinde — anders plakt de volgende melding vast aan de vorige', () => {
+  // Zonder afsluitend regeleinde schrijft de volgende toevoeging zijn rij achter de laatste rij aan.
+  // Dat herschrijft stilletjes een gepubliceerde regel én laat de nieuwe melding verdwijnen, en geen
+  // van beide poorten ziet het als een verdwenen regel (bevinding Gemini, 26-07-2026 — de fout stond
+  // op dat moment echt in dit bestand, ik had hem er bij het oplossen van een conflict in gezet).
+  const bestand = readFileSync(join(ROOT, 'data/kanaalpost-publiek.md'), 'utf8');
+  assert.equal(bestand.endsWith('\n'), true);
+  assert.equal(bestand.endsWith('\n\n'), false);
+});
+
+test('een samengesteld teken lift niet mee op een los teken dat al gemeld werd', () => {
+  // Het bewezen tegenvoorbeeld van Codex: zet naast de ellips ook een NFD-accent in dezelfde regel.
+  // Vóór de fix bleef de melding letterlijk ['U+2026'] en bleef een test die daarop vertrouwde groen.
+  const met = nietCanoniekeRegels('| 2026-07-26 14:10 | X | tekst… en café | AFGEROND | geen |');
+  assert.deepEqual(met, [{ regel: 1, tekens: ['U+2026', 'samengesteld teken (NFD-accent of ligatuur)'] }]);
+  // En zonder dat accent blijft de melding precies dat ene teken — geen valse tweede oorzaak.
+  const zonder = nietCanoniekeRegels('| 2026-07-26 14:10 | X | tekst… en café'.normalize('NFC') + ' |');
+  assert.deepEqual(zonder, [{ regel: 1, tekens: ['U+2026'] }]);
+});
+
+// --- de andere kant van de wet: er mag ook niet stilletjes een regel BIJ komen ------------------
+
+test('dezelfde regel er een tweede keer bij is een overtreding', () => {
+  // Precies wat er bij het omhangen van deze tak gebeurde: een samenvoeging plakte dezelfde
+  // WAARNEMER-regel nog een keer onderaan, en append-only zag daar niets van (bevinding Codex).
+  const uit = nieuweDuplicaten('kop\n| a |\n| b |\n', 'kop\n| a |\n| b |\n| a |\n');
+  assert.deepEqual(uit, [{ regel: 4, aantal: 2, toegestaan: 1 }]);
+});
+
+test('gewoon aanvullen is geen duplicaat', () => {
+  assert.deepEqual(nieuweDuplicaten('kop\n| a |\n', 'kop\n| a |\n| b |\n'), []);
+});
+
+test('twee gelijke regels die er al stonden mogen blijven — weghalen mag immers niet', () => {
+  assert.deepEqual(nieuweDuplicaten('kop\n| a |\n| a |\n', 'kop\n| a |\n| a |\n| b |\n'), []);
+  // Maar een DERDE exemplaar is nieuw.
+  assert.deepEqual(
+    nieuweDuplicaten('kop\n| a |\n| a |\n', 'kop\n| a |\n| a |\n| a |\n'),
+    [{ regel: 4, aantal: 3, toegestaan: 2 }],
+  );
+});
+
+test('proza dat toevallig twee keer voorkomt telt niet mee — alleen tabelregels', () => {
+  assert.deepEqual(nieuweDuplicaten('kop\nzelfde zin\n', 'kop\nzelfde zin\nzelfde zin\n'), []);
+});
+
+test('de echte spiegel heeft geen enkele dubbele rij ten opzichte van de hoofdlijn', () => {
+  // Nulmeting-variant: het bestand zoals het nu is, tegen zichzelf zonder de tak-regels is niet
+  // beschikbaar in een test. Wat hier wél kan: geen enkele tabelregel komt twee keer voor.
+  const rijen = readFileSync(join(ROOT, 'data/kanaalpost-publiek.md'), 'utf8')
+    .split('\n').filter((r) => r.startsWith('|'));
+  const dubbel = rijen.filter((r, i) => rijen.indexOf(r) !== i);
+  assert.deepEqual(dubbel, []);
 });
 
 // --- de gaten die de review van 26-07-2026 aanwees ----------------------------------------------
