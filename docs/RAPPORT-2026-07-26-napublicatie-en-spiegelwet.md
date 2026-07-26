@@ -625,6 +625,52 @@ eindtoestand t.o.v. origin/main — verdwenen 0, ok true, opOrde true
 publieke rijen t.o.v. origin/main — verdwenen 0, dubbel 0, in beeld 48, ok true
 ```
 
+### §6h. De push zelf legde het bloot: de zwaarste vondst van de dag
+
+De push van bovenstaande reparatie liep **rood in CI** (run 30208787315) — en de manier waarop is
+ernstiger dan de aanleiding. De job produceerde **exitcode 1 en nul regels uitvoer**. Geen melding, geen
+oordeel, geen aanwijzing.
+
+Oorzaak, lokaal gereproduceerd: GitHub start een `run`-stap als **`bash -e`**. Daarmee doodt elk *kaal*
+commando met een exitcode ≠ 0 de stap ter plekke. En `git merge-base --is-ancestor` gebruikt exitcode 1
+voor een volstrekt normale uitkomst: *"nee, geen voorouder"* — precies wat er na een force-push gebeurt.
+De drieweg-logica die in §6d met zoveel zorg is gebouwd stond dus in CI **achter een muur**: de stap
+stierf op de regel die het antwoord ophaalde, nog vóór er iets mee gedaan kon worden. De hele
+herschreven-tak-route was in de praktijk dode code.
+
+Nulmeting, met de letterlijke stap uit de workflow en de weggeduwde kop als `before`:
+
+```
+$ VOOR=c47fecf… bash -e spiegelwet-step.sh
+(geen uitvoer)   → exit=1
+```
+
+Twee reparaties. Ten eerste vangt een `if` de exitcode op, zodat de drie uitkomsten weer alle drie
+bereikbaar zijn. Dezelfde meting daarna:
+
+```
+::warning::deze tak is herschreven (rebase of force-push): c47fecf… ligt niet in haar historie.
+          Regels die main al publiceerde worden hieronder hard getoetst.
+::warning::append-only afwijking t.o.v. de herschreven vorige stand: 1 regel(s) verdwenen, vanaf regel 73.
+de huidige stand van main (harde eis bij een herschreven tak): geen regel verdwenen, geen regel dubbel,
+          48 rij(en) publiek herkend.
+→ exit=0
+```
+
+Ten tweede — en dat is het punt dat verder reikt dan deze ene regel — staat er nu een **val op de uitgang**
+van de stap. Eindigt hij onverwacht, dan zegt hij dat tenminste. Want een poort die zwijgend rood wordt
+is voor wie ernaar kijkt niet te onderscheiden van een poort die zwijgend niets doet, en dat is precies
+wat deze wet elders verbiedt. Gemeten met een kaal falend commando ingespoten in de stap:
+
+```
+vóór:  uitvoer: (niets)                                                              → exit=128
+na  :  ::error::de spiegelwet-stap stopte onverwacht met exitcode 128 — er is dus
+       niets afgetoetst, en dat is rood.                                             → exit=128
+```
+
+Dat de run rood werd is dus goed nieuws: falen deed hij aan de juiste kant. Dat hij er niets bij zei,
+was de fout — en die was alleen te zien doordat de poort op zijn eigen werk gedraaid heeft.
+
 ## AFSLUITING
 
 - Tests groen: `npm test` → `tests 340 / pass 340 / fail 0` (na §6f; na §6e 336, na §6d 333, na §6c 328,

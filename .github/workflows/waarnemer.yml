@@ -322,6 +322,15 @@ jobs:
           SPIEGEL_OUD: ${{ runner.temp }}/spiegel-oud.md
         run: |
           set -uo pipefail
+          # GitHub start deze stap als `bash -e`. Dat betekent dat ELK kaal commando met een
+          # exitcode ≠ 0 de stap ter plekke doodt — zonder melding, midden in de controle. Precies dat
+          # gebeurde met `git merge-base --is-ancestor` (exitcode 1 = "geen voorouder", een normale
+          # uitkomst): de hele herschreven-tak-route was in CI dode code en de run stierf zwijgend
+          # rood (gemeten: run 30208787315, exit 1, nul regels uitvoer). Rood is de juiste kant om op
+          # te falen, maar zwijgend falen is precies wat deze wet elders verbiedt. Vandaar deze val:
+          # eindigt de stap onverwacht, dan zegt hij dat tenminste.
+          trap 'code=$?; if [ "${code}" -ne 0 ] && [ "${netjes:-0}" -ne 1 ]; then echo "::error::de spiegelwet-stap stopte onverwacht met exitcode ${code} — er is dus niets afgetoetst, en dat is rood."; fi' EXIT
+          netjes=0
           leeg=0000000000000000000000000000000000000000
           toets() { # $1 = commit, $2 = omschrijving, $3 = "zacht" → verdwenen regels zijn een waarschuwing
             # Onderscheid maken tussen "bestond nog niet" en "kon niet gelezen worden". Alles op één
@@ -449,10 +458,11 @@ jobs:
             # vraag niet beantwoorden (kapot object, onvolledige kloon). Dat laatste als "geen voorouder"
             # lezen zou een meetfout stilletjes tot de zachte tak-route promoveren (bevinding Codex,
             # 26-07-2026). Een toets die niets kon zeggen is rood.
+            # De exitcode moet door een `if` opgevangen worden; kaal laten staan doodt de stap onder
+            # `bash -e` zodra het antwoord "geen voorouder" is (gemeten, zie de val bovenaan).
             ANC=""
             if heeft_voor; then
-              git merge-base --is-ancestor "${VOOR}" HEAD 2>/dev/null
-              ANC=$?
+              if git merge-base --is-ancestor "${VOOR}" HEAD 2>/dev/null; then ANC=0; else ANC=$?; fi
             fi
             if [ "${ANC}" = "0" ]; then
               # Het gewone geval: de vorige stand ligt in de historie van deze stand. Volle, harde toets.
@@ -515,6 +525,9 @@ jobs:
               process.exit(0);
             }).catch((e) => { console.error(`::error::vormcontrole niet te draaien: ${e.message}`); process.exit(1); });
           ' || fout=1
+          # Hier eindigt de stap zoals bedoeld — met een oordeel dat hierboven al is uitgeschreven.
+          # De val hoeft er dan niets meer bovenop te zeggen.
+          netjes=1
           exit "${fout}"
 
   # De run is pas rood NA het melden. Deze poort bestaat apart zodat "zichtbaar maken" en "falen"
