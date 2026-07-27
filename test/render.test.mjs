@@ -227,3 +227,43 @@ test('een categorielabel wordt geëscaped als tekst, nooit als markup uitgevoerd
   assert.equal(html.includes('<b>x</b>'), false);
   assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/);
 });
+
+// --- Vlootstand: leegstand wordt zichtbaar --------------------------------------------------
+//
+// De blinde vlek die dit blok dicht: de kanaalpost toont AFRONDINGEN, dus een venster dat niets
+// meldt kwam er per definitie niet in voor. "Welke tab staat stil?" was daardoor alleen te
+// beantwoorden door zelf alle tabs af te lopen. Deze proeven bewaken dat de plaat die vraag
+// beantwoordt zonder ooit stilte als groen te tonen.
+
+test('de plaat toont een regel per venster, met de drie standen en de gebruikte grens', () => {
+  const html = renderHtml(fixture);
+  assert.match(html, /id="vlootstand"/);
+  assert.match(html, /Vlootstand — wie werkt, wie staat leeg/);
+  assert.match(html, /1 werkt · 1 leeg · 1 onbekend/, 'de kop is de ene regel die Richard leest');
+  assert.match(html, /240<\/strong> minuten/, 'een stand zonder zijn drempel is een mening');
+  for (const venster of ['DASHBOARD', 'CONTROL', 'MARKT']) assert.match(html, new RegExp(`>${venster}<`));
+});
+
+test('een venster dat nooit meldde staat ONBEKEND op de plaat, niet stil groen', () => {
+  const s = structuredClone(fixture);
+  s.vlootstand.vensters = [{ venster: 'MARKT', rol: null, toestand: 'ONBEKEND', laatste: null, stilMinuten: null }];
+  s.vlootstand.telling = { werkt: 0, leeg: 0, onbekend: 1 };
+  const html = renderHtml(s);
+  assert.match(html, /nooit gemeld/);
+  assert.match(html, /dot bad"><\/span>ONBEKEND/, 'ONBEKEND krijgt de rode stip, niet de groene');
+  assert.doesNotMatch(html, /dot ok"><\/span>WERKT/);
+});
+
+test('zonder leesbare stand toont de sectie waaróm ze leeg is, in plaats van een lege tabel', () => {
+  const s = structuredClone(fixture);
+  s.vlootstand = { available: false, reason: 'BRON_ONBEREIKBAAR', grensMinuten: 240, vensters: [], telling: { werkt: 0, leeg: 0, onbekend: 0 } };
+  const html = renderHtml(s);
+  assert.match(html, /geen bron is geen stand/);
+  assert.doesNotMatch(html, /<th>venster<\/th>/, 'geen tabelkop zonder tabel');
+});
+
+test('de rol wordt ge-escaped als hij er staat — de plaat is publiek', () => {
+  const s = structuredClone(fixture);
+  s.vlootstand.vensters[0].rol = 'a<b>c';
+  assert.match(renderHtml(s), /a&lt;b&gt;c/);
+});

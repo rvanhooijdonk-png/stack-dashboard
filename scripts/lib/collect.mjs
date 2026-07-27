@@ -253,6 +253,132 @@ export async function collectMergedRecent(days = 7) {
 }
 
 /** Tracker: alleen kopregels en beslispunttitels — nooit de body van een update. */
+/**
+ * Rijen lezen zonder ze stil te laten vallen (27-07-2026).
+ *
+ * De oude lezers herkenden een rij aan een patroon MET bovengrens: `{3,160}` voor een besluit,
+ * `{1,200}` voor een trackerupdate, `{3,110}` voor een kop. Een rij die niet in die maat paste
+ * viel weg — geen fout, geen telling, geen spoor. Op de plaat is "de jongste die ik begreep" dan
+ * niet te onderscheiden van "de jongste die er is": het besluitenregister stond op D-0094 terwijl
+ * D-0095 t/m D-0099 gewoon op main stonden (68 van de 98 rijen onzichtbaar).
+ *
+ * Vandaar deze vorm: herkennen aan het ANKER (het ID, het kopteken), pas daarna inkorten — en van
+ * elke lezer een telling `{ inBron, herkend, getoond }` teruggeven. Inkorten is een weergavekeuze,
+ * weglaten is een meting; die twee mogen nooit meer op elkaar lijken.
+ */
+/**
+ * De verwachting komt van de BRONKANT, vóór het filter (Richard, 27-07-2026): een lezer die telt
+ * wat hij overhoudt, telt wat hij al heeft weggegooid en meldt dat alles klopt. `inBron` telt dus
+ * elke KANDIDAAT-rij — alles wat er in de bron uitziet als een rij van deze soort, ook als de lezer
+ * hem niet begrijpt. `herkend` is wat de lezer erna overhield; het verschil is de uitkomst.
+ *
+ * `afgekapt` telt de rijen waarvan de tekst is ingekort. Afkappen mag, stil afkappen niet: een
+ * grens die zwijgend inkort of weggooit is een defect, geen instelling.
+ */
+function tel(inBron, herkend, getoond, afgekapt) {
+  return { inBron, herkend, getoond, afgekapt };
+}
+
+/** Kort in en houdt bij dát er ingekort is — de teller hangt eraan, niet aan de lengte alleen. */
+function kort(tekst, max, teller) {
+  if (tekst.length <= max) return tekst;
+  teller.n += 1;
+  return tekst.slice(0, max);
+}
+
+/** Alles na het eerste liggend/kort streepje op de regel, ontdaan van opmaak en afsluitende punt. */
+function staart(regel, max, teller) {
+  return kort(regel.replace(/\*+\s*$/, '').trim().replace(/\.$/, ''), max, teller);
+}
+
+export function leesBesluiten(text) {
+  const regels = String(text ?? '').split('\n');
+  // Bronkant: élke tabelrij waarvan de eerste cel met `D-` begint is een kandidaat — ook een rij
+  // met een scheve ID-vorm. Pas daarna filtert de lezer; dat verschil hoort zichtbaar te zijn.
+  const kandidaat = /^\s*\|\s*[Dd]-/;
+  const anker = /^\s*\|\s*(D-\d{4})\s*\|(.*)$/;
+  const afgekapt = { n: 0 };
+  let inBron = 0;
+  const herkend = [];
+  for (const regel of regels) {
+    if (!kandidaat.test(regel)) continue;
+    inBron += 1;
+    const m = anker.exec(regel);
+    if (!m) continue;
+    // De rest van de rij: | datum | besluit | ... — het besluit mag elke lengte hebben.
+    const cellen = m[2].split('|');
+    const datum = (cellen[0] ?? '').trim();
+    const besluit = (cellen[1] ?? '').trim();
+    if (!/^[\d-]{4,12}$/.test(datum) || besluit.length < 3) continue;
+    herkend.push({
+      id: m[1], date: datum, decision: kort(besluit, 160, afgekapt), category: categoriseer(besluit),
+    });
+  }
+  herkend.sort((a, b) => b.id.localeCompare(a.id));
+  const entries = herkend.slice(0, 10);
+  return { entries, telling: tel(inBron, herkend.length, entries.length, afgekapt.n) };
+}
+
+export function leesTracker(text) {
+  const regels = String(text ?? '').split('\n');
+  const updateKandidaat = /^ {0,3}\*\*Update\b/i;
+  const updateAnker = /^ {0,3}\*\*Update\s+([0-9]{1,2}\/[0-9]{1,2})\s*\((\d+)\)\s*(?:[—-]\s*)?(.*)$/;
+  const puntAnker = /BESLISPUNT\s*\(?([0-9]{1,3}[a-z]?)\)?\s*[—-]\s*([^*\n]*)/g;
+  const afgekapt = { n: 0 };
+  let inBron = 0;
+  let dubbel = 0;
+  const gelezen = [];
+  const punten = [];
+  const gezien = new Set();
+  for (const regel of regels) {
+    if (updateKandidaat.test(regel)) {
+      inBron += 1;
+      const m = updateAnker.exec(regel);
+      const title = m ? staart(m[3], 120, afgekapt) : '';
+      if (m && title) gelezen.push({ number: Number(m[2]), date: m[1], title });
+    }
+    puntAnker.lastIndex = 0;
+    for (const p of regel.matchAll(puntAnker)) {
+      inBron += 1;
+      const title = kort(p[2].split('.')[0].trim(), 110, afgekapt);
+      // Een beslispunt dat twee keer in de tracker staat is één beslispunt. Zou het tweede exemplaar
+      // als "weggevallen" tellen, dan meldde de rijentoets rood op gewone herhaling (Gemini, 27-07).
+      if (gezien.has(p[1])) { dubbel += 1; continue; }
+      if (title.length < 3) continue;
+      gezien.add(p[1]);
+      punten.push({ id: p[1], title, category: categoriseer(title) });
+    }
+  }
+  gelezen.sort((a, b) => b.number - a.number);
+  const updates = gelezen.slice(0, 8);
+  const decisionPoints = punten.slice(0, 12);
+  return {
+    updates,
+    decisionPoints,
+    telling: tel(
+      inBron, gelezen.length + punten.length + dubbel, updates.length + decisionPoints.length,
+      afgekapt.n,
+    ),
+  };
+}
+
+export function leesJournaal(text) {
+  const regels = String(text ?? '').split('\n');
+  const afgekapt = { n: 0 };
+  let inBron = 0;
+  const gelezen = [];
+  for (const regel of regels) {
+    if (!/^ {0,3}#{2,3}(\s|$)/.test(regel)) continue;
+    inBron += 1;
+    const m = /^ {0,3}#{2,3}\s+(.+)$/.exec(regel);
+    if (!m) continue;
+    const title = kort(m[1].trim(), 110, afgekapt);
+    if (title) gelezen.push({ title });
+  }
+  const entries = gelezen.slice(0, 6);
+  return { entries, telling: tel(inBron, gelezen.length, entries.length, afgekapt.n) };
+}
+
 export async function collectTracker() {
   const text = await fileFromRepo(CONTROL_REPO, TRACKER_PATH);
   const proof = `${repoUrl(CONTROL_REPO)}/blob/main/${TRACKER_PATH}`;
@@ -265,23 +391,12 @@ export async function collectTracker() {
     };
   }
 
-  // Kopregels: "**Update 23/7 (24) — TITEL.**"
-  const updates = [...text.matchAll(/^\*\*Update\s+([0-9]{1,2}\/[0-9]{1,2})\s*\((\d+)\)\s*[—-]\s*([^*\n]{1,200})/gm)]
-    .map((m) => ({ number: Number(m[2]), date: m[1], title: m[3].trim().replace(/\.$/, '').slice(0, 120) }))
-    .sort((a, b) => b.number - a.number)
-    .slice(0, 8);
-
-  // Beslispunten, twee schrijfwijzen: "BESLISPUNT 23a — titel" en "BESLISPUNT (9a) — titel".
-  const seen = new Set();
-  const decisionPoints = [...text.matchAll(/BESLISPUNT\s*\(?([0-9]{1,3}[a-z]?)\)?\s*[—-]\s*([^.*\n]{3,110})/g)]
-    .map((m) => ({ id: m[1], title: m[2].trim(), category: categoriseer(m[2]) }))
-    .filter((d) => (seen.has(d.id) ? false : seen.add(d.id)))
-    .slice(0, 12);
+  const { updates, decisionPoints, telling } = leesTracker(text);
 
   const n = updates.length + decisionPoints.length;
   const { trust, note } = trustWithAge(n, await lastCommitDate(CONTROL_REPO, TRACKER_PATH));
   return {
-    available: true, updates, decisionPoints,
+    available: true, updates, decisionPoints, rijen: telling,
     evidence: evidence(src, 'main', trust, proof, note),
   };
 }
@@ -297,13 +412,10 @@ export async function collectDecisions() {
       evidence: evidence(src, 'main', 'SOURCE_UNAVAILABLE', proof, 'Niet leesbaar.'),
     };
   }
-  const entries = [...text.matchAll(/^\|\s*(D-\d{4})\s*\|\s*([\d-]{4,12})\s*\|\s*([^|]{3,160}?)\s*\|/gm)]
-    .map((m) => ({ id: m[1], date: m[2], decision: m[3].trim(), category: categoriseer(m[3]) }))
-    .sort((a, b) => b.id.localeCompare(a.id))
-    .slice(0, 10);
+  const { entries, telling } = leesBesluiten(text);
   const { trust, note } = trustWithAge(entries.length, await lastCommitDate(CONTROL_REPO, 'CONTROL/DECISIONS.md'));
   return {
-    available: true, entries,
+    available: true, entries, rijen: telling,
     evidence: evidence(src, 'main', trust, proof, note),
   };
 }
@@ -432,10 +544,10 @@ export async function collectLogbook() {
         'Journaal staat nog niet op main — het zit in een openstaande PR.'),
     };
   }
-  const entries = [...text.matchAll(/^#{2,3}\s+(.{3,110})$/gm)].map((m) => ({ title: m[1].trim() })).slice(0, 6);
+  const { entries, telling } = leesJournaal(text);
   const { trust, note } = trustWithAge(entries.length, await lastCommitDate(CONTROL_REPO, 'CONTROL/FABLE-JOURNAAL.md'));
   return {
-    available: true, entries,
+    available: true, entries, rijen: telling,
     evidence: evidence(src, 'main', trust, proof, note),
   };
 }

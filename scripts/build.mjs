@@ -20,6 +20,8 @@ import { validate } from './lib/validate.mjs';
 import { toPublicPlanning } from './lib/planning.mjs';
 import { vertaalBouwlijst } from './lib/planning-bron.mjs';
 import { kanaalpostUitTekst, toPublicKanaalpost } from './lib/kanaalpost.mjs';
+import { VLOOT_ONBEKEND_MINUTEN, toPublicVlootstand, vlootstand as vlootstandVan } from './lib/doorstroom.mjs';
+import { LANES } from './lib/kijk.mjs';
 import {
   collectPullRequests, collectMergedRecent, collectTracker,
   collectDecisions, collectTracks, collectLogbook, collectCi, collectBouwlijst,
@@ -44,8 +46,12 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  *        kanaalpost aan de bouwlijst en toonde de plaat dus alleen de meldingen van dit venster —
  *        een lege bouwlijst nam dan de post van de hele vloot mee. Daarom is `planning.kanaalpost`
  *        vervallen: één bron, geen tweede stille route.
+ * 2.5.0: vlootstand — welk venster WERKT, LEEG staat of ONBEKEND is. De spiegel toont afrondingen;
+ *        wie niets meldt kwam daar per definitie niet in voor, dus was leegstand alleen te zien door
+ *        zelf de tabs af te lopen. Afgeleid uit dezelfde spiegel (geen tweede bron) en bewust NIET
+ *        erin geschreven: het logboek is append-only, en een kop die je bijwerkt wist de vorige.
  */
-const CONTRACT_VERSION = '2.4.0';
+const CONTRACT_VERSION = '2.5.0';
 const REFRESH_SECONDS = 900;
 /** Een titel is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
 const MAX_TITLE = 80;
@@ -185,8 +191,24 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
     errorCode: ERROR_CODE_BY_TRUST[e.trust],
   });
 
+  // Rijentelling per bron (27-07-2026). Een lezer die rijen laat vallen zag er tot vandaag uit als
+  // een bron die niets nieuws had; `herkend < inBron` maakt dat verschil meetbaar — en `doorstroom`
+  // maakt er ROOD van. Alleen getallen, dus veilig in de publieke `status.json`.
+  const rijenVan = (bron) => {
+    const r = bron?.rijen;
+    return r && [r.inBron, r.herkend, r.getoond, r.afgekapt].every((n) => Number.isInteger(n) && n >= 0)
+      ? {
+        inBron: r.inBron, herkend: r.herkend, getoond: r.getoond, afgekapt: r.afgekapt,
+      }
+      : null;
+  };
   const sources = ['pullRequests', 'merged', 'tracker', 'decisions', 'tracks', 'logbook', 'ci']
-    .map((key) => ({ key, trust: trustOf(raw[key].evidence), retrievedAt: raw[key].evidence.retrievedAt }));
+    .map((key) => ({
+      key,
+      trust: trustOf(raw[key].evidence),
+      retrievedAt: raw[key].evidence.retrievedAt,
+      rijen: rijenVan(raw[key]),
+    }));
 
   return {
     contractVersion: CONTRACT_VERSION,
@@ -200,6 +222,9 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
     // Vloot-breed doorgeefluik, zelfde fail-closed-per-sectie-regel als planning: geen `sources`-bron,
     // dus een onleesbare spiegel degradeert de rest van de pagina niet.
     kanaalpost: toPublicKanaalpost(raw.kanaalpost),
+    // Zelfde fail-closed-per-sectie-regel: een onleesbare spiegel maakt deze sectie onbeschikbaar met
+    // een nette melding en laat de rest van de pagina staan.
+    vlootstand: toPublicVlootstand(raw.vlootstand),
     workstreams: raw.workstreams.map((w, i) => publicWorkstream(w, i)),
     pullRequests: {
       available: raw.pullRequests.available,
@@ -290,13 +315,30 @@ export async function buildSnapshot() {
   // De vloot-kanaalpost komt uit de publieke spiegel in DEZE repo, niet uit het interne logboek op de
   // rapporten-branch: wat de plaat toont, hoort bij de commit die hem publiceerde, en de bron is al
   // voor publiek geschreven. Ontbreekt of hapert het bestand, dan meldt de sectie dat zelf.
-  const kanaalpost = kanaalpostUitTekst(await readText('data/kanaalpost-publiek.md'));
+  const spiegelTekst = await readText('data/kanaalpost-publiek.md');
+  const kanaalpost = kanaalpostUitTekst(spiegelTekst);
+
+  // De VLOOTSTAND komt uit dezelfde spiegel, maar beantwoordt de omgekeerde vraag: niet "wat is er
+  // afgerond" maar "wie zwijgt". Die stand wordt hier AFGELEID en nergens ingeschreven — de spiegel
+  // is append-only, dus een kop die elke ronde herschreven wordt kan er niet in staan. De vensterlijst
+  // is `LANES`, dezelfde gesloten lijst die de kijk gebruikt; `data/vloot.json` mag er alleen ROLLEN
+  // bij zetten en bepaalt niet wie meetelt. Ontbreekt dat bestand, dan blijft de rol leeg: een rol
+  // verzinnen zou een omschrijving op de openbare plaat zetten die niemand heeft vastgesteld.
+  const rollen = await readJson('data/vloot.json', {});
+  const vlootstand = {
+    bronOk: typeof spiegelTekst === 'string' && spiegelTekst.length > 0,
+    grensMinuten: VLOOT_ONBEKEND_MINUTEN,
+    standen: vlootstandVan(spiegelTekst ?? '', {
+      vensters: LANES.map((venster) => ({ venster, rol: rollen?.[venster] ?? null })),
+    }),
+  };
 
   return {
     generatedAt: new Date().toISOString(),
     workstreams,
     planning,
     kanaalpost,
+    vlootstand,
     pullRequests, merged, tracker, decisions, tracks, logbook, ci,
   };
 }

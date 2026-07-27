@@ -1,17 +1,24 @@
 {
-  "contractVersion": "2.4.0",
+  "contractVersion": "2.5.0",
   "generatedAt": "2026-07-23T12:00:00.000Z",
   "overallStatus": "DEGRADED",
   "sources": [
     {
       "key": "pullRequests",
       "retrievedAt": "2026-07-23T12:00:00.000Z",
-      "trust": "VERIFIED_CURRENT"
+      "trust": "VERIFIED_CURRENT",
+      "rijen": null
     },
     {
       "key": "logbook",
       "retrievedAt": "2026-07-23T12:00:00.000Z",
-      "trust": "SOURCE_UNAVAILABLE"
+      "trust": "SOURCE_UNAVAILABLE",
+      "rijen": {
+        "inBron": 12,
+        "herkend": 9,
+        "getoond": 6,
+        "afgekapt": 1
+      }
     }
   ],
   "planning": {
@@ -108,6 +115,39 @@
         "datum": "2026-07-25 22:15"
       }
     ]
+  },
+  "vlootstand": {
+    "available": true,
+    "reason": null,
+    "grensMinuten": 240,
+    "vensters": [
+      {
+        "venster": "DASHBOARD",
+        "rol": null,
+        "toestand": "WERKT",
+        "laatste": "2026-07-26 09:16",
+        "stilMinuten": 12
+      },
+      {
+        "venster": "CONTROL",
+        "rol": null,
+        "toestand": "LEEG",
+        "laatste": "2026-07-26 08:40",
+        "stilMinuten": 48
+      },
+      {
+        "venster": "MARKT",
+        "rol": null,
+        "toestand": "ONBEKEND",
+        "laatste": null,
+        "stilMinuten": null
+      }
+    ],
+    "telling": {
+      "werkt": 1,
+      "leeg": 1,
+      "onbekend": 1
+    }
   },
   "workstreams": [
     {

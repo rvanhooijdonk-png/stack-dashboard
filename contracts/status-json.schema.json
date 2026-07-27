@@ -5,26 +5,97 @@
   "description": "Contract voor public/status.json — de machineleesbare kop van de pagina. Dit is nadrukkelijk NIET de volledige snapshot: alleen versie, tijdstempel, algemene stand en het trust-oordeel per bronkey. Eerder werd status.json tegen het volledige snapshot-schema gehouden; dat schema eist acht secties die hier bewust niet in staan, dus die controle kon nooit slagen. Twee bestanden, twee contracten.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contractVersion", "generatedAt", "overallStatus", "sources"],
+  "required": [
+    "contractVersion",
+    "generatedAt",
+    "overallStatus",
+    "sources"
+  ],
   "properties": {
-    "contractVersion": { "type": "string", "const": "2.4.0" },
-    "generatedAt": { "type": "string", "format": "date-time" },
-    "overallStatus": { "enum": ["OK", "DEGRADED"] },
+    "contractVersion": {
+      "type": "string",
+      "const": "2.5.0"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "overallStatus": {
+      "enum": [
+        "OK",
+        "DEGRADED"
+      ]
+    },
     "sources": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["key", "trust", "retrievedAt"],
+        "required": [
+          "key",
+          "trust",
+          "retrievedAt",
+          "rijen"
+        ],
         "properties": {
           "key": {
-            "enum": ["pullRequests", "merged", "tracker", "decisions", "tracks", "logbook", "ci"],
+            "enum": [
+              "pullRequests",
+              "merged",
+              "tracker",
+              "decisions",
+              "tracks",
+              "logbook",
+              "ci"
+            ],
             "description": "Vaste bronkeys. Een nieuwe bron moet hier eerst worden opgenomen — anders faalt de build, in plaats van stilletjes een nieuwe naam te publiceren."
           },
           "trust": {
-            "enum": ["VERIFIED_CURRENT", "STALE", "UNVERIFIED", "SOURCE_UNAVAILABLE", "CONFLICTING_EVIDENCE"]
+            "enum": [
+              "VERIFIED_CURRENT",
+              "STALE",
+              "UNVERIFIED",
+              "SOURCE_UNAVAILABLE",
+              "CONFLICTING_EVIDENCE"
+            ]
           },
-          "retrievedAt": { "type": "string", "format": "date-time" }
+          "retrievedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "rijen": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Rijentelling van de lezer die deze bron leest. `herkend` < `inBron` betekent dat de lezer rijen heeft laten vallen — dat is een achterstand, geen lege bron. Null waar de bron geen rijen kent (PR-tellingen, CI-ampels).",
+            "required": [
+              "inBron",
+              "herkend",
+              "getoond",
+              "afgekapt"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "inBron": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "herkend": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "getoond": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "afgekapt": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Rijen waarvan de tekst is ingekort. Afkappen mag; stil afkappen niet."
+              }
+            }
+          }
         }
       }
     }
