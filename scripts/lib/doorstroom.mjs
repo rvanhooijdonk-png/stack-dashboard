@@ -25,7 +25,7 @@
  */
 
 import {
-  bevatOnzichtbaar, kanoniekeSpiegelvorm, spiegelUitTekst, publiekeRijenUitTekst,
+  bevatOnzichtbaar, cellenVanRegel, kanoniekeSpiegelvorm, spiegelUitTekst, publiekeRijenUitTekst,
 } from './kanaalpost.mjs';
 
 /** Een bronrij die X minuten na aanlevering nog niet gepubliceerd is, is achterstand. */
@@ -44,14 +44,15 @@ const KOPNAMEN = ['datum-tijd', 'tab-rol', 'onderwerp', 'status', 'actie voor'];
 /** Een melding van bewezen lege voorraad. Vrije tekst, dus ruim herkend en niet op één zin gepind. */
 const LEEG_MELDING = /voorraad\s+leeg/i;
 
+// De cellezer van de spiegelwet zelf, niet een tweede uitvoering ernaast. GEMETEN 27-07-2026: deze
+// module splitste hard op `|`, dus een rij met `A \| B` in de tekst telde als zes cellen en kreeg
+// `GEEN_RIJ` — terwijl de spiegellezer diezelfde rij als vijf nette cellen ziet. Twee lezers die het
+// oneens zijn over waar de kolommen liggen is precies wat hier niet mag: de rij werd geweigerd onder
+// een reden die niet klopte, en de weigering wees dus naar niets. Sindsdien is er één uitvoering
+// (`cellenVanRegel`) en houdt niemand hier een eigen kopie op na.
 const cellenVan = (regel) => {
-  const r = String(regel ?? '');
-  // Beide uiteinden moeten een streep zijn. Anders leest `| a | b | c | d | e | rommel` als vijf
-  // nette cellen met de rommel eraf geknipt — en dan publiceert de poort een halve regel.
-  if (!r.startsWith('|') || !r.endsWith('|')) return null;
-  const delen = r.split('|');
-  if (delen.length !== KOPNAMEN.length + 2) return null;
-  return delen.slice(1, -1).map((c) => c.trim());
+  const c = cellenVanRegel(regel);
+  return c && c.length === KOPNAMEN.length ? c : null;
 };
 
 const isKop = (c) => c.every((v, i) => v.toLowerCase() === KOPNAMEN[i]);
