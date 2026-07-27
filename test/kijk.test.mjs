@@ -1554,13 +1554,28 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
       // Dit onderscheidt de proef van een tautologie (Codex, tiende ronde): de POORTLOZE scanner
       // leest hier wel gewoon een rij, en de poort houdt juist die lezing tegen. Precies gezegd
       // (Codex, elfde ronde): de suite bewijst hiermee de SCANNERHELFT — dat er een rij te lezen
-      // valt en dat de poort hem tegenhoudt. De MARKDOWNHELFT (dat markdown hier nul rijen ziet) is
-      // alleen EXTERN gemeten, met markdown-it ernaast, en staat niet in deze suite. De poort is
-      // geen tweede lezer. Markdown in de suite draaien vraagt een testafhankelijkheid; die keuze
-      // staat als beslispunt in het rapport en is niet eenzijdig genomen.
+      // valt en dat de poort hem tegenhoudt. De MARKDOWNHELFT (hoeveel rijen markdown per geval
+      // ziet, en dus wélke 20 van de 57 gevaarlijk zijn: 20 met nul rijen, 37 gelijk aan de
+      // scanner) is alleen EXTERN gemeten, met markdown-it ernaast, en staat niet in deze suite.
+      // De poort is geen tweede lezer. Markdown in de suite draaien vraagt een
+      // testafhankelijkheid; die keuze staat als beslispunt in het rapport en is niet eenzijdig
+      // genomen.
       assert.equal(spiegelScan(tekst).kandidaten.filter(Boolean).length, 1, `${naam} ${waar}: de scanner leest hier wel een rij`);
     }
   }
+  // TWAALFDE RONDE (Gemini): een UTF-8 BOM aan het BEGIN van het bestand zou volgens hem een valse
+  // afkeuring zijn, want editors zetten hem er ongevraagd voor. NAGEMETEN op het ECHTE bestand met
+  // een BOM ervoor: de scanner leest gewoon 54 rijen, en markdown-it ziet nul tabellen en nul
+  // datarijen (beide presets). Dat is dus geen valse afkeuring maar precies de gevaarlijke
+  // divergentie, en de poort weigert terecht — met reden VREEMDE_WITRUIMTE op regel 1. De BOM
+  // wegstrippen zou de scanner rijen laten lezen die de gepubliceerde pagina niet toont.
+  const metBom = '\ufeff' + [KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.')].join('\n');
+  const bomVorm = kanoniekeSpiegelvorm(metBom);
+  assert.equal(bomVorm.ok, false, 'een BOM vooraan sluit het document');
+  assert.equal(bomVorm.reden, 'VREEMDE_WITRUIMTE');
+  assert.equal(bomVorm.regel, 1, 'en wijst de eerste regel aan');
+  assert.equal(spiegelScan(metBom).kandidaten.filter(Boolean).length, 1, 'terwijl de scanner er wel een rij leest — dat is de divergentie zelf');
+
   // En de grens: gewone spaties en tabs middenin een regel blijven toegestaan, anders is elke
   // uitgelijnde tabel ineens vormbrekend.
   assert.equal(kanoniekeSpiegelvorm([KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Twee  spaties.')].join('\n')).ok, true);
