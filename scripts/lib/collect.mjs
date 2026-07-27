@@ -323,6 +323,10 @@ export function leesTracker(text) {
   const regels = String(text ?? '').split('\n');
   const updateKandidaat = /^ {0,3}\*\*Update\b/i;
   const updateAnker = /^ {0,3}\*\*Update\s+([0-9]{1,2}\/[0-9]{1,2})\s*\((\d+)\)\s*(?:[—-]\s*)?(.*)$/;
+  // Kandidaat is élke vermelding van BESLISPUNT met een nummer erachter; het anker eist het
+  // liggend streepje. `BESLISPUNT 12a: titel` haalde het anker niet en telde ook niet mee — dan
+  // meldt de lezer nul en dat ziet er hetzelfde uit als geen beslispunten (Codex, 27-07).
+  const puntKandidaat = /BESLISPUNT\s*\(?[0-9]{1,3}[a-z]?\)?/g;
   const puntAnker = /BESLISPUNT\s*\(?([0-9]{1,3}[a-z]?)\)?\s*[—-]\s*([^*\n]*)/g;
   const afgekapt = { n: 0 };
   let inBron = 0;
@@ -337,9 +341,10 @@ export function leesTracker(text) {
       const title = m ? staart(m[3], 120, afgekapt) : '';
       if (m && title) gelezen.push({ number: Number(m[2]), date: m[1], title });
     }
+    puntKandidaat.lastIndex = 0;
+    inBron += [...regel.matchAll(puntKandidaat)].length;
     puntAnker.lastIndex = 0;
     for (const p of regel.matchAll(puntAnker)) {
-      inBron += 1;
       const title = kort(p[2].split('.')[0].trim(), 110, afgekapt);
       // Een beslispunt dat twee keer in de tracker staat is één beslispunt. Zou het tweede exemplaar
       // als "weggevallen" tellen, dan meldde de rijentoets rood op gewone herhaling (Gemini, 27-07).

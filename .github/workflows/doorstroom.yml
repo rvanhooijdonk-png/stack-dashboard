@@ -173,6 +173,13 @@ jobs:
             exit 1
           fi
 
+          # Sluiten mag ALLEEN op GROEN. Een oordeel dat GEEL is (niet gemeten, geen telling op de
+          # plaat) sloot het alarm eerder gewoon: fail-open, precies de vorm die dit werk bestrijdt.
+          if [ "$uitkomst" != "GROEN" ]; then
+            echo "::warning title=Doorstroom niet groen::${uitkomst} — ${samenvatting}"
+            exit 0
+          fi
+
           if [ -n "$nummer" ]; then
             gh issue close "$nummer" --comment "$(printf 'Weer GROEN.\n\n%s\n' "$samenvatting")"
             echo "alarm gesloten: #${nummer}"

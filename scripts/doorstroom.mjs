@@ -148,7 +148,10 @@ const rollen = leesJson(VLOOT) ?? {};
 const standen = vlootstand(spiegelOud, { vensters: LANES.map((venster) => ({ venster, rol: rollen[venster] ?? null })), nu });
 
 console.log(`overzetting: ${uit.overgezet.length} overgezet, ${uit.geweigerd.length} geweigerd`);
-for (const g of [...uit.geweigerd, ...inbox.stuk]) console.log(`  geweigerd ${g.id}: ${g.reden}`);
+// De Actions-log van deze repo is openbaar. `g.id` is een bestandsnaam uit de PRIVATE inbox en
+// draagt vaak een slug met onderwerp erin; die hoort daar niet in (Codex, 27-07). Volgnummer plus
+// de gesloten redencode is genoeg om een geweigerde rij terug te vinden in de bron zelf.
+[...uit.geweigerd, ...inbox.stuk].forEach((g, i) => console.log(`  geweigerd #${i + 1}: ${g.reden}`));
 console.log(`achterstand: ${achterstand.uitkomst}${achterstand.reden ? ` (${achterstand.reden})` : ''}`
   + `${achterstand.achterstallig.length ? ` — oudste ${achterstand.oudsteMinuten} min, grens ${ACHTERSTAND_MINUTEN}` : ''}`);
 console.log(`stempel: ${stempel.uitkomst}${stempel.reden ? ` (${stempel.reden}` : ''}`
@@ -175,8 +178,13 @@ const oordeel = {
   bronRijen,
   vlootstand: standen,
   // Eén veld waar de alarmstap op kijkt: elk rood telt, ongeacht welke van de drie het was.
-  uitkomst: [achterstand.uitkomst, stempel.uitkomst, bronRijen.uitkomst].includes('ROOD') || !inbox.ok
-    ? 'ROOD' : 'GROEN',
+  // Drie waarden, niet twee (Codex, 27-07): een GEEL deeloordeel — "niet gemeten" — werd hier
+  // afgerond naar GROEN en sloot daarmee het alarm. Niet-gemeten is geen goed nieuws.
+  uitkomst: (() => {
+    const delen = [achterstand.uitkomst, stempel.uitkomst, bronRijen.uitkomst];
+    if (delen.includes('ROOD') || !inbox.ok) return 'ROOD';
+    return delen.includes('GEEL') ? 'GEEL' : 'GROEN';
+  })(),
 };
 if (uitvoerPad) writeFileSync(uitvoerPad, `${JSON.stringify(oordeel, null, 2)}\n`, 'utf8');
 console.log(`\nuitkomst: ${oordeel.uitkomst}`);

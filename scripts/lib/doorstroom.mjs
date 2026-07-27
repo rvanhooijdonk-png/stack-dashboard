@@ -300,6 +300,9 @@ export function vlootstandBlok(standen = [], { nu = new Date() } = {}) {
  * Geen telling op de plaat is GEEL, geen ROOD: een pagina van vóór dit contract is achterstallig
  * gebouwd, niet kapot. Zodra de nieuwe build live staat wordt dat vanzelf een echte meting.
  */
+/** Bronnen die rijen lezen. Ontbreekt hier een telling, dan is er niet gemeten — dat is GEEL. */
+export const ROW_SOURCES = ['tracker', 'decisions', 'logbook'];
+
 export function bronRijenOordeel(sources) {
   if (!Array.isArray(sources)) {
     return { uitkomst: 'GEEL', reden: 'PLAAT_ZONDER_BRONNEN', bronnen: [], gevallen: 0, afgekapt: 0 };
@@ -316,6 +319,20 @@ export function bronRijenOordeel(sources) {
 
   if (!bronnen.length) {
     return { uitkomst: 'GEEL', reden: 'PLAAT_NOG_ZONDER_RIJENTELLING', bronnen: [], gevallen: 0, afgekapt: 0 };
+  }
+  // Fail-open dichtgezet (Codex, 27-07): een bron zónder telling telde niet mee zodra één andere
+  // bron er wél een had, en alles op nul was gewoon GROEN. Beide zien er uit als "niets aan de
+  // hand" terwijl er niets gemeten is.
+  const zonderTelling = sources
+    .filter((s) => s && ROW_SOURCES.includes(s.key) && !(s.rijen && Number.isInteger(s.rijen.inBron)))
+    .map((s) => s.key);
+  if (zonderTelling.length) {
+    return {
+      uitkomst: 'GEEL', reden: `BRON_ZONDER_RIJENTELLING: ${zonderTelling.join(', ')}`, bronnen, gevallen: 0, afgekapt: 0,
+    };
+  }
+  if (bronnen.every((b) => b.inBron === 0)) {
+    return { uitkomst: 'GEEL', reden: 'ALLE_BRONNEN_NUL', bronnen, gevallen: 0, afgekapt: 0 };
   }
   const kwijt = bronnen.filter((b) => b.gevallen > 0);
   const gevallen = kwijt.reduce((n, b) => n + b.gevallen, 0);

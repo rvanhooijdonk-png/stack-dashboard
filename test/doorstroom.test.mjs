@@ -355,3 +355,20 @@ test('een plaat zonder rijentelling is GEEL, niet ROOD en niet stil groen', () =
   assert.equal(bronRijenOordeel(null).uitkomst, 'GEEL');
   assert.equal(bronRijenOordeel([]).reden, 'PLAAT_NOG_ZONDER_RIJENTELLING');
 });
+
+test('een bron zonder rijentelling verdwijnt niet achter een bron die er wel een heeft', () => {
+  const o = bronRijenOordeel([
+    { key: 'decisions', rijen: { inBron: 98, herkend: 98, getoond: 10, afgekapt: 0 } },
+    { key: 'logbook', rijen: null },
+    { key: 'tracker', rijen: { inBron: 8, herkend: 8, getoond: 8, afgekapt: 0 } },
+  ]);
+  assert.equal(o.uitkomst, 'GEEL', 'niet gemeten is niet groen');
+  assert.match(o.reden, /logbook/);
+});
+
+test('alles op nul is niet groen — dat is een lezer die niets vond', () => {
+  const nul = (key) => ({ key, rijen: { inBron: 0, herkend: 0, getoond: 0, afgekapt: 0 } });
+  const o = bronRijenOordeel(['tracker', 'decisions', 'logbook'].map(nul));
+  assert.equal(o.uitkomst, 'GEEL');
+  assert.equal(o.reden, 'ALLE_BRONNEN_NUL');
+});

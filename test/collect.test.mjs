@@ -216,3 +216,12 @@ test('voorloopruimte of een kleine letter maakt een rij niet onzichtbaar', () =>
   assert.equal(telling.herkend, 0);
   assert.equal(leesJournaal('  ## ingesprongen kop').telling.inBron, 1);
 });
+
+test('een beslispunt in een onbekende schrijfwijze telt aan de bronkant mee', () => {
+  // `BESLISPUNT 12a: titel` haalde het anker niet en telde ook niet mee: nul en nul, en dat ziet
+  // eruit als "er zijn geen beslispunten" (Codex, 27-07-2026).
+  const { decisionPoints, telling } = leesTracker('BESLISPUNT 12a: met een dubbele punt.');
+  assert.equal(decisionPoints.length, 0);
+  assert.equal(telling.inBron, 1, 'hij stond er');
+  assert.equal(telling.herkend, 0, 'en het verschil is de uitkomst');
+});
