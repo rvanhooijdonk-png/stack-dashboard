@@ -204,7 +204,7 @@ jobs:
               // ~1 MiB en stopt de bewaker (bevinding Codex). Fail-closed, maar onnodig.
               const lees = (rev) => execFileSync("git", ["show", `${rev}:data/kanaalpost-publiek.md`], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
               const regel = Buffer.from(process.env.RIJ_B64, "base64").toString("utf8").trim();
-              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld, nietCanoniekeRegels, nieuweNietCanoniekeRegels, nieuweDuplicaten, publiekeAfwijkingen }) => {
+              import("./scripts/lib/spiegelwet.mjs").then(({ alleenAangevuld, nietCanoniekeRegels, nieuweNietCanoniekeRegels, nieuweVormbrekendeRegels, nieuweDuplicaten, publiekeAfwijkingen }) => {
                 const nu = lees("HEAD");
                 const vertrek = readFileSync(process.env.SPIEGEL_VOOR, "utf8");
                 for (const [wat, oud] of [["de stand waarvan deze job vertrok", vertrek], ["de voorganger van deze commit", lees("HEAD~1")]]) {
@@ -247,6 +247,14 @@ jobs:
                 // stand pushen zonder alarm — het alarm is dan stil, en stil is precies wat niet mag.
                 if (!nu.split("\n").map((r) => r.trim()).includes(regel)) {
                   console.error("::error::de alarmregel staat na het herplaatsen niet meer in de spiegel — geweigerd.");
+                  process.exit(1);
+                }
+                // De vormpoort weigert het HELE bestand zodra er een codehek, commentaar, rauwe HTML,
+                // inspringing of containerteken in staat. Wie zoiets NIEUW toevoegt maakt de plaat dus
+                // donker; dat wordt hier tegengehouden op het moment dat de schrijver er nog bij is.
+                const vormNieuw = nieuweVormbrekendeRegels(vertrek, nu);
+                if (vormNieuw.length) {
+                  console.error(`::error::nieuwe regel(s) die de spiegel onleesbaar maken: ${vormNieuw.map((v) => `regel ${v.regel} (${v.reden})`).join("; ")} — geen codehek, commentaar, rauwe HTML, inspringing of opsommingsteken in dit bestand.`);
                   process.exit(1);
                 }
                 const vuilNieuw = nieuweNietCanoniekeRegels(vertrek, nu);
@@ -511,9 +519,14 @@ jobs:
           # tabelregels voldeden al, dus deze eis legt niets recht met terugwerkende kracht.
           OUD="$SPIEGEL_OUD" node -e '
             const { readFileSync } = require("node:fs");
-            import("./scripts/lib/spiegelwet.mjs").then(({ nietCanoniekeRegels, nieuweNietCanoniekeRegels }) => {
+            import("./scripts/lib/spiegelwet.mjs").then(({ nietCanoniekeRegels, nieuweNietCanoniekeRegels, nieuweVormbrekendeRegels }) => {
               const nu = readFileSync("data/kanaalpost-publiek.md", "utf8");
               const oud = readFileSync(process.env.OUD, "utf8");
+              const vorm = nieuweVormbrekendeRegels(oud, nu);
+              if (vorm.length) {
+                console.error(`::error::nieuwe regel(s) die de spiegel onleesbaar maken: ${vorm.map((v) => `regel ${v.regel} (${v.reden})`).join("; ")} — geen codehek, commentaar, rauwe HTML, inspringing of opsommingsteken in dit bestand.`);
+                process.exit(1);
+              }
               const nieuw = nieuweNietCanoniekeRegels(oud, nu);
               const bestaand = nietCanoniekeRegels(nu).length - nieuw.length;
               if (bestaand > 0) console.log(`::warning::${bestaand} regel(s) die er al stonden zijn niet canoniek; die blokkeren niet, maar horen opgeruimd te worden.`);

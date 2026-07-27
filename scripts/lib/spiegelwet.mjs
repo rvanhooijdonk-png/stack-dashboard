@@ -21,7 +21,7 @@
  * dus gemeld, niet bestraft.
  */
 
-import { bevatOnzichtbaar, publiekeRijenUitTekst } from './kanaalpost.mjs';
+import { bevatOnzichtbaar, publiekeRijenUitTekst, kanoniekeSpiegelvorm } from './kanaalpost.mjs';
 
 const regels = (tekst) => String(tekst ?? '').replace(/\n+$/, '').split('\n');
 const isLeeg = (r) => r.length === 0 || (r.length === 1 && r[0] === '');
@@ -296,6 +296,46 @@ export function publiekeAfwijkingen(oud, nieuw) {
     eerste,
     aantal: nieuwe.length,
   };
+}
+
+/**
+ * DE SCHRIJFKANT VAN DE VORMPOORT — en zonder deze functie is die poort een voetklem.
+ *
+ * `kanoniekeSpiegelvorm` (kanaalpost.mjs) weigert het HELE bestand zodra er één codehek, één
+ * HTML-commentaar, één regel die met `<` begint, één ingesprongen regel of één containerteken in
+ * staat. Dat is bewust: de bron mag geen scope kunnen maken. Maar het betekent ook dat één venster
+ * dat ooit `<!--` in zijn onderwerp schrijft, of één opsommingsteken in de uitleg, de hele plaat
+ * donker maakt. Een leespoort zonder schrijfpoort verplaatst het probleem alleen maar naar het moment
+ * waarop niemand meer kijkt.
+ *
+ * Daarom wordt hier bij het SCHRIJVEN geweigerd wat bij het lezen het bestand onbruikbaar zou maken —
+ * en net als bij `nieuweNietCanoniekeRegels` alleen op de NIEUWE regels. Een harde eis op het hele
+ * bestand zou zichzelf opsluiten zodra er ooit één regel doorheen glipt: herstellen mag niet
+ * (append-only) en laten staan houdt élke volgende commit rood, ook die van iemand die de spiegel
+ * niet aanraakt. Wat er al stond blijft dus zichtbaar als waarschuwing bij het lezen; wat er nieuw
+ * bij komt wordt tegengehouden op het moment dat de schrijver er nog bij is.
+ */
+export function nieuweVormbrekendeRegels(oud, nieuw) {
+  // Beide kanten op DEZELFDE manier in regels hakken, en niet op `\n` alleen. Gemeten (Gemini,
+  // achtste ronde): zet git de regeleindes om van LF naar CRLF, dan draagt elke regel uit `nieuw`
+  // een `\r` die de sleutels uit `oud` niet hebben, telt de vergelijking álle bestaande regels als
+  // nieuw, en meldt een historische vuile regel alsof die er net bij kwam —
+  // `[{"regel":1,"reden":"VORM_RAUWE_HTML"}]` op een aanvulling die alleen een keurige rij toevoegt.
+  // Die kant is niet gevaarlijk maar wel verlammend: de poort houdt dan werk tegen om een reden die
+  // niets met dat werk te maken heeft.
+  const inRegels = (t) => String(t ?? '').split(/\r\n|\r|\n/);
+  const telling = new Map();
+  for (const r of inRegels(oud)) telling.set(r, (telling.get(r) ?? 0) + 1);
+  const gevonden = [];
+  inRegels(nieuw).forEach((ruw, i) => {
+    const n = telling.get(ruw) ?? 0;
+    if (n > 0) { telling.set(ruw, n - 1); return; }
+    const vorm = kanoniekeSpiegelvorm(ruw);
+    // De REDEN en het regelnummer, nooit de regel zelf: deze uitkomst kan in een publieke melding
+    // terechtkomen, en dan is de brontekst precies wat er niet in hoort.
+    if (!vorm.ok) gevonden.push({ regel: i + 1, reden: `VORM_${vorm.reden}` });
+  });
+  return gevonden;
 }
 
 export function nieuweNietCanoniekeRegels(oud, nieuw) {
