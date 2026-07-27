@@ -1425,6 +1425,14 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
     ['CONTAINER', 'gewone tekst\n> een blockquote'],
     ['CONTAINER', 'gewone tekst\n- een opsomming'],
     ['CONTAINER', 'gewone tekst\n1. een genummerde'],
+    // Een markering die ALLEEN op de regel staat opent net zo goed een lijstitem — zonder spatie
+    // erachter glipte die langs de vorige versie (Codex, achtste ronde; zie de proef hieronder).
+    ['CONTAINER', 'gewone tekst\n-'],
+    ['CONTAINER', 'gewone tekst\n+'],
+    ['CONTAINER', 'gewone tekst\n*'],
+    ['CONTAINER', 'gewone tekst\n1.'],
+    ['CONTAINER', 'gewone tekst\n1)'],
+    ['INSPRINGING', 'gewone tekst\n een enkele spatie'],
     ['REGELSCHEIDER', `gewone tekst\niets${String.fromCodePoint(0x2028)}anders`],
     ['REGELSCHEIDER', `gewone tekst\niets${String.fromCodePoint(0x2029)}anders`],
     // Form feed en verticale tab apart, want ze zitten in dezelfde tekenklasse en werden daardoor
@@ -1450,11 +1458,39 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
     assert.equal(kanaalpostUitTekst(ingesprongen).available, false, JSON.stringify(voor));
   }
 
+  // ACHTSTE REVIEWRONDE — en het einde van de kolomtelling als grens. Codex vond dat een KALE
+  // opsommingsmarkering de containertoets passeert (die eiste een spatie of tab ná de markering, en
+  // een markering alleen op de regel heeft daar niets achter), waarna de drie tabelregels op ONDERLING
+  // VERSCHILLENDE inspringing van nul tot drie spaties — allemaal onder de codeblokgrens, dus allemaal
+  // toegestaan — kop, scheiding en rij in verschillende containers laten vallen. GEMETEN op exact de
+  // bytes uit zijn melding (`-` / kop met twee spaties / scheiding en rij op kolom 0):
+  //   poort PASSEERT · scanner leest 1 MINI-rij · beschikbaar true
+  //   markdown-it: 0 tabellen, alles één alinea binnen <li>
+  // Daarna de hele ruimte doorgelopen: zes markeringen plus geen markering × vier inspringingen op
+  // elk van de drie tabelregels = 448 gevallen, elk langs de echte lezer én markdown-it (zowel de
+  // GFM- als de commonmark-preset, identieke uitkomst):
+  //   VÓÓR: poort laat 384 gevallen door, waarvan 102 waarbij de scanner MEER rijen ziet dan markdown
+  //   NA:   poort laat er 1 door — het vlakke geval, dat in beide lezers precies één rij is; 0 gevaar
+  // Die 102 zijn niet met patronen uit te putten zolang inspringing überhaupt mag. Dus mag ze niet
+  // meer: ELKE inspringing is vormbrekend, niet pas vier kolommen. Drie spaties waren hiervóór nog
+  // toegestaan — dat is nu de weigering die de klasse sluit.
+  const kaleMarkeringen = ['-', '+', '*', '1.', '1)'];
+  for (const m of kaleMarkeringen) {
+    const gevaar = [m, `  ${KOP}`, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.')].join('\n');
+    assert.deepEqual(kanoniekeSpiegelvorm(gevaar), { ok: false, reden: 'CONTAINER', regel: 1 },
+      `${m} alleen op een regel opent een lijstitem`);
+    assert.equal(kanaalpostUitTekst(gevaar).available, false, `${m}: er komt geen rij uit`);
+  }
+  // En de inspringing zelf, los van de markering: één spatie is genoeg om te weigeren.
+  for (const spaties of [' ', '  ', '   ']) {
+    const scheef = [KOP, spaties + SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.')].join('\n');
+    assert.deepEqual(kanoniekeSpiegelvorm(scheef), { ok: false, reden: 'INSPRINGING', regel: 2 },
+      `${spaties.length} spaties inspringing is niet meer kanoniek`);
+  }
+
   // En de grens de andere kant op, want een poort die te veel weigert maakt de plaat donker zonder
-  // reden: drie kolommen is nog gewoon een tabel, voor markdown én voor de scanner. Een regel die
-  // ALLEEN uit witruimte bestaat is voor markdown een lege regel, hoeveel witruimte er ook staat, en
-  // kan dus nooit een codeblok openen — die mag er ook door.
-  assert.equal(kanoniekeSpiegelvorm('tekst\n   drie spaties').ok, true);
+  // reden. Een regel die ALLEEN uit witruimte bestaat is voor markdown een lege regel, hoeveel
+  // witruimte er ook staat, en kan dus nooit een codeblok of container openen — die mag er door.
   assert.equal(kanoniekeSpiegelvorm('tekst\n    \ntekst').ok, true, 'alleen witruimte is een lege regel');
   assert.equal(kanoniekeSpiegelvorm('tekst\n\t\ntekst').ok, true, 'ook als die witruimte een tab is');
   assert.equal(kanoniekeSpiegelvorm('tekst\nab\tcd').ok, true, 'een tab midden in een regel springt niets in');
@@ -1465,9 +1501,27 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
   // markdown-it (GFM) rendert `<p>[link]: /url "</p>` GEVOLGD door een echte tabel met de rij erin —
   // de tabel onderbreekt de alinea, dus de referentie komt nooit tot stand. Beide lezers zien de rij.
   // Geen divergentie, en zeker niet de gevaarlijke kant; de poort hoeft hier niets te doen.
-  const linkreferentie = ['[link]: /url "', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.'), '"'].join('\n');
-  assert.equal(kanoniekeSpiegelvorm(linkreferentie).ok, true, 'hier is niets aan de vorm mis');
-  assert.equal(kanaalpostUitTekst(linkreferentie).rows.length, 1, 'en de rij hoort gelezen te worden');
+  //
+  // In de ACHTSTE ronde meldde Gemini dezelfde constructie nog eens plus twee andere. Alle drie
+  // nagemeten met markdown-it (GFM-preset) op exact de opgegeven bytes, naast de echte lezer:
+  //   alinea-onderbreking (`Uitleg.` gevolgd door de tabel) → 1 tabel, 1 datarij; scanner 1 rij
+  //   twee backticks als inline-codespan over meerdere regels → 1 tabel, 2 datarijen; scanner 1 rij
+  //   link-referentie met titel `"titel` … `"`                → 1 tabel, 2 datarijen; scanner 1 rij
+  // De markdown-lezer ziet in alle drie MINSTENS zoveel rijen als de scanner. Dat is de veilige kant
+  // — de gevaarlijke is dat de scanner MEER ziet — dus er valt niets te dichten. Ze staan hier zodat
+  // ronde negen ze niet opnieuw als bevinding opvoert. Kanttekening bij het bewijs: er was op deze
+  // machine één markdown-lezer beschikbaar (markdown-it), geen tweede implementatie ernaast.
+  const weerlegd = [
+    ['link-referentie met lege titel', ['[link]: /url "', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.'), '"']],
+    ['link-referentie met tekst in de titel', ['[ref]: /url "titel', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.'), '"']],
+    ['alinea die de tabel voorafgaat', ['Uitleg over de publicatie.', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.')]],
+    ['twee backticks over meerdere regels', ['`` uitleg', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.'), '``']],
+  ];
+  for (const [wat, regels] of weerlegd) {
+    const tekst = regels.join('\n');
+    assert.equal(kanoniekeSpiegelvorm(tekst).ok, true, `${wat}: hier is niets aan de vorm mis`);
+    assert.equal(kanaalpostUitTekst(tekst).rows.length, 1, `${wat}: en de rij hoort gelezen te worden`);
+  }
 
   // En de andere kant, want een poort die alles weigert is geen poort: het ECHTE bestand komt er
   // gewoon door. Gemeten op `data/kanaalpost-publiek.md` (85 regels, 26-07-2026): 0 hekken,
@@ -1507,8 +1561,18 @@ test('reviewgat 30 — de vormpoort heeft een schrijfkant, anders is hij een voe
     ['<div>', 'VORM_RAUWE_HTML'],
     ['    ingesprongen uitleg', 'VORM_INSPRINGING'],
     [' \tingesprongen met een tab', 'VORM_INSPRINGING'], // vier kolommen, twee tekens (zevende ronde)
+    [' één spatie is al genoeg', 'VORM_INSPRINGING'], // achtste ronde: elke inspringing
     ['- een opsomming', 'VORM_CONTAINER'],
     ['> een blockquote', 'VORM_CONTAINER'],
+    ['-', 'VORM_CONTAINER'], // kale markering (Codex, achtste ronde)
+    ['1.', 'VORM_CONTAINER'],
+    // De onzichtbare regelscheiders stonden alleen aan de LEESkant in een proef. De schrijfkant
+    // weigerde ze al, maar dat was nergens gemeten — en een belofte zonder proef is geen belofte
+    // (Codex, achtste ronde). Elk teken apart, zodat er geen bijvangst is.
+    [`iets${String.fromCodePoint(0x2028)}anders`, 'VORM_REGELSCHEIDER'],
+    [`iets${String.fromCodePoint(0x2029)}anders`, 'VORM_REGELSCHEIDER'],
+    ['iets\fanders', 'VORM_REGELSCHEIDER'],
+    ['iets\vanders', 'VORM_REGELSCHEIDER'],
   ];
   for (const [regel, reden] of stuk) {
     const nieuw = `${oud}\n${regel}`;
@@ -1531,6 +1595,22 @@ test('reviewgat 30 — de vormpoort heeft een schrijfkant, anders is hij een voe
   // en laten staan houdt élke volgende commit rood.
   const alVuil = `${oud}\n<div>`;
   assert.deepEqual(nieuweVormbrekendeRegels(alVuil, `${alVuil}\n${R('2026-07-26 17:10', 'MINI', 'Nieuw.')}`), []);
+
+  // ACHTSTE REVIEWRONDE (Gemini). "Alleen de nieuwe regels" werd bepaald door de regels van vóór en
+  // ná letterlijk te vergelijken, en die vergelijking hakte op `\n` — dus met het regeleinde eraan.
+  // GEMETEN VÓÓR DE FIX: zet git de regeleindes om van LF naar CRLF, dan draagt elke regel uit het
+  // nieuwe bestand een `\r` die de sleutels van het oude niet hebben, telt álles als nieuw, en meldt
+  // de historische vuile regel alsof die er net bij kwam: `[{"regel":1,"reden":"VORM_RAUWE_HTML"}]`
+  // op een aanvulling die alleen een keurige rij toevoegt. Niet gevaarlijk maar verlammend — de poort
+  // houdt werk tegen om een reden die niets met dat werk te maken heeft.
+  const crlf = (regels) => regels.join('\r\n');
+  const alVuilRegels = [KOP, SCH, R('2026-07-26 17:00', 'CONTROL', 'Echt.'), '<div>'];
+  assert.deepEqual(
+    nieuweVormbrekendeRegels(alVuilRegels.join('\n'), crlf([...alVuilRegels, R('2026-07-26 17:10', 'MINI', 'Nieuw.')])),
+    [], 'een omgezet regeleinde maakt bestaande regels niet nieuw');
+  assert.deepEqual(
+    nieuweVormbrekendeRegels(alVuilRegels.join('\n'), crlf([...alVuilRegels, R('2026-07-26 17:10', 'MINI', 'Nieuw.'), '- vuil'])),
+    [{ regel: 6, reden: 'VORM_CONTAINER' }], 'en een écht nieuwe vuile regel wordt nog steeds gezien');
 
   // En de twee poorten delen één definitie. Een regel die de schrijfkant afkeurt, maakt het bestand
   // bij het lezen onleesbaar, en andersom — anders laat de ene door wat de andere weigert.

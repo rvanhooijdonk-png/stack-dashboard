@@ -316,13 +316,21 @@ export function publiekeAfwijkingen(oud, nieuw) {
  * bij komt wordt tegengehouden op het moment dat de schrijver er nog bij is.
  */
 export function nieuweVormbrekendeRegels(oud, nieuw) {
+  // Beide kanten op DEZELFDE manier in regels hakken, en niet op `\n` alleen. Gemeten (Gemini,
+  // achtste ronde): zet git de regeleindes om van LF naar CRLF, dan draagt elke regel uit `nieuw`
+  // een `\r` die de sleutels uit `oud` niet hebben, telt de vergelijking álle bestaande regels als
+  // nieuw, en meldt een historische vuile regel alsof die er net bij kwam —
+  // `[{"regel":1,"reden":"VORM_RAUWE_HTML"}]` op een aanvulling die alleen een keurige rij toevoegt.
+  // Die kant is niet gevaarlijk maar wel verlammend: de poort houdt dan werk tegen om een reden die
+  // niets met dat werk te maken heeft.
+  const inRegels = (t) => String(t ?? '').split(/\r\n|\r|\n/);
   const telling = new Map();
-  for (const r of String(oud ?? '').split('\n')) telling.set(r, (telling.get(r) ?? 0) + 1);
+  for (const r of inRegels(oud)) telling.set(r, (telling.get(r) ?? 0) + 1);
   const gevonden = [];
-  String(nieuw ?? '').split('\n').forEach((ruw, i) => {
+  inRegels(nieuw).forEach((ruw, i) => {
     const n = telling.get(ruw) ?? 0;
     if (n > 0) { telling.set(ruw, n - 1); return; }
-    const vorm = kanoniekeSpiegelvorm(ruw.replace(/\r$/, ''));
+    const vorm = kanoniekeSpiegelvorm(ruw);
     // De REDEN en het regelnummer, nooit de regel zelf: deze uitkomst kan in een publieke melding
     // terechtkomen, en dan is de brontekst precies wat er niet in hoort.
     if (!vorm.ok) gevonden.push({ regel: i + 1, reden: `VORM_${vorm.reden}` });

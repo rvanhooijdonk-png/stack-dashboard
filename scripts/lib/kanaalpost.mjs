@@ -226,34 +226,32 @@ const hekKern = (regel) => String(regel).replace(/^[ \t]*(?:(?:>[ \t]*)+)?(?:[-*
  * is er nog steeds scope-afhandeling. Twee lagen die hetzelfde bedoelen, niet één die het moet halen.
  */
 /**
- * Hoeveel KOLOMMEN springt deze regel in? Markdown telt inspringing niet in tekens maar in kolommen,
- * en een tab springt naar het eerstvolgende veelvoud van vier. `" \t"` is dus vier kolommen — een
- * ingesprongen codeblok — terwijl het maar twee tekens zijn.
+ * Springt deze regel in? In kanonieke vorm begint iedere regel op kolom nul, dus dit is een ja/nee en
+ * geen telling meer.
  *
- * ZEVENDE REVIEWRONDE (Codex, kop 726cdb7). De eerste versie van deze toets was `/^(?: {4}|\t)/` en
- * keek dus alleen naar een tab op kolom nul. Gemeten op de echte lezer, met een tab achter één, twee
- * en drie spaties, elk met de drie tabelregels erachter:
- *   poort PASSEERT · scanner leest 1 rij · beschikbaar true
- *   markdown-it (GFM) leest 0 tabellen: het is een ingesprongen codeblok
- * Dat is exact de gevaarlijke kant — uitleg komt binnen als echte toestand — en het is dezelfde fout
- * die de poort juist moest uitsluiten, alleen een laag dieper: de poort modelleerde markdown-tekens
- * in plaats van markdown-kolommen.
+ * ZEVENDE REVIEWRONDE (Codex, kop 726cdb7). De toets was `/^(?: {4}|\t)/` en keek dus alleen naar een
+ * tab op kolom nul, terwijl markdown inspringing in KOLOMMEN telt en een tab naar het eerstvolgende
+ * veelvoud van vier springt. `" \t"` is vier kolommen — een ingesprongen codeblok — maar twee tekens.
+ * Gemeten met een tab achter één, twee en drie spaties, met de drie tabelregels erachter:
+ *   poort PASSEERT · scanner leest 1 rij · beschikbaar true · markdown-it: 0 tabellen
+ * Daarop is deze functie eerst een kolomteller geworden, met de grens op vier.
+ *
+ * ACHTSTE REVIEWRONDE (Codex, kop 9f92535). Die grens hield geen stand. Bij een kale `-` en de drie
+ * tabelregels op onderling verschillende inspringing van nul tot drie spaties — allemaal ONDER de
+ * codeblokgrens en dus toegestaan — vallen kop, scheiding en rij in verschillende containers: markdown
+ * ziet geen tabel, de scanner leest de rij als echte toestand. De hele ruimte doorgemeten (448
+ * gevallen, zie de proef): 102 daarvan waren gevaarlijk. Zolang inspringing überhaupt mag is die
+ * klasse niet uit te putten, dus ligt de grens nu op één kolom — en daarmee is de kolomtelling zelf
+ * overbodig geworden: bij een grens van één maken tabstops geen verschil meer.
  *
  * Een regel die ALLEEN uit witruimte bestaat is voor markdown een lege regel, hoeveel witruimte er ook
- * staat, en kan dus nooit een codeblok openen. Die wordt hier niet als inspringing geteld — anders
+ * staat, en kan dus nooit een codeblok of container openen. Die telt hier niet als inspringing — anders
  * maakt één spatie op een verder lege regel het hele logboek onleesbaar zonder dat er iets te winnen is.
  */
-function inspringkolommen(regel) {
+function springtIn(regel) {
   const r = String(regel);
-  if (/^[ \t]*$/.test(r)) return 0; // alleen witruimte: voor markdown een lege regel
-  let kolom = 0;
-  for (const teken of r) {
-    if (teken === ' ') kolom += 1;
-    else if (teken === '\t') kolom += 4 - (kolom % 4);
-    else return kolom;
-    if (kolom >= 4) return kolom;
-  }
-  return kolom;
+  if (/^[ \t]*$/.test(r)) return false; // alleen witruimte: voor markdown een lege regel
+  return /^[ \t]/.test(r);
 }
 
 const KANONIEK_VERBODEN = Object.freeze([
@@ -265,11 +263,13 @@ const KANONIEK_VERBODEN = Object.freeze([
   // Een regel die met een tag begint: markdown houdt zo'n blok open tot een lege regel of EOF, en
   // alles ertussen is geen tabel. Vangt Codex 4 ook zonder hek.
   { reden: 'RAUWE_HTML', test: (r) => /^ {0,3}</.test(r) },
-  // Vier KOLOMMEN inspringing is een ingesprongen codeblok; een tabelregel daarin is geen tabel.
-  // In kolommen, niet in tekens — zie `inspringkolommen` (Codex, zevende ronde).
-  { reden: 'INSPRINGING', test: (r) => inspringkolommen(r) >= 4 },
-  // Blockquote of lijstitem: containers verplaatsen de kolom waarop alles telt.
-  { reden: 'CONTAINER', test: (r) => /^ {0,3}(?:>|(?:[-*+]|\d{1,9}[.)])[ \t])/.test(r) },
+  // ELKE inspringing, niet pas vier kolommen — zie `springtIn` voor de meting die dat afdwong.
+  // Een regel die alleen uit witruimte bestaat blijft een lege regel.
+  { reden: 'INSPRINGING', test: springtIn },
+  // Blockquote of lijstitem: containers verplaatsen de kolom waarop alles telt. Ook een markering
+  // die ALLEEN op de regel staat opent een lijstitem — die had geen spatie erachter en glipte
+  // daarmee langs de vorige versie (Codex, achtste ronde).
+  { reden: 'CONTAINER', test: (r) => /^(?:>|(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$))/.test(r) },
   // U+2028/U+2029 en de form feed zijn regelscheiders voor sommige lezers en gewone tekens voor
   // andere. Twee lezers die het over de regelindeling oneens zijn is precies wat hier niet mag.
   { reden: 'REGELSCHEIDER', test: (r) => /[\u2028\u2029\f\v]/.test(r) },
