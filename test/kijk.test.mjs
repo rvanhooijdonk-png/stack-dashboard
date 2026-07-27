@@ -26,7 +26,8 @@ import { spiegelScan, kanoniekeSpiegelvorm, kanaalpostUitTekst } from '../script
 import { nieuweVormbrekendeRegels } from '../scripts/lib/spiegelwet.mjs';
 
 /** De gesloten redenlijst van de vormpoort, hier herhaald zodat de proef een NIEUWE reden opmerkt. */
-const REDENEN_VORM = ['CODEHEK', 'HTML_COMMENTAAR', 'RAUWE_HTML', 'INSPRINGING', 'CONTAINER', 'REGELSCHEIDER'];
+const REDENEN_VORM = ['CODEHEK', 'HTML_COMMENTAAR', 'RAUWE_HTML', 'INSPRINGING', 'CONTAINER',
+  'REGELSCHEIDER', 'VREEMDE_WITRUIMTE'];
 
 const KOP_A = 'a'.repeat(40);
 const KOP_B = 'b'.repeat(40);
@@ -1511,16 +1512,63 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
   // — de gevaarlijke is dat de scanner MEER ziet — dus er valt niets te dichten. Ze staan hier zodat
   // ronde negen ze niet opnieuw als bevinding opvoert. Kanttekening bij het bewijs: er was op deze
   // machine één markdown-lezer beschikbaar (markdown-it), geen tweede implementatie ernaast.
+  // NEGENDE RONDE (Codex), en het is dezelfde soort fout één laag dieper: de scanner knipt cellen met
+  // JavaScripts `trim()`, en die neemt méér weg dan markdown witruimte noemt. Markdown kent alleen
+  // spatie, tab en de regeleindes; `trim()` neemt ook U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F,
+  // U+3000 en U+FEFF weg. Zet zo'n teken vóór de SCHEIDINGSREGEL en markdown ziet geen scheiding meer,
+  // dus geen tabel, terwijl de scanner de rij eronder wél leest.
+  // GEMETEN VÓÓR DE FIX, elk teken apart, met de drie tabelregels erachter:
+  //   poort PASSEERT · scanner 1 rij · markdown-it 0 tabellen / 0 datarijen (beide presets)
+  // Codex meldde één teken (U+1680); de klasse bleek acht tekens groot. Vandaar één regel voor de
+  // hele klasse — elke witruimte die geen spatie of tab is — en niet acht patronen.
+  const vreemdeWitruimte = [' ', ' ', ' ', ' ', ' ', ' ', '　', '﻿'];
+  for (const teken of vreemdeWitruimte) {
+    const naam = `U+${teken.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
+    for (const [waar, regels] of [
+      ['op de scheidingsregel', [KOP, teken + SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.')]],
+      ['op de kopregel', [teken + KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.')]],
+      ['in een cel', [KOP, SCH, `| 2026-07-26 17:10 |${teken}MINI | Binnen. | AFGEROND | niemand |`]],
+    ]) {
+      const tekst = regels.join('\n');
+      const vorm = kanoniekeSpiegelvorm(tekst);
+      assert.equal(vorm.ok, false, `${naam} ${waar}: dit hoort geweigerd te worden`);
+      assert.equal(vorm.reden, 'VREEMDE_WITRUIMTE', `${naam} ${waar}: met een eigen gesloten reden`);
+      assert.equal(kanaalpostUitTekst(tekst).available, false, `${naam} ${waar}: er komt geen rij uit`);
+    }
+  }
+  // En de grens: gewone spaties en tabs middenin een regel blijven toegestaan, anders is elke
+  // uitgelijnde tabel ineens vormbrekend.
+  assert.equal(kanoniekeSpiegelvorm([KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Twee  spaties.')].join('\n')).ok, true);
+  assert.equal(kanoniekeSpiegelvorm('tekst\nab\tcd').ok, true);
+
+  // NEGENDE RONDE (Gemini), drie meldingen, alle drie nagemeten en alle drie onjuist:
+  //   een codehek van backticks NÁ de tabel   → beweerd PASSEERT; werkelijk WEIGERT(CODEHEK, regel 3)
+  //   hetzelfde met tildes                    → beweerd PASSEERT; werkelijk WEIGERT(CODEHEK, regel 3)
+  //   link-referentie NÁ de tabel, rij in de  → beweerd: markdown 0 datarijen, scanner 1.
+  //   meerregelige titel                        Werkelijk: markdown-it ziet 1 tabel met 3 datarijen
+  //                                             (de referentieregel en de sluitende `"` worden zélf
+  //                                             rijen), de scanner leest er 0 en levert available
+  //                                             false. Scanner < markdown, dus de veilige kant.
+  // De eerste twee zijn hieronder als proef vastgelegd; de derde staat in de weerlegd-lijst.
+  for (const hek of ['```', '~~~']) {
+    const naTabel = [KOP, SCH, hek, R('2026-07-26 17:10', 'MINI', 'Binnen.'), hek].join('\n');
+    assert.deepEqual(kanoniekeSpiegelvorm(naTabel), { ok: false, reden: 'CODEHEK', regel: 3 },
+      `${hek} na de tabel wordt geweigerd, waar de melding ook zei`);
+    assert.equal(kanaalpostUitTekst(naTabel).available, false);
+  }
+
   const weerlegd = [
+    ['link-referentie ná de tabel', [KOP, SCH, '[ref]: /url "titel', R('2026-07-26 17:10', 'MINI', 'Binnen.'), '"'], 0],
     ['link-referentie met lege titel', ['[link]: /url "', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.'), '"']],
     ['link-referentie met tekst in de titel', ['[ref]: /url "titel', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.'), '"']],
     ['alinea die de tabel voorafgaat', ['Uitleg over de publicatie.', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.')]],
     ['twee backticks over meerdere regels', ['`` uitleg', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.'), '``']],
   ];
-  for (const [wat, regels] of weerlegd) {
+  for (const [wat, regels, verwachteRijen = 1] of weerlegd) {
     const tekst = regels.join('\n');
     assert.equal(kanoniekeSpiegelvorm(tekst).ok, true, `${wat}: hier is niets aan de vorm mis`);
-    assert.equal(kanaalpostUitTekst(tekst).rows.length, 1, `${wat}: en de rij hoort gelezen te worden`);
+    assert.equal(kanaalpostUitTekst(tekst).rows.length, verwachteRijen,
+      `${wat}: de scanner leest er ${verwachteRijen} — nooit méér dan markdown`);
   }
 
   // En de andere kant, want een poort die alles weigert is geen poort: het ECHTE bestand komt er
@@ -1611,6 +1659,35 @@ test('reviewgat 30 — de vormpoort heeft een schrijfkant, anders is hij een voe
   assert.deepEqual(
     nieuweVormbrekendeRegels(alVuilRegels.join('\n'), crlf([...alVuilRegels, R('2026-07-26 17:10', 'MINI', 'Nieuw.'), '- vuil'])),
     [{ regel: 6, reden: 'VORM_CONTAINER' }], 'en een écht nieuwe vuile regel wordt nog steeds gezien');
+
+  // NEGENDE REVIEWRONDE (Gemini). Melding: de leeskant zou op `\n` alleen splitsen, waardoor een
+  // kale markering met een achterblijvende `\r` (`"-\r"`) daar zou passeren terwijl de schrijfkant
+  // hem weigert — een bestand dat je niet mag schrijven maar wél wordt gelezen. NAGEMETEN op alle
+  // drie de vormen: de leeskant splitst zelf al op CRLF/CR/LF en komt op alle drie uit op
+  // {ok:false, reden:'CONTAINER', regel:2}, de schrijfkant op VORM_CONTAINER. Geen asymmetrie —
+  // maar de proef blijft staan, want dit is precies het soort verschil dat niemand later terugvindt.
+  for (const tekst of ['gewone tekst\r\n-\r\n', 'gewone tekst\n-\r\n', 'gewone tekst\n-\r']) {
+    assert.deepEqual(kanoniekeSpiegelvorm(tekst), { ok: false, reden: 'CONTAINER', regel: 2 },
+      `${JSON.stringify(tekst)}: het regeleinde verandert het oordeel van de leeskant niet`);
+  }
+  assert.deepEqual(nieuweVormbrekendeRegels(oud, `${oud}\r\n-\r\n`), [{ regel: 4, reden: 'VORM_CONTAINER' }],
+    'en de schrijfkant weigert dezelfde toevoeging');
+
+  // Uit dezelfde ronde, en dit klopte wél: "alleen nieuwe regels" wordt met een TELLING bepaald, niet
+  // met een volgorde. Een bestaande vuile regel die naar boven wordt VERPLAATST is dus voor de
+  // schrijfkant geen nieuwe regel, terwijl hij op zijn nieuwe plek het hele document anders indeelt.
+  // GEMETEN: de schrijfkant meldt `[]` — en de leeskant weigert het resultaat alsnog
+  // ({ok:false, reden:'CONTAINER', regel:1}, available false). Dus luide weigering, niet stille
+  // toelating: de veilige kant, en precies waarom de leespoort het HELE bestand toetst en niet
+  // vertrouwt op wat de schrijfkant heeft gezien. Dat de twee lagen hier verschillend oordelen is
+  // geen fout maar de reden dat het er twee zijn.
+  const vuilOud = [oud, '- vuil'].join('\n');
+  const verplaatst = ['- vuil', oud].join('\n');
+  assert.deepEqual(nieuweVormbrekendeRegels(vuilOud, verplaatst), [],
+    'een verplaatste bestaande regel telt niet als nieuw — dat ziet de schrijfkant niet');
+  assert.deepEqual(kanoniekeSpiegelvorm(verplaatst), { ok: false, reden: 'CONTAINER', regel: 1 },
+    'en dan vangt de leeskant het op, want die toetst het hele bestand');
+  assert.equal(kanaalpostUitTekst(verplaatst).available, false);
 
   // En de twee poorten delen één definitie. Een regel die de schrijfkant afkeurt, maakt het bestand
   // bij het lezen onleesbaar, en andersom — anders laat de ene door wat de andere weigert.

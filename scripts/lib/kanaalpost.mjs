@@ -273,6 +273,15 @@ const KANONIEK_VERBODEN = Object.freeze([
   // U+2028/U+2029 en de form feed zijn regelscheiders voor sommige lezers en gewone tekens voor
   // andere. Twee lezers die het over de regelindeling oneens zijn is precies wat hier niet mag.
   { reden: 'REGELSCHEIDER', test: (r) => /[\u2028\u2029\f\v]/.test(r) },
+  // NEGENDE RONDE (Codex). Elke andere witruimte dan spatie en tab. De scanner knipt cellen met
+  // JavaScripts `trim()`, en die neemt \u00f3\u00f3k U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000 en
+  // U+FEFF weg. Markdown kent alleen spatie, tab en de regeleindes als witruimte. Zet \u00e9\u00e9n van die
+  // acht tekens v\u00f3\u00f3r de SCHEIDINGSREGEL en markdown ziet geen scheidingsregel meer, dus geen tabel \u2014
+  // terwijl de scanner de rij eronder gewoon leest. GEMETEN op alle acht: poort PASSEERT, scanner
+  // 1 rij, markdown-it 0 tabellen en 0 datarijen, in beide presets. Dat is de gevaarlijke kant.
+  // De diepere oorzaak is de asymmetrie tussen `trim()` en markdown; die wordt hier bij de bron
+  // afgesloten in plaats van de gedeelde scanner te veranderen (twee lagen, zie de kop hierboven).
+  { reden: 'VREEMDE_WITRUIMTE', test: (r) => /[^\S \t]/u.test(r) },
 ]);
 
 /**

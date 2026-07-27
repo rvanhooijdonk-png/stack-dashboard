@@ -489,6 +489,14 @@ const MUTATIES = [
     naar: '  { reden: \'REGELSCHEIDER\', test: () => false }, // mutatie: exotische scheiders zijn toegestaan',
   },
   {
+    proef: '29-vreemdewitruimte (reviewgat)',
+    raakt: 'reviewgat 29 —',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'witruimte die geen spatie of tab is mag weer — een U+00A0 of U+1680 vóór de scheidingsregel laat markdown de tabel niet zien terwijl de scanner de rij leest (bevinding Codex, negende ronde; acht tekens gemeten)',
+    van: "  { reden: 'VREEMDE_WITRUIMTE', test: (r) => /[^\\S \\t]/u.test(r) },",
+    naar: "  { reden: 'VREEMDE_WITRUIMTE', test: () => false }, // mutatie: trim() en markdown mogen weer verschillen",
+  },
+  {
     proef: '30-regeleinde (reviewgat)',
     raakt: 'reviewgat 30 —',
     bestand: 'scripts/lib/spiegelwet.mjs',
