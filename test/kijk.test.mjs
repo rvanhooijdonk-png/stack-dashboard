@@ -1525,8 +1525,14 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
   // klasse groter is dan de opsteller dacht. Daarom somt de proef niets meer op maar LEIDT DE KLASSE
   // AF: elk codepunt dat trim() wegneemt en dat geen spatie of tab is. Dat zijn er 23, waarvan 19
   // binnen een regel blijven; drie plaatsen maal 19 = 57 gevallen. Met markdown-it ernaast (beide
-  // presets, tabellen aan): 20 gevallen waarin de scanner MEER rijen leest dan markdown ziet, en de
-  // poort weigert alle 20. De overige 37 zijn gelijk. Nul gevallen waarin de scanner minder ziet.
+  // presets, tabellen aan) is de uitkomst NIET een getal, en dat is zelf de bevinding van de
+  // DERTIENDE ronde: markdown-it-py 3.0.0 telt 20 gevallen waarin de scanner MEER rijen leest dan
+  // markdown ziet, markdown-it 14.1.0 (JS) telt er 19. Twee implementaties van dezelfde parser zijn
+  // het over precies een geval oneens - U+FEFF op de KOPREGEL: py ziet nul datarijen, JS ziet er
+  // een. Zeker is: alle 19 tekens voor de SCHEIDINGSREGEL zijn in beide gevaarlijk, de rest is
+  // gelijk, nergens leest de scanner minder, en de poort weigert alle 57. Twee lezers die het
+  // oneens zijn over wat markdown ziet is exact de reden dat deze code geen parser nabootst maar de
+  // BRON in kanonieke vorm eist.
   const trimKlasse = [];
   for (let cp = 0; cp <= 0x10ffff; cp++) {  // elk codepunt betekent elk codepunt, niet alleen de BMP (Codex, elfde ronde)
     if (cp >= 0xd800 && cp <= 0xdfff) continue; // losse surrogaten zijn geen teken
@@ -1555,26 +1561,31 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
       // leest hier wel gewoon een rij, en de poort houdt juist die lezing tegen. Precies gezegd
       // (Codex, elfde ronde): de suite bewijst hiermee de SCANNERHELFT — dat er een rij te lezen
       // valt en dat de poort hem tegenhoudt. De MARKDOWNHELFT (hoeveel rijen markdown per geval
-      // ziet, en dus wélke 20 van de 57 gevaarlijk zijn: 20 met nul rijen, 37 gelijk aan de
-      // scanner) is alleen EXTERN gemeten, met markdown-it ernaast, en staat niet in deze suite.
+      // ziet, en dus welke gevallen gevaarlijk zijn - 20 volgens markdown-it-py, 19 volgens
+      // markdown-it JS, zie de telling hierboven) is alleen EXTERN gemeten en staat niet hierin.
       // De poort is geen tweede lezer. Markdown in de suite draaien vraagt een
       // testafhankelijkheid; die keuze staat als beslispunt in het rapport en is niet eenzijdig
       // genomen.
       assert.equal(spiegelScan(tekst).kandidaten.filter(Boolean).length, 1, `${naam} ${waar}: de scanner leest hier wel een rij`);
     }
   }
-  // TWAALFDE RONDE (Gemini): een UTF-8 BOM aan het BEGIN van het bestand zou volgens hem een valse
-  // afkeuring zijn, want editors zetten hem er ongevraagd voor. NAGEMETEN op het ECHTE bestand met
-  // een BOM ervoor: de scanner leest gewoon 54 rijen, en markdown-it ziet nul tabellen en nul
-  // datarijen (beide presets). Dat is dus geen valse afkeuring maar precies de gevaarlijke
-  // divergentie, en de poort weigert terecht — met reden VREEMDE_WITRUIMTE op regel 1. De BOM
-  // wegstrippen zou de scanner rijen laten lezen die de gepubliceerde pagina niet toont.
+  // TWAALFDE RONDE (Gemini): een UTF-8 BOM aan het BEGIN van het bestand zou een valse afkeuring
+  // zijn, want editors zetten hem er ongevraagd voor. DERTIENDE RONDE (Codex): mijn weerlegging
+  // daarvan klopte niet, en de meting staat nu in de plaats van de bewering. Op het ECHTE bestand
+  // met een BOM ervoor verandert er niets - de BOM landt op de titelregel "# KANAALPOST", en beide
+  // parsers zien met en zonder BOM dezelfde 2 tabellen en 59 datarijen. Daar is de weigering dus
+  // een BEWUSTE CONSERVATIEVE AFKEURING: zichtbaar rood in plaats van vals groen, op te lossen door
+  // de BOM uit de bron te halen. Alleen als de BOM op een TABELREGEL staat lopen de lezers uiteen
+  // (zie de telling hierboven: op de kopregel ziet py nul rijen en JS een rij; voor de
+  // scheidingsregel is hij in beide gevaarlijk). De fixture hieronder is dat tweede geval: BOM
+  // direct voor de kopregel. Wat de suite ervan vastlegt is opnieuw de scannerhelft - poort dicht
+  // op regel 1, scanner leest wel een rij; de markdownkant blijft extern gemeten.
   const metBom = '\ufeff' + [KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.')].join('\n');
   const bomVorm = kanoniekeSpiegelvorm(metBom);
   assert.equal(bomVorm.ok, false, 'een BOM vooraan sluit het document');
   assert.equal(bomVorm.reden, 'VREEMDE_WITRUIMTE');
   assert.equal(bomVorm.regel, 1, 'en wijst de eerste regel aan');
-  assert.equal(spiegelScan(metBom).kandidaten.filter(Boolean).length, 1, 'terwijl de scanner er wel een rij leest — dat is de divergentie zelf');
+  assert.equal(spiegelScan(metBom).kandidaten.filter(Boolean).length, 1, 'terwijl de scanner er wel een rij leest');
 
   // En de grens: gewone spaties en tabs middenin een regel blijven toegestaan, anders is elke
   // uitgelijnde tabel ineens vormbrekend.

@@ -281,8 +281,12 @@ const KANONIEK_VERBODEN = Object.freeze([
   // De klasse is AFGELEID en niet opgesomd (Codex wees er terecht op dat een opsomming achterloopt):
   // elk codepunt dat `trim()` wegneemt en geen spatie of tab is — 23 stuks, 19 daarvan binnen één
   // regel. GEMETEN over alle 19 maal drie plaatsen = 57 gevallen, met markdown-it ernaast in beide
-  // presets (tabellen expliciet aan): 20 gevallen waarin de scanner MEER rijen leest dan markdown
-  // ziet, en de poort weigert alle 20; 37 gelijk; nul waarin de scanner minder ziet.
+  // presets (tabellen expliciet aan). De uitkomst hangt af van de IMPLEMENTATIE, en dat is zelf een
+  // bevinding (dertiende ronde): markdown-it-py telt 20 gevallen waarin de scanner MEER rijen leest
+  // dan markdown ziet, markdown-it JS telt er 19; ze verschillen over U+FEFF op de kopregel. In
+  // beide geldt: alle 19 tekens voor de scheidingsregel zijn gevaarlijk, nergens ziet de scanner
+  // minder, en de poort weigert alle 57. Dat twee lezers het oneens zijn over "wat markdown ziet"
+  // is de reden dat hier geen parser wordt nagebootst maar kanonieke vorm wordt geeist.
   // De diepere oorzaak is de asymmetrie tussen `trim()` en markdown; die wordt hier bij de bron
   // afgesloten in plaats van de gedeelde scanner te veranderen (twee lagen, zie de kop hierboven).
   { reden: 'VREEMDE_WITRUIMTE', test: (r) => /[^\S \t]/u.test(r) },
