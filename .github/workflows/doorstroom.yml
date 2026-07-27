@@ -142,7 +142,16 @@ jobs:
             samenvatting="$(node -e '
               const o = JSON.parse(require("fs").readFileSync("/tmp/oordeel.json","utf8"));
               const r = [];
-              r.push(`bron: ${o.bron.ok ? `gelezen, ${o.bron.aangeleverd} rij(en) aangeleverd` : `NIET gelezen (${o.bron.reden})`}`);
+              r.push(`inbox: ${o.bron.ok ? `gelezen, ${o.bron.aangeleverd} rij(en) aangeleverd` : `NIET gelezen (${o.bron.reden})`}${o.bron.map === "ONTBREEKT" ? " — MAP BESTAAT NIET" : ""}`);
+              // De kanaalpost hoort in de ALARMTEKST, niet alleen in de stapuitvoer. Zonder deze
+              // regel las het alarm "0 rij(en) aangeleverd" terwijl er negentien binnenkwamen langs
+              // de andere bron — precies de melding die deze reparatie moest wegnemen. En een
+              // weigering zonder telling is een weigering die niemand kan navertellen.
+              const k = o.kanaalpost;
+              if (k) {
+                const telling = Object.entries(k.telling ?? {}).sort((a, b) => b[1] - a[1]).map(([g, n]) => `${g} ${n}`).join(", ");
+                r.push(`kanaalpost: ${k.ok ? `${k.gezien} gezien, ${k.bruikbaar} bruikbaar, ${k.geweigerd} geweigerd${telling ? ` (${telling})` : ""}` : `NIET gelezen (${k.reden})`} — ${k.uitkomst}`);
+              }
               r.push(`overgezet: ${o.overzetting.overgezet.length}, geweigerd: ${o.overzetting.geweigerd.length + o.bron.onbruikbaar.length}`);
               r.push(`achterstand: ${o.achterstand.uitkomst}${o.achterstand.reden ? ` (${o.achterstand.reden})` : ""}${o.achterstand.oudsteMinuten === null ? "" : `, oudste ${o.achterstand.oudsteMinuten} min`}`);
               r.push(`stempel: ${o.stempel.uitkomst}${o.stempel.reden ? ` (${o.stempel.reden})` : ""}${o.stempel.ouderdomMinuten === null ? "" : `, ${o.stempel.ouderdomMinuten} min oud`}`);
