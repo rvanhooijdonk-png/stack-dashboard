@@ -1517,12 +1517,28 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
   // spatie, tab en de regeleindes; `trim()` neemt ook U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F,
   // U+3000 en U+FEFF weg. Zet zo'n teken vóór de SCHEIDINGSREGEL en markdown ziet geen scheiding meer,
   // dus geen tabel, terwijl de scanner de rij eronder wél leest.
-  // GEMETEN VÓÓR DE FIX, elk teken apart, met de drie tabelregels erachter:
-  //   poort PASSEERT · scanner 1 rij · markdown-it 0 tabellen / 0 datarijen (beide presets)
-  // Codex meldde één teken (U+1680); de klasse bleek acht tekens groot. Vandaar één regel voor de
-  // hele klasse — elke witruimte die geen spatie of tab is — en niet acht patronen.
-  const vreemdeWitruimte = [' ', ' ', ' ', ' ', ' ', ' ', '　', '﻿'];
-  for (const teken of vreemdeWitruimte) {
+  // GEMETEN VOOR DE FIX, elk teken apart, met de drie tabelregels erachter:
+  //   poort PASSEERT - scanner 1 rij - markdown-it 0 tabellen / 0 datarijen (beide presets,
+  //   tabelregel in commonmark expliciet aangezet: anders meet je de preset en niet het teken)
+  // Codex meldde een teken (U+1680) en merkte in de TIENDE ronde terecht op dat de proef daarna acht
+  // VERTEGENWOORDIGERS opsomde en die "de klasse" noemde. Een opgesomde lijst loopt achter zodra de
+  // klasse groter is dan de opsteller dacht. Daarom somt de proef niets meer op maar LEIDT DE KLASSE
+  // AF: elk codepunt dat trim() wegneemt en dat geen spatie of tab is. Dat zijn er 23, waarvan 19
+  // binnen een regel blijven; drie plaatsen maal 19 = 57 gevallen. Met markdown-it ernaast (beide
+  // presets, tabellen aan): 20 gevallen waarin de scanner MEER rijen leest dan markdown ziet, en de
+  // poort weigert alle 20. De overige 37 zijn gelijk. Nul gevallen waarin de scanner minder ziet.
+  const trimKlasse = [];
+  for (let cp = 0; cp <= 0xffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue; // losse surrogaten zijn geen teken
+    const c = String.fromCodePoint(cp);
+    if ((c + 'x').trim() === 'x' && c !== ' ' && c !== '\t') trimKlasse.push(c);
+  }
+  // De klasse wordt geteld, niet overgeschreven: verandert een toekomstige Node hem, dan valt dit om
+  // in plaats van dat de proef stilletjes een kleinere klasse blijft meten.
+  assert.equal(trimKlasse.length, 23, 'de trim-klasse telt 23 codepunten');
+  const eenRegelig = trimKlasse.filter((c) => !['\n', '\r', ' ', ' '].includes(c));
+  assert.equal(eenRegelig.length, 19, 'waarvan 19 binnen een regel blijven');
+  for (const teken of eenRegelig) {
     const naam = `U+${teken.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
     for (const [waar, regels] of [
       ['op de scheidingsregel', [KOP, teken + SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.')]],
@@ -1532,8 +1548,15 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
       const tekst = regels.join('\n');
       const vorm = kanoniekeSpiegelvorm(tekst);
       assert.equal(vorm.ok, false, `${naam} ${waar}: dit hoort geweigerd te worden`);
-      assert.equal(vorm.reden, 'VREEMDE_WITRUIMTE', `${naam} ${waar}: met een eigen gesloten reden`);
+      // Twee redenen zijn goed: U+000B en U+000C worden al eerder als REGELSCHEIDER gepakt.
+      assert.ok(['VREEMDE_WITRUIMTE', 'REGELSCHEIDER'].includes(vorm.reden), `${naam} ${waar}: gesloten reden, kreeg ${vorm.reden}`);
       assert.equal(kanaalpostUitTekst(tekst).available, false, `${naam} ${waar}: er komt geen rij uit`);
+      // Dit onderscheidt de proef van een tautologie (Codex, tiende ronde): de POORTLOZE scanner
+      // leest hier wel gewoon een rij. De twee lezers zijn het dus echt oneens, en de poort verbergt
+      // dat niet maar weigert erop. Zonder deze assertie bevestigt de proef alleen dat de regex zijn
+      // eigen tekens matcht. Wat de proef NIET doet is markdown zelf draaien: dat vraagt een
+      // testafhankelijkheid en die keuze staat als beslispunt in het rapport.
+      assert.equal(spiegelScan(tekst).kandidaten.filter(Boolean).length, 1, `${naam} ${waar}: de scanner leest hier wel een rij`);
     }
   }
   // En de grens: gewone spaties en tabs middenin een regel blijven toegestaan, anders is elke

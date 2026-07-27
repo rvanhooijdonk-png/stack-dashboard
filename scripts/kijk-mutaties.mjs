@@ -492,7 +492,7 @@ const MUTATIES = [
     proef: '29-vreemdewitruimte (reviewgat)',
     raakt: 'reviewgat 29 —',
     bestand: 'scripts/lib/kanaalpost.mjs',
-    wat: 'witruimte die geen spatie of tab is mag weer — een U+00A0 of U+1680 vóór de scheidingsregel laat markdown de tabel niet zien terwijl de scanner de rij leest (bevinding Codex, negende ronde; acht tekens gemeten)',
+    wat: 'witruimte die geen spatie of tab is mag weer — een U+00A0 of U+1680 vóór de scheidingsregel laat markdown de tabel niet zien terwijl de scanner de rij leest (bevinding Codex, negende ronde; de klasse is afgeleid en geteld: 23 codepunten, 19 eenregelig, 57 gevallen gemeten)',
     van: "  { reden: 'VREEMDE_WITRUIMTE', test: (r) => /[^\\S \\t]/u.test(r) },",
     naar: "  { reden: 'VREEMDE_WITRUIMTE', test: () => false }, // mutatie: trim() en markdown mogen weer verschillen",
   },
