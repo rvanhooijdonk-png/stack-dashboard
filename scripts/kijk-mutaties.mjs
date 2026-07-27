@@ -369,11 +369,72 @@ const MUTATIES = [
     naar: 'const hekGeldig = () => true; // mutatie: elke hekachtige regel opent',
   },
   {
+    proef: '29-poort (reviewgat)',
+    raakt: 'reviewgat 29 —',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'de vormpoort laat alles door, dus alle acht routes van de zesde ronde staan weer open',
+    van: "  if (!vorm.ok) return { available: false, reason: 'NIET_CANONIEK', vorm, rows: [] };",
+    naar: '  void vorm; // mutatie: de vormpoort weigert niets meer',
+  },
+  {
+    proef: '29-hek (reviewgat)',
+    raakt: 'reviewgat 29 —',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'een codehek is geen reden meer om het bestand te weigeren',
+    van: "  { reden: 'CODEHEK', test: (r) => /(`{3,}|~{3,})/.test(r) },",
+    naar: '  { reden: \'CODEHEK\', test: () => false }, // mutatie: hekken zijn toegestaan',
+  },
+  {
+    proef: '29-commentaar (reviewgat)',
+    raakt: 'reviewgat 29 —',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'een HTML-commentaar is geen reden meer om het bestand te weigeren',
+    van: "  { reden: 'HTML_COMMENTAAR', test: (r) => r.includes('<!--') || r.includes('-->') },",
+    naar: '  { reden: \'HTML_COMMENTAAR\', test: () => false }, // mutatie: commentaar is toegestaan',
+  },
+  {
+    proef: '29-html (reviewgat)',
+    raakt: 'reviewgat 29 —',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'een regel die met een tag begint is geen reden meer om te weigeren — het <div>-geval van Codex staat weer open',
+    van: "  { reden: 'RAUWE_HTML', test: (r) => /^ {0,3}</.test(r) },",
+    naar: '  { reden: \'RAUWE_HTML\', test: () => false }, // mutatie: rauwe HTML is toegestaan',
+  },
+  {
+    proef: '29-inspringing (reviewgat)',
+    raakt: 'reviewgat 29 —',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'een ingesprongen regel is geen reden meer om te weigeren — het ingesprongen-codeblok-geval staat weer open',
+    van: "  { reden: 'INSPRINGING', test: (r) => /^(?: {4}|\\t)/.test(r) },",
+    naar: '  { reden: \'INSPRINGING\', test: () => false }, // mutatie: inspringing is toegestaan',
+  },
+  {
+    proef: '29-container (reviewgat)',
+    raakt: 'reviewgat 29 —',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'blockquote en lijstitem zijn geen reden meer om te weigeren — de containergevallen staan weer open',
+    van: "  { reden: 'CONTAINER', test: (r) => /^ {0,3}(?:>|(?:[-*+]|\\d{1,9}[.)])[ \\t])/.test(r) },",
+    naar: '  { reden: \'CONTAINER\', test: () => false }, // mutatie: containertekens zijn toegestaan',
+  },
+  {
+    proef: '29-regelscheider (reviewgat)',
+    raakt: 'reviewgat 29 —',
+    bestand: 'scripts/lib/kanaalpost.mjs',
+    wat: 'U+2028/U+2029 zijn geen reden meer om te weigeren — twee lezers mogen het weer oneens zijn over de regelindeling',
+    van: "  { reden: 'REGELSCHEIDER', test: (r) => /[\\u2028\\u2029\\f\\v]/.test(r) },",
+    naar: '  { reden: \'REGELSCHEIDER\', test: () => false }, // mutatie: exotische scheiders zijn toegestaan',
+  },
+  {
     proef: '28a (reviewgat)',
     raakt: 'reviewgat 28 —',
     bestand: 'scripts/lib/kanaalpost.mjs',
     wat: 'alleen LF telt als regeleinde, dus een CRLF-bestand laat een voorbeeldrij als toestand binnen',
-    van: "  const regels = String(tekst ?? '').split(/\\r\\n|\\r|\\n/);",
+    // TWEE regels als anker, en dat is geen netheid. De vormpoort splitst inmiddels op dezelfde
+    // manier en staat EERDER in het bestand; met alleen de split-regel als anker muteerde
+    // `String.replace` de poort in plaats van de scanner en bleef proef 28 groen — gemeten.
+    van: "  // {\"sporen\":[\"CHIEF\",\"CONTROL\",\"MINI\"],\"telling\":3,\"verworpen\":0} — de voorbeeldrij MÍDDEN in het\n"
+      + "  // codeblok kwam als echte toestand binnen (bevinding Codex, vijfde ronde).\n"
+      + "  const regels = String(tekst ?? '').split(/\\r\\n|\\r|\\n/);",
     naar: "  const regels = String(tekst ?? '').split('\\n'); // mutatie: CRLF blijft plakken",
   },
   {

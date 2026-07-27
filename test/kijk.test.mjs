@@ -22,7 +22,10 @@ import {
   DREMPEL_MAX_MS, LANE_STIL_UREN,
 } from '../scripts/lib/kijk.mjs';
 import { DREMPEL_UREN } from '../scripts/lib/waarnemer.mjs';
-import { spiegelScan } from '../scripts/lib/kanaalpost.mjs';
+import { spiegelScan, kanoniekeSpiegelvorm, kanaalpostUitTekst } from '../scripts/lib/kanaalpost.mjs';
+
+/** De gesloten redenlijst van de vormpoort, hier herhaald zodat de proef een NIEUWE reden opmerkt. */
+const REDENEN_VORM = ['CODEHEK', 'HTML_COMMENTAAR', 'RAUWE_HTML', 'INSPRINGING', 'CONTAINER', 'REGELSCHEIDER'];
 
 const KOP_A = 'a'.repeat(40);
 const KOP_B = 'b'.repeat(40);
@@ -918,9 +921,18 @@ test('reviewgat 20 — een spiegelrij buiten de tabel of in commentaar telt, of 
   // a en b zijn de gevaarlijkste: er stáát een volwaardige spiegelrij en die werd nul. c is de
   // spiegelbeeldige fout: er staat GEEN geldende rij en die werd wél toestand. Beide keren beslist de
   // opmaak eromheen wat de bron zegt, en dat is precies wat een bronvaste lezer niet mag toestaan.
+  // Deze proef meet de TWEEDE LAAG. Sinds de vormpoort (`kanoniekeSpiegelvorm`, reviewgat 29) wordt een
+  // bestand met een codehek, een commentaar, rauwe HTML, een ingesprongen regel of een containerteken
+  // in zijn GEHEEL geweigerd — de scanner komt er niet meer aan te pas. Dat maakt de metingen hieronder
+  // niet overbodig maar juist noodzakelijk: ze leggen vast dat de scanner ook zónder die poort de
+  // goede kant op faalt. Twee lagen die hetzelfde bedoelen, en allebei apart gemeten.
   const na = (tekst) => {
-    const { state } = kijkStateUitSpiegel(tekst, { commitSha: KOP_A });
-    return { sporen: Object.keys(state.lanes).sort(), telling: state.eventCount, verworpen: state.verworpenRijen };
+    const s = spiegelScan(tekst);
+    return {
+      sporen: [...new Set(s.kandidaten.filter(Boolean).map((r) => r.tab))].sort(),
+      telling: s.kandidaten.length,
+      verworpen: s.afgekeurd,
+    };
   };
 
   const legeRegel = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Eerste.'), '',
@@ -1141,9 +1153,18 @@ test('reviewgat 26 — een voorbeeldtabel in een codeblok is uitleg, geen toesta
   // gebouwd. Beide kanten lezen de voorbeeldrij mee, hun toestandshash is identiek, en de uitkomst is
   // GROEN. Een parserverschil is onzichtbaar voor een vergelijking die beide kanten uit één parser
   // haalt — precies de reden dat deze route niet is weggeredeneerd maar nagemeten.
+  // Deze proef meet de TWEEDE LAAG. Sinds de vormpoort (`kanoniekeSpiegelvorm`, reviewgat 29) wordt een
+  // bestand met een codehek, een commentaar, rauwe HTML, een ingesprongen regel of een containerteken
+  // in zijn GEHEEL geweigerd — de scanner komt er niet meer aan te pas. Dat maakt de metingen hieronder
+  // niet overbodig maar juist noodzakelijk: ze leggen vast dat de scanner ook zónder die poort de
+  // goede kant op faalt. Twee lagen die hetzelfde bedoelen, en allebei apart gemeten.
   const na = (tekst) => {
-    const { state } = kijkStateUitSpiegel(tekst, { commitSha: KOP_A });
-    return { sporen: Object.keys(state.lanes).sort(), telling: state.eventCount, verworpen: state.verworpenRijen };
+    const s = spiegelScan(tekst);
+    return {
+      sporen: [...new Set(s.kandidaten.filter(Boolean).map((r) => r.tab))].sort(),
+      telling: s.kandidaten.length,
+      verworpen: s.afgekeurd,
+    };
   };
 
   const voorbeeld = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'De echte rij.'), '',
@@ -1237,9 +1258,18 @@ test('reviewgat 27 — commentaar en codehek zijn scopes, geen losse tekens: dri
   // Vijfde reviewronde, drie bevindingen van Gemini, alle drie eerst nagespeeld en alle drie echt.
   // Ze horen bij elkaar: telkens werd één teken-reeks als scope-schakelaar gelezen zonder te kijken
   // waar hij stond of wat erna kwam.
+  // Deze proef meet de TWEEDE LAAG. Sinds de vormpoort (`kanoniekeSpiegelvorm`, reviewgat 29) wordt een
+  // bestand met een codehek, een commentaar, rauwe HTML, een ingesprongen regel of een containerteken
+  // in zijn GEHEEL geweigerd — de scanner komt er niet meer aan te pas. Dat maakt de metingen hieronder
+  // niet overbodig maar juist noodzakelijk: ze leggen vast dat de scanner ook zónder die poort de
+  // goede kant op faalt. Twee lagen die hetzelfde bedoelen, en allebei apart gemeten.
   const na = (tekst) => {
-    const { state } = kijkStateUitSpiegel(tekst, { commitSha: KOP_A });
-    return { sporen: Object.keys(state.lanes).sort(), telling: state.eventCount, verworpen: state.verworpenRijen };
+    const s = spiegelScan(tekst);
+    return {
+      sporen: [...new Set(s.kandidaten.filter(Boolean).map((r) => r.tab))].sort(),
+      telling: s.kandidaten.length,
+      verworpen: s.afgekeurd,
+    };
   };
 
   // EEN. Een backtick-hek met een backtick in zijn taalaanduiding is volgens markdown geen hek. Het
@@ -1265,7 +1295,10 @@ test('reviewgat 27 — commentaar en codehek zijn scopes, geen losse tekens: dri
   // toestand binnenkomt — en daarmee dezelfde fout als reviewgat 26, alleen via de commentaartak.
   const staartNaSluiting = ['<!--', '--> ```', KOPREGELS,
     rij('2026-07-26 17:00', 'CONTROL', 'Zou uitleg moeten zijn.')].join('\n');
-  assert.deepEqual(na(staartNaSluiting), { sporen: [], telling: 0, verworpen: 1 });
+  // `telling: 1` en niet `0`: deze proef leest sinds de vormpoort de scanner rechtstreeks, en dáár is
+  // de voorbeeldrij één KANDIDAAT die wordt afgekeurd. De oude `0` kwam uit de laag erboven, die een
+  // bestand zonder één geldige rij als geheel onleesbaar noemt — een andere meting, geen ander gedrag.
+  assert.deepEqual(na(staartNaSluiting), { sporen: [], telling: 1, verworpen: 1 });
 
   // En de tegenhanger van twee: een rij die ECHT in commentaar staat blijft buiten de toestand, maar
   // wordt geteld als afkeuring. Zie ook reviewgat 20, waar die verwachting is bijgesteld.
@@ -1277,9 +1310,18 @@ test('reviewgat 27 — commentaar en codehek zijn scopes, geen losse tekens: dri
 test('reviewgat 28 — regeleindes en containertekens: twee gemeten gaten, vier bewust geaccepteerde', () => {
   // Vijfde ronde, Codex. De eerste twee zijn gerepareerd, de laatste vier staan hier als VASTGELEGDE
   // afwijking: ze wijken allemaal af naar de kant van de AFKEURING, en een afkeuring is zichtbaar.
+  // Deze proef meet de TWEEDE LAAG. Sinds de vormpoort (`kanoniekeSpiegelvorm`, reviewgat 29) wordt een
+  // bestand met een codehek, een commentaar, rauwe HTML, een ingesprongen regel of een containerteken
+  // in zijn GEHEEL geweigerd — de scanner komt er niet meer aan te pas. Dat maakt de metingen hieronder
+  // niet overbodig maar juist noodzakelijk: ze leggen vast dat de scanner ook zónder die poort de
+  // goede kant op faalt. Twee lagen die hetzelfde bedoelen, en allebei apart gemeten.
   const na = (tekst) => {
-    const { state } = kijkStateUitSpiegel(tekst, { commitSha: KOP_A });
-    return { sporen: Object.keys(state.lanes).sort(), telling: state.eventCount, verworpen: state.verworpenRijen };
+    const s = spiegelScan(tekst);
+    return {
+      sporen: [...new Set(s.kandidaten.filter(Boolean).map((r) => r.tab))].sort(),
+      telling: s.kandidaten.length,
+      verworpen: s.afgekeurd,
+    };
   };
   const K = ['| datum-tijd | tab-rol | onderwerp | status | actie voor |', '| --- | --- | --- | --- | --- |'];
 
@@ -1317,6 +1359,96 @@ test('reviewgat 28 — regeleindes en containertekens: twee gemeten gaten, vier 
     assert.equal(uit.sporen.length, 0, `${naam}: geen enkele rij mag hier toestand worden`);
     assert.ok(uit.verworpen >= 1, `${naam}: de afwijking moet zichtbaar zijn als afkeuring`);
   }
+});
+
+test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zijn geheel geweigerd', () => {
+  // ZESDE REVIEWRONDE, en de reden dat er geen zevende patchronde komt. Beide families leverden op
+  // kop ae302c2 samen acht NIEUWE gemeten routes waarlangs de scanner MINDER "binnen" ziet dan
+  // markdown — de gevaarlijke kant, want dan komt uitleg als echte toestand binnen. Alle acht zijn
+  // hier eerst nagespeeld tegen de echte lezer voordat er iets veranderde:
+  //   A `<!-- x --> y <!--` op één regel        → {"binnengelaten":1,"afgekeurd":0}
+  //   B een sluithek met vier spaties ervoor    → {"binnengelaten":2,"afgekeurd":0}
+  //   C een rij vóór `-->` op dezelfde regel    → verdwijnt ongeteld: 0 kandidaten, 0 afkeuringen,
+  //                                                terwijl dezelfde rij mét `-->` op een eigen regel
+  //                                                wél als afkeuring telt
+  //   D `<!--` in de laatste cel van een rij    → {"binnengelaten":2,"afgekeurd":0}
+  //   E een hek in een lijstitem, gesloten op kolom 0   → {"binnengelaten":1,"afgekeurd":0}
+  //   F `<!--` in een blockquote, daarna een hek        → {"binnengelaten":1,"afgekeurd":0}
+  //   G `<!--` als ingesprongen codeblok, daarna een hek → {"binnengelaten":1,"afgekeurd":0}
+  //   H een `<div>`-blok dat volgens markdown tot EOF loopt → {"binnengelaten":1,"afgekeurd":0}
+  // Vier daarvan waren alleen te vinden mét een échte CommonMark-lezer ernaast. Dat is het signaal:
+  // elke ronde dicht acht gaten en de volgende ronde vindt er acht nieuwe. Markdown namaken is de
+  // verkeerde opgave; de bron mag simpelweg geen scope kunnen maken.
+  const KOP = '| datum-tijd | tab-rol | onderwerp | status | actie voor |';
+  const SCH = '| --- | --- | --- | --- | --- |';
+  const R = (t, tab, o) => `| ${t} | ${tab} | ${o} | AFGEROND | niemand |`;
+
+  const acht = {
+    A: ['<!-- uitleg --> nog iets <!--', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen commentaar.'), '-->'],
+    B: [KOP, SCH, R('2026-07-26 17:00', 'CONTROL', 'Echt.'), '```', '    ```', KOP, SCH,
+      R('2026-07-26 17:10', 'MINI', 'Binnen het blok.'), '```'],
+    C: ['<!--', `${R('2026-07-26 17:10', 'MINI', 'Verstopt.')} -->`],
+    D: [KOP, SCH, '| 2026-07-26 17:00 | CONTROL | Onderwerp | AFGEROND | <!-- |',
+      R('2026-07-26 17:10', 'MINI', 'Binnen commentaar.'), '-->'],
+    E: ['- item', '  ```markdown', '  uitleg', '', '```', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.')],
+    F: ['> <!--', '> uitleg', '', '```markdown', '-->', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.')],
+    G: ['    <!--', '```markdown', '-->', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.')],
+    H: ['<div>', '```markdown', '```', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.'), ''],
+  };
+
+  // Eén regel sluit alle acht: geen van deze bestanden staat in kanonieke vorm, dus er komt geen
+  // gedeeltelijke lezing uit maar een weigering. De REDEN is een gesloten code en het REGELNUMMER is
+  // een getal — geen brontekst, want deze uitkomst kan op de publieke plaat belanden.
+  for (const [naam, regels] of Object.entries(acht)) {
+    const vorm = kanoniekeSpiegelvorm(regels.join('\n'));
+    assert.equal(vorm.ok, false, `${naam}: dit bestand kan scope maken en hoort geweigerd te worden`);
+    assert.ok(REDENEN_VORM.includes(vorm.reden), `${naam}: de reden komt uit de gesloten lijst`);
+    assert.ok(Number.isInteger(vorm.regel) && vorm.regel >= 1, `${naam}: de weigering wijst een regel aan`);
+    const raw = kanaalpostUitTekst(regels.join('\n'));
+    assert.equal(raw.available, false, `${naam}: er komt geen enkele rij uit`);
+    assert.deepEqual(raw.rows, [], `${naam}: ook geen halve lezing`);
+    const { state, fouten } = kijkStateUitSpiegel(regels.join('\n'), { commitSha: KOP_A });
+    assert.deepEqual(Object.keys(state.lanes), [], `${naam}: geen spoor komt in de toestand`);
+    assert.ok(fouten.length >= 1, `${naam}: de weigering staat IN de toestand, niet ernaast`);
+  }
+
+  // Elk verboden teken apart, zodat een weggehaalde regel in de lijst een proef omgooit en niet
+  // stilzwijgend door een andere regel wordt opgevangen.
+  const perStuk = [
+    ['CODEHEK', 'gewone tekst\n```js'],
+    ['HTML_COMMENTAAR', 'gewone tekst\n<!-- iets'],
+    ['HTML_COMMENTAAR', 'gewone tekst\niets -->'],
+    ['RAUWE_HTML', 'gewone tekst\n<div>'],
+    ['INSPRINGING', 'gewone tekst\n    ingesprongen'],
+    ['INSPRINGING', 'gewone tekst\n\tmet een tab'],
+    ['CONTAINER', 'gewone tekst\n> een blockquote'],
+    ['CONTAINER', 'gewone tekst\n- een opsomming'],
+    ['CONTAINER', 'gewone tekst\n1. een genummerde'],
+    ['REGELSCHEIDER', `gewone tekst\niets${String.fromCodePoint(0x2028)}anders`],
+    ['REGELSCHEIDER', `gewone tekst\niets${String.fromCodePoint(0x2029)}anders`],
+  ];
+  for (const [reden, tekst] of perStuk) {
+    assert.deepEqual(kanoniekeSpiegelvorm(tekst), { ok: false, reden, regel: 2 }, tekst);
+  }
+
+  // En de andere kant, want een poort die alles weigert is geen poort: het ECHTE bestand komt er
+  // gewoon door. Gemeten op `data/kanaalpost-publiek.md` (85 regels, 26-07-2026): 0 hekken,
+  // 0 commentaren, 0 rauwe HTML, 0 ingesprongen regels, 0 containertekens, geen CR. De poort raakt
+  // de productie-inhoud dus niet — dat is nagemeten en niet aangenomen.
+  const echt = readFileSync(new URL('../data/kanaalpost-publiek.md', import.meta.url), 'utf8');
+  assert.deepEqual(kanoniekeSpiegelvorm(echt), { ok: true, reden: null, regel: 0 },
+    'het echte spiegelbestand staat in kanonieke vorm');
+  assert.equal(kanaalpostUitTekst(echt).available, true, 'en wordt dus gewoon gelezen');
+
+  // DE PRIJS, expliciet en gemeten: een bestand dat volgens de scanner prima leesbaar is, wordt nu
+  // toch geweigerd zodra er één hek in staat. Dat is de bewuste keuze — luide uitval boven stille
+  // uitleg-als-toestand — en hij staat hier zodat niemand hem per ongeluk terugdraait.
+  const leesbaarMaarNietKanoniek = [KOP, SCH, R('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '```js `foo`', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Volgens markdown gewoon toestand.')].join('\n');
+  assert.equal(spiegelScan(leesbaarMaarNietKanoniek).kandidaten.filter(Boolean).length, 2,
+    'de scanner zelf leest dit bestand correct — twee sporen, nul afkeuringen');
+  assert.equal(kanaalpostUitTekst(leesbaarMaarNietKanoniek).available, false,
+    'en toch weigert de poort het, want het KAN scope maken');
 });
 
 test('weerlegging — AFGEROND wordt LEEG, en dat is de bedoeling, geen fout', () => {

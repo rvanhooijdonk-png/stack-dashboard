@@ -195,6 +195,69 @@ const SLUITHEK = /^ {0,3}(?:`{3,}|~{3,})[ \t]*$/;
  */
 const hekKern = (regel) => String(regel).replace(/^[ \t]*(?:(?:>[ \t]*)+)?(?:[-*+]|\d{1,9}[.)])?[ \t]*/, '');
 
+/**
+ * DE VORMPOORT — en de reden dat de scanner hieronder niet langer alléén staat.
+ *
+ * Zes reviewrondes lang is dezelfde fout in dezelfde vorm teruggekomen: de scanner ziet MINDER
+ * "binnen" dan markdown, en daardoor komt uitleg als echte toestand binnen. Ronde zes leverde acht
+ * nieuwe gemeten gevallen op, van twee onafhankelijke reviewfamilies, waarvan vier alleen te vinden
+ * waren met een échte CommonMark-lezer (markdown-it) ernaast:
+ *   `<!-- x --> y <!--` op één regel · een sluithek met vier spaties ervoor · een hek in een lijstitem
+ *   dat op kolom 0 gesloten wordt · `<!--` in een blockquote gevolgd door een hek · `<!--` als
+ *   ingesprongen codeblok · een `<div>`-blok dat volgens markdown tot EOF loopt · een dubbel genest
+ *   lijstitem · U+2028 in de taalaanduiding van een hek.
+ * Elk daarvan is met de hand te dichten, en elke ronde bewijst opnieuw dat de volgende ronde er weer
+ * acht vindt. Markdown namaken is de verkeerde opgave.
+ *
+ * Daarom deze omkering: het spiegelBESTAND moet in kanonieke vorm staan. Geen codehek, geen
+ * HTML-commentaar, geen rauwe HTML, geen ingesprongen regel, geen blockquote of lijstitem, geen
+ * exotische regelscheider. Staat er één zo'n constructie in, dan is het HELE bestand onleesbaar en
+ * komt er GEEN OORDEEL uit — niet een gedeeltelijke lezing waarvan niemand de scope kan narekenen.
+ * Zo hoeft de lezer geen markdown meer te modelleren; hij hoeft alleen te zien dat er niets in staat
+ * wat scope kan maken. Alle acht bevindingen hebben minstens één van deze constructies nodig.
+ *
+ * Gemeten op het echte bestand (85 regels, 26-07-2026): 0 hekken, 0 commentaren, 0 rauwe HTML,
+ * 0 ingesprongen regels, 0 containertekens, geen CR. De poort raakt de productie-inhoud dus niet.
+ * De prijs staat er wel: schrijft iemand ooit een opsomming in dit logboek, dan valt de plaat om in
+ * een zichtbare storing. Dat is de veilige kant — luide uitval boven stille uitleg-als-toestand — en
+ * het is een bewuste keuze die als beslispunt in het rapport staat.
+ *
+ * De scanner hieronder blijft ongewijzigd staan als tweede laag: raakt deze poort ooit verzwakt, dan
+ * is er nog steeds scope-afhandeling. Twee lagen die hetzelfde bedoelen, niet één die het moet halen.
+ */
+const KANONIEK_VERBODEN = Object.freeze([
+  // Een codehek waar dan ook op de regel. Bewust grover dan markdown: `HEK` eist hoogstens drie
+  // spaties inspringing, hier is elk voorkomen genoeg. Vangt Gemini B, Codex 1/4/5/6.
+  { reden: 'CODEHEK', test: (r) => /(`{3,}|~{3,})/.test(r) },
+  // Beide helften van een HTML-commentaar, ook los. Vangt Gemini A/C/D, Codex 2/3/7.
+  { reden: 'HTML_COMMENTAAR', test: (r) => r.includes('<!--') || r.includes('-->') },
+  // Een regel die met een tag begint: markdown houdt zo'n blok open tot een lege regel of EOF, en
+  // alles ertussen is geen tabel. Vangt Codex 4 ook zonder hek.
+  { reden: 'RAUWE_HTML', test: (r) => /^ {0,3}</.test(r) },
+  // Vier spaties of een tab is een ingesprongen codeblok; een tabelregel daarin is geen tabel.
+  { reden: 'INSPRINGING', test: (r) => /^(?: {4}|\t)/.test(r) },
+  // Blockquote of lijstitem: containers verplaatsen de kolom waarop alles telt.
+  { reden: 'CONTAINER', test: (r) => /^ {0,3}(?:>|(?:[-*+]|\d{1,9}[.)])[ \t])/.test(r) },
+  // U+2028/U+2029 en de form feed zijn regelscheiders voor sommige lezers en gewone tekens voor
+  // andere. Twee lezers die het over de regelindeling oneens zijn is precies wat hier niet mag.
+  { reden: 'REGELSCHEIDER', test: (r) => /[\u2028\u2029\f\v]/.test(r) },
+]);
+
+/**
+ * Staat dit bestand in kanonieke spiegelvorm? `{ ok: true }` of `{ ok: false, reden, regel }`.
+ * `reden` komt uit een bevroren lijst en `regel` is een REGELNUMMER — geen brontekst, want de uitkomst
+ * hiervan kan op de publieke plaat belanden.
+ */
+export function kanoniekeSpiegelvorm(tekst) {
+  const regels = String(tekst ?? '').split(/\r\n|\r|\n/);
+  for (let i = 0; i < regels.length; i += 1) {
+    for (const v of KANONIEK_VERBODEN) {
+      if (v.test(regels[i])) return { ok: false, reden: v.reden, regel: i + 1 };
+    }
+  }
+  return { ok: true, reden: null, regel: 0 };
+}
+
 /** Vorm-toets op één datarij. Geen oordeel over publiceerbaarheid — dat doet de DTO. */
 function rijUitCellen(c) {
   const d = DATUM.exec(ontdaan(c[0]));
@@ -495,6 +558,11 @@ export function kanaalpostUitTekst(tekst) {
   if (typeof tekst !== 'string' || tekst.trim() === '') {
     return { available: false, reason: 'BRON_ONBEREIKBAAR', rows: [] };
   }
+  // De vormpoort staat vóór de scanner, niet erin. Een bestand dat scope kan maken wordt in zijn
+  // geheel geweigerd; er komt dan geen gedeeltelijke lezing uit waarvan de scope niet na te rekenen
+  // is. Zie `kanoniekeSpiegelvorm` voor de acht gemeten gevallen die hiertoe leidden.
+  const vorm = kanoniekeSpiegelvorm(tekst);
+  if (!vorm.ok) return { available: false, reason: 'NIET_CANONIEK', vorm, rows: [] };
   const rows = spiegelUitTekst(tekst);
   if (!rows.length) return { available: false, reason: 'LEEG', rows: [] };
   return { available: true, reason: null, rows };
