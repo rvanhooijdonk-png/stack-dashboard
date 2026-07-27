@@ -1,0 +1,187 @@
+name: doorstroom
+
+# DE OVERZETTING ZONDER MENS.
+#
+# Wat kapot was, gemeten op 27-07-2026: elk venster zette zijn eigen spiegelrij in DEZELFDE regel van
+# DEZELFDE tabel via een eigen bundel. Twee vensters tegelijk = botsing, per constructie. Op het
+# moment van deze fix stonden er 16 unieke rijen in 9 openstaande bundels, waarvan er 8 niet meer
+# samen te voegen waren. Vier bundels waren onderweg gesloten of gesneuveld. De rijen waren niet
+# zoek — ze stonden vast achter een handmatige handeling die niemand op tijd deed.
+#
+# De omkering: een venster levert één rij als één BESTAND aan (`CONTROL/SPIEGEL/INBOX/`, naam
+# `YYYY-MM-DDTHH-MM-<venster>-<slug>.md`, op de tak waar vensters toch al hun rapporten zetten).
+# Twee bestanden botsen niet. Deze workflow is de enige schrijver van de publieke spiegel en oordeelt
+# PER RIJ: een onbruikbare rij wordt geweigerd met reden, de rest gaat gewoon door. Dat is precies wat
+# een handmatige bundel nooit kon — die viel als geheel om.
+#
+# DE KLOK. Niet op een kwartiercron. Gemeten in deze repo (27-07-2026, 05:30 UTC): van de zes
+# uurslots die `waarnemer.yml` in de vijf uur ervoor had moeten vuren, vuurde er ÉÉN, 42 minuten te
+# laat; `publish.yml` had in diezelfde periode 20 opeenvolgende runs op de kwartierslag, allemaal via
+# `workflow_dispatch`. GitHub's eigen planner is hier dus aantoonbaar geen klok, en de dispatch-keten
+# aantoonbaar wel. Daarom hangt deze workflow aan `workflow_run` op `publish` — dezelfde route die
+# `waarnemer.yml` al zonder gaten gebruikt — met de uurcron er als zwakke reserve naast, niet als
+# fundament.
+#
+# WAT DIT NIET DOET: niets mergen, niets weggooien, geen bestaande regel aanraken. De spiegel is
+# append-only; dat wordt twee keer getoetst (in de uitvoerder én hier, vóór de push).
+on:
+  workflow_run:
+    workflows: [publish]
+    types: [completed]
+  schedule:
+    - cron: '52 * * * *'
+  push:
+    paths:
+      - '.github/workflows/doorstroom.yml'
+      - 'scripts/doorstroom.mjs'
+      - 'scripts/lib/doorstroom.mjs'
+      - 'test/doorstroom.test.mjs'
+      - 'data/vloot.json'
+  workflow_dispatch:
+
+permissions: {}
+
+# Nooit annuleren: deze workflow schrijft. Een halverwege afgebroken schrijver is erger dan een
+# dubbele run — de tweede run is idempotent (een al gepubliceerde rij wordt niet nog eens gezet).
+concurrency:
+  group: doorstroom
+  cancel-in-progress: false
+
+jobs:
+  overzetten:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # alleen om de publieke spiegel aan te vullen
+      issues: write     # de alarmroute die NIET door de spiegel loopt
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+
+      # Dezelfde poort als in `publish.yml`, om dezelfde reden: kaal `node --test` geeft exit 0 bij
+      # nul gevonden tests. Een schrijver die op een leeggelopen testontdekking groen draait, schrijft
+      # met ongetoetst oordeel in een bestand dat niemand meer kan repareren.
+      - name: Tests
+        env:
+          TESTS_ONDERGRENS: "50"
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=tap 2>&1 | tee /tmp/tests.tap
+          total="$(grep -E '^# tests [0-9]+' /tmp/tests.tap | tail -1 | grep -oE '[0-9]+' || echo 0)"
+          echo "Ontdekte tests: ${total} (ondergrens ${TESTS_ONDERGRENS})"
+          if [ "${total:-0}" -lt "${TESTS_ONDERGRENS}" ]; then
+            echo "::error title=Testontdekking leeggelopen::${total} tests < ondergrens ${TESTS_ONDERGRENS}." >&2
+            exit 1
+          fi
+
+      # Zonder token is de bron (privérepo) onbereikbaar. Dat is met opzet een ROOD oordeel en geen
+      # stille nul: "ik zie geen rijen" en "ik mag de rijen niet zien" mogen nooit hetzelfde betekenen.
+      # De waarde wordt nergens afgedrukt; de uitvoerder draagt hem alleen in een header.
+      - name: Overzetten (bron → publieke spiegel)
+        env:
+          CONTROL_READ_TOKEN: ${{ secrets.ORG_PR_READ_TOKEN }}
+          DOORSTROOM_PLAAT_URL: https://rvanhooijdonk-png.github.io/stack-dashboard/
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            node scripts/doorstroom.mjs --schrijf --uitvoer /tmp/oordeel.json
+          else
+            echo "niet op main (${{ github.ref_name }}) — alleen kijken, niet schrijven"
+            node scripts/doorstroom.mjs --uitvoer /tmp/oordeel.json
+          fi
+
+      # Push met een rebase ertussen: een mens mag ondertussen best iets aan main hebben toegevoegd.
+      # Onze commit voegt alleen achteraan toe, dus na een rebase geldt de append-only-wet nog steeds —
+      # en de uitvoerder heeft die vlak voor het schrijven zelf al getoetst. Lukt de push alsnog niet,
+      # dan is dat een storing en geen "volgende keer beter": exit 1, en de alarmstap hieronder ziet het.
+      - name: Aanvulling vastleggen
+        if: github.ref_name == 'main'
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- data/kanaalpost-publiek.md; then
+            echo "geen nieuwe rijen — niets vast te leggen"
+            exit 0
+          fi
+          aantal="$(git diff --numstat -- data/kanaalpost-publiek.md | awk '{print $1}')"
+          git config user.name  'doorstroom'
+          git config user.email 'doorstroom@users.noreply.github.com'
+          git add data/kanaalpost-publiek.md
+          git commit -m "doorstroom: ${aantal} spiegelrij(en) overgezet"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+          echo "vastgelegd en gepusht: ${aantal} rij(en)"
+
+      # HET ALARM STAAT BUITEN DE KETEN DIE HET BEWAAKT.
+      #
+      # Dat is punt 4 van de opdracht, en het is geen theorie: op 26-07 om 19:39 meldde de waarnemer
+      # "pagina toont oude data" — die melding landde in de vastzittende spiegel en was dus precies zo
+      # onzichtbaar als de storing zelf. Een alarm dat door het zieke orgaan loopt, is geen alarm.
+      #
+      # Twee routes, allebei onafhankelijk van de spiegel én van de Pages-bouw:
+      #  1. de run wordt ROOD — GitHub mailt de eigenaar over een gefaalde workflow;
+      #  2. één openstaand issue in deze repo, dat bij herstel vanzelf weer dicht gaat.
+      # Deze repo is PUBLIEK, dus in het issue staan alleen tellingen en redencodes uit de vastgelegde
+      # lijst — nooit de inhoud van een rij, nooit een naam die niet al in deze repo staat.
+      - name: Alarm buiten de keten
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERK: 'DOORSTROOM ROOD'
+        run: |
+          set -euo pipefail
+
+          # Ontbrekend oordeel = de uitvoerder zelf viel om. Dat is rood, niet onbekend.
+          if [ ! -f /tmp/oordeel.json ]; then
+            uitkomst=ROOD
+            samenvatting='uitvoerder gaf geen oordeel af (UITVOERDER_GEFAALD) — zie de stapuitvoer hierboven'
+          else
+            uitkomst="$(node -p "JSON.parse(require('fs').readFileSync('/tmp/oordeel.json','utf8')).uitkomst")"
+            samenvatting="$(node -e '
+              const o = JSON.parse(require("fs").readFileSync("/tmp/oordeel.json","utf8"));
+              const r = [];
+              r.push(`bron: ${o.bron.ok ? `gelezen, ${o.bron.aangeleverd} rij(en) aangeleverd` : `NIET gelezen (${o.bron.reden})`}`);
+              r.push(`overgezet: ${o.overzetting.overgezet.length}, geweigerd: ${o.overzetting.geweigerd.length + o.bron.onbruikbaar.length}`);
+              r.push(`achterstand: ${o.achterstand.uitkomst}${o.achterstand.reden ? ` (${o.achterstand.reden})` : ""}${o.achterstand.oudsteMinuten === null ? "" : `, oudste ${o.achterstand.oudsteMinuten} min`}`);
+              r.push(`stempel: ${o.stempel.uitkomst}${o.stempel.reden ? ` (${o.stempel.reden})` : ""}${o.stempel.ouderdomMinuten === null ? "" : `, ${o.stempel.ouderdomMinuten} min oud`}`);
+              const b = o.bronRijen ?? { uitkomst: "?", reden: null, gevallen: 0, afgekapt: 0 };
+              r.push(`bronrijen: ${b.uitkomst}${b.reden ? ` (${b.reden})` : ""}${b.afgekapt ? `, ${b.afgekapt} ingekort` : ""}`);
+              const onbekend = o.vlootstand.filter((v) => v.toestand === "ONBEKEND").map((v) => v.venster);
+              r.push(`vloot ONBEKEND (${onbekend.length}): ${onbekend.join(", ") || "geen"}`);
+              process.stdout.write(r.join("\n"));
+            ')"
+          fi
+
+          nummer="$(gh issue list --state open --limit 50 --json number,title \
+            --jq "[.[] | select(.title | startswith(\"${MERK}\"))][0].number // empty")"
+
+          if [ "$uitkomst" = "ROOD" ]; then
+            tekst="$(printf 'Run: %s/%s/actions/runs/%s\nMoment: %s (aanleiding: %s)\n\n%s\n' \
+              "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}" \
+              "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${GITHUB_EVENT_NAME}" "$samenvatting")"
+            if [ -n "$nummer" ]; then
+              gh issue comment "$nummer" --body "$tekst"
+              echo "alarm bijgeschreven op issue #${nummer}"
+            else
+              nieuw="$(gh issue create --title "${MERK} — de doorstroom of de plaat staat stil" \
+                --body "$(printf 'Deze melding staat MET OPZET buiten de publieke spiegel en buiten de Pages-bouw: die twee zijn precies wat hier bewaakt wordt.\n\n%s\n\nDit issue sluit vanzelf zodra een volgende run weer GROEN is.\n' "$tekst")")"
+              echo "alarm geopend: ${nieuw}"
+            fi
+            echo "::error title=Doorstroom ROOD::${samenvatting}"
+            exit 1
+          fi
+
+          # Sluiten mag ALLEEN op GROEN. Een oordeel dat GEEL is (niet gemeten, geen telling op de
+          # plaat) sloot het alarm eerder gewoon: fail-open, precies de vorm die dit werk bestrijdt.
+          if [ "$uitkomst" != "GROEN" ]; then
+            echo "::warning title=Doorstroom niet groen::${uitkomst} — ${samenvatting}"
+            exit 0
+          fi
+
+          if [ -n "$nummer" ]; then
+            gh issue close "$nummer" --comment "$(printf 'Weer GROEN.\n\n%s\n' "$samenvatting")"
+            echo "alarm gesloten: #${nummer}"
+          fi
+          echo "GROEN"

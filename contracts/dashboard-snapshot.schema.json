@@ -19,12 +19,13 @@
     "tracks",
     "logbook",
     "ci",
-    "kanaalpost"
+    "kanaalpost",
+    "vlootstand"
   ],
   "properties": {
     "contractVersion": {
       "type": "string",
-      "const": "2.4.0",
+      "const": "2.5.0",
       "description": "Vastgepind: een DTO die zich niet als exact deze contractversie meldt, hoort niet bij dit schema. Bump dit samen met CONTRACT_VERSION in scripts/build.mjs."
     },
     "generatedAt": {
@@ -44,7 +45,8 @@
         "required": [
           "key",
           "trust",
-          "retrievedAt"
+          "retrievedAt",
+          "rijen"
         ],
         "additionalProperties": false,
         "properties": {
@@ -57,6 +59,39 @@
           "retrievedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "rijen": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Rijentelling van de lezer die deze bron leest. `herkend` < `inBron` betekent dat de lezer rijen heeft laten vallen — dat is een achterstand, geen lege bron. Null waar de bron geen rijen kent (PR-tellingen, CI-ampels).",
+            "required": [
+              "inBron",
+              "herkend",
+              "getoond",
+              "afgekapt"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "inBron": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "herkend": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "getoond": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "afgekapt": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Rijen waarvan de tekst is ingekort. Afkappen mag; stil afkappen niet."
+              }
+            }
           }
         }
       }
@@ -328,6 +363,118 @@
           "type": "integer",
           "minimum": 0,
           "description": "Aantal rijen dat de publicatie-poort niet haalde. Zichtbaar op de plaat: inhouden mag, stilzwijgend inhouden niet."
+        }
+      }
+    },
+    "vlootstand": {
+      "type": "object",
+      "description": "v2.5: welk venster WERKT, welk staat LEEG, en van welk weten we het niet. Afgeleid uit dezelfde publieke spiegel als `kanaalpost` — de spiegel toont wat er AFGEROND is, deze sectie wat er STIL is, en dat waren tot nu toe twee verschillende soorten onwetendheid: een venster dat niets meldt, verscheen nergens. Bewust NIET in de spiegel zelf ingeschreven: die is append-only (geen regel mag ooit verdwijnen), dus een kop die elke ronde herschreven wordt kan daar per definitie niet staan. Afleiden en tonen kan wel. `available: false` met reason BRON_ONBEREIKBAAR/LEEG is een geldige fail-closed eindstand; net als planning en kanaalpost staat deze sectie niet in `sources`.",
+      "required": [
+        "available",
+        "reason",
+        "grensMinuten",
+        "vensters",
+        "telling"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "BRON_ONBEREIKBAAR",
+            "LEEG",
+            null
+          ],
+          "description": "Waarom de sectie leeg is; null als hij gevuld is. Gesloten lijst, nooit vrije tekst."
+        },
+        "grensMinuten": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Hoe lang een venster mag zwijgen voordat het ONBEKEND heet. Staat op de plaat zelf, want een stand zonder zijn drempel is een mening."
+        },
+        "vensters": {
+          "type": "array",
+          "description": "Eén regel per venster van de vloot, in de volgorde van de vastgelegde lijst (`LANES` in scripts/lib/kijk.mjs). De lijst is gesloten: een venster dat daar niet in staat komt hier niet voor, en een venster dat wél in de lijst staat maar nooit meldde krijgt ONBEKEND — nooit stil groen.",
+          "items": {
+            "type": "object",
+            "required": [
+              "venster",
+              "rol",
+              "toestand",
+              "laatste",
+              "stilMinuten"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "venster": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9]*(?:[ -][A-Z0-9]+)*$",
+                "description": "Neutraal rollabel van het werkvenster, in kapitalen — hetzelfde patroon als `kanaalpost.rows[].tab`, want het is dezelfde soort naam."
+              },
+              "rol": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9 ./-]{0,39}$",
+                "description": "Waar dit venster over gaat, in maximaal veertig tekens uit een smal tekenbereik. Komt uit data/vloot.json en is null zolang dat bestand er niet is: een rol verzinnen zou een naam op de openbare plaat zetten die niemand heeft vastgesteld."
+              },
+              "toestand": {
+                "enum": [
+                  "WERKT",
+                  "LEEG",
+                  "ONBEKEND"
+                ],
+                "description": "WERKT = meldde binnen de grens iets anders dan lege voorraad. LEEG = meldde binnen de grens zelf dat de voorraad leeg is. ONBEKEND = zweeg langer dan de grens, of meldde nog nooit. Er is met opzet geen vierde waarde: onwetendheid is hier een stand, geen ontbrekend veld."
+              },
+              "laatste": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}( [0-9]{2}:[0-9]{2})?$",
+                "description": "Datum(-tijd) van de laatste melding van dit venster in de spiegel; null als het nog nooit meldde."
+              },
+              "stilMinuten": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Hoe lang dit venster al zwijgt, in minuten; null als er geen leesbaar moment is. Null is óók ONBEKEND — een onleesbare tijd bewijst geen activiteit."
+              }
+            }
+          }
+        },
+        "telling": {
+          "type": "object",
+          "description": "Kop-band van de sectie. Puur afgeleid uit `vensters`, zodat één regel lezen genoeg is.",
+          "required": [
+            "werkt",
+            "leeg",
+            "onbekend"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "werkt": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "leeg": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "onbekend": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
         }
       }
     },

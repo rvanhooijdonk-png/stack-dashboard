@@ -610,6 +610,56 @@ function kanaalpost(k) {
 </section>`;
 }
 
+/**
+ * VLOOTSTAND — de omgekeerde vraag van de kanaalpost.
+ *
+ * De kanaalpost toont wat er AFGEROND is. Wie niets meldt, komt daar per definitie niet in voor, dus
+ * was "welk venster staat leeg?" alleen te beantwoorden door zelf alle tabs af te lopen — precies het
+ * handwerk dat hier weg moet. Deze tabel toont daarom élk venster van de vastgelegde lijst, ook (juist)
+ * de vensters die zwijgen.
+ *
+ * Drie standen en geen vierde. `WERKT` moet verdiend worden met een recente melding; `LEEG` is een
+ * venster dat zijn lege voorraad zélf meldde; al het andere is `ONBEKEND`. Stilte wordt hier nooit
+ * groen — dat was de fout die twee dagen onzichtbaar bleef.
+ */
+const VLOOT_REDEN = {
+  LEEG: 'De vensterlijst kwam leeg terug. Zolang niet vaststaat wie er tot de vloot hoort, valt er over leegstand niets te zeggen.',
+  BRON_ONBEREIKBAAR: 'De spiegel kon niet gelezen worden, of de vensterlijst was niet als vensterlijst te lezen. Er staat hier bewust geen oude stand: geen bron is geen stand.',
+};
+const VLOOT_KLEUR = { WERKT: 'ok', LEEG: 'warn', ONBEKEND: 'bad' };
+
+function vlootstand(v) {
+  if (!v?.available) {
+    return `<section id="vlootstand" class="card wide">
+  <h2>Vlootstand — wie werkt, wie staat leeg</h2>
+  <p class="empty">${esc(VLOOT_REDEN[v?.reason] ?? VLOOT_REDEN.BRON_ONBEREIKBAAR)}</p>
+</section>`;
+  }
+  const stilte = (r) => {
+    if (r.stilMinuten === null) return r.laatste ? 'tijd onleesbaar' : 'nooit gemeld';
+    if (r.stilMinuten < 60) return `${num(r.stilMinuten)} min stil`;
+    return `${num(Math.floor(r.stilMinuten / 60))} u stil`;
+  };
+  const rows = v.vensters.map((r) => `<tr>
+      <td class="nowrap"><span class="tag">${esc(r.venster)}</span></td>
+      <td>${r.rol ? esc(r.rol) : '<span class="muted">—</span>'}</td>
+      <td class="nowrap muted">${r.laatste ? esc(r.laatste) : '—'}</td>
+      <td class="nowrap muted">${esc(stilte(r))}</td>
+      <td class="nowrap"><span class="dot ${VLOOT_KLEUR[r.toestand] ?? 'bad'}"></span>${esc(r.toestand)}</td></tr>`).join('\n');
+  return `<section id="vlootstand" class="card wide">
+  <h2>Vlootstand — wie werkt, wie staat leeg
+    <span class="badge">${num(v.telling.werkt)} werkt · ${num(v.telling.leeg)} leeg · ${num(v.telling.onbekend)} onbekend</span></h2>
+  <p class="lead muted">Eén regel per werkvenster. Een venster dat langer dan
+  <strong>${num(v.grensMinuten)}</strong> minuten niets meldde staat op <strong>ONBEKEND</strong> — nooit
+  stil groen: van een zwijgend venster weet niemand of het werkt of leegstaat. <em>LEEG</em> verschijnt
+  alleen als het venster zijn lege voorraad zelf heeft gemeld.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>venster</th><th>rol</th><th>laatste melding</th><th>stilte</th><th>stand</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>
+</section>`;
+}
+
 const STYLE = `
 :root{--bg:#0f1115;--card:#171a21;--line:#252a34;--fg:#e6e8ec;--mut:#9aa3b2;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#58a6ff}
 @media (prefers-color-scheme:light){:root{--bg:#f6f7f9;--card:#fff;--line:#e3e6ea;--fg:#1c2027;--mut:#5c6470;--acc:#0969da}}
@@ -709,6 +759,8 @@ de leeftijd van déze kopie; losse brondata kan ouder zijn, dus lees ook de badg
 ${overzicht(s)}
 
 ${planning(s.planning, s.generatedAt)}
+
+${vlootstand(s.vlootstand)}
 
 ${kanaalpost(s.kanaalpost)}
 
