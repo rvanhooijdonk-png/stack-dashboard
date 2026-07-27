@@ -160,8 +160,13 @@ export function overzetting(spiegelTekst, bronRijen = []) {
  */
 export function achterstandsOordeel(bronRijen = [], spiegelTekst, { nu = new Date(), minuten = ACHTERSTAND_MINUTEN } = {}) {
   const tekst = spiegelTekst === null || spiegelTekst === undefined ? null : String(spiegelTekst);
-  if (tekst === null || !kanoniekeSpiegelvorm(tekst).ok) {
-    return { uitkomst: 'ROOD', reden: 'SPIEGEL_ONLEESBAAR', achterstallig: [], oudsteMinuten: null };
+  const vormBron = tekst === null ? null : kanoniekeSpiegelvorm(tekst);
+  if (vormBron === null || !vormBron.ok) {
+    // De reden van de vormpoort reist mee. Zonder dat zegt het alarm alleen "onleesbaar", en dan
+    // begint de zoektocht bij nul terwijl de poort de plek en de soort al wist. Beide zijn
+    // getallen en gesloten-lijst-namen — geen brontekst, want dit belandt in een publieke log.
+    const soort = vormBron === null ? 'GEEN_BRON' : `${vormBron.reden}@${vormBron.regel}`;
+    return { uitkomst: 'ROOD', reden: `SPIEGEL_ONLEESBAAR/${soort}`, achterstallig: [], oudsteMinuten: null };
   }
 
   const regels = regelsVan(tekst);
@@ -344,4 +349,33 @@ export function bronRijenOordeel(sources) {
     gevallen,
     afgekapt,
   };
+}
+
+/**
+ * HET EINDOORDEEL — één plek waar de deeloordelen samenkomen, zodat de regel te toetsen is.
+ *
+ * Drie waarden, niet twee: "niet gemeten" is GEEL en werd hier eerder afgerond naar GROEN.
+ * Nieuw (27-07): een BRONMAP DIE NIET BESTAAT telt als niet-gemeten. De doorstroom las een
+ * ontbrekende inbox als "0 rijen aangeleverd" en oordeelde groen — want zonder aanvoer kan niets
+ * achterlopen. Dat is afwezigheid gelezen als gezondheid: dezelfde klasse die dit bouwsel bestrijdt,
+ * in het bouwsel zelf. Ontbreekt de map, dan is er niets bewezen en mag het nooit groen zijn.
+ *
+ * @param {object} p
+ * @param {string[]} p.delen        de deeloordelen (GROEN/GEEL/ROOD)
+ * @param {boolean}  p.bronOk       is de bron überhaupt gelezen
+ * @param {string|null} p.inboxMap  'AANWEZIG' | 'ONTBREEKT' | null (niet vastgesteld)
+ */
+export function eindoordeel({ delen = [], bronOk = true, inboxMap = null } = {}) {
+  // ELKE onbekende waarde is GEEL, niet GROEN (bevinding Gemini 27-07). Een deeloordeel dat
+  // `undefined`, `null` of `'FOUT'` teruggeeft, is een stuk dat niet gemeten heeft — en dat viel er
+  // hier stil doorheen: `.includes('ROOD')` en `.includes('GEEL')` zeiden allebei nee, en dan bleef
+  // GROEN over. Een kapotte meter die groen licht geeft is precies de klasse die dit alarm bestrijdt.
+  const gewogen = delen.map((d) => (UITKOMSTEN.includes(d) ? d : 'GEEL'));
+  // Zo ook de map: alleen het uitdrukkelijke 'AANWEZIG' en het niet-gestelde `null` zijn geen
+  // bezwaar. 'ONTBREEKT' en elke andere waarde vergelen — anders zou een nieuwe foutstatus
+  // (bijvoorbeeld 'ERROR') stilzwijgend als gezond tellen.
+  const kaart = inboxMap === 'AANWEZIG' || inboxMap === null || inboxMap === undefined ? 'GROEN' : 'GEEL';
+  const alles = [...gewogen, kaart];
+  if (!bronOk || alles.includes('ROOD')) return 'ROOD';
+  return alles.includes('GEEL') ? 'GEEL' : 'GROEN';
 }

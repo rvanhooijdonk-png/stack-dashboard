@@ -28,8 +28,8 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 
 import {
-  ACHTERSTAND_MINUTEN, achterstandsOordeel, bronRijenOordeel, bronRijUitTekst, overzetting,
-  stempelOordeel, vlootstand,
+  ACHTERSTAND_MINUTEN, achterstandsOordeel, bronRijenOordeel, bronRijUitTekst, eindoordeel,
+  overzetting, stempelOordeel, vlootstand,
 } from './lib/doorstroom.mjs';
 import { LANES } from './lib/kijk.mjs';
 import { alleenAangevuld } from './lib/spiegelwet.mjs';
@@ -77,8 +77,13 @@ async function leesInbox() {
   if (!sha) return { ok: false, reden: 'BRON_GEEN_SHA', rijen: [], stuk: [] };
 
   const lijst = await haal(`https://api.github.com/repos/${BRON_REPO}/contents/${BRON_MAP}?ref=${sha}`);
-  // Een lege of nog niet bestaande map is geen storing: dan is er simpelweg niets aangeleverd.
-  if (lijst.status === 404) return { ok: true, sha, rijen: [], stuk: [] };
+  // Een map die NIET BESTAAT is iets anders dan een map die leeg is, en het verschil is precies de
+  // klasse die dit hele bouwsel bestrijdt. GEMETEN 27-07-2026: `CONTROL/SPIEGEL/INBOX` op de
+  // rapporten-tak geeft HTTP 404 — en de doorstroom meldde daarop "gelezen, 0 rij(en) aangeleverd"
+  // met een GROENE achterstand, want zonder bron kan niets achterlopen. Dat is afwezigheid gelezen
+  // als gezondheid, in mijn eigen alarm. De map wordt daarom apart gemeld en het eindoordeel kan er
+  // niet groen op staan.
+  if (lijst.status === 404) return { ok: true, sha, rijen: [], stuk: [], map: 'ONTBREEKT' };
   if (lijst.status !== 200) return { ok: false, reden: `INBOX_HTTP_${lijst.status}`, rijen: [], stuk: [] };
 
   let items = [];
@@ -101,7 +106,7 @@ async function leesInbox() {
     if (!gelezen.ok) { stuk.push({ id: item.name, reden: gelezen.reden }); continue; }
     rijen.push({ ...gelezen, geleverdOp });
   }
-  return { ok: true, sha, rijen, stuk };
+  return { ok: true, sha, rijen, stuk, map: 'AANWEZIG' };
 }
 
 const leesTekst = (pad) => { try { return readFileSync(pad, 'utf8'); } catch { return null; } };
@@ -113,7 +118,8 @@ const spiegelOud = leesTekst(SPIEGEL);
 
 console.log(`doorstroom — bron ${BRON_REPO}@${BRON_TAK}/${BRON_MAP}`);
 if (!inbox.ok) console.log(`bron niet gelezen: ${inbox.reden}`);
-else console.log(`bron: kop ${inbox.sha}, ${inbox.rijen.length} rij(en) aangeleverd, ${inbox.stuk.length} onbruikbaar`);
+else console.log(`bron: kop ${inbox.sha}, ${inbox.rijen.length} rij(en) aangeleverd, ${inbox.stuk.length} onbruikbaar`
+  + `${inbox.map === 'ONTBREEKT' ? ` — LET OP: de inbox-map ${BRON_MAP} bestaat niet op deze tak` : ''}`);
 
 const uit = overzetting(spiegelOud, inbox.rijen);
 const achterstand = inbox.ok
@@ -171,7 +177,7 @@ if (schrijven && !uit.ongewijzigd) {
 
 const oordeel = {
   nu: nu.toISOString(),
-  bron: { ok: inbox.ok, reden: inbox.ok ? null : inbox.reden, sha: inbox.sha ?? null, aangeleverd: inbox.rijen.length, onbruikbaar: inbox.stuk },
+  bron: { ok: inbox.ok, reden: inbox.ok ? null : inbox.reden, sha: inbox.sha ?? null, aangeleverd: inbox.rijen.length, onbruikbaar: inbox.stuk, map: inbox.map ?? null },
   overzetting: { overgezet: uit.overgezet.map((o) => o.id), geweigerd: uit.geweigerd },
   achterstand,
   stempel,
@@ -180,11 +186,11 @@ const oordeel = {
   // Eén veld waar de alarmstap op kijkt: elk rood telt, ongeacht welke van de drie het was.
   // Drie waarden, niet twee (Codex, 27-07): een GEEL deeloordeel — "niet gemeten" — werd hier
   // afgerond naar GROEN en sloot daarmee het alarm. Niet-gemeten is geen goed nieuws.
-  uitkomst: (() => {
-    const delen = [achterstand.uitkomst, stempel.uitkomst, bronRijen.uitkomst];
-    if (delen.includes('ROOD') || !inbox.ok) return 'ROOD';
-    return delen.includes('GEEL') ? 'GEEL' : 'GROEN';
-  })(),
+  uitkomst: eindoordeel({
+    delen: [achterstand.uitkomst, stempel.uitkomst, bronRijen.uitkomst],
+    bronOk: inbox.ok,
+    inboxMap: inbox.map ?? null,
+  }),
 };
 if (uitvoerPad) writeFileSync(uitvoerPad, `${JSON.stringify(oordeel, null, 2)}\n`, 'utf8');
 console.log(`\nuitkomst: ${oordeel.uitkomst}`);
