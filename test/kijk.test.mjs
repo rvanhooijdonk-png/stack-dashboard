@@ -1528,7 +1528,7 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
   // presets, tabellen aan): 20 gevallen waarin de scanner MEER rijen leest dan markdown ziet, en de
   // poort weigert alle 20. De overige 37 zijn gelijk. Nul gevallen waarin de scanner minder ziet.
   const trimKlasse = [];
-  for (let cp = 0; cp <= 0xffff; cp++) {
+  for (let cp = 0; cp <= 0x10ffff; cp++) {  // elk codepunt betekent elk codepunt, niet alleen de BMP (Codex, elfde ronde)
     if (cp >= 0xd800 && cp <= 0xdfff) continue; // losse surrogaten zijn geen teken
     const c = String.fromCodePoint(cp);
     if ((c + 'x').trim() === 'x' && c !== ' ' && c !== '\t') trimKlasse.push(c);
@@ -1552,10 +1552,12 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
       assert.ok(['VREEMDE_WITRUIMTE', 'REGELSCHEIDER'].includes(vorm.reden), `${naam} ${waar}: gesloten reden, kreeg ${vorm.reden}`);
       assert.equal(kanaalpostUitTekst(tekst).available, false, `${naam} ${waar}: er komt geen rij uit`);
       // Dit onderscheidt de proef van een tautologie (Codex, tiende ronde): de POORTLOZE scanner
-      // leest hier wel gewoon een rij. De twee lezers zijn het dus echt oneens, en de poort verbergt
-      // dat niet maar weigert erop. Zonder deze assertie bevestigt de proef alleen dat de regex zijn
-      // eigen tekens matcht. Wat de proef NIET doet is markdown zelf draaien: dat vraagt een
-      // testafhankelijkheid en die keuze staat als beslispunt in het rapport.
+      // leest hier wel gewoon een rij, en de poort houdt juist die lezing tegen. Precies gezegd
+      // (Codex, elfde ronde): de suite bewijst hiermee de SCANNERHELFT — dat er een rij te lezen
+      // valt en dat de poort hem tegenhoudt. De MARKDOWNHELFT (dat markdown hier nul rijen ziet) is
+      // alleen EXTERN gemeten, met markdown-it ernaast, en staat niet in deze suite. De poort is
+      // geen tweede lezer. Markdown in de suite draaien vraagt een testafhankelijkheid; die keuze
+      // staat als beslispunt in het rapport en is niet eenzijdig genomen.
       assert.equal(spiegelScan(tekst).kandidaten.filter(Boolean).length, 1, `${naam} ${waar}: de scanner leest hier wel een rij`);
     }
   }
