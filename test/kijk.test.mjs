@@ -1427,10 +1427,47 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
     ['CONTAINER', 'gewone tekst\n1. een genummerde'],
     ['REGELSCHEIDER', `gewone tekst\niets${String.fromCodePoint(0x2028)}anders`],
     ['REGELSCHEIDER', `gewone tekst\niets${String.fromCodePoint(0x2029)}anders`],
+    // Form feed en verticale tab apart, want ze zitten in dezelfde tekenklasse en werden daardoor
+    // door de U+2028-proef "gedekt" zonder ooit zelf gemeten te zijn (Codex, zevende ronde).
+    ['REGELSCHEIDER', 'gewone tekst\niets\fanders'],
+    ['REGELSCHEIDER', 'gewone tekst\niets\vanders'],
   ];
   for (const [reden, tekst] of perStuk) {
     assert.deepEqual(kanoniekeSpiegelvorm(tekst), { ok: false, reden, regel: 2 }, tekst);
   }
+
+  // ZEVENDE REVIEWRONDE — de poort telde TEKENS waar markdown KOLOMMEN telt. Codex vond dat een tab
+  // achter één, twee of drie spaties de eerste versie van deze toets (`/^(?: {4}|\t)/`) passeerde.
+  // GEMETEN VÓÓR DE FIX, met de drie tabelregels erachter, op de echte lezer:
+  //   poort PASSEERT · scanner leest 1 rij · beschikbaar true
+  //   markdown-it (GFM) op dezelfde bytes: code_block, 0 tabellen
+  // Dus opnieuw de gevaarlijke kant, en opnieuw omdat de poort markdown nabootste in plaats van te
+  // eisen. De reparatie zit op de kolomtelling zelf, niet op nog een patroon erbij.
+  for (const voor of [' \t', '  \t', '   \t', '\t', '    ']) {
+    const ingesprongen = [voor + KOP, voor + SCH, voor + R('2026-07-26 17:10', 'MINI', 'Binnen.')].join('\n');
+    assert.deepEqual(kanoniekeSpiegelvorm(ingesprongen), { ok: false, reden: 'INSPRINGING', regel: 1 },
+      `${JSON.stringify(voor)} is vier kolommen en dus een codeblok`);
+    assert.equal(kanaalpostUitTekst(ingesprongen).available, false, JSON.stringify(voor));
+  }
+
+  // En de grens de andere kant op, want een poort die te veel weigert maakt de plaat donker zonder
+  // reden: drie kolommen is nog gewoon een tabel, voor markdown én voor de scanner. Een regel die
+  // ALLEEN uit witruimte bestaat is voor markdown een lege regel, hoeveel witruimte er ook staat, en
+  // kan dus nooit een codeblok openen — die mag er ook door.
+  assert.equal(kanoniekeSpiegelvorm('tekst\n   drie spaties').ok, true);
+  assert.equal(kanoniekeSpiegelvorm('tekst\n    \ntekst').ok, true, 'alleen witruimte is een lege regel');
+  assert.equal(kanoniekeSpiegelvorm('tekst\n\t\ntekst').ok, true, 'ook als die witruimte een tab is');
+  assert.equal(kanoniekeSpiegelvorm('tekst\nab\tcd').ok, true, 'een tab midden in een regel springt niets in');
+
+  // WEERLEGD, en daarom vastgelegd — anders komt hij elke ronde terug. Gemini meldde in de zevende
+  // ronde dat een link-referentie met een meerregelige titel (`[x]: /u "` … `"`) de rijen ertussen
+  // voor markdown ONZICHTBAAR maakt terwijl de scanner ze binnenlaat. Nagemeten op exact die bytes:
+  // markdown-it (GFM) rendert `<p>[link]: /url "</p>` GEVOLGD door een echte tabel met de rij erin —
+  // de tabel onderbreekt de alinea, dus de referentie komt nooit tot stand. Beide lezers zien de rij.
+  // Geen divergentie, en zeker niet de gevaarlijke kant; de poort hoeft hier niets te doen.
+  const linkreferentie = ['[link]: /url "', KOP, SCH, R('2026-07-26 17:10', 'MINI', 'Binnen.'), '"'].join('\n');
+  assert.equal(kanoniekeSpiegelvorm(linkreferentie).ok, true, 'hier is niets aan de vorm mis');
+  assert.equal(kanaalpostUitTekst(linkreferentie).rows.length, 1, 'en de rij hoort gelezen te worden');
 
   // En de andere kant, want een poort die alles weigert is geen poort: het ECHTE bestand komt er
   // gewoon door. Gemeten op `data/kanaalpost-publiek.md` (85 regels, 26-07-2026): 0 hekken,
@@ -1469,6 +1506,7 @@ test('reviewgat 30 — de vormpoort heeft een schrijfkant, anders is hij een voe
     ['```markdown', 'VORM_CODEHEK'],
     ['<div>', 'VORM_RAUWE_HTML'],
     ['    ingesprongen uitleg', 'VORM_INSPRINGING'],
+    [' \tingesprongen met een tab', 'VORM_INSPRINGING'], // vier kolommen, twee tekens (zevende ronde)
     ['- een opsomming', 'VORM_CONTAINER'],
     ['> een blockquote', 'VORM_CONTAINER'],
   ];

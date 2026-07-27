@@ -225,6 +225,37 @@ const hekKern = (regel) => String(regel).replace(/^[ \t]*(?:(?:>[ \t]*)+)?(?:[-*
  * De scanner hieronder blijft ongewijzigd staan als tweede laag: raakt deze poort ooit verzwakt, dan
  * is er nog steeds scope-afhandeling. Twee lagen die hetzelfde bedoelen, niet één die het moet halen.
  */
+/**
+ * Hoeveel KOLOMMEN springt deze regel in? Markdown telt inspringing niet in tekens maar in kolommen,
+ * en een tab springt naar het eerstvolgende veelvoud van vier. `" \t"` is dus vier kolommen — een
+ * ingesprongen codeblok — terwijl het maar twee tekens zijn.
+ *
+ * ZEVENDE REVIEWRONDE (Codex, kop 726cdb7). De eerste versie van deze toets was `/^(?: {4}|\t)/` en
+ * keek dus alleen naar een tab op kolom nul. Gemeten op de echte lezer, met een tab achter één, twee
+ * en drie spaties, elk met de drie tabelregels erachter:
+ *   poort PASSEERT · scanner leest 1 rij · beschikbaar true
+ *   markdown-it (GFM) leest 0 tabellen: het is een ingesprongen codeblok
+ * Dat is exact de gevaarlijke kant — uitleg komt binnen als echte toestand — en het is dezelfde fout
+ * die de poort juist moest uitsluiten, alleen een laag dieper: de poort modelleerde markdown-tekens
+ * in plaats van markdown-kolommen.
+ *
+ * Een regel die ALLEEN uit witruimte bestaat is voor markdown een lege regel, hoeveel witruimte er ook
+ * staat, en kan dus nooit een codeblok openen. Die wordt hier niet als inspringing geteld — anders
+ * maakt één spatie op een verder lege regel het hele logboek onleesbaar zonder dat er iets te winnen is.
+ */
+function inspringkolommen(regel) {
+  const r = String(regel);
+  if (/^[ \t]*$/.test(r)) return 0; // alleen witruimte: voor markdown een lege regel
+  let kolom = 0;
+  for (const teken of r) {
+    if (teken === ' ') kolom += 1;
+    else if (teken === '\t') kolom += 4 - (kolom % 4);
+    else return kolom;
+    if (kolom >= 4) return kolom;
+  }
+  return kolom;
+}
+
 const KANONIEK_VERBODEN = Object.freeze([
   // Een codehek waar dan ook op de regel. Bewust grover dan markdown: `HEK` eist hoogstens drie
   // spaties inspringing, hier is elk voorkomen genoeg. Vangt Gemini B, Codex 1/4/5/6.
@@ -234,8 +265,9 @@ const KANONIEK_VERBODEN = Object.freeze([
   // Een regel die met een tag begint: markdown houdt zo'n blok open tot een lege regel of EOF, en
   // alles ertussen is geen tabel. Vangt Codex 4 ook zonder hek.
   { reden: 'RAUWE_HTML', test: (r) => /^ {0,3}</.test(r) },
-  // Vier spaties of een tab is een ingesprongen codeblok; een tabelregel daarin is geen tabel.
-  { reden: 'INSPRINGING', test: (r) => /^(?: {4}|\t)/.test(r) },
+  // Vier KOLOMMEN inspringing is een ingesprongen codeblok; een tabelregel daarin is geen tabel.
+  // In kolommen, niet in tekens — zie `inspringkolommen` (Codex, zevende ronde).
+  { reden: 'INSPRINGING', test: (r) => inspringkolommen(r) >= 4 },
   // Blockquote of lijstitem: containers verplaatsen de kolom waarop alles telt.
   { reden: 'CONTAINER', test: (r) => /^ {0,3}(?:>|(?:[-*+]|\d{1,9}[.)])[ \t])/.test(r) },
   // U+2028/U+2029 en de form feed zijn regelscheiders voor sommige lezers en gewone tekens voor
