@@ -254,7 +254,60 @@ function springtIn(regel) {
   return /^[ \t]/.test(r);
 }
 
+/**
+ * Draagt deze REGEL een onopgeloste samenvoegmarkering? Losstaand en vormonafhankelijk, want de
+ * vormpoort hierboven geldt alleen voor de publieke spiegel: het INTERNE `CONTROL/KANAALPOST.md`
+ * opent met een HTML-commentaarkop en wordt door die poort sowieso geweigerd (GEMETEN 27-07-2026 op
+ * zes opeenvolgende versies: alle zes `HTML_COMMENTAAR` op regel 1, óók de twee die echt corrupt
+ * waren). Een toets die alleen ín de vormpoort leeft, kan het bestand dat corrupt raakte dus niet
+ * bewaken. Daarom staat hij hier apart en is hij op elk tekstbestand te draaien.
+ *
+ * Alle vier de vormen die git achterlaat, inclusief `|||||||` van de diff3-stijl. MINSTENS zeven
+ * tekens (bevinding Codex 27-07: `conflict-marker-size` in `.gitattributes` mag groter dan zeven
+ * zijn, en dan zou een vaste zeven de markering missen) en dan witruimte of regeleinde — zes is geen
+ * markering en zeven met tekst eraan vast evenmin.
+ */
+export const isConflictmarkering = (regel) => /^(?:<{7,}|={7,}|>{7,}|\|{7,})(?:[ \t]|$)/.test(String(regel ?? ''))
+  || /^<{7,}/.test(String(regel ?? ''));
+
+/**
+ * Alleen de OPENINGS- en SLUITMARKERING.
+ *
+ * De opening mag ZONDER witruimte erachter (bevinding Gemini 27-07: `<<<<<<<HEAD` komt voor bij
+ * handmatig bewerken en bij externe samenvoegtools; git zelf zet er een spatie tussen). Zeven punthaken
+ * aan het begin van een regel zijn in geen enkele markdown of HTML iets legitiems, dus daar kost het
+ * niets. Bij de SLUITING blijft de witruimte-eis wél staan, en dat is geen slordigheid: `>>>>>>>tekst`
+ * is zevenvoudig geneste blokcitatie — zeldzaam, maar geldige markdown. Liever daar één vorm missen
+ * dan een geldig document weigeren; de opening staat er in een echt conflict altijd bij.
+ */
+const isConflictAnker = (regel) => /^<{7,}/.test(String(regel ?? '')) || /^>{7,}(?:[ \t]|$)/.test(String(regel ?? ''));
+
+/**
+ * De REGELNUMMERS (1-gebaseerd) met een samenvoegmarkering. Leeg = schoon. Nooit brontekst terug.
+ *
+ * MET ÉÉN ANKEREIS (bevinding Codex 27-07, en hij heeft gelijk): `=======` op zichzelf is géén bewijs
+ * van een conflict — het is ook de onderstreping van een setext-kop, en `|||||||` lijkt op een lege
+ * tabelregel. Zonder anker zou een geldig document geweigerd worden en dan blokkeert de poort de hele
+ * spiegel om niets. Een `=`- of `|`-markering telt daarom alleen mee als er in hetzelfde document ook
+ * een `<<<<<<<` of `>>>>>>>` staat. Git laat die altijd achter — de gemeten corruptie had alle drie.
+ */
+export function conflictmarkeringen(tekst) {
+  const regels = String(tekst ?? '').split(/\r\n|\r|\n/);
+  const heeftAnker = regels.some(isConflictAnker);
+  return regels
+    .map((r, i) => ((heeftAnker ? isConflictmarkering(r) : isConflictAnker(r)) ? i + 1 : 0))
+    .filter((n) => n > 0);
+}
+
 const KANONIEK_VERBODEN = Object.freeze([
+  // Een onopgeloste samenvoeging. GEMETEN geval (27-07-2026): `CONTROL/KANAALPOST.md` op de
+  // rapporten-tak droeg twee keer op één ochtend een `<<<<<<< HEAD` / `=======` / `>>>>>>> <sha>`
+  // blok — één keer 5 minuten, één keer minder dan één minuut — en werd beide keren gewoon
+  // gepubliceerd. Deze regel staat BEWUST vóór `RAUWE_HTML` en `CONTAINER`: die twee weigerden de
+  // openings- en sluitmarkering al, maar onder een reden die naar het verkeerde ding wijst, en de
+  // middelste markering (`=======`) glipte er langs. Een poort die weigert maar de verkeerde naam
+  // noemt, stuurt de zoeker weg van de corruptie. De reden hoort de vondst te zijn.
+  // (de toets zelf staat documentbreed in `kanoniekeSpiegelvorm` — hij heeft het hele document nodig)
   // Een codehek waar dan ook op de regel. Bewust grover dan markdown: `HEK` eist hoogstens drie
   // spaties inspringing, hier is elk voorkomen genoeg. Vangt Gemini B, Codex 1/4/5/6.
   { reden: 'CODEHEK', test: (r) => /(`{3,}|~{3,})/.test(r) },
@@ -299,6 +352,12 @@ const KANONIEK_VERBODEN = Object.freeze([
  */
 export function kanoniekeSpiegelvorm(tekst) {
   const regels = String(tekst ?? '').split(/\r\n|\r|\n/);
+  // BEWUST als eerste, vóór `RAUWE_HTML` en `CONTAINER`: die twee weigerden de openings- en
+  // sluitmarkering al, maar onder een reden die naar het verkeerde ding wijst. De reden hoort de
+  // vondst te zijn. Documentbreed en niet per regel, want `=======` is pas een markering als er ook
+  // een anker in hetzelfde document staat.
+  const conflict = conflictmarkeringen(tekst);
+  if (conflict.length > 0) return { ok: false, reden: 'CONFLICTMARKERING', regel: conflict[0] };
   for (let i = 0; i < regels.length; i += 1) {
     for (const v of KANONIEK_VERBODEN) {
       if (v.test(regels[i])) return { ok: false, reden: v.reden, regel: i + 1 };

@@ -190,10 +190,34 @@ test('een rij die de lezer niet begrijpt telt toch mee aan de bronkant', () => {
 });
 
 test('een trackerregel in een onbekende schrijfwijze verdwijnt niet uit de telling', () => {
+  // Hiervóór was dit een GEMETEN gat: de rij telde aan de bronkant mee en werd niet begrepen
+  // (`herkend: 0`). Eerlijk, maar onhersteld — en op de echte tracker gold dat voor 17 van de 32
+  // updates. Sinds het anker alleen nog het woord en de datum eist, wordt hij gelezen; zonder
+  // volgnummer kan hij het publieke contract (`number` = geheel getal) niet in, dus hij is HERKEND
+  // en niet GETOOND. Dat verschil is een venster en staat in de telling.
   const { updates, telling } = leesTracker('**Update 26/7 zonder nummer — iets belangrijks.**');
   assert.equal(updates.length, 0);
-  assert.equal(telling.inBron, 1, 'hij stond er wel');
-  assert.equal(telling.herkend, 0);
+  assert.deepEqual(telling, { inBron: 1, herkend: 1, getoond: 0, afgekapt: 0 });
+});
+
+test('het volgnummer wordt gevonden waar het staat, en niet verzonnen waar het ontbreekt', () => {
+  // De drie schrijfwijzen die op de echte tracker samen 17 rijen kostten, plus de valkuil.
+  const bron = [
+    '**Update 23/7 (23) — pal achter de datum.**',
+    '**Update 22/7 nacht (8) — met een dagdeel ertussen.**',
+    '**Update 22/7 middag/namiddag — helemaal zonder nummer.**',
+    '**Update 21/7 en eerder.**',
+    '**Update 20/7 — een titel met (2026) erin, en dat is geen volgnummer.**',
+  ].join('\n');
+  const { updates, telling } = leesTracker(bron);
+  assert.equal(telling.inBron, 5);
+  assert.equal(telling.herkend, 5, 'alle vijf gelezen — dit is de reparatie');
+  assert.deepEqual(updates.map((u) => u.number), [23, 8], 'alleen genummerde in het venster');
+  assert.deepEqual(updates.map((u) => u.title),
+    ['pal achter de datum', 'met een dagdeel ertussen']);
+  // Een getal achter een gedachtestreepje hoort bij de titel; wie dat als volgnummer leest, zet de
+  // hele lijst in de verkeerde volgorde.
+  assert.equal(telling.getoond, 2);
 });
 
 test('afkappen wordt gemeld, ook in het journaal', () => {

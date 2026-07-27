@@ -322,7 +322,25 @@ export function leesBesluiten(text) {
 export function leesTracker(text) {
   const regels = String(text ?? '').split('\n');
   const updateKandidaat = /^ {0,3}\*\*Update\b/i;
-  const updateAnker = /^ {0,3}\*\*Update\s+([0-9]{1,2}\/[0-9]{1,2})\s*\((\d+)\)\s*(?:[—-]\s*)?(.*)$/;
+  // Het anker eist alleen wat een update IDENTIFICEERT: het woord en een datum. Alles daarna is
+  // vorm, en vorm varieert. GEMETEN 27-07-2026 op de echte tracker: 17 van de 32 updates vielen
+  // weg omdat het oude anker het volgnummer PAL achter de datum eiste — `Update 22/7 nacht (8)`,
+  // `Update 22/7 middag/namiddag`, `Update 21/7 en eerder` haalden het geen van drieën. Dat is
+  // dezelfde vorm als de 160-tekengrens: een lezer die de vorm van gisteren eist en vandaag stil
+  // minder leest.
+  // De `i`-vlag is niet cosmetisch: `updateKandidaat` (de BRONtelling) is hoofdletterongevoelig, dus
+  // `**UPDATE 22/7 ...` telde wél mee in `inBron` en niet in `herkend` — een zelfgemaakte ROOD op een
+  // regel die er gewoon staat. Gemeten op de echte tracker komt die schrijfwijze niet voor, dus dit is
+  // dichtzetten vóór het gebeurt (bevinding Codex 27-07), geen reparatie van iets zichtbaars.
+  const updateAnker = /^ {0,3}\*\*Update\s+([0-9]{1,2}\/[0-9]{1,2})\s*(.*)$/i;
+  // Het volgnummer staat tussen haakjes ergens vóór het gedachtestreepje — met of zonder dagdeel
+  // ertussen. Staat er een streepje vóór de haakjes, dan hoort het getal bij de TITEL en niet bij
+  // de update (`Update 23/7 — iets (2026) meer`), en blijft het nummer leeg.
+  // Hoogstens DRIE cijfers, en tussen datum en nummer geen cijfer. Anders leest
+  // `Update 22/7 nacht (2026) — titel` het jaartal als volgnummer 2026 en duwt dat élke echte update
+  // uit de top-8 (bevinding Codex 27-07). Het dagdeel ertussen — "nacht", "avond", "vroeg", "laat" —
+  // is echt en staat op 12 van de 32 gemeten regels, dus de prefix mag blijven; cijfers erin niet.
+  const nummerVoorop = /^([^(]{0,24})\(([0-9]{1,3})\)\s*/;
   // Kandidaat is élke vermelding van BESLISPUNT met een nummer erachter; het anker eist het
   // liggend streepje. `BESLISPUNT 12a: titel` haalde het anker niet en telde ook niet mee — dan
   // meldt de lezer nul en dat ziet er hetzelfde uit als geen beslispunten (Codex, 27-07).
@@ -338,8 +356,18 @@ export function leesTracker(text) {
     if (updateKandidaat.test(regel)) {
       inBron += 1;
       const m = updateAnker.exec(regel);
-      const title = m ? staart(m[3], 120, afgekapt) : '';
-      if (m && title) gelezen.push({ number: Number(m[2]), date: m[1], title });
+      if (m) {
+        let rest = m[2];
+        let number = null;
+        const nm = nummerVoorop.exec(rest);
+        // Ook het en-streepje `–`, niet alleen het em-streepje: anders hoort het getal bij de titel
+        // en telt het toch als volgnummer.
+        if (nm && !/[—–-]/.test(nm[1]) && !/[0-9]/.test(nm[1])) { number = Number(nm[2]); rest = rest.slice(nm[0].length); }
+        // Een update zonder titel is nog steeds een update. Zijn eigen datum is dan zijn naam —
+        // dat is geen verzinsel maar wat er staat, en het scheelt een rij die stil verdwijnt.
+        const title = staart(rest.replace(/^[—-]\s*/, ''), 120, afgekapt) || m[1];
+        gelezen.push({ number, date: m[1], title, volgorde: gelezen.length });
+      }
     }
     puntKandidaat.lastIndex = 0;
     inBron += [...regel.matchAll(puntKandidaat)].length;
@@ -354,8 +382,21 @@ export function leesTracker(text) {
       punten.push({ id: p[1], title, category: categoriseer(title) });
     }
   }
-  gelezen.sort((a, b) => b.number - a.number);
-  const updates = gelezen.slice(0, 8);
+  // Genummerd eerst, hoogste boven; wat geen nummer draagt houdt zijn plek in het bestand. Zonder
+  // die tweedeling maakt één update zonder nummer (`b.number - a.number` met null) de hele volgorde
+  // stuk, en dan verandert een leesfout stilletjes wát er bovenaan staat.
+  gelezen.sort((a, b) => {
+    if (a.number === null && b.number === null) return a.volgorde - b.volgorde;
+    if (a.number === null) return 1;
+    if (b.number === null) return -1;
+    return b.number - a.number;
+  });
+  // Het publieke contract eist een geheel getal als volgnummer, dus een update zonder nummer kan
+  // niet in de VENSTERLIJST. Hij is wel HERKEND en wordt als zodanig geteld: het verschil tussen
+  // `herkend` en `getoond` is een venster, geen verlies — precies het onderscheid waarvoor de
+  // telling gemaakt is.
+  const updates = gelezen.filter((u) => Number.isInteger(u.number))
+    .slice(0, 8).map(({ number, date, title }) => ({ number, date, title }));
   const decisionPoints = punten.slice(0, 12);
   return {
     updates,

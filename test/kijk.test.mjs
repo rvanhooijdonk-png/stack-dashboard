@@ -22,12 +22,12 @@ import {
   DREMPEL_MAX_MS, LANE_STIL_UREN,
 } from '../scripts/lib/kijk.mjs';
 import { DREMPEL_UREN } from '../scripts/lib/waarnemer.mjs';
-import { spiegelScan, kanoniekeSpiegelvorm, kanaalpostUitTekst } from '../scripts/lib/kanaalpost.mjs';
+import { spiegelScan, kanoniekeSpiegelvorm, kanaalpostUitTekst, conflictmarkeringen } from '../scripts/lib/kanaalpost.mjs';
 import { nieuweVormbrekendeRegels } from '../scripts/lib/spiegelwet.mjs';
 
 /** De gesloten redenlijst van de vormpoort, hier herhaald zodat de proef een NIEUWE reden opmerkt. */
-const REDENEN_VORM = ['CODEHEK', 'HTML_COMMENTAAR', 'RAUWE_HTML', 'INSPRINGING', 'CONTAINER',
-  'REGELSCHEIDER', 'VREEMDE_WITRUIMTE'];
+const REDENEN_VORM = ['CONFLICTMARKERING', 'CODEHEK', 'HTML_COMMENTAAR', 'RAUWE_HTML', 'INSPRINGING',
+  'CONTAINER', 'REGELSCHEIDER', 'VREEMDE_WITRUIMTE'];
 
 const KOP_A = 'a'.repeat(40);
 const KOP_B = 'b'.repeat(40);
@@ -1768,4 +1768,79 @@ test('weerlegging — AFGEROND wordt LEEG, en dat is de bedoeling, geen fout', (
   // Dat onderscheid is de kern: de uitkomst van de gebeurtenis staat los van de toestand van het werk.
   // Zodra de exporter uit task_events publiceert komt de echte toestand mee en vervalt de vertaling.
   assert.equal(o.state.bronSoort, OVERGANG_MERK);
+});
+
+test('een onopgeloste samenvoeging wordt geweigerd ONDER DIE NAAM, en de middelste markering ook', () => {
+  const KOP = '| datum-tijd | tab-rol | onderwerp | status | actie voor |';
+  const SCH = '| --- | --- | --- | --- | --- |';
+  const R = (t, tab, o) => `| ${t} | ${tab} | ${o} | AFGEROND | niemand |`;
+
+  // De vorm zoals hij GEMETEN is op de rapporten-tak, 27-07-2026: kop, scheiding, een paar rijen,
+  // en dan een blok dat twee lezingen naast elkaar laat staan. Rijtekst hier is verzonnen — de
+  // echte rijen horen niet in een publieke repo.
+  const conflict = [KOP, SCH,
+    R('2026-07-27 08:01', 'EEN', 'Voor de samenvoeging.'),
+    '<<<<<<< HEAD',
+    R('2026-07-27 08:05', 'TWEE', 'Mijn kant.'),
+    '=======',
+    R('2026-07-27 08:04', 'DRIE', 'Hun kant.'),
+    '>>>>>>> 0000000 (een commit die nooit op de tak kwam)',
+  ].join('\n');
+  assert.deepEqual(kanoniekeSpiegelvorm(conflict), { ok: false, reden: 'CONFLICTMARKERING', regel: 4 },
+    'de weigering noemt de corruptie, niet RAUWE_HTML');
+  assert.equal(kanaalpostUitTekst(conflict).available, false, 'en er komt geen enkele rij doorheen');
+
+  // Elke markering afzonderlijk, want alleen samen gemeten zegt niets over welke regel hem ving.
+  // De OPENING en de SLUITING zijn op zichzelf al bewijs: die twee vormen bestaan in geen enkele
+  // legitieme markdown.
+  for (const markering of ['<<<<<<< HEAD', '>>>>>>> 0000000', '<<<<<<<<<< HEAD', '>>>>>>>>>> 0000000']) {
+    assert.deepEqual(kanoniekeSpiegelvorm(`gewone tekst\n${markering}`),
+      { ok: false, reden: 'CONFLICTMARKERING', regel: 2 }, markering);
+  }
+  // De MIDDELSTE twee alleen mét anker (bevinding Codex 27-07, en hij heeft gelijk): `=======` is
+  // ook de onderstreping van een setext-kop en `|||||||` lijkt op een lege tabelregel. Zonder anker
+  // weigeren zou een geldig document blokkeren, en dan gaat de plaat op zwart om niets.
+  for (const midden of ['=======', '||||||| samengevoegde basis', '=========']) {
+    assert.equal(kanoniekeSpiegelvorm(`gewone tekst\n${midden}`).ok, true,
+      `${JSON.stringify(midden)} zonder anker is geen bewijs van een conflict`);
+    assert.deepEqual(kanoniekeSpiegelvorm(`<<<<<<< HEAD\n${midden}`),
+      { ok: false, reden: 'CONFLICTMARKERING', regel: 1 }, `${midden} MET anker`);
+  }
+  // Een opening ZONDER witruimte erachter (bevinding Gemini 27-07): externe samenvoegtools en
+  // handmatig bewerken laten `<<<<<<<HEAD` achter, en die glipte er langs.
+  assert.deepEqual(kanoniekeSpiegelvorm('gewone tekst\n<<<<<<<HEAD'),
+    { ok: false, reden: 'CONFLICTMARKERING', regel: 2 }, '<<<<<<<HEAD zonder spatie');
+  assert.deepEqual(conflictmarkeringen('<<<<<<<HEAD\n=======\n>>>>>>> abc'), [1, 2, 3],
+    'de opening zonder spatie werkt ook als anker voor de middelste markering');
+  // De sluiting houdt de witruimte-eis: `>>>>>>>tekst` is zevenvoudig geneste blokcitatie en dus
+  // geldige markdown. Liever daar één vorm missen dan een geldig document weigeren.
+  assert.equal(conflictmarkeringen('gewone tekst\n>>>>>>>geciteerd').length, 0,
+    'zevenvoudige blokcitatie is geen conflict');
+
+  // Een setext-kop blijft dus gewoon publiceerbaar — de reden dat de ankereis er is.
+  assert.equal(kanoniekeSpiegelvorm('Een kop\n=======\n\ngewone tekst').ok, true,
+    'een setext-kop met precies zeven gelijktekens mag niet als conflict gelden');
+
+  // En de grens de andere kant op: een poort die te veel weigert maakt de plaat donker zonder reden.
+  // Zes gelijktekens is geen markering, zeven met tekst eraan vast evenmin, en een `=`-lijn onder een
+  // kop is gewone markdown (setext). Alleen de `=`- en `|`-vorm zijn hier te meten: een regel die met
+  // `<` of `>` begint werd al vóór deze regel geweigerd (RAUWE_HTML respectievelijk CONTAINER), dus
+  // daar valt geen onschuldige kant te bewijzen — dat is bestaand gedrag en geen winst van deze regel.
+  for (const onschuldig of ['======', '=======x', '=====================', 'a ======= b', '||||||']) {
+    assert.equal(kanoniekeSpiegelvorm(`gewone tekst\n${onschuldig}`).ok, true,
+      `${JSON.stringify(onschuldig)} is geen conflictmarkering`);
+  }
+  // De losstaande toets, die ook op bestanden draait die de vormpoort nooit haalt — het interne
+  // kanaalbestand opent met een commentaarkop en wordt door de vormpoort altijd geweigerd, corrupt
+  // of niet. Hij geeft REGELNUMMERS terug, nooit brontekst.
+  assert.deepEqual(conflictmarkeringen(conflict), [4, 6, 8]);
+  assert.deepEqual(conflictmarkeringen([KOP, SCH, R('2026-07-27 08:01', 'EEN', 'Schoon.')].join('\n')), []);
+  assert.deepEqual(conflictmarkeringen(null), []);
+
+  // De winst is dus precies aanwijsbaar: `=======` was de ENIGE van de vier markeringen die er
+  // helemaal langs kwam, en de andere drie kregen een reden die naar het verkeerde ding wees.
+  for (const oud of ['<<<<<<< HEAD', '>>>>>>> 0000000']) {
+    assert.equal(REDENEN_VORM.indexOf('CONFLICTMARKERING') < REDENEN_VORM.indexOf('RAUWE_HTML'), true,
+      `${oud}: de nieuwe reden moet vóór de oude staan, anders wint de oude naam`);
+  }
 });

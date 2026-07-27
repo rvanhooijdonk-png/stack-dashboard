@@ -24,7 +24,7 @@ import test from 'node:test';
 import {
   ACHTERSTAND_MINUTEN, STEMPEL_MINUTEN, VLOOT_ONBEKEND_MINUTEN,
   overzetting, achterstandsOordeel, stempelOordeel, vlootstand, vlootstandBlok, bronRijUitTekst,
-  toPublicVlootstand, bronRijenOordeel,
+  toPublicVlootstand, bronRijenOordeel, eindoordeel,
 } from '../scripts/lib/doorstroom.mjs';
 import { alleenAangevuld } from '../scripts/lib/spiegelwet.mjs';
 import { spiegelUitTekst } from '../scripts/lib/kanaalpost.mjs';
@@ -158,7 +158,21 @@ test('GROEN: een rij die al gepubliceerd is telt niet mee, hoe oud hij ook is', 
 test('ROOD blijft ROOD als de spiegel onleesbaar is — geen bron is geen groen', () => {
   const oordeel = achterstandsOordeel([bron(R('2026-07-27 04:00', 'MARKT', 'Wacht.'), 200)], null, { nu: NU });
   assert.equal(oordeel.uitkomst, 'ROOD');
-  assert.equal(oordeel.reden, 'SPIEGEL_ONLEESBAAR');
+  assert.equal(oordeel.reden, 'SPIEGEL_ONLEESBAAR/GEEN_BRON');
+});
+
+test('en het alarm noemt de SOORT corruptie, niet alleen "onleesbaar"', () => {
+  // GEMETEN 27-07-2026 op de rapporten-tak: het kanaalbestand droeg twee keer op één ochtend een
+  // onopgelost samenvoegblok. "Onleesbaar" alleen laat de zoeker bij nul beginnen terwijl de poort
+  // de soort én het regelnummer al wist.
+  const rij = R('2026-07-27 04:00', 'MARKT', 'Wacht.');
+  const stuk = [spiegel(rij), '<<<<<<< HEAD', '=======', '>>>>>>> 0000000'].join('\n');
+  const oordeel = achterstandsOordeel([bron(rij, 200)], stuk, { nu: NU });
+  assert.equal(oordeel.uitkomst, 'ROOD');
+  assert.match(oordeel.reden, /^SPIEGEL_ONLEESBAAR\/CONFLICTMARKERING@\d+$/);
+  // Alleen namen uit de gesloten lijst en een regelnummer — er mag geen brontekst in, want dit
+  // belandt in de publieke Actions-log.
+  assert.equal(/[a-z]/.test(oordeel.reden.replace(/@\d+$/, '')), false);
 });
 
 // ─── 3. de rode proef op het stempel ────────────────────────────────────────────────────────────
@@ -371,4 +385,43 @@ test('alles op nul is niet groen — dat is een lezer die niets vond', () => {
   const o = bronRijenOordeel(['tracker', 'decisions', 'logbook'].map(nul));
   assert.equal(o.uitkomst, 'GEEL');
   assert.equal(o.reden, 'ALLE_BRONNEN_NUL');
+});
+
+// ---------------------------------------------------------------------------------------------
+// EINDOORDEEL — een ontbrekende bronmap is niet-gemeten, geen goed nieuws
+// ---------------------------------------------------------------------------------------------
+
+test('een bronmap die niet bestaat wordt nooit GROEN, ook niet als al het andere groen is', () => {
+  // GEMETEN 27-07-2026: `CONTROL/SPIEGEL/INBOX` op de rapporten-tak geeft HTTP 404. De doorstroom
+  // meldde daarop "gelezen, 0 rij(en) aangeleverd" met een groene achterstand — want zonder aanvoer
+  // kan niets achterlopen. Afwezigheid gelezen als gezondheid, in het alarm zelf.
+  const groen = ['GROEN', 'GROEN', 'GROEN'];
+  assert.equal(eindoordeel({ delen: groen, bronOk: true, inboxMap: 'ONTBREEKT' }), 'GEEL');
+  assert.equal(eindoordeel({ delen: groen, bronOk: true, inboxMap: 'AANWEZIG' }), 'GROEN');
+});
+
+test('een ontbrekende bronmap maakt een echte storing niet zachter', () => {
+  // GEEL mag nooit rood overstemmen: er is verschil tussen "niets gemeten" en "gemeten en stuk".
+  assert.equal(eindoordeel({ delen: ['ROOD', 'GROEN', 'GROEN'], bronOk: true, inboxMap: 'ONTBREEKT' }), 'ROOD');
+  assert.equal(eindoordeel({ delen: ['GROEN', 'GROEN', 'GROEN'], bronOk: false, inboxMap: 'ONTBREEKT' }), 'ROOD');
+});
+
+test('een niet vastgestelde map telt niet mee als bezwaar', () => {
+  // `null` = de vraag is niet gesteld (oude uitvoerders, of een bron die niet gelezen kon worden).
+  // Dat mag het oordeel niet vergelen, anders staat het alarm permanent op geel en betekent geel niets.
+  assert.equal(eindoordeel({ delen: ['GROEN', 'GROEN', 'GROEN'], bronOk: true, inboxMap: null }), 'GROEN');
+  assert.equal(eindoordeel({}), 'GROEN');
+});
+
+test('een deeloordeel dat geen oordeel is, telt als niet-gemeten en niet als goed nieuws', () => {
+  // NULMETING (bevinding Gemini 27-07): de vorige vorm keek alleen of ROOD of GEEL in de lijst zat.
+  // Een deel dat `undefined`, `null` of iets anders teruggaf, viel er stil doorheen en dan bleef
+  // GROEN over — een kapotte meter die groen licht geeft.
+  for (const rommel of [undefined, null, 'FOUT', '', 0, {}]) {
+    assert.equal(eindoordeel({ delen: ['GROEN', rommel], bronOk: true, inboxMap: 'AANWEZIG' }), 'GEEL',
+      `${JSON.stringify(rommel)} is geen oordeel en mag niet groen tellen`);
+  }
+  // En een onbekende mapstatus ook niet: alleen 'AANWEZIG' en het niet-gestelde null zijn geen bezwaar.
+  assert.equal(eindoordeel({ delen: ['GROEN'], bronOk: true, inboxMap: 'ERROR' }), 'GEEL');
+  assert.equal(eindoordeel({ delen: ['GROEN'], bronOk: true, inboxMap: 'AANWEZIG' }), 'GROEN');
 });
