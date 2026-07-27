@@ -937,10 +937,15 @@ test('reviewgat 20 — een spiegelrij buiten de tabel of in commentaar telt, of 
   assert.equal(o.kijk().uitkomst, 'ROOD');
   assert.ok(o.kijk().redenen.includes('VELD_NIET_GESLOTEN'));
 
-  // En commentaar is géén gegeven. Een verborgen tabel levert geen enkel spoor op.
+  // En commentaar is géén gegeven. Een verborgen tabel levert geen enkel spoor op — maar de rij die
+  // erin stond wordt wél GETELD als afkeuring. Deze regel stond hier eerst als `telling: 1,
+  // verworpen: 0`, en dat was precies de stille verdwijning die de naam van deze proef verbiedt: wie
+  // `<!--` en `-->` om bestaande rijen zet liet ze spoorloos oplossen. Gevonden in de vijfde
+  // reviewronde, langs de aanvalslijn die Gemini opende. Nu geldt overal dezelfde regel — verstoppen
+  // kost zichtbaarheid, of het nu met een codehek of met een commentaar gebeurt.
   const verborgen = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'De echte rij.'), '',
     '<!--', KOPREGELS, rij('2026-07-26 17:10', 'MINI', 'Ik sta in commentaar.'), '-->'].join('\n');
-  assert.deepEqual(na(verborgen), { sporen: ['CONTROL'], telling: 1, verworpen: 0 });
+  assert.deepEqual(na(verborgen), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
 
   // De toets staat op EXACT vijf kolommen, en dat is waarom de kolom-uitleg bovenaan de echte spiegel
   // (twee kolommen) hier niets raakt — anders zou elke andere tabel in het bestand afkeuringen worden.
@@ -1169,9 +1174,149 @@ test('reviewgat 26 — een voorbeeldtabel in een codeblok is uitleg, geen toesta
 
   // En de twee scopes bijten elkaar niet: een hek binnen commentaar wisselt de hekstand niet, anders
   // zou één backtickregel in een commentaarblok de rest van het bestand van soort laten veranderen.
+  // De kop ná `-->` staat er met opzet: zonder kop wordt de CHIEF-rij ook bij FOUT gedrag verworpen,
+  // en dan bewijst de toets niets (bevinding Codex op de tweede hekronde). Nu onderscheidt hij wel:
+  // blijft de hekstand hangen, dan verdwijnt CHIEF; klopt hij, dan is CHIEF een spoor.
   const gemengd = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
-    '<!--', '```', '-->', rij('2026-07-26 17:20', 'CHIEF', 'Erna.')].join('\n');
-  assert.deepEqual(na(gemengd), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
+    '<!--', '```', '-->', KOPREGELS, rij('2026-07-26 17:20', 'CHIEF', 'Erna.')].join('\n');
+  assert.deepEqual(na(gemengd), { sporen: ['CHIEF', 'CONTROL'], telling: 2, verworpen: 0 });
+
+  // En andersom: een `<!--` BINNEN een codeblok opent geen commentaar, dus het echte sluithek blijft
+  // werken en de tabel erna is gewoon toestand. Gemeten, omdat de review dit als lek aanwees:
+  // {"sporen":["CONTROL","CHIEF"],"afgekeurd":0} — de vrees kwam niet uit, de volgorde klopt al.
+  const commentaarInBlok = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '```', '<!--', '```', KOPREGELS, rij('2026-07-26 17:20', 'CHIEF', 'Erna.')].join('\n');
+  assert.deepEqual(na(commentaarInBlok), { sporen: ['CHIEF', 'CONTROL'], telling: 2, verworpen: 0 });
+
+  // GEMETEN VÓÓR DEZE TWEEDE FIX, op kop f0fca13, met een blok van vier backticks waarin een
+  // voorbeeld van drie stond: {"kandidaten":[CONTROL,MINI],"afgekeurd":0}. Het binnenste hek sloot
+  // het buitenste blok, waarna de voorbeeldrij eronder weer echte toestand werd — precies de fout
+  // die deze toets bij de eerste fix moest afsluiten, nu één laag dieper. Gevonden door Codex op de
+  // kop die ik al gepusht had; de eerste versie wisselde bij ELK hek blind van stand.
+  const genest = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'), '',
+    '````markdown', '```', KOPREGELS, rij('2026-07-26 17:10', 'MINI', 'Voorbeeld in een voorbeeld.'),
+    '```', '````', KOPREGELS, rij('2026-07-26 17:20', 'CHIEF', 'Erna, buiten het blok.')].join('\n');
+  assert.deepEqual(na(genest), { sporen: ['CHIEF', 'CONTROL'], telling: 3, verworpen: 1 },
+    'de rij in het geneste voorbeeld blijft afkeuring; de rij ná het buitenste hek telt weer');
+
+  // Een tilde-hek sluit een backtick-blok niet, en andersom ook niet: ander teken, geen sluiting.
+  // De KOPREGELS binnen het blok zijn geen opsmuk maar het meetpunt: zonder hen is deze toets
+  // schijngroen. Sluit het tilde-hek het backtick-blok ten onrechte, dan staat de MINI-rij daarna
+  // buiten een tabel en wordt hij alsnog een afkeuring — exact dezelfde uitkomst, dus de toets zou
+  // niets meten. Mét de kop wordt hij bij een fout gesloten blok een SPOOR, en dan valt hij om.
+  // Aangewezen door Gemini in de vijfde ronde; hetzelfde geldt voor `korter` hieronder.
+  const anderTeken = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '```', '~~~', KOPREGELS, rij('2026-07-26 17:10', 'MINI', 'Nog steeds binnen het blok.')].join('\n');
+  assert.deepEqual(na(anderTeken), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
+
+  // Korter sluit niet, langer wel — de markdown-regel, en de kant die veilig is: te lang binnen
+  // blijven kost hoogstens een afkeuring.
+  const korter = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '````', '```', KOPREGELS, rij('2026-07-26 17:10', 'MINI', 'Binnen.')].join('\n');
+  assert.deepEqual(na(korter), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
+  const langer = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '```', '````', KOPREGELS, rij('2026-07-26 17:10', 'CHIEF', 'Buiten, want langer sluit wel.')].join('\n');
+  assert.deepEqual(na(langer), { sporen: ['CHIEF', 'CONTROL'], telling: 2, verworpen: 0 });
+
+  // Andersom óók, en dit geval meet de TEKENvergelijking los van de lengtevergelijking: een blok van
+  // drie tildes mag niet sluiten met drie backticks. In `anderTeken` hierboven zit de lengte impliciet
+  // gelijk, dus alleen dit geval valt om als de tekenvergelijking verdwijnt (bevinding Codex, punt 8).
+  const tildeDanBacktick = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '~~~', '```', KOPREGELS, rij('2026-07-26 17:10', 'MINI', 'Moet binnen blijven.')].join('\n');
+  assert.deepEqual(na(tildeDanBacktick), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
+
+  // Een hek met taalaanduiding is een OPENEND hek, nooit een sluitend. Gemeten vóór deze derde fix:
+  // een `````js` binnen een blok van vier backticks sloot het blok en leverde
+  // {"sporen":["CONTROL","MINI"],"afgekeurd":0} — de voorbeeldrij werd weer toestand.
+  const metTaal = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '````markdown', '````js', KOPREGELS, rij('2026-07-26 17:10', 'MINI', 'Voorbeeld.'), '````'].join('\n');
+  assert.deepEqual(na(metTaal), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
+});
+
+test('reviewgat 27 — commentaar en codehek zijn scopes, geen losse tekens: drie randen gemeten', () => {
+  // Vijfde reviewronde, drie bevindingen van Gemini, alle drie eerst nagespeeld en alle drie echt.
+  // Ze horen bij elkaar: telkens werd één teken-reeks als scope-schakelaar gelezen zonder te kijken
+  // waar hij stond of wat erna kwam.
+  const na = (tekst) => {
+    const { state } = kijkStateUitSpiegel(tekst, { commitSha: KOP_A });
+    return { sporen: Object.keys(state.lanes).sort(), telling: state.eventCount, verworpen: state.verworpenRijen };
+  };
+
+  // EEN. Een backtick-hek met een backtick in zijn taalaanduiding is volgens markdown geen hek. Het
+  // opende er wel een, waarna een echte tabel eronder werd AFGEKEURD: gemeten
+  // {"sporen":["CONTROL"],"telling":2,"verworpen":1}. De veilige kant — een afkeuring is zichtbaar —
+  // maar wel onterecht, en onterechte afkeuringen maken de plaat rood zonder oorzaak.
+  const backtickInTaal = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '```js `foo`', KOPREGELS, rij('2026-07-26 17:10', 'MINI', 'Geen hek, dus gewoon toestand.')].join('\n');
+  assert.deepEqual(na(backtickInTaal), { sporen: ['CONTROL', 'MINI'], telling: 2, verworpen: 0 });
+
+  // TWEE, en dit is de zwaarste van de drie. Vier tekens `<!--` in de tekst van een cel zetten de hele
+  // commentaarstand aan. De rij zelf én alles eronder verdwenen daarna spoorloos: gemeten met drie
+  // rijen {"sporen":["CONTROL"],"telling":1,"verworpen":0}. Wie die vier tekens in zijn onderwerp
+  // schrijft — per ongeluk of niet — wist daarmee de rest van de spiegel uit de meting.
+  const inlineCommentaar = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    rij('2026-07-26 17:05', 'MARKT', 'Tekst met <!-- erin'),
+    rij('2026-07-26 17:10', 'CHIEF', 'Rij erna.')].join('\n');
+  assert.deepEqual(na(inlineCommentaar), { sporen: ['CHIEF', 'CONTROL', 'MARKT'], telling: 3, verworpen: 0 });
+
+  // DRIE. Sluit een commentaar middenin een regel, dan telt de staart erna weer mee. Deed hij dat niet,
+  // dan opende `--> ```' geen blok en werd de voorbeeldtabel eronder echte toestand: gemeten
+  // {"sporen":["CONTROL"],"telling":1,"verworpen":0}. Dit is de gevaarlijke kant — uitleg die als
+  // toestand binnenkomt — en daarmee dezelfde fout als reviewgat 26, alleen via de commentaartak.
+  const staartNaSluiting = ['<!--', '--> ```', KOPREGELS,
+    rij('2026-07-26 17:00', 'CONTROL', 'Zou uitleg moeten zijn.')].join('\n');
+  assert.deepEqual(na(staartNaSluiting), { sporen: [], telling: 0, verworpen: 1 });
+
+  // En de tegenhanger van twee: een rij die ECHT in commentaar staat blijft buiten de toestand, maar
+  // wordt geteld als afkeuring. Zie ook reviewgat 20, waar die verwachting is bijgesteld.
+  const verstopt = [KOPREGELS, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'),
+    '<!--', KOPREGELS, rij('2026-07-26 17:10', 'MINI', 'Verstopt.'), '-->'].join('\n');
+  assert.deepEqual(na(verstopt), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
+});
+
+test('reviewgat 28 — regeleindes en containertekens: twee gemeten gaten, vier bewust geaccepteerde', () => {
+  // Vijfde ronde, Codex. De eerste twee zijn gerepareerd, de laatste vier staan hier als VASTGELEGDE
+  // afwijking: ze wijken allemaal af naar de kant van de AFKEURING, en een afkeuring is zichtbaar.
+  const na = (tekst) => {
+    const { state } = kijkStateUitSpiegel(tekst, { commitSha: KOP_A });
+    return { sporen: Object.keys(state.lanes).sort(), telling: state.eventCount, verworpen: state.verworpenRijen };
+  };
+  const K = ['| datum-tijd | tab-rol | onderwerp | status | actie voor |', '| --- | --- | --- | --- | --- |'];
+
+  // EEN. Hetzelfde bestand met CRLF-regeleindes. Gemeten vóór de fix:
+  // {"sporen":["CHIEF","CONTROL","MINI"],"telling":3,"verworpen":0} — de voorbeeldrij midden in het
+  // codeblok werd echte toestand, want een `\r` aan het regeleinde maakte het openende hek onzichtbaar.
+  const crlf = [...K, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'), '```markdown', ...K,
+    rij('2026-07-26 17:10', 'MINI', 'Binnen.'), '```', ...K,
+    rij('2026-07-26 17:20', 'CHIEF', 'Buiten.')].join('\r\n');
+  assert.deepEqual(na(crlf), { sporen: ['CHIEF', 'CONTROL'], telling: 3, verworpen: 1 });
+
+  // TWEE. Een hek in een lijstitem. Gemeten vóór de fix:
+  // {"sporen":["CONTROL","MINI"],"telling":2,"verworpen":0} — het lijstteken maakte het hek onzichtbaar.
+  const inLijst = [...K, rij('2026-07-26 17:00', 'CONTROL', 'Echt.'), '- ```markdown',
+    `  ${K[0]}`, `  ${K[1]}`, `  ${rij('2026-07-26 17:10', 'MINI', 'Binnen het lijstitem.')}`, '  ```'].join('\n');
+  assert.deepEqual(na(inLijst), { sporen: ['CONTROL'], telling: 2, verworpen: 1 });
+
+  // DRIE t/m ZES: vastgelegde afwijkingen van markdown, alle vier naar de veilige kant. Een echte
+  // markdown-parser kent containers (lijst, blockquote, raw-HTML-blok) en laat een ongesloten hek of
+  // commentaar dáár eindigen; deze scanner niet, dus hij blijft langer "binnen". Dat kost hoogstens
+  // een AFKEURING — zichtbaar, rood — en nooit een rij die als toestand doorgaat. Ze staan hier zodat
+  // de afwijking gemeten vastligt en niet elke ronde opnieuw ontdekt wordt.
+  const gevallen = [
+    ['ongesloten hek in een lijstitem', ['- item', '  ```markdown', '  uitleg', '', ...K,
+      rij('2026-07-26 17:20', 'CHIEF', 'Buiten het lijstitem.')]],
+    ['commentaar met vier spaties ervoor', ['    <!--', '```markdown', ...K,
+      rij('2026-07-26 17:10', 'MINI', 'Binnen.'), '```']],
+    ['ongesloten commentaar in een blockquote', ['> <!--', '> uitleg', '', '```markdown', ...K,
+      rij('2026-07-26 17:10', 'MINI', 'Binnen.'), '```']],
+    ['hekachtige regels in een raw-HTML-blok', ['<div>', '```markdown', ...K,
+      rij('2026-07-26 17:10', 'MINI', 'Raw HTML.'), '```', '']],
+  ];
+  for (const [naam, regels] of gevallen) {
+    const uit = na(regels.join('\n'));
+    assert.equal(uit.sporen.length, 0, `${naam}: geen enkele rij mag hier toestand worden`);
+    assert.ok(uit.verworpen >= 1, `${naam}: de afwijking moet zichtbaar zijn als afkeuring`);
+  }
 });
 
 test('weerlegging — AFGEROND wordt LEEG, en dat is de bedoeling, geen fout', () => {

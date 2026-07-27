@@ -160,12 +160,40 @@ const isKop = (c) => c.length === KOPNAMEN.length
 const isScheiding = (c) => c.length > 0 && c.every((cel) => /^:?-{3,}:?$/.test(cel));
 
 /**
- * Een markdown-codehek: drie of meer backticks of tildes, hoogstens drie spaties ingesprongen. Er
- * wordt niet gekeken of het openende en sluitende hek dezelfde soort of lengte hebben — elk hek
- * wisselt de stand. Dat is grover dan de markdown-regels, en met opzet: een hek te veel maakt een
- * rij hoogstens AFGEKEURD, terwijl een hek te weinig hem als echte toestand binnenlaat.
+ * Een markdown-codehek: drie of meer backticks of tildes, hoogstens drie spaties ingesprongen. Het
+ * teken en de lengte worden bewaard, want sluiten mag alleen met hetzelfde teken en minstens
+ * dezelfde lengte — dat is de markdown-regel. Blind wisselen bij elk hek was grover én verkeerd om:
+ * een voorbeeldhek van drie backticks bínnen een blok van vier sloot dat blok, waarna de
+ * voorbeeldtabel eronder weer echte toestand werd. Bij twijfel blijven we dus binnen het blok: te
+ * lang binnen maakt een rij hoogstens AFGEKEURD, te vroeg buiten laat hem als toestand binnen.
  */
-const HEK = /^ {0,3}(?:`{3,}|~{3,})/;
+const HEK = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+/**
+ * Een backtick-hek met een backtick in zijn taalaanduiding is volgens markdown GÉÉN hek. Zonder die
+ * eis opende ```js `foo` een blok dat er nooit was, en werd de tabel eronder AFGEKEURD terwijl hij
+ * gewoon toestand is — gemeten {"sporen":["CONTROL"],"telling":2,"verworpen":1}. Dat is de veilige
+ * kant (een afkeuring, geen stille toestand), maar het blijft een onterechte afkeuring, dus dicht.
+ * Voor tilde-hekken geldt de eis niet: daar mag alles in de taalaanduiding staan.
+ */
+const hekGeldig = (hek) => hek[1][0] === '~' || !hek[2].includes('`');
+/**
+ * Sluiten mag bovendien alleen met een KALE hekregel: een openend hek draagt een taalaanduiding
+ * (```markdown), een sluitend hek nooit. Zonder die eis sluit `````js` binnen een blok van vier
+ * backticks dat blok — gemeten: {"sporen":["CONTROL","MINI"],"afgekeurd":0}, dus de voorbeeldrij
+ * werd weer echte toestand (bevinding Codex op de tweede hekronde).
+ */
+const SLUITHEK = /^ {0,3}(?:`{3,}|~{3,})[ \t]*$/;
+/**
+ * Een hek mag in een lijstitem of een blockquote staan, en dan gaat er een containerteken aan vooraf:
+ * `- ```markdown` of `> ```markdown`. Die tekens worden voor de hektoets weggenomen, anders werd zo'n
+ * hek niet gezien en kwam de voorbeeldtabel eronder als echte toestand binnen — gemeten
+ * {"sporen":["CONTROL","MINI"],"telling":2,"verworpen":0} (bevinding Codex, vijfde ronde).
+ *
+ * Dit is bewust GROVER dan markdown: het maakt eerder iets een hek dan minder. Dat is de veilige kant,
+ * want de prijs van te veel hek is een zichtbare AFKEURING, en de prijs van te weinig hek is uitleg die
+ * als toestand doorgaat. Een tabelregel begint met een `|` en wordt hier dus nooit geraakt.
+ */
+const hekKern = (regel) => String(regel).replace(/^[ \t]*(?:(?:>[ \t]*)+)?(?:[-*+]|\d{1,9}[.)])?[ \t]*/, '');
 
 /** Vorm-toets op één datarij. Geen oordeel over publiceerbaarheid — dat doet de DTO. */
 function rijUitCellen(c) {
@@ -205,22 +233,53 @@ export function spiegelUitTekst(tekst) {
  * aanwijst. `kandidaten` houdt de bronvolgorde intact en zet `null` waar de vormtoets afketste, zodat
  * een lezer zowel kan tellen als kan zien dát er iets is afgekeurd.
  */
+/**
+ * "Ziet eruit als een spiegelrij": vijf kolommen, geen kop, geen scheidingsregel. Bewust vormvrij —
+ * of de rij ook geldig is beslist `rijUitCellen`. Deze toets bepaalt alleen of het wegvallen van een
+ * regel geteld moet worden, en dat is de vraag die op drie plekken terugkomt.
+ */
+function lijktSpiegelrij(regel) {
+  const c = cellenVan(regel);
+  return Boolean(c && c.length === KOPNAMEN.length && !isKop(c) && !isScheiding(c));
+}
+
 export function spiegelScan(tekst) {
-  const regels = String(tekst ?? '').split('\n');
+  // Markdown kent drie regeleindes: LF, CRLF en een losse CR. Splitsen op alleen `\n` liet bij een
+  // CRLF-bestand een `\r` aan elke regel plakken, en dat brak twee dingen tegelijk: `.` in een regex
+  // slaat `\r` als regeleinde over, dus een openend hek werd niet meer herkend, en een sluithek was
+  // niet meer kaal. Gemeten op een CRLF-versie van hetzelfde bestand:
+  // {"sporen":["CHIEF","CONTROL","MINI"],"telling":3,"verworpen":0} — de voorbeeldrij MÍDDEN in het
+  // codeblok kwam als echte toestand binnen (bevinding Codex, vijfde ronde).
+  const regels = String(tekst ?? '').split(/\r\n|\r|\n/);
   const kandidaten = [];
   let inTabel = false;
   let inCommentaar = false;
-  let inCode = false;
+  let hekOpen = null;
   for (let i = 0; i < regels.length; i += 1) {
+    // De regel als LOSSE waarde, want een commentaar kan middenin sluiten en dan telt de staart erna
+    // gewoon weer mee. Zie de commentaartak hieronder.
+    let regel = regels[i];
     // HTML-commentaar is GEEN gegeven. Zonder deze scope werd een volledige tabel tussen `<!--` en
     // `-->` gewoon meegelezen: de commentaaropener sloot de tabel, maar de exacte kop op de regel
     // erna opende hem weer. Gemeten: een verborgen MINI-rij kwam als echt spoor in de toestand en de
     // uitkomst was GROEN. Uitgecommentarieerde tekst die als waarheid wordt gelezen is de omgekeerde
     // fout van een rij die stil verdwijnt, en even erg.
     if (inCommentaar) {
-      if (regels[i].includes('-->')) inCommentaar = false;
+      const dicht = regel.indexOf('-->');
+      if (dicht === -1) {
+        inTabel = false;
+        // Symmetrisch met het codehek: verstoppen kost zichtbaarheid. Een rij tussen `<!--` en `-->`
+        // verdween hiervoor spoorloos — gemeten {"sporen":["CONTROL"],"telling":1,"verworpen":0},
+        // terwijl de naam van proef 20 al beloofde dat zoiets geteld of afgekeurd wordt.
+        if (lijktSpiegelrij(regel)) kandidaten.push(null);
+        continue;
+      }
+      inCommentaar = false;
+      // Alles ná `-->` staat buiten het commentaar en telt weer mee. Met een kale `continue` werd
+      // `--> ``` ` een regel zonder gevolg: het hek opende nooit en de voorbeeldtabel eronder kwam
+      // als echte toestand binnen — gemeten {"sporen":["CONTROL"],"telling":1,"verworpen":0}.
+      regel = regel.slice(dicht + 3);
       inTabel = false;
-      continue;
     }
     // Een markdown-codehek is de tweede vorm van "dit is geen gegeven", en hij ontbrak. Gemeten op kop
     // 9f413d8: een voorbeeldtabel in een ```-blok — kop, scheiding, één MINI-rij — leverde
@@ -229,8 +288,22 @@ export function spiegelScan(tekst) {
     // wordt door dezelfde lezer gebouwd, dus beide kanten zijn het eens en de uitkomst is GROEN.
     // De naam van de bestaande toets (`… of codeblok telt niet mee`) beloofde dit al; alleen het
     // commentaargeval stond erin.
-    if (HEK.test(regels[i])) {
-      inCode = !inCode;
+    // Sluiten mag alleen met hetzelfde teken en minstens dezelfde lengte. Gemeten op kop f0fca13
+    // met een blok van vier backticks waarin een voorbeeld van drie stond: het binnenste hek sloot
+    // het buitenste, en de MINI-rij in dat voorbeeld kwam als `{"kandidaten":[CONTROL,MINI],
+    // "afgekeurd":0}` terug — echte toestand, nul afkeuringen. Een hek dat niet sluit is nu gewoon
+    // inhoud van het blok.
+    const hek0 = HEK.exec(hekKern(regel));
+    const hek = hek0 && hekGeldig(hek0) ? hek0 : null;
+    if (hek && hekOpen === null) {
+      hekOpen = hek[1];
+      inTabel = false;
+      continue;
+    }
+    const sluit = hek && hekOpen !== null && SLUITHEK.test(hekKern(regel))
+      && hek[1][0] === hekOpen[0] && hek[1].length >= hekOpen.length;
+    if (sluit) {
+      hekOpen = null;
       inTabel = false;
       continue;
     }
@@ -238,18 +311,21 @@ export function spiegelScan(tekst) {
     // wél als AFGEKEURD geteld en niet stil overgeslagen. Anders is het hek zelf een verstopplaats:
     // drie backticks om bestaande rijen zetten zou ze spoorloos laten verdwijnen, en dat is dezelfde
     // fout in spiegelbeeld. Zo kost verstoppen zichtbaarheid in plaats van dat het hem oplevert.
-    if (inCode) {
+    if (hekOpen !== null) {
       inTabel = false;
-      const cc = cellenVan(regels[i]);
-      if (cc && cc.length === KOPNAMEN.length && !isKop(cc) && !isScheiding(cc)) kandidaten.push(null);
+      if (lijktSpiegelrij(regel)) kandidaten.push(null);
       continue;
     }
-    if (regels[i].includes('<!--') && !regels[i].includes('-->')) {
+    // Een `<!--` BINNEN een tabelcel opent geen commentaar. Deed hij dat wel, dan brak één rij met die
+    // vier tekens in zijn tekst niet alleen zichzelf maar alles eronder af, en beide verdwenen stil —
+    // gemeten met drie rijen: {"sporen":["CONTROL"],"telling":1,"verworpen":0}. Een regel die een
+    // volwaardige spiegelrij ís, wordt daarom als spiegelrij behandeld en niet als opmaak.
+    if (regel.includes('<!--') && !regel.includes('-->') && !lijktSpiegelrij(regel)) {
       inCommentaar = true;
       inTabel = false;
       continue;
     }
-    const c = cellenVan(regels[i]);
+    const c = cellenVan(regel);
     // Elke niet-tabelregel — lege regel, kop, proza — sluit de lopende tabel.
     if (!c) { inTabel = false; continue; }
     if (isKop(c)) {
