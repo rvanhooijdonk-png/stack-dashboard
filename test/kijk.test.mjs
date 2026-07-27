@@ -23,6 +23,7 @@ import {
 } from '../scripts/lib/kijk.mjs';
 import { DREMPEL_UREN } from '../scripts/lib/waarnemer.mjs';
 import { spiegelScan, kanoniekeSpiegelvorm, kanaalpostUitTekst } from '../scripts/lib/kanaalpost.mjs';
+import { nieuweVormbrekendeRegels } from '../scripts/lib/spiegelwet.mjs';
 
 /** De gesloten redenlijst van de vormpoort, hier herhaald zodat de proef een NIEUWE reden opmerkt. */
 const REDENEN_VORM = ['CODEHEK', 'HTML_COMMENTAAR', 'RAUWE_HTML', 'INSPRINGING', 'CONTAINER', 'REGELSCHEIDER'];
@@ -1449,6 +1450,55 @@ test('reviewgat 29 — de vormpoort: een bestand dat scope kan maken wordt in zi
     'de scanner zelf leest dit bestand correct — twee sporen, nul afkeuringen');
   assert.equal(kanaalpostUitTekst(leesbaarMaarNietKanoniek).available, false,
     'en toch weigert de poort het, want het KAN scope maken');
+});
+
+test('reviewgat 30 — de vormpoort heeft een schrijfkant, anders is hij een voetklem', () => {
+  // De leespoort weigert het HELE bestand zodra er één verboden constructie in staat. Dat is de veilige
+  // kant, maar het betekent ook dat één venster dat `<!--` in zijn onderwerp schrijft, of één
+  // opsommingsteken in de uitleg zet, de plaat donker maakt — en dan pas bij het LEZEN, als er niemand
+  // meer bij is. Een leespoort zonder schrijfpoort verplaatst het probleem naar dat moment.
+  const KOP = '| datum-tijd | tab-rol | onderwerp | status | actie voor |';
+  const SCH = '| --- | --- | --- | --- | --- |';
+  const R = (t, tab, o) => `| ${t} | ${tab} | ${o} | AFGEROND | niemand |`;
+  const oud = [KOP, SCH, R('2026-07-26 17:00', 'CONTROL', 'Echt.')].join('\n');
+
+  // Elke verboden constructie wordt bij het SCHRIJVEN geweigerd, met de reden en het regelnummer —
+  // en zonder de regel zelf, want dit oordeel komt in een melding terecht.
+  const stuk = [
+    [R('2026-07-26 17:10', 'MINI', 'Tekst met <!-- erin'), 'VORM_HTML_COMMENTAAR'],
+    ['```markdown', 'VORM_CODEHEK'],
+    ['<div>', 'VORM_RAUWE_HTML'],
+    ['    ingesprongen uitleg', 'VORM_INSPRINGING'],
+    ['- een opsomming', 'VORM_CONTAINER'],
+    ['> een blockquote', 'VORM_CONTAINER'],
+  ];
+  for (const [regel, reden] of stuk) {
+    const nieuw = `${oud}\n${regel}`;
+    const gevonden = nieuweVormbrekendeRegels(oud, nieuw);
+    assert.equal(gevonden.length, 1, `${reden}: precies deze ene nieuwe regel wordt aangewezen`);
+    assert.deepEqual(gevonden[0], { regel: 4, reden });
+    // En dit is waarom het ertoe doet: zonder de schrijfpoort zou dit bestand er gewoon in gaan en
+    // daarna bij het LEZEN het hele logboek onbruikbaar maken.
+    assert.equal(kanaalpostUitTekst(nieuw).available, false, `${reden}: de leespoort zou hierop dichtslaan`);
+  }
+
+  // Een gewone nieuwe rij komt er gewoon door — een poort die alles weigert is geen poort.
+  const gewoon = `${oud}\n${R('2026-07-26 17:10', 'MINI', 'Een gewone regel in gewone taal.')}`;
+  assert.deepEqual(nieuweVormbrekendeRegels(oud, gewoon), []);
+  assert.equal(kanaalpostUitTekst(gewoon).available, true);
+
+  // ALLEEN de nieuwe regels, net als bij de bestaande vorm-eis. Stond de vuile regel er al, dan blijft
+  // hij zichtbaar bij het lezen maar sluit hij de deur niet voor iemand die de spiegel niet aanraakt.
+  // Zonder dit onderscheid sluiten append-only en een harde vorm-eis elkaar op: herstellen mag niet,
+  // en laten staan houdt élke volgende commit rood.
+  const alVuil = `${oud}\n<div>`;
+  assert.deepEqual(nieuweVormbrekendeRegels(alVuil, `${alVuil}\n${R('2026-07-26 17:10', 'MINI', 'Nieuw.')}`), []);
+
+  // En de twee poorten delen één definitie. Een regel die de schrijfkant afkeurt, maakt het bestand
+  // bij het lezen onleesbaar, en andersom — anders laat de ene door wat de andere weigert.
+  for (const [regel] of stuk) {
+    assert.equal(kanoniekeSpiegelvorm(regel).ok, false, `${regel}: beide poorten wijzen dezelfde regel af`);
+  }
 });
 
 test('weerlegging — AFGEROND wordt LEEG, en dat is de bedoeling, geen fout', () => {

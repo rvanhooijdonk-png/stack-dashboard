@@ -369,6 +369,22 @@ const MUTATIES = [
     naar: 'const hekGeldig = () => true; // mutatie: elke hekachtige regel opent',
   },
   {
+    proef: '30-schrijfpoort (reviewgat)',
+    raakt: 'reviewgat 30 —',
+    bestand: 'scripts/lib/spiegelwet.mjs',
+    wat: 'de schrijfkant weigert niets meer, dus een venster kan de plaat donker schrijven zonder waarschuwing',
+    van: "    if (!vorm.ok) gevonden.push({ regel: i + 1, reden: `VORM_${vorm.reden}` });",
+    naar: '    void vorm; // mutatie: de schrijfpoort meldt niets meer',
+  },
+  {
+    proef: '30-alleennieuw (reviewgat)',
+    raakt: 'reviewgat 30 —',
+    bestand: 'scripts/lib/spiegelwet.mjs',
+    wat: 'de schrijfkant kijkt naar ALLE regels in plaats van alleen de nieuwe — dan sluit één oude vuile regel de deur voor iedereen',
+    van: "    if (n > 0) { telling.set(ruw, n - 1); return; }\n    const vorm = kanoniekeSpiegelvorm(ruw.replace(/\\r$/, ''));",
+    naar: "    void n; // mutatie: ook oude regels tellen mee\n    const vorm = kanoniekeSpiegelvorm(ruw.replace(/\\r$/, ''));",
+  },
+  {
     proef: '29-poort (reviewgat)',
     raakt: 'reviewgat 29 —',
     bestand: 'scripts/lib/kanaalpost.mjs',
