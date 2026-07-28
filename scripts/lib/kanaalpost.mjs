@@ -147,12 +147,47 @@ function isEchteDatum(v) {
  * Cellen van één tabelregel, of `null` als het geen tabelregel is. Splitsen gebeurt op een
  * NIET-ge-escapete pipe: `A \| B` is in markdown één cel met een pipe erin, en hard splitsen
  * schoof daar een halve cel naar de volgende kolom (review Gemini, 26-07-2026).
+ *
+ * De backslash telt op PARITEIT, niet op aanwezigheid (review Codex + Gemini, 27-07-2026). Een
+ * lookbehind `(?<!\\)\|` keek alleen naar het teken ervoor, en dan is `A \\| B` — een ge-escapete
+ * backslash gevolgd door een ECHTE kolomgrens — ineens één cel. Dat schoof de rest van de rij een
+ * kolom op en de rij viel om onder een reden die naar de bron wees in plaats van naar de lezer.
+ *
+ * DIT IS DE ENIGE UITVOERING. `lib/doorstroom.mjs` en `lib/kanaalpostbron.mjs` roepen deze functie
+ * aan en houden er geen eigen kopie op na: twee lezers die het oneens zijn over waar de kolommen
+ * liggen is precies de storing die deze ronde is opgespoord.
  */
-function cellenVan(regel) {
+export function cellenVanRegel(regel) {
   const r = String(regel ?? '').trim();
   if (!r.startsWith('|') || !r.endsWith('|')) return null;
-  return r.slice(1, -1).split(/(?<!\\)\|/).map((c) => c.replace(/\\\|/g, '|').trim());
+  const binnen = r.slice(1, -1);
+  const cellen = [];
+  let cel = '';
+  for (let i = 0; i < binnen.length; i += 1) {
+    const teken = binnen[i];
+    if (teken === '\\' && i + 1 < binnen.length) {
+      const volgend = binnen[i + 1];
+      // Een backslash escapet precies één teken. Voor `|` en `\` valt de backslash weg (dat is de
+      // ontsnapping ongedaan maken); voor al het andere blijft hij staan, want dan hoort hij bij de
+      // tekst — `\n` in een melding is geen regelovergang maar twee tekens.
+      cel += volgend === '|' || volgend === '\\' ? volgend : `\\${volgend}`;
+      i += 1;
+      continue;
+    }
+    if (teken === '|') { cellen.push(cel); cel = ''; continue; }
+    cel += teken;
+  }
+  cellen.push(cel);
+  return cellen.map((c) => c.trim());
 }
+
+/**
+ * De omkering van `cellenVanRegel`: maak tekst veilig om ALS cel in een tabelregel te zetten.
+ * Backslash eerst, anders escapet de tweede stap zijn eigen ontsnappingsteken nog een keer.
+ */
+export const celVeilig = (tekst) => String(tekst ?? '').replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+
+const cellenVan = cellenVanRegel;
 
 const KOPNAMEN = ['datum-tijd', 'tab-rol', 'onderwerp', 'status', 'actie voor'];
 const isKop = (c) => c.length === KOPNAMEN.length
