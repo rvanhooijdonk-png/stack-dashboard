@@ -63,7 +63,19 @@ jobs:
       # Dezelfde poort als in `publish.yml`, om dezelfde reden: kaal `node --test` geeft exit 0 bij
       # nul gevonden tests. Een schrijver die op een leeggelopen testontdekking groen draait, schrijft
       # met ongetoetst oordeel in een bestand dat niemand meer kan repareren.
+      #
+      # `continue-on-error: true` (Codex-bevinding 1, ALARM-DAT-ELKE-RUN-MAILT-review 28-07-2026): zonder
+      # dit zette een falende Tests/Overzetten/Vastleggen-stap de JOB al op rood vóór de alarmstap ook
+      # maar draaide — de `exit 0` van de alarmstap bij een bekende, al gemelde oorzaak maakte dat niet
+      # ongedaan, en GitHub mailde alsnog via de native workflow-faalroute (route 1 hieronder), buiten
+      # de ontdubbeling om. Met `continue-on-error: true` wordt de JOB-conclusie uitsluitend bepaald
+      # door de laatste stap ("Alarm buiten de keten") — de enige stap die de herhaal-drempel kent. De
+      # `id:`'s (`tests`/`overzetten`/`vastleggen`) en de `if: steps.X.outcome == 'success'`-ketens
+      # zorgen dat een écht kapotte stap latere schrijfstappen nog steeds overslaat (outcome blijft
+      # zichtbaar ondanks continue-on-error; alleen conclusion wordt gemaskeerd).
       - name: Tests
+        id: tests
+        continue-on-error: true
         env:
           TESTS_ONDERGRENS: "50"
         run: |
@@ -80,6 +92,9 @@ jobs:
       # stille nul: "ik zie geen rijen" en "ik mag de rijen niet zien" mogen nooit hetzelfde betekenen.
       # De waarde wordt nergens afgedrukt; de uitvoerder draagt hem alleen in een header.
       - name: Overzetten (bron → publieke spiegel)
+        id: overzetten
+        continue-on-error: true
+        if: steps.tests.outcome == 'success'
         env:
           CONTROL_READ_TOKEN: ${{ secrets.ORG_PR_READ_TOKEN }}
           DOORSTROOM_PLAAT_URL: https://rvanhooijdonk-png.github.io/stack-dashboard/
@@ -97,7 +112,9 @@ jobs:
       # en de uitvoerder heeft die vlak voor het schrijven zelf al getoetst. Lukt de push alsnog niet,
       # dan is dat een storing en geen "volgende keer beter": exit 1, en de alarmstap hieronder ziet het.
       - name: Aanvulling vastleggen
-        if: github.ref_name == 'main'
+        id: vastleggen
+        continue-on-error: true
+        if: github.ref_name == 'main' && steps.overzetten.outcome == 'success'
         run: |
           set -euo pipefail
           if git diff --quiet -- data/kanaalpost-publiek.md; then
@@ -125,6 +142,34 @@ jobs:
       #  2. één openstaand issue in deze repo, dat bij herstel vanzelf weer dicht gaat.
       # Deze repo is PUBLIEK, dus in het issue staan alleen tellingen en redencodes uit de vastgelegde
       # lijst — nooit de inhoud van een rij, nooit een naam die niet al in deze repo staat.
+      #
+      # HERHAAL-DREMPEL (order ALARM-DAT-ELKE-RUN-MAILT, 28-07-2026, Richard): route 1 hierboven
+      # mailde bij ÉLKE ROOD-run, ook als de oorzaak al twintig keer eerder gemeld was. Een alarm dat
+      # bij elke herhaling mailt wordt weggeklikt, en dan mist de ontvanger de mail die wél over iets
+      # nieuws gaat. `scripts/lib/alarm-drempel.mjs` (zelfde ontdubbelpatroon als `waarnemer.mjs`'s
+      # `magAppenden`, hier op issue-comments toegepast) beslist of de HUIDIGE oorzaakcode al binnen
+      # het herhaalvenster (12 uur) gemeld is. Zo ja: geen nieuwe comment, geen `exit 1` — dus geen
+      # mail — maar wél zichtbaar als `::warning` in de run-log, en het bestaande issue blijft open.
+      # Zo nee (nieuwe oorzaak, of dezelfde oorzaak na afloop van het venster): ongewijzigd gedrag,
+      # comment/issue + `exit 1`. Op GROEN blijft het issue-sluiten ongewijzigd — dat gaf al één
+      # melding per herstel, dat hoefde niet te veranderen.
+      #
+      # Codex-bevinding 2 (round-trip): `oorzaakCode`/`alarm-drempel.mjs` saneert nu vluchtige delen
+      # (regelnummers, dynamische tellers, vrije tekst na ": ") vóór vergelijking, en vergelijkt per
+      # deel-oorzaak i.p.v. de hele kommagescheiden string — anders matcht een aanhoudende structurele
+      # fout nooit tegen zichzelf terug, en verdwijnt gedeeltelijk herstel (A+B → A) niet als "al bekend".
+      #
+      # Codex-bevinding 3 (vertrouwen): dit publieke issue (#40-achtig) is onvergrendeld — elke lezer kan
+      # erop reageren. `gh issue view --json body,comments` geeft geen bruikbaar auteursveld (inconsistente
+      # `login`-vorm tussen issue en comment in `gh`'s eigen CLI-normalisatie, geverifieerd door beide
+      # vormen live op te vragen). Daarom nu `gh api` rechtstreeks tegen de REST-endpoints — die geven wél
+      # consistent `login: "github-actions[bot]"` + `type: "Bot"` terug voor zowel het issue als elke
+      # comment. `alarm-besluit.mjs` vertrouwt alléén tekst met die exacte auteur, en gebruikt GitHub's
+      # eigen `created_at` — nooit een zelf-gerapporteerde `Moment:`-regel uit de tekst zelf, die iedereen
+      # kan spoofen. (`gh api --paginate ... --jq 'map(...)'` bleek per pagina te filteren en meerdere
+      # JSON-arrays aaneen te plakken i.p.v. ze te mergen — hier vermeden door per item te streamen en
+      # buiten `gh api` om met `jq -s` tot één array samen te voegen; live getest tegen een issue met 112
+      # comments over 4 pagina's.)
       - name: Alarm buiten de keten
         if: always()
         env:
@@ -163,20 +208,81 @@ jobs:
             ')"
           fi
 
+          # Codex-bevinding 1: de JOB-conclusie hangt nu alleen nog af van deze stap (zie
+          # `continue-on-error` hierboven). Een eerder-gefaalde stap moet dus HIER alsnog meetellen —
+          # anders verdwijnt een echte storing stilletjes zodra `mag=false` (bekende-oorzaak-onderdrukking)
+          # toevallig ook van toepassing is op een heel ANDERE, infrastructurele oorzaak.
+          infra_oorzaak=""
+          if [ "${{ steps.tests.outcome }}" = "failure" ]; then
+            infra_oorzaak="tests-gefaald"
+          elif [ "${{ steps.overzetten.outcome }}" = "failure" ]; then
+            infra_oorzaak="uitvoerder-gefaald"
+          elif [ "${{ steps.vastleggen.outcome }}" = "failure" ]; then
+            infra_oorzaak="vastleggen-gefaald"
+          fi
+          if [ -n "$infra_oorzaak" ]; then
+            # Dwingt ROOD af ook als /tmp/oordeel.json (geschreven vóór de vastleggen-stap) toevallig
+            # GROEN meldde — anders sluit de close-branch hieronder het issue op een oordeel dat de
+            # push zelf tegensprak. Dit is de "false GROEN read"-tak uit de Codex-review.
+            uitkomst=ROOD
+            samenvatting="infra: ${infra_oorzaak} — ${samenvatting}"
+          fi
+
           nummer="$(gh issue list --state open --limit 50 --json number,title \
             --jq "[.[] | select(.title | startswith(\"${MERK}\"))][0].number // empty")"
 
           if [ "$uitkomst" = "ROOD" ]; then
-            tekst="$(printf 'Run: %s/%s/actions/runs/%s\nMoment: %s (aanleiding: %s)\n\n%s\n' \
+            nu_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+            issue_json=""
+            if [ -n "$nummer" ]; then
+              issue_json=/tmp/issue-met-comments.json
+              gh api "repos/${GITHUB_REPOSITORY}/issues/${nummer}" \
+                --jq '{body, authorLogin: .user.login, authorType: .user.type, createdAt: .created_at}' \
+                > /tmp/issue-body.json
+              gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${nummer}/comments" \
+                --jq '.[] | {body, authorLogin: .user.login, authorType: .user.type, createdAt: .created_at}' \
+                | jq -s '.' > /tmp/issue-comments.json
+              jq -s '{body: .[0].body, authorLogin: .[0].authorLogin, authorType: .[0].authorType, createdAt: .[0].createdAt, comments: .[1]}' \
+                /tmp/issue-body.json /tmp/issue-comments.json > "$issue_json"
+            fi
+
+            besluit="$(node scripts/alarm-besluit.mjs /tmp/oordeel.json "$issue_json" "$nu_iso" "$infra_oorzaak")"
+            if [ -z "$besluit" ]; then
+              echo "::error title=Alarm-besluit leeg::alarm-besluit.mjs gaf geen uitvoer terug" >&2
+              exit 1
+            fi
+            code="$(node -p 'JSON.parse(process.argv[1]).code' "$besluit")"
+            mag="$(node -p 'JSON.parse(process.argv[1]).mag' "$besluit")"
+            reden="$(node -p 'JSON.parse(process.argv[1]).reden' "$besluit")"
+            if [ -z "$code" ] || [ -z "$mag" ]; then
+              echo "::error title=Alarm-besluit onvolledig::code of mag ontbreekt in ${besluit}" >&2
+              exit 1
+            fi
+
+            if [ "$mag" = "false" ]; then
+              # Zelfde oorzaak al binnen het herhaalvenster gemeld: geen nieuwe comment, geen
+              # exit 1 — dus geen mail. Wél zichtbaar in de run-log; het issue blijft open staan
+              # van de eerdere melding.
+              echo "::warning title=Doorstroom nog steeds ROOD (bekende oorzaak, geen nieuwe melding)::${code} — ${reden}"
+              exit 0
+            elif [ "$mag" != "true" ]; then
+              # Codex-bevinding (klein): fail-open voorkomen — alles wat geen letterlijk "true" of
+              # "false" is, is een fout in het besluit zelf, geen stilzwijgende onderdrukking.
+              echo "::error title=Alarm-besluit ongeldige mag-waarde::verwacht 'true' of 'false', kreeg '${mag}'" >&2
+              exit 1
+            fi
+
+            tekst="$(printf 'Run: %s/%s/actions/runs/%s\nMoment: %s (aanleiding: %s)\n\n%s\noorzaakcode: %s\n' \
               "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}" \
-              "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${GITHUB_EVENT_NAME}" "$samenvatting")"
+              "$nu_iso" "${GITHUB_EVENT_NAME}" "$samenvatting" "$code")"
             if [ -n "$nummer" ]; then
               gh issue comment "$nummer" --body "$tekst"
-              echo "alarm bijgeschreven op issue #${nummer}"
+              echo "alarm bijgeschreven op issue #${nummer} (oorzaakcode: ${code})"
             else
               nieuw="$(gh issue create --title "${MERK} — de doorstroom of de plaat staat stil" \
                 --body "$(printf 'Deze melding staat MET OPZET buiten de publieke spiegel en buiten de Pages-bouw: die twee zijn precies wat hier bewaakt wordt.\n\n%s\n\nDit issue sluit vanzelf zodra een volgende run weer GROEN is.\n' "$tekst")")"
-              echo "alarm geopend: ${nieuw}"
+              echo "alarm geopend: ${nieuw} (oorzaakcode: ${code})"
             fi
             echo "::error title=Doorstroom ROOD::${samenvatting}"
             exit 1
