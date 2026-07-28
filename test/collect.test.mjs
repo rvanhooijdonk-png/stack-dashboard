@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   ageTrust, categoriseer, CATEGORIEEN, parseTrackDefs, isEchteDatum, tracksFromListing,
-  leesBesluiten, leesTracker, leesJournaal,
+  leesBesluiten, leesTracker, leesJournaal, decodeContentsResponse,
 } from '../scripts/lib/collect.mjs';
 
 // --- Bevinding uit de derde review (Codex, 23-07-2026): de leeftijdsgrens lekte een dag ---
@@ -248,4 +248,48 @@ test('een beslispunt in een onbekende schrijfwijze telt aan de bronkant mee', ()
   assert.equal(decisionPoints.length, 0);
   assert.equal(telling.inBron, 1, 'hij stond er');
   assert.equal(telling.herkend, 0, 'en het verschil is de uitkomst');
+});
+
+// --- W-41 (28-07-2026): te-groot-voor-de-contents-API is geen leegte -----------------------------
+//
+// De GitHub Contents-API antwoordt boven ±1MB met HTTP 200, `encoding: "none"`, `content: ""` —
+// geen foutcode. `fileFromRepo()` zag dat voorheen niet: `res.data?.trim()` is bij zo'n respons
+// leeg, precies zoals bij een 0-byte-bestand, en beide gaven stil dezelfde `null` terug — dezelfde
+// blinde plek als `bezorging.py` (W-40), gemeten door PR-OPSCHONING in
+// `2026-07-28-w41-blinde-leesroutes-gemeten.md` §2: "toetsen op leegte is fout, toetsen op
+// `encoding === 'none'` is precies." Deze proeven vergen dat onderscheid van de zuivere
+// beslislogica, los van de `gh`-aanroep — zelfde patroon als `tracksFromListing`.
+
+test('een te groot bestand (encoding "none") is geen lege bron — apart signaal, geen null', () => {
+  const res = decodeContentsResponse({ size: 1183240, encoding: 'none', content: '' });
+  assert.equal(res.text, null);
+  assert.equal(res.tooLarge, true, 'boven de contents-API-grens moet zichtbaar zijn, niet stil null');
+  assert.equal(res.size, 1183240, 'de grootte blijft bekend ook al is de inhoud onbereikbaar');
+});
+
+test('een echt leeg bestand (0 bytes, encoding base64) is wél gewoon leeg — geen too_large', () => {
+  const res = decodeContentsResponse({ size: 0, encoding: 'base64', content: '' });
+  assert.equal(res.text, null);
+  assert.equal(res.tooLarge, false, 'een 0-byte-bestand mag niet als too_large verschijnen');
+  assert.equal(res.size, 0);
+});
+
+test('een gewoon leesbaar bestand decodeert zoals voorheen', () => {
+  const b64 = Buffer.from('hallo wereld', 'utf8').toString('base64');
+  const res = decodeContentsResponse({ size: 12, encoding: 'base64', content: b64 });
+  assert.equal(res.text, 'hallo wereld');
+  assert.equal(res.tooLarge, false);
+});
+
+test('base64 met interne newlines (zoals GitHub ze levert) blijft werken', () => {
+  const b64 = Buffer.from('regel een\nregel twee', 'utf8').toString('base64');
+  const metRegeleindes = b64.replace(/(.{20})/g, '$1\n');
+  const res = decodeContentsResponse({ size: 21, encoding: 'base64', content: metRegeleindes });
+  assert.equal(res.text, 'regel een\nregel twee');
+});
+
+test('een ontbrekende of kapotte respons geeft geen too_large en geen crash', () => {
+  assert.deepEqual(decodeContentsResponse(null), { text: null, tooLarge: false, size: null });
+  assert.deepEqual(decodeContentsResponse(undefined), { text: null, tooLarge: false, size: null });
+  assert.deepEqual(decodeContentsResponse({}), { text: null, tooLarge: false, size: null });
 });

@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { toPublicSnapshot, readTextPolicy } from '../scripts/build.mjs';
+import { toPublicSnapshot, readTextPolicy, planningFromBouwlijst } from '../scripts/build.mjs';
 
 /**
  * Een collectorresultaat met velden die nooit gepubliceerd mogen worden (interne notitie,
@@ -198,6 +198,64 @@ test('een categorie buiten de gesloten woordenschat breekt de build, niet pas he
   const vies2 = structuredClone(raw);
   vies2.tracker.decisionPoints[0].category = 'iets-nieuws';
   assert.throws(() => toPublicSnapshot(vies2), /gesloten lijst/);
+});
+
+// --- Bevinding Codex-review 28-07-2026 (too_large-check, W-41-vervolg): het signaal verdween
+// stil zodra buildSnapshot() alleen `.text` las van `collectBouwlijst()`'s `{text, tooLarge, size}`.
+
+test('een te grote bouwlijst-bron toont LEEG op de plaat, maar tooLarge verdwijnt niet uit de interne snapshot', () => {
+  const gewaarschuwd = [];
+  const origWarn = console.warn;
+  console.warn = (msg) => gewaarschuwd.push(msg);
+  try {
+    const planning = planningFromBouwlijst({ text: null, tooLarge: true, size: 1183240, spiegelAt: null });
+    assert.equal(planning.available, false);
+    assert.equal(planning.reason, 'LEEG', 'het contract kent nog geen derde stand — dat is het NOOIT_GEMETEN-voorstel');
+    assert.equal(planning.bronTooLarge, true);
+    assert.equal(planning.bronSize, 1183240);
+    assert.equal(gewaarschuwd.length, 1, 'het signaal moet naar de build-log, niet stil verdwijnen');
+    assert.match(gewaarschuwd[0], /1183240/);
+  } finally {
+    console.warn = origWarn;
+  }
+});
+
+test('een gewoon leesbare bouwlijst-bron zet bronTooLarge op false en waarschuwt niet', () => {
+  const gewaarschuwd = [];
+  const origWarn = console.warn;
+  console.warn = (msg) => gewaarschuwd.push(msg);
+  const feed = JSON.stringify({
+    meetlat: { sha: 'e0049dcabc123def456' },
+    totaal_bouwbaar: 4,
+    publish_veilig: 1,
+    taken: [{
+      task_id: 'T-0001',
+      feature_label: 'Dagelijkse automatische contentpublicatie',
+      verwachte_duur: '1-2 dagen',
+      richard_poort: 'geen',
+      prioriteit_tier: 3,
+      status: 'READY',
+      is_twijfel: false,
+      afhankelijkheden: 2,
+    }],
+  });
+  try {
+    const planning = planningFromBouwlijst({ text: feed, tooLarge: false, size: 812, spiegelAt: '2026-07-28T10:00:00Z' });
+    assert.equal(planning.available, true);
+    assert.equal(planning.bronTooLarge, false);
+    assert.equal(planning.bronSize, 812);
+    assert.equal(planning.bron.spiegelAt, '2026-07-28T10:00:00Z');
+    assert.equal(gewaarschuwd.length, 0);
+  } finally {
+    console.warn = origWarn;
+  }
+});
+
+test('een ontbrekend bouwlijst-object crasht niet — leeg, geen tooLarge', () => {
+  const planning = planningFromBouwlijst(undefined);
+  assert.equal(planning.available, false);
+  assert.equal(planning.bronTooLarge, false);
+  assert.equal(planning.bronSize, null);
 });
 
 test('een track met een telling die niet strookt met zijn datum breekt de build (fail-closed)', () => {

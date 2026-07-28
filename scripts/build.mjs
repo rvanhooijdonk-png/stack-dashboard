@@ -290,6 +290,32 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
 }
 
 /**
+ * Vertaalt de bouwlijst-collectorrespons naar de interne planning-sectie. Los van `buildSnapshot()`
+ * zodat dit zonder netwerk te toetsen is (zelfde patroon als `decodeContentsResponse`).
+ *
+ * Bevinding Codex-review 28-07-2026 (W-41-vervolg, too_large-check): `collectBouwlijst()` geeft
+ * sinds vandaag `tooLarge`/`size` terug, maar deze functie zag voorheen alleen `.text` — een te
+ * grote bron werd zo ononderscheidbaar van een lege, óók in de interne snapshot, niet alleen op de
+ * plaat. Het publieke contract kent nog geen derde stand naast LEEG/CORRUPT (dat is het
+ * `NOOIT_GEMETEN`-voorstel, wacht op Richards akkoord) — tot dan blijft de plaat zelf LEEG tonen,
+ * maar het signaal verdwijnt hier niet meer stil: het gaat naar de build-log (zelfde `console.warn`-
+ * patroon als de sanitize-bevindingen hieronder) en blijft op het interne planning-object staan.
+ */
+export function planningFromBouwlijst(bouwlijst) {
+  if (bouwlijst?.tooLarge) {
+    console.warn(`bouwlijst: bron is te groot om te lezen (±1MB-grens contents-API, grootte ${bouwlijst.size ?? 'onbekend'} bytes) — plaat toont LEEG, dit is een grens, geen storing`);
+  }
+  const planning = vertaalBouwlijst(bouwlijst?.text ?? '');
+  // Het spiegelmoment hoort bij de HERKOMST, niet bij de vertaling: de vertaler kent alleen de tekst.
+  if (planning.bron) planning.bron.spiegelAt = bouwlijst?.spiegelAt ?? null;
+  // Niet in het publieke contract (toPublicPlanning bouwt zijn eigen sleutels, kopieert dit niet mee)
+  // — puur voor wie de interne snapshot leest of logt, zodat "te groot" hier vindbaar blijft.
+  planning.bronTooLarge = bouwlijst?.tooLarge === true;
+  planning.bronSize = bouwlijst?.size ?? null;
+  return planning;
+}
+
+/**
  * Er is één weg naar publicatie. De vorige `--fixture`-modus sloeg `toPublicSnapshot()` over en
  * schreef een bestand rechtstreeks naar `public/` — een tweede, ongecontroleerde publicatiebuild
  * (bewezen probe, Codex 23-07-2026). Die modus is weg; fixtures dienen de tests, niet de output.
@@ -308,9 +334,7 @@ export async function buildSnapshot() {
   // Fail-closed en zonder terugval op het oude voorbeeldbestand: onleesbaar of onvertaalbaar wordt
   // LEEG/CORRUPT met een nette melding op de plaat. Vijf verzonnen features tonen omdat de echte bron
   // even niet leesbaar is, zou de plaat laten liegen — en de plaat is er juist tegen dat misverstand.
-  const planning = vertaalBouwlijst(bouwlijst.text ?? '');
-  // Het spiegelmoment hoort bij de HERKOMST, niet bij de vertaling: de vertaler kent alleen de tekst.
-  if (planning.bron) planning.bron.spiegelAt = bouwlijst.spiegelAt;
+  const planning = planningFromBouwlijst(bouwlijst);
 
   // De vloot-kanaalpost komt uit de publieke spiegel in DEZE repo, niet uit het interne logboek op de
   // rapporten-branch: wat de plaat toont, hoort bij de commit die hem publiceerde, en de bron is al
