@@ -63,7 +63,22 @@ jobs:
       # Dezelfde poort als in `publish.yml`, om dezelfde reden: kaal `node --test` geeft exit 0 bij
       # nul gevonden tests. Een schrijver die op een leeggelopen testontdekking groen draait, schrijft
       # met ongetoetst oordeel in een bestand dat niemand meer kan repareren.
+      #
+      # `continue-on-error: true` is bewust (ALARM-DAT-ELKE-RUN-MAILT A2-A4, bevinding Codex-review):
+      # zonder deze regel bepaalt DEZE stap alleen al of de hele job faalt, en dus of GitHub's eigen
+      # "workflow gefaald"-mail vuurt — buiten de meldbeslissing hieronder om. Bij een aanhoudende
+      # testfout (zoals de kapotte snapshot-toets die dit werk aanleiding gaf) zou dat betekenen dat
+      # de debounce verderop bestaat maar niets voorstelt: GitHub mailt dan alsnog op elke run.
+      # Overzetten en Aanvulling vastleggen kregen dezelfde behandeling (zie hun eigen stappen) —
+      # samen zijn Tests/Overzetten/Vastleggen zo alle drie "zacht": ze blokkeren de KETEN eronder via
+      # hun eigen `if:`, maar niet de JOB. Dat maakt de Alarm-stap ("if: always()", helemaal onderaan)
+      # de enige stap die de job — en dus de native faalmail — nog mag laten falen; dat gebeurt via
+      # `steps.<id>.outcome` van alle drie (die zowel de schrijfstappen blokkeren als de Alarm-stap
+      # vertellen welke stap faalde) en via de meldbeslissing in de Alarm-stap zelf. Checkout/
+      # setup-node vallen hierbuiten — zie de toelichting bij de Alarm-stap.
       - name: Tests
+        id: tests
+        continue-on-error: true
         env:
           TESTS_ONDERGRENS: "50"
         run: |
@@ -79,7 +94,13 @@ jobs:
       # Zonder token is de bron (privérepo) onbereikbaar. Dat is met opzet een ROOD oordeel en geen
       # stille nul: "ik zie geen rijen" en "ik mag de rijen niet zien" mogen nooit hetzelfde betekenen.
       # De waarde wordt nergens afgedrukt; de uitvoerder draagt hem alleen in een header.
+      # Blijft ongewijzigd t.o.v. vóór A2-A4: schrijft alleen als Tests écht slaagde. `continue-on-error`
+      # op de Tests-stap zorgt dat een falende test de JOB niet meer stilzwijgend laat doorlopen naar
+      # hier — deze `if:` is daarmee de vervanger van wat eerst een impliciete `success()`-cascade was.
       - name: Overzetten (bron → publieke spiegel)
+        id: overzetten
+        continue-on-error: true
+        if: steps.tests.outcome == 'success'
         env:
           CONTROL_READ_TOKEN: ${{ secrets.ORG_PR_READ_TOKEN }}
           DOORSTROOM_PLAAT_URL: https://rvanhooijdonk-png.github.io/stack-dashboard/
@@ -97,7 +118,11 @@ jobs:
       # en de uitvoerder heeft die vlak voor het schrijven zelf al getoetst. Lukt de push alsnog niet,
       # dan is dat een storing en geen "volgende keer beter": exit 1, en de alarmstap hieronder ziet het.
       - name: Aanvulling vastleggen
-        if: github.ref_name == 'main'
+        id: vastleggen
+        continue-on-error: true
+        if: >-
+          github.ref_name == 'main' && steps.tests.outcome == 'success'
+          && steps.overzetten.outcome == 'success'
         run: |
           set -euo pipefail
           if git diff --quiet -- data/kanaalpost-publiek.md; then
@@ -125,16 +150,55 @@ jobs:
       #  2. één openstaand issue in deze repo, dat bij herstel vanzelf weer dicht gaat.
       # Deze repo is PUBLIEK, dus in het issue staan alleen tellingen en redencodes uit de vastgelegde
       # lijst — nooit de inhoud van een rij, nooit een naam die niet al in deze repo staat.
+      # DE MELDBESLISSING STAAT APART EN IS BEPROEFD (`scripts/lib/doorstroom-alarm.mjs`,
+      # `test/doorstroom-alarm.test.mjs`) — zie ALARM-DAT-ELKE-RUN-MAILT A2-A4. Zonder debounce
+      # mailde elke ROOD-run opnieuw zolang de onderliggende oorzaak dezelfde bleef; dit stapje
+      # onthoudt de laatst-gemelde oorzaak (verborgen marker in het lichaam van het alarmissue) en
+      # meldt alleen bij een NIEUWE oorzaak, de EERSTE keer, of na `DOORSTROOM_ALARM_PERIODE_UUR` uur
+      # zonder wijziging. Een verdwenen oorzaak (weer GROEN met een open issue) meldt precies één keer
+      # "opgelost" — dat gedrag bestond al (issue sluit op GROEN) en verandert hier niet.
+      #
+      # Checkout/setup-node zijn met opzet BUITEN dit stelsel gelaten: faalt een van die twee, dan is
+      # deze stap zelf niet eens uitgecheckt om te kunnen draaien — er is dan letterlijk geen debounce
+      # mogelijk, en de native faalmail is daar het enige signaal dat overblijft. Tests/Overzetten/
+      # Aanvulling vastleggen liggen daarentegen WEL binnen bereik van deze stap (zie hieronder) — dat
+      # is de correctie op een eerdere versie waarin alleen Tests werd opgevangen: een mislukte push
+      # kon toen een reeds-GROEN `oordeel.json` (geschreven vóór de push) laten gelden en een
+      # openstaand issue ten onrechte als "opgelost" sluiten, terwijl de run door de pushfout alsnog
+      # rood bleef — twee tegenstrijdige signalen tegelijk (bevinding Codex-review, tweede ronde).
       - name: Alarm buiten de keten
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           MERK: 'DOORSTROOM ROOD'
+          DOORSTROOM_ALARM_PERIODE_UUR: '24'
+          # Tests-falen heeft geen eigen env-var nodig: dan draait Overzetten niet (if:
+          # steps.tests.outcome == 'success'), dus /tmp/oordeel.json ontbreekt gewoon — dat bestaande
+          # pad hieronder dekt het al.
+          OVERZETTEN_UITKOMST: ${{ steps.overzetten.outcome }}
+          VASTLEGGEN_UITKOMST: ${{ steps.vastleggen.outcome }}
         run: |
           set -euo pipefail
 
-          # Ontbrekend oordeel = de uitvoerder zelf viel om. Dat is rood, niet onbekend.
-          if [ ! -f /tmp/oordeel.json ]; then
+          oorzaakOverride=""
+
+          # Overzetten/Vastleggen kregen `continue-on-error: true` (net als Tests) zodat ALLEEN deze
+          # Alarm-stap de job — en dus de native faalmail — mag laten falen. Hun eigen falen moet dus
+          # hier expliciet worden opgevangen; zonder deze twee takken zou zo'n storing volledig buiten
+          # de meldbeslissing om lopen. Tests-falen hoeft geen eigen tak: Overzetten draait dan niet
+          # (if: steps.tests.outcome == 'success'), dus /tmp/oordeel.json ontbreekt gewoon — dat pad
+          # bestond al en geeft via de tap-uitvoer de falende testnaam/-namen mee als oorzaak.
+          if [ "$OVERZETTEN_UITKOMST" = "failure" ]; then
+            uitkomst=ROOD
+            samenvatting='overzetten (bron → publieke spiegel) faalde — zie de stapuitvoer hierboven'
+            oorzaakOverride="OVERZETTEN_GEFAALD"
+          elif [ "$VASTLEGGEN_UITKOMST" = "failure" ]; then
+            uitkomst=ROOD
+            samenvatting='aanvulling vastleggen (push naar main) faalde — de spiegel op main is NIET bijgewerkt, ook al kan het lokale oordeel GROEN zeggen'
+            oorzaakOverride="VASTLEGGEN_GEFAALD"
+          elif [ ! -f /tmp/oordeel.json ]; then
+            # Ontbrekend oordeel = de uitvoerder zelf viel om (meestal: Tests faalde, zie hierboven).
+            # Dat is rood, niet onbekend.
             uitkomst=ROOD
             samenvatting='uitvoerder gaf geen oordeel af (UITVOERDER_GEFAALD) — zie de stapuitvoer hierboven'
           else
@@ -166,17 +230,46 @@ jobs:
           nummer="$(gh issue list --state open --limit 50 --json number,title \
             --jq "[.[] | select(.title | startswith(\"${MERK}\"))][0].number // empty")"
 
+          issue_open=false
+          : > /tmp/issue-body.txt
+          if [ -n "$nummer" ]; then
+            issue_open=true
+            gh issue view "$nummer" --json body -q .body > /tmp/issue-body.txt
+          fi
+
+          node scripts/doorstroom-alarm.mjs beslis \
+            --oordeel /tmp/oordeel.json --tap /tmp/tests.tap --issue-body /tmp/issue-body.txt \
+            --issue-open "$issue_open" --periode-uur "${DOORSTROOM_ALARM_PERIODE_UUR}" \
+            --oorzaak-override "$oorzaakOverride" \
+            > /tmp/beslissing.json
+          melden="$(node -p "JSON.parse(require('fs').readFileSync('/tmp/beslissing.json','utf8')).melden")"
+          reden="$(node -p "JSON.parse(require('fs').readFileSync('/tmp/beslissing.json','utf8')).reden")"
+
           if [ "$uitkomst" = "ROOD" ]; then
-            tekst="$(printf 'Run: %s/%s/actions/runs/%s\nMoment: %s (aanleiding: %s)\n\n%s\n' \
+            if [ "$melden" != "true" ]; then
+              # Zelfde oorzaak, nog binnen de periode: geen nieuwe mail, geen nieuwe issue-actie. De
+              # staat (welke oorzaak, wanneer laatst gemeld) verandert bewust NIET — anders schuift de
+              # periodieke herinnering elke run een stukje op, ook als we niets meldden.
+              echo "::notice title=Doorstroom nog steeds ROOD (${reden}, niet opnieuw gemeld)::${samenvatting}"
+              exit 0
+            fi
+
+            tekst="$(printf 'Run: %s/%s/actions/runs/%s\nMoment: %s (aanleiding: %s, reden: %s)\n\n%s\n' \
               "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}" \
-              "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${GITHUB_EVENT_NAME}" "$samenvatting")"
+              "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${GITHUB_EVENT_NAME}" "${reden}" "$samenvatting")"
             if [ -n "$nummer" ]; then
               gh issue comment "$nummer" --body "$tekst"
-              echo "alarm bijgeschreven op issue #${nummer}"
+              node scripts/doorstroom-alarm.mjs merk-schrijven \
+                --basis /tmp/issue-body.txt --beslissing /tmp/beslissing.json > /tmp/nieuwe-body.txt
+              gh issue edit "$nummer" --body-file /tmp/nieuwe-body.txt
+              echo "alarm bijgeschreven op issue #${nummer} (${reden})"
             else
+              printf 'Deze melding staat MET OPZET buiten de publieke spiegel en buiten de Pages-bouw: die twee zijn precies wat hier bewaakt wordt.\n\n%s\n\nDit issue sluit vanzelf zodra een volgende run weer GROEN is.\n' "$tekst" > /tmp/basisbody.txt
+              node scripts/doorstroom-alarm.mjs merk-schrijven \
+                --basis /tmp/basisbody.txt --beslissing /tmp/beslissing.json > /tmp/nieuwe-body.txt
               nieuw="$(gh issue create --title "${MERK} — de doorstroom of de plaat staat stil" \
-                --body "$(printf 'Deze melding staat MET OPZET buiten de publieke spiegel en buiten de Pages-bouw: die twee zijn precies wat hier bewaakt wordt.\n\n%s\n\nDit issue sluit vanzelf zodra een volgende run weer GROEN is.\n' "$tekst")")"
-              echo "alarm geopend: ${nieuw}"
+                --body-file /tmp/nieuwe-body.txt)"
+              echo "alarm geopend: ${nieuw} (${reden})"
             fi
             echo "::error title=Doorstroom ROOD::${samenvatting}"
             exit 1
@@ -189,8 +282,8 @@ jobs:
             exit 0
           fi
 
-          if [ -n "$nummer" ]; then
+          if [ "$melden" = "true" ] && [ -n "$nummer" ]; then
             gh issue close "$nummer" --comment "$(printf 'Weer GROEN.\n\n%s\n' "$samenvatting")"
-            echo "alarm gesloten: #${nummer}"
+            echo "alarm gesloten: #${nummer} (${reden})"
           fi
           echo "GROEN"
