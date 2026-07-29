@@ -633,6 +633,24 @@ function publiekeVorm(r) {
 const cap = (v, max) => (v.length > max ? `${v.slice(0, max - 1).trimEnd()}…` : v);
 
 /**
+ * Botsing tussen twee eigen poorten, opgelost zonder een van beide te verzwakken (Codex-review,
+ * 29-07-2026): de spiegelwet eist de VOLLE 40-teken git-SHA in de bron (geen ellipsis-afkapping,
+ * op één grandfathered regel na — zie spiegelwet.test.mjs), maar diezelfde 40 hex-tekens matchen
+ * ook het HIGH_ENTROPY-restpatroon in sanitize.mjs en worden dan als mogelijk geheim ingehouden.
+ *
+ * Geen generieke "elke lowercase-hex-40 is een SHA"-regex: een raw hex-secret heeft dezelfde vorm
+ * en zou zo ongemerkt langs de poort glippen — precies de bescherming die 26-07-2026 bewust werd
+ * verwijderd. In plaats daarvan een allowlist van SHA's die met de hand zijn nagekeken en die al
+ * elders in dezelfde bron in hun korte vorm voorkomen (bv. "sha `49a20e4`"). Alleen die worden
+ * verkort tot de gangbare git-vorm; elke andere 40-tekenreeks blijft onaangeroerd en dus ingehouden.
+ */
+const PUBLIEKE_GIT_SHA1 = new Set([
+  'b694235cae13d681d485040b9c3309a239b225ec', // RAFFINADERIJ 2026-07-27 08:16/09:53 (regels 90, 93)
+]);
+const shaVerkort = (v) =>
+  v.replace(/\b[0-9a-f]{40}\b/g, (m) => (PUBLIEKE_GIT_SHA1.has(m) ? `${m.slice(0, 7)}…` : m));
+
+/**
  * Alle rijen die de publieke kant HERKENT, in bronvolgorde en zonder de limiet van vijftien: elke rij
  * door vorm- en publicatiepoort, daarna afgekapt zoals hij op de plaat komt te staan.
  *
@@ -646,6 +664,7 @@ function veiligePubliekeRijen(raw) {
   let ingehouden = 0;
   for (const r of raw.rows) {
     const rij = publiekeVorm(r);
+    if (rij) rij.onderwerp = shaVerkort(rij.onderwerp);
     if (!rij || ![rij.tab, rij.onderwerp, rij.status, rij.actie, rij.datum].every(publishVeilig)) {
       ingehouden += 1;
       continue;

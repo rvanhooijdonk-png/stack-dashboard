@@ -322,3 +322,44 @@ test('de meegeleverde spiegel levert rijen op — de plaat leest een bestaand be
   // Geen enkele rij hoort een pad, sleutel of adres te dragen: de spiegel is al voor publiek geschreven.
   assert.equal(dto.ingehouden, 0, 'een ingehouden rij betekent dat een venster iets schreef dat er niet hoort');
 });
+
+// --- SHA-verkorting: botsing spiegelwet (volle SHA verplicht in de bron) vs sanitize-poort
+// (40 hextekens = mogelijk geheim) opgelost met een handmatig nagekeken allowlist, geen
+// generieke "elke hex-40 is een SHA"-regex (Codex-review, 29-07-2026: die zou een echt
+// hex-vormig geheim ongemerkt doorlaten — precies de uitzondering die op 26-07-2026 bewust
+// uit sanitize.mjs is gehaald). ---
+
+const GEAUTORISEERDE_SHA = 'b694235cae13d681d485040b9c3309a239b225ec';
+
+test('een geautoriseerde SHA in het onderwerp wordt getoond in de gangbare korte vorm', () => {
+  const dto = toPublicKanaalpost(bron([{ ...rij(1), onderwerp: `zie sha ${GEAUTORISEERDE_SHA} voor details` }]));
+  assert.equal(dto.available, true);
+  assert.equal(dto.ingehouden, 0);
+  assert.equal(dto.rows.length, 1);
+  assert.equal(dto.rows[0].onderwerp, 'zie sha b694235… voor details');
+});
+
+test('een niet-geautoriseerde hex-40 blijft ingehouden — de allowlist verzwakt de poort niet', () => {
+  const vreemdeHex = 'a'.repeat(40);
+  const dto = toPublicKanaalpost(bron([{ ...rij(1), onderwerp: `zie sha ${vreemdeHex} voor details` }]));
+  assert.equal(dto.available, false);
+  assert.equal(dto.reason, 'INGEHOUDEN');
+  assert.equal(dto.ingehouden, 1);
+});
+
+test('twee geautoriseerde SHAs in dezelfde rij worden allebei verkort', () => {
+  const dto = toPublicKanaalpost(
+    bron([{ ...rij(1), onderwerp: `van ${GEAUTORISEERDE_SHA} naar ${GEAUTORISEERDE_SHA}` }]),
+  );
+  assert.equal(dto.ingehouden, 0);
+  assert.equal(dto.rows.length, 1);
+  assert.equal(dto.rows[0].onderwerp, 'van b694235… naar b694235…');
+});
+
+test('41 hextekens is geen SHA-1 meer en blijft ingehouden (geen randgeval-lek op de \\b-grens)', () => {
+  const eenTeLang = `${GEAUTORISEERDE_SHA}a`;
+  const dto = toPublicKanaalpost(bron([{ ...rij(1), onderwerp: `zie sha ${eenTeLang} voor details` }]));
+  assert.equal(dto.available, false);
+  assert.equal(dto.reason, 'INGEHOUDEN');
+  assert.equal(dto.ingehouden, 1);
+});
