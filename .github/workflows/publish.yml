@@ -39,10 +39,18 @@ jobs:
       # De zojuist gebouwde stempel, zodat de post-deploy zelftest kan bewijzen dat de origin
       # deze ook echt serveert. Leeg bij een gefaalde build (dan draait `verify` sowieso niet).
       stamp: ${{ steps.stamp.outputs.value }}
+      # Welke stap faalde + de gemeten foutlocatie — voor de noodpagina (OPDRACHT/DE-PLAAT-
+      # MELDT-MAAR-ZEGT-NIET-WAT). Job-outputs blijven leesbaar voor needs.build zelfs als de
+      # job als geheel `failure` is, zolang de producerende stap zelf slaagde — zelfde patroon
+      # als `stamp` hierboven, nu ook op de faalpad.
+      failure_step: ${{ steps.faalinfo.outputs.step }}
+      failure_detail: ${{ steps.faalinfo.outputs.detail }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - id: checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+      - id: setup_node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: '20'
 
@@ -63,6 +71,7 @@ jobs:
       # exact-aantal-eis — hij staat ruim onder het echte aantal (117 op 24-07) zodat normaal
       # snoeien niet vals alarmeert, maar een leeggelopen ontdekking wél.
       - name: Tests
+        id: tests
         env:
           TESTS_ONDERGRENS: "50"
         run: |
@@ -79,6 +88,7 @@ jobs:
       # Poort 3 komt van buiten onze eigen regexen. Vaste versie, geverifieerde checksum:
       # een secretsscanner die je niet kunt vertrouwen, is geen poort.
       - name: gitleaks installeren (gepind + checksum)
+        id: gitleaks_install
         run: |
           set -euo pipefail
           curl -sSL --fail -o gitleaks.tar.gz \
@@ -89,6 +99,7 @@ jobs:
 
       # Bewijs dat poort 3 écht dichtgaat. Faalt deze stap niet, dan is de scan een placebo.
       - name: Zelftest — een nepsecret MOET de scan laten falen
+        id: gitleaks_selftest
         run: |
           set -euo pipefail
           mkdir -p /tmp/gate-selftest
@@ -119,6 +130,7 @@ jobs:
           rm -rf /tmp/gate-selftest
 
       - name: Genereren (read-only aggregatie)
+        id: genereren
         env:
           # Zonder dit token vallen de org-brede PR-secties terug op SOURCE_UNAVAILABLE.
           # De pagina toont dat zichtbaar; er wordt nooit een oude groene stand hergebruikt.
@@ -126,6 +138,7 @@ jobs:
         run: node scripts/build.mjs
 
       - name: Alleen toegestane bestanden in de publicatiemap
+        id: allowed_files
         run: |
           set -euo pipefail
           onverwacht=$(find public -mindepth 1 \
@@ -136,6 +149,7 @@ jobs:
           fi
 
       - name: gitleaks op de output
+        id: gitleaks_output
         run: ./gitleaks dir public --redact --exit-code 1 --no-banner
 
       - name: Stempel als job-output (voor de post-deploy zelftest)
@@ -143,6 +157,7 @@ jobs:
         run: echo "value=$(node -p "require('./public/status.json').generatedAt")" >> "$GITHUB_OUTPUT"
 
       - name: Samenvatting
+        id: samenvatting
         run: |
           {
             echo '### stack-dashboard'
@@ -152,9 +167,119 @@ jobs:
             node -p "require('./public/status.json').sources.map(s=>'- '+s.key+': '+s.trust).join('\n')"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+      - id: upload_artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         with:
           path: public
+
+      # OPDRACHT/DE-PLAAT-MELDT-MAAR-ZEGT-NIET-WAT (2026-07-28): de noodpagina somde eerst drie
+      # mogelijke oorzaken op ("een test, de sanitize-gate of de secretsscan") terwijl de CI altijd
+      # al weet welke stap het was — `steps.<id>.outcome` meet het, hier wordt niets geraden. Bij
+      # Tests wordt ook de gemeten TAP-locatie (bestand:regel) meegegeven; bij de overige stappen
+      # is er geen vergelijkbare gestructureerde locatie, dus alleen de stapnaam + een eerlijke
+      # verwijzing naar de CI-log (geen verzonnen bestand/regel).
+      #
+      # Deze stap staat bewust ALS LAATSTE: stond hij eerder (vóór Samenvatting/upload), dan had
+      # `if: failure()` op dát moment nog niets om te melden zolang alle stappen ervoor slaagden —
+      # faalde een stap DAARNA (Samenvatting, upload-pages-artifact), dan was faalinfo dus al als
+      # `skipped` afgesloten en kreeg de downstream job lege outputs (Codex-review 28-07-2026).
+      # Nu vangt `if: failure()` hier een fout in ÉÉN van alle voorgaande stappen, inclusief de
+      # laatste twee.
+      #
+      # Restbeperking, bewust niet opgelost (Codex-review v2, 28-07-2026 — laag): een POST-actie
+      # (de opruimstap die `actions/checkout`/`actions/setup-node` zelf na afloop van de hele job
+      # draait) loopt ná déze stap. Faalt zo'n post-actie, dan was `failure()` hier nog niets en
+      # slaat deze stap dus zelf over — de noodpagina krijgt dan lege `step`/`detail`-outputs en valt
+      # terug op de generieke tekst die al in `failure-page.mjs` zit, niet op een specifieke melding.
+      # Dat degradeert veilig (nooit een oude/foute stand), maar noemt de post-actie niet met naam.
+      - name: Faalinfo vastleggen (voor de noodpagina — de gemeten stap, geen drie mogelijkheden)
+        id: faalinfo
+        if: failure()
+        run: |
+          set -uo pipefail
+          stap="onbekende stap"
+          detail="geen van de gemeten stappen faalde expliciet — mogelijk een post-job- of infrastructuurfout; zie de volledige CI-log van deze run"
+          if [ "${{ steps.checkout.outcome }}" = "failure" ]; then
+            stap="checkout"
+            detail="git checkout van deze commit is mislukt — zie de CI-log van deze stap"
+          elif [ "${{ steps.setup_node.outcome }}" = "failure" ]; then
+            stap="setup-node"
+            detail="node-installatie via actions/setup-node is mislukt — zie de CI-log van deze stap"
+          elif [ "${{ steps.tests.outcome }}" = "failure" ]; then
+            stap="Tests"
+            # Eerst het blok van de EERSTE 'not ok' isoleren (tot de volgende 'not ok'), zodat een
+            # 'location:' uit een LATERE falende test nooit aan de EERSTE genoemde testnaam wordt
+            # geplakt (Codex-review 28-07-2026: de twee greps liepen eerder onafhankelijk over het
+            # hele bestand). Anker op exact twee spaties + aanhalingsteken: dat is de insprong van
+            # het echte gestructureerde TAP-veld, niet van tekst die toevallig in een geneste
+            # `error: |-`-blok staat (die springt verder in).
+            # grep -oE + tr i.p.v. \s-sed: \s is geen POSIX-BRE/ERE-klasse en niet overal
+            # gegarandeerd (lokaal op macOS/BSD-sed faalde dit stil) — hier lokaal getoetst tegen
+            # een echte gevangen TAP-regel (test/spiegelwet.test.mjs:138) vóórdat dit naar CI ging.
+            # `|| true` op elke extractie: GitHub's runner-shell heeft `-e` al aan (los van de
+            # `set -uo pipefail` hierboven, die schakelt `-e` niet uit) — zonder `|| true` breekt
+            # een lege match (geen 'not ok'/'location:' gevonden) deze stap af vóór de fallback
+            # hieronder wordt bereikt (Codex-review 28-07-2026).
+            # Insprong van de EERSTE 'not ok' expliciet meten i.p.v. aan te nemen dat hij bij kolom
+            # 0 begint (Codex-review v2, 28-07-2026): een genest subtest-kind (`t.test()`/
+            # `describe()`) hangt dieper in en verscheen anders onder de naam/locatie van zijn
+            # OUDER-test, niet zichzelf — reproduceerbaar met `node --test-reporter=tap`. Het
+            # `location:`-anker (insprong+2, `grep -m1`) blijft daardoor exact op het kind geplakt,
+            # ook als de blok-afkap (bij een niet-geneste vervolgtest op dezelfde insprong) niet in
+            # elk denkbaar geval de allerlaatste regel raakt — de EERSTE match is en blijft de juiste.
+            eerste_ln="$(grep -nE '^[[:space:]]*not ok ' /tmp/tests.tap 2>/dev/null | head -1 | cut -d: -f1 || true)"
+            inspring="$(sed -n "${eerste_ln:-0}p" /tmp/tests.tap 2>/dev/null | sed -E 's/^([[:space:]]*)not ok.*/\1/' || true)"
+            blok="$(awk -v start="${eerste_ln:-0}" -v ind="$inspring" 'NR==start{found=1} found{ if(NR>start && $0 ~ "^"ind"not ok ") exit; print }' /tmp/tests.tap 2>/dev/null || true)"
+            naam="$(printf '%s\n' "$blok" | head -1 | sed -E 's/^[[:space:]]*not ok [0-9]+ - //' || true)"
+            regel="$(printf '%s\n' "$blok" | grep -m1 -E "^${inspring}  location: '" | grep -oE "'[^']+'" | tr -d "'" | sed -E 's#^/home/runner/work/[^/]+/[^/]+/##' || true)"
+            if [ -n "$regel" ]; then
+              detail="${naam:-testfout} (${regel})"
+            else
+              detail="${naam:-testfout} — zie de CI-log van de Tests-stap voor de exacte regel"
+            fi
+          elif [ "${{ steps.gitleaks_install.outcome }}" = "failure" ]; then
+            stap="gitleaks installeren"
+            # Neutraal i.p.v. specifiek "checksum kwam niet overeen": de stap heeft drie andere
+            # faalpunten (download, uitpakken, versie-check) die evengoed de oorzaak kunnen zijn
+            # (Codex-review v2, 28-07-2026) — het gemeten `outcome` bewijst alleen dát de stap
+            # faalde, niet welke van de vier commando's.
+            detail="installatie van gitleaks v${GITLEAKS_VERSION} is niet gelukt (download, checksum, uitpakken of versie-check) — zie de CI-log van deze stap"
+          elif [ "${{ steps.gitleaks_selftest.outcome }}" = "failure" ]; then
+            stap="gitleaks-zelftest"
+            detail="de scanner vond het geplante nepsecret niet (of gaf zelf een fout) — de secretsscan is dan niet te vertrouwen"
+          elif [ "${{ steps.genereren.outcome }}" = "failure" ]; then
+            stap="Genereren"
+            detail="node scripts/build.mjs gaf een fout — zie de CI-log van de Genereren-stap"
+          elif [ "${{ steps.allowed_files.outcome }}" = "failure" ]; then
+            stap="Alleen toegestane bestanden"
+            detail="onverwachte bestanden in public/ — zie de CI-log van deze stap"
+          elif [ "${{ steps.gitleaks_output.outcome }}" = "failure" ]; then
+            stap="gitleaks op de output"
+            # Neutraal i.p.v. "sloeg aan": gitleaks geeft exitcode 1 zowel bij een gevonden secret
+            # als bij een scannerfout (zelfde ambiguïteit als bij de zelftest hierboven, gemeten —
+            # Codex-review v2, 28-07-2026). Het gemeten `outcome` bewijst alleen dát de stap faalde.
+            detail="de secretsscan op de gegenereerde public/-map is niet succesvol afgerond (trof mogelijk iets aan, of de scanner faalde zelf) — zie de CI-log van deze stap"
+          elif [ "${{ steps.stamp.outcome }}" = "failure" ]; then
+            stap="Stempel als job-output"
+            detail="kon generatedAt niet uit public/status.json lezen — zie de CI-log van deze stap"
+          elif [ "${{ steps.samenvatting.outcome }}" = "failure" ]; then
+            stap="Samenvatting"
+            detail="het schrijven van de GITHUB_STEP_SUMMARY is mislukt — zie de CI-log van deze stap"
+          elif [ "${{ steps.upload_artifact.outcome }}" = "failure" ]; then
+            stap="upload-pages-artifact"
+            detail="het uploaden van het Pages-artefact is mislukt — zie de CI-log van deze stap"
+          fi
+          # `detail` is door de bovenstaande constructie altijd één regel (eigen tekst + hooguit een
+          # testnaam/bestandspad); de newline→spatie-vervanging maakt dat ook aantoonbaar zo, waarna
+          # de simpele `key=value`-vorm van GITHUB_OUTPUT volstaat — geen heredoc-afsluiter meer
+          # nodig die (in theorie) door de waarde zelf getroffen kan worden (Codex-review 28-07-2026:
+          # een `detail` die toevallig de losse regel `FAALINFO_EOF` bevat, zou de oude heredoc-vorm
+          # vroegtijdig afsluiten).
+          detail_eenregelig="$(printf '%s' "${detail:0:300}" | tr '\n' ' ')"
+          {
+            echo "step=${stap}"
+            echo "detail=${detail_eenregelig}"
+          } >> "$GITHUB_OUTPUT"
 
   # Faalt de build, dan publiceren we een datavrije foutpagina. Dat is opzettelijk:
   # GitHub Pages haalt een oude versie niet weg, en een stilstaande groene pagina is
@@ -175,6 +300,11 @@ jobs:
         with:
           node-version: '20'
       - name: Foutpagina genereren (geen enkele brondata, uit één getest bestand)
+        env:
+          # De gemeten stap + foutlocatie uit de build-job (leeg = de oude, eerlijke generieke
+          # tekst blijft de fallback in failure-page.mjs — zie oorzaakTekst()).
+          FAILURE_STEP: ${{ needs.build.outputs.failure_step }}
+          FAILURE_DETAIL: ${{ needs.build.outputs.failure_detail }}
         run: |
           set -euo pipefail
           mkdir -p public

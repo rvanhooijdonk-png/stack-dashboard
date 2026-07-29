@@ -47,6 +47,39 @@ test('foutpagina lijkt NIET op de GitHub-Pages-404', () => {
 // De discriminatie-logica die de CI-stap `verify-failure` gebruikt. Hier bewezen op alle drie de
 // takken, zodat de detectie klopt ook al kan de live-CI-bedrading pas door een échte gefaalde build
 // worden uitgeoefend (gepusht is niet live — de logica is wél getest).
+// OPDRACHT/DE-PLAAT-MELDT-MAAR-ZEGT-NIET-WAT (2026-07-28): de melding moet de gemeten stap
+// noemen i.p.v. drie mogelijkheden op te sommen — maar alleen als de CI dat ook echt meet.
+test('zonder info blijft de oude, generieke drie-mogelijkheden-tekst de fallback', () => {
+  const html = failurePageHtml();
+  assert.match(html, /een test, de sanitize-gate of de secretsscan gaf een fout/);
+  assert.ok(html.includes(FAILURE_MARKER), 'marker blijft aanwezig zonder info');
+});
+
+test('met info noemt de pagina de gemeten stap en foutlocatie, niet de drie mogelijkheden', () => {
+  const html = failurePageHtml({
+    step: 'Tests',
+    detail: "de echte spiegel voldoet (test/spiegelwet.test.mjs:138:1)",
+  });
+  assert.match(html, /De stap <strong>Tests<\/strong> is afgebroken/);
+  assert.match(html, /test\/spiegelwet\.test\.mjs:138:1/);
+  assert.ok(!html.includes('een test, de sanitize-gate of de secretsscan gaf een fout'),
+    'de oude drie-mogelijkheden-tekst verdwijnt zodra er een gemeten stap is');
+  assert.ok(html.includes(FAILURE_MARKER), 'marker blijft aanwezig mét info');
+  assert.equal(classifyServedPage(html), 'noodpagina', 'blijft classificeren als noodpagina');
+});
+
+test('info met HTML-gevoelige tekens wordt geëscaped, niet geïnjecteerd', () => {
+  const html = failurePageHtml({ step: '<script>kwaad()</script>', detail: 'a & b < c' });
+  assert.ok(!html.includes('<script>kwaad()'), 'stapnaam wordt geëscaped');
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /a &amp; b &lt; c/);
+});
+
+test('zonder bruikbare stapnaam (leeg) blijft de generieke tekst gelden', () => {
+  const html = failurePageHtml({ step: '', detail: 'iets' });
+  assert.match(html, /een test, de sanitize-gate of de secretsscan gaf een fout/);
+});
+
 test('classifyServedPage onderscheidt noodpagina / github-404 / anders', () => {
   assert.equal(classifyServedPage(failurePageHtml()), 'noodpagina');
   assert.equal(
