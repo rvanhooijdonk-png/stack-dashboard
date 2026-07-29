@@ -70,15 +70,25 @@ const koppen = {
   ...(process.env.CONTROL_READ_TOKEN ? { authorization: `Bearer ${process.env.CONTROL_READ_TOKEN}` } : {}),
 };
 
+// GEMETEN 29-07-2026: `CONTROL/KANAALPOST.md` staat op 1.662.777 bytes — over de 1 MB-grens van het
+// GEWONE contents-antwoord. Boven die grens levert GitHub `encoding: "none"`, `content: ""` terug,
+// geen fout, geen 404 — gewoon een lege bron met status 200. Daar viel `leesKanaalpost` stil op
+// `BRON_GEEN_KOP`: geen kop gezien, want geen tekst gezien. Het `raw`-mediatype omzeilt de
+// JSON+base64-verpakking (en daarmee die 1 MB-grens) tot 100 MB en levert de bytes rechtstreeks.
+const koppenRuw = { ...koppen, accept: 'application/vnd.github.raw+json' };
+
 /** Eén ophaal met tijdsbudget. Een fout is een UITKOMST, geen uitzondering — en draagt geen URL mee. */
-async function haal(url) {
+async function haal(url, headers = koppen) {
   try {
-    const r = await fetch(url, { headers: koppen, signal: AbortSignal.timeout(20000) });
+    const r = await fetch(url, { headers, signal: AbortSignal.timeout(20000) });
     return { status: r.status, tekst: await r.text() };
   } catch {
     return { status: 0, tekst: '' };
   }
 }
+
+/** Zelfde ophaal, maar de RUWE bestandsinhoud — geen JSON-omslag, dus geen 1 MB-plafond. */
+const haalRuw = (url) => haal(url, koppenRuw);
 
 /** `YYYY-MM-DDTHH-MM-...` uit de bestandsnaam. Geen tijdstempel = geen bewijs van aanlevering. */
 function geleverdUitNaam(naam) {
@@ -114,14 +124,9 @@ async function leesInbox() {
   for (const item of items.filter((i) => i?.type === 'file' && /\.md$/.test(i?.name ?? '')).sort((a, b) => a.name.localeCompare(b.name))) {
     const geleverdOp = geleverdUitNaam(item.name);
     if (!geleverdOp) { stuk.push({ id: item.name, reden: 'GEEN_TIJDSTEMPEL_IN_NAAM' }); continue; }
-    const inhoud = await haal(`https://api.github.com/repos/${BRON_REPO}/contents/${encodeURI(item.path)}?ref=${sha}`);
+    const inhoud = await haalRuw(`https://api.github.com/repos/${BRON_REPO}/contents/${encodeURI(item.path)}?ref=${sha}`);
     if (inhoud.status !== 200) { stuk.push({ id: item.name, reden: `RIJ_HTTP_${inhoud.status}` }); continue; }
-    let tekst = '';
-    try {
-      const blob = JSON.parse(inhoud.tekst);
-      tekst = blob?.encoding === 'base64' ? Buffer.from(blob.content, 'base64').toString('utf8') : String(blob?.content ?? '');
-    } catch { stuk.push({ id: item.name, reden: 'RIJ_ONLEESBAAR' }); continue; }
-    const gelezen = bronRijUitTekst(item.name, tekst);
+    const gelezen = bronRijUitTekst(item.name, inhoud.tekst);
     if (!gelezen.ok) { stuk.push({ id: item.name, reden: gelezen.reden }); continue; }
     rijen.push({ ...gelezen, geleverdOp });
   }
@@ -136,17 +141,11 @@ async function leesInbox() {
  * precies zo uit als een gezonde stille dag, en dat verschil is het onderwerp van dit hele bouwsel.
  */
 async function leesKanaalpost(sha) {
-  const r = await haal(`https://api.github.com/repos/${BRON_REPO}/contents/${encodeURI(BRON_KANAALPOST)}?ref=${sha}`);
+  const r = await haalRuw(`https://api.github.com/repos/${BRON_REPO}/contents/${encodeURI(BRON_KANAALPOST)}?ref=${sha}`);
   if (r.status !== 200) return { ok: false, reden: `KANAALPOST_HTTP_${r.status}`, rijen: [], geweigerd: [], telling: {}, gezien: 0 };
-  let tekst = '';
-  try {
-    const blob = JSON.parse(r.tekst);
-    tekst = blob?.encoding === 'base64' ? Buffer.from(blob.content, 'base64').toString('utf8') : String(blob?.content ?? '');
-  } catch { return { ok: false, reden: 'KANAALPOST_ONLEESBAAR', rijen: [], geweigerd: [], telling: {}, gezien: 0 };
-  }
   // `id` wordt een regelnummer met een voorvoegsel: de bron is privé en deze log is openbaar, dus er
   // mag geen brontekst in — maar het moet wel te onderscheiden zijn van een inbox-bestandsnaam.
-  const gelezen = bronRijenUitKanaalpost(tekst);
+  const gelezen = bronRijenUitKanaalpost(r.tekst);
   return {
     ...gelezen,
     rijen: gelezen.rijen.map((rij) => ({ ...rij, id: `KANAALPOST:${rij.id}` })),
