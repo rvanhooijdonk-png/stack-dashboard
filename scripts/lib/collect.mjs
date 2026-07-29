@@ -117,20 +117,43 @@ const evidence = (source, sourceRef, trust, proofUrl, error = null) => ({
 const repoUrl = (repo) => `https://github.com/${OWNER}/${repo}`;
 const seg = (s) => encodeURIComponent(s);
 
-/** Bestandsinhoud uit een repo halen via de contents-API. */
-async function fileFromRepo(repo, path, ref = 'main') {
-  const encoded = path.split('/').map(seg).join('/');
-  const res = await gh(
-    ['api', `repos/${OWNER}/${repo}/contents/${encoded}?ref=${seg(ref)}`, '-q', '.content'],
-    { json: false },
-  );
-  if (!res.ok || !res.data?.trim()) return null;
+/**
+ * Zuivere beslislogica voor één contents-API-respons — los van de `gh`-aanroep, zelfde patroon
+ * als `tracksFromListing`, zodat dit zonder netwerk te toetsen is.
+ *
+ * Boven ±1MB antwoordt de contents-API met HTTP 200, `encoding: "none"`, `content: ""` — geen
+ * foutcode. Toetsen op lege inhoud is dan fout: een 0-byte-bestand geeft óók lege `content`, maar
+ * met `encoding: "base64"`. Alleen `encoding` onderscheidt de twee gevallen exact (gemeten, niet
+ * aangenomen — PR-OPSCHONING, W-41, `2026-07-28-w41-blinde-leesroutes-gemeten.md` §2/§11). Zonder
+ * dit onderscheid valt "te groot om te lezen" stil samen met "leeg" — dezelfde blinde plek als
+ * `bezorging.py` (W-40), en precies de fout die de eigen regel bovenaan dit bestand verbiedt:
+ * een fout is geen leegte.
+ */
+export function decodeContentsResponse(data) {
+  if (!data || typeof data !== 'object') return { text: null, tooLarge: false, size: null };
+  const size = typeof data.size === 'number' ? data.size : null;
+  if (data.encoding === 'none') return { text: null, tooLarge: true, size };
+  const raw = typeof data.content === 'string' ? data.content : '';
+  if (!raw.trim()) return { text: null, tooLarge: false, size };
   try {
-    return Buffer.from(res.data.replace(/\s/g, ''), 'base64').toString('utf8');
+    return { text: Buffer.from(raw.replace(/\s/g, ''), 'base64').toString('utf8'), tooLarge: false, size };
   } catch {
-    return null;
+    return { text: null, tooLarge: false, size };
   }
 }
+
+/** Bestandsinhoud uit een repo halen via de contents-API. `{text, tooLarge, size}` — nooit een kale null. */
+async function fileFromRepo(repo, path, ref = 'main') {
+  const encoded = path.split('/').map(seg).join('/');
+  const res = await gh(['api', `repos/${OWNER}/${repo}/contents/${encoded}?ref=${seg(ref)}`]);
+  if (!res.ok || !res.data) return { text: null, tooLarge: false, size: null };
+  return decodeContentsResponse(res.data);
+}
+
+/** De standaardreden voor `evidence()` als een bron niets opleverde: too_large krijgt zijn eigen tekst. */
+const onbereikbaarReden = (tooLarge, size, fallback) => (tooLarge
+  ? `Bron is groter dan de leesgrens van de contents-API (±1MB; grootte ${size ?? 'onbekend'} bytes) — niet uitgelezen, geen lege bron.`
+  : fallback);
 
 /** Een bron die leesbaar was maar niets herkenbaars opleverde, is niet geverifieerd. */
 const trustFor = (count) => (count > 0 ? 'VERIFIED_CURRENT' : 'UNVERIFIED');
@@ -253,57 +276,216 @@ export async function collectMergedRecent(days = 7) {
 }
 
 /** Tracker: alleen kopregels en beslispunttitels — nooit de body van een update. */
+/**
+ * Rijen lezen zonder ze stil te laten vallen (27-07-2026).
+ *
+ * De oude lezers herkenden een rij aan een patroon MET bovengrens: `{3,160}` voor een besluit,
+ * `{1,200}` voor een trackerupdate, `{3,110}` voor een kop. Een rij die niet in die maat paste
+ * viel weg — geen fout, geen telling, geen spoor. Op de plaat is "de jongste die ik begreep" dan
+ * niet te onderscheiden van "de jongste die er is": het besluitenregister stond op D-0094 terwijl
+ * D-0095 t/m D-0099 gewoon op main stonden (68 van de 98 rijen onzichtbaar).
+ *
+ * Vandaar deze vorm: herkennen aan het ANKER (het ID, het kopteken), pas daarna inkorten — en van
+ * elke lezer een telling `{ inBron, herkend, getoond }` teruggeven. Inkorten is een weergavekeuze,
+ * weglaten is een meting; die twee mogen nooit meer op elkaar lijken.
+ */
+/**
+ * De verwachting komt van de BRONKANT, vóór het filter (Richard, 27-07-2026): een lezer die telt
+ * wat hij overhoudt, telt wat hij al heeft weggegooid en meldt dat alles klopt. `inBron` telt dus
+ * elke KANDIDAAT-rij — alles wat er in de bron uitziet als een rij van deze soort, ook als de lezer
+ * hem niet begrijpt. `herkend` is wat de lezer erna overhield; het verschil is de uitkomst.
+ *
+ * `afgekapt` telt de rijen waarvan de tekst is ingekort. Afkappen mag, stil afkappen niet: een
+ * grens die zwijgend inkort of weggooit is een defect, geen instelling.
+ */
+function tel(inBron, herkend, getoond, afgekapt) {
+  return { inBron, herkend, getoond, afgekapt };
+}
+
+/** Kort in en houdt bij dát er ingekort is — de teller hangt eraan, niet aan de lengte alleen. */
+function kort(tekst, max, teller) {
+  if (tekst.length <= max) return tekst;
+  teller.n += 1;
+  return tekst.slice(0, max);
+}
+
+/** Alles na het eerste liggend/kort streepje op de regel, ontdaan van opmaak en afsluitende punt. */
+function staart(regel, max, teller) {
+  return kort(regel.replace(/\*+\s*$/, '').trim().replace(/\.$/, ''), max, teller);
+}
+
+export function leesBesluiten(text) {
+  const regels = String(text ?? '').split('\n');
+  // Bronkant: élke tabelrij waarvan de eerste cel met `D-` begint is een kandidaat — ook een rij
+  // met een scheve ID-vorm. Pas daarna filtert de lezer; dat verschil hoort zichtbaar te zijn.
+  const kandidaat = /^\s*\|\s*[Dd]-/;
+  const anker = /^\s*\|\s*(D-\d{4})\s*\|(.*)$/;
+  const afgekapt = { n: 0 };
+  let inBron = 0;
+  const herkend = [];
+  for (const regel of regels) {
+    if (!kandidaat.test(regel)) continue;
+    inBron += 1;
+    const m = anker.exec(regel);
+    if (!m) continue;
+    // De rest van de rij: | datum | besluit | ... — het besluit mag elke lengte hebben.
+    const cellen = m[2].split('|');
+    const datum = (cellen[0] ?? '').trim();
+    const besluit = (cellen[1] ?? '').trim();
+    if (!/^[\d-]{4,12}$/.test(datum) || besluit.length < 3) continue;
+    herkend.push({
+      id: m[1], date: datum, decision: kort(besluit, 160, afgekapt), category: categoriseer(besluit),
+    });
+  }
+  herkend.sort((a, b) => b.id.localeCompare(a.id));
+  const entries = herkend.slice(0, 10);
+  return { entries, telling: tel(inBron, herkend.length, entries.length, afgekapt.n) };
+}
+
+export function leesTracker(text) {
+  const regels = String(text ?? '').split('\n');
+  const updateKandidaat = /^ {0,3}\*\*Update\b/i;
+  // Het anker eist alleen wat een update IDENTIFICEERT: het woord en een datum. Alles daarna is
+  // vorm, en vorm varieert. GEMETEN 27-07-2026 op de echte tracker: 17 van de 32 updates vielen
+  // weg omdat het oude anker het volgnummer PAL achter de datum eiste — `Update 22/7 nacht (8)`,
+  // `Update 22/7 middag/namiddag`, `Update 21/7 en eerder` haalden het geen van drieën. Dat is
+  // dezelfde vorm als de 160-tekengrens: een lezer die de vorm van gisteren eist en vandaag stil
+  // minder leest.
+  // De `i`-vlag is niet cosmetisch: `updateKandidaat` (de BRONtelling) is hoofdletterongevoelig, dus
+  // `**UPDATE 22/7 ...` telde wél mee in `inBron` en niet in `herkend` — een zelfgemaakte ROOD op een
+  // regel die er gewoon staat. Gemeten op de echte tracker komt die schrijfwijze niet voor, dus dit is
+  // dichtzetten vóór het gebeurt (bevinding Codex 27-07), geen reparatie van iets zichtbaars.
+  const updateAnker = /^ {0,3}\*\*Update\s+([0-9]{1,2}\/[0-9]{1,2})\s*(.*)$/i;
+  // Het volgnummer staat tussen haakjes ergens vóór het gedachtestreepje — met of zonder dagdeel
+  // ertussen. Staat er een streepje vóór de haakjes, dan hoort het getal bij de TITEL en niet bij
+  // de update (`Update 23/7 — iets (2026) meer`), en blijft het nummer leeg.
+  // Hoogstens DRIE cijfers, en tussen datum en nummer geen cijfer. Anders leest
+  // `Update 22/7 nacht (2026) — titel` het jaartal als volgnummer 2026 en duwt dat élke echte update
+  // uit de top-8 (bevinding Codex 27-07). Het dagdeel ertussen — "nacht", "avond", "vroeg", "laat" —
+  // is echt en staat op 12 van de 32 gemeten regels, dus de prefix mag blijven; cijfers erin niet.
+  const nummerVoorop = /^([^(]{0,24})\(([0-9]{1,3})\)\s*/;
+  // Kandidaat is élke vermelding van BESLISPUNT met een nummer erachter; het anker eist het
+  // liggend streepje. `BESLISPUNT 12a: titel` haalde het anker niet en telde ook niet mee — dan
+  // meldt de lezer nul en dat ziet er hetzelfde uit als geen beslispunten (Codex, 27-07).
+  const puntKandidaat = /BESLISPUNT\s*\(?[0-9]{1,3}[a-z]?\)?/g;
+  const puntAnker = /BESLISPUNT\s*\(?([0-9]{1,3}[a-z]?)\)?\s*[—-]\s*([^*\n]*)/g;
+  const afgekapt = { n: 0 };
+  let inBron = 0;
+  let dubbel = 0;
+  const gelezen = [];
+  const punten = [];
+  const gezien = new Set();
+  for (const regel of regels) {
+    if (updateKandidaat.test(regel)) {
+      inBron += 1;
+      const m = updateAnker.exec(regel);
+      if (m) {
+        let rest = m[2];
+        let number = null;
+        const nm = nummerVoorop.exec(rest);
+        // Ook het en-streepje `–`, niet alleen het em-streepje: anders hoort het getal bij de titel
+        // en telt het toch als volgnummer.
+        if (nm && !/[—–-]/.test(nm[1]) && !/[0-9]/.test(nm[1])) { number = Number(nm[2]); rest = rest.slice(nm[0].length); }
+        // Een update zonder titel is nog steeds een update. Zijn eigen datum is dan zijn naam —
+        // dat is geen verzinsel maar wat er staat, en het scheelt een rij die stil verdwijnt.
+        const title = staart(rest.replace(/^[—-]\s*/, ''), 120, afgekapt) || m[1];
+        gelezen.push({ number, date: m[1], title, volgorde: gelezen.length });
+      }
+    }
+    puntKandidaat.lastIndex = 0;
+    inBron += [...regel.matchAll(puntKandidaat)].length;
+    puntAnker.lastIndex = 0;
+    for (const p of regel.matchAll(puntAnker)) {
+      const title = kort(p[2].split('.')[0].trim(), 110, afgekapt);
+      // Een beslispunt dat twee keer in de tracker staat is één beslispunt. Zou het tweede exemplaar
+      // als "weggevallen" tellen, dan meldde de rijentoets rood op gewone herhaling (Gemini, 27-07).
+      if (gezien.has(p[1])) { dubbel += 1; continue; }
+      if (title.length < 3) continue;
+      gezien.add(p[1]);
+      punten.push({ id: p[1], title, category: categoriseer(title) });
+    }
+  }
+  // Genummerd eerst, hoogste boven; wat geen nummer draagt houdt zijn plek in het bestand. Zonder
+  // die tweedeling maakt één update zonder nummer (`b.number - a.number` met null) de hele volgorde
+  // stuk, en dan verandert een leesfout stilletjes wát er bovenaan staat.
+  gelezen.sort((a, b) => {
+    if (a.number === null && b.number === null) return a.volgorde - b.volgorde;
+    if (a.number === null) return 1;
+    if (b.number === null) return -1;
+    return b.number - a.number;
+  });
+  // Het publieke contract eist een geheel getal als volgnummer, dus een update zonder nummer kan
+  // niet in de VENSTERLIJST. Hij is wel HERKEND en wordt als zodanig geteld: het verschil tussen
+  // `herkend` en `getoond` is een venster, geen verlies — precies het onderscheid waarvoor de
+  // telling gemaakt is.
+  const updates = gelezen.filter((u) => Number.isInteger(u.number))
+    .slice(0, 8).map(({ number, date, title }) => ({ number, date, title }));
+  const decisionPoints = punten.slice(0, 12);
+  return {
+    updates,
+    decisionPoints,
+    telling: tel(
+      inBron, gelezen.length + punten.length + dubbel, updates.length + decisionPoints.length,
+      afgekapt.n,
+    ),
+  };
+}
+
+export function leesJournaal(text) {
+  const regels = String(text ?? '').split('\n');
+  const afgekapt = { n: 0 };
+  let inBron = 0;
+  const gelezen = [];
+  for (const regel of regels) {
+    if (!/^ {0,3}#{2,3}(\s|$)/.test(regel)) continue;
+    inBron += 1;
+    const m = /^ {0,3}#{2,3}\s+(.+)$/.exec(regel);
+    if (!m) continue;
+    const title = kort(m[1].trim(), 110, afgekapt);
+    if (title) gelezen.push({ title });
+  }
+  const entries = gelezen.slice(0, 6);
+  return { entries, telling: tel(inBron, gelezen.length, entries.length, afgekapt.n) };
+}
+
 export async function collectTracker() {
-  const text = await fileFromRepo(CONTROL_REPO, TRACKER_PATH);
+  const { text, tooLarge, size } = await fileFromRepo(CONTROL_REPO, TRACKER_PATH);
   const proof = `${repoUrl(CONTROL_REPO)}/blob/main/${TRACKER_PATH}`;
   const src = `${CONTROL_REPO} / tracker`;
 
   if (!text) {
     return {
       available: false, updates: [], decisionPoints: [],
-      evidence: evidence(src, 'main', 'SOURCE_UNAVAILABLE', proof, 'Tracker niet leesbaar met het huidige token.'),
+      evidence: evidence(src, 'main', 'SOURCE_UNAVAILABLE', proof,
+        onbereikbaarReden(tooLarge, size, 'Tracker niet leesbaar met het huidige token.')),
     };
   }
 
-  // Kopregels: "**Update 23/7 (24) — TITEL.**"
-  const updates = [...text.matchAll(/^\*\*Update\s+([0-9]{1,2}\/[0-9]{1,2})\s*\((\d+)\)\s*[—-]\s*([^*\n]{1,200})/gm)]
-    .map((m) => ({ number: Number(m[2]), date: m[1], title: m[3].trim().replace(/\.$/, '').slice(0, 120) }))
-    .sort((a, b) => b.number - a.number)
-    .slice(0, 8);
-
-  // Beslispunten, twee schrijfwijzen: "BESLISPUNT 23a — titel" en "BESLISPUNT (9a) — titel".
-  const seen = new Set();
-  const decisionPoints = [...text.matchAll(/BESLISPUNT\s*\(?([0-9]{1,3}[a-z]?)\)?\s*[—-]\s*([^.*\n]{3,110})/g)]
-    .map((m) => ({ id: m[1], title: m[2].trim(), category: categoriseer(m[2]) }))
-    .filter((d) => (seen.has(d.id) ? false : seen.add(d.id)))
-    .slice(0, 12);
+  const { updates, decisionPoints, telling } = leesTracker(text);
 
   const n = updates.length + decisionPoints.length;
   const { trust, note } = trustWithAge(n, await lastCommitDate(CONTROL_REPO, TRACKER_PATH));
   return {
-    available: true, updates, decisionPoints,
+    available: true, updates, decisionPoints, rijen: telling,
     evidence: evidence(src, 'main', trust, proof, note),
   };
 }
 
 /** Besluitenregister — welke beslispunten zijn inmiddels beantwoord. */
 export async function collectDecisions() {
-  const text = await fileFromRepo(CONTROL_REPO, 'CONTROL/DECISIONS.md');
+  const { text, tooLarge, size } = await fileFromRepo(CONTROL_REPO, 'CONTROL/DECISIONS.md');
   const proof = `${repoUrl(CONTROL_REPO)}/blob/main/CONTROL/DECISIONS.md`;
   const src = `${CONTROL_REPO} / besluitenregister`;
   if (!text) {
     return {
       available: false, entries: [],
-      evidence: evidence(src, 'main', 'SOURCE_UNAVAILABLE', proof, 'Niet leesbaar.'),
+      evidence: evidence(src, 'main', 'SOURCE_UNAVAILABLE', proof, onbereikbaarReden(tooLarge, size, 'Niet leesbaar.')),
     };
   }
-  const entries = [...text.matchAll(/^\|\s*(D-\d{4})\s*\|\s*([\d-]{4,12})\s*\|\s*([^|]{3,160}?)\s*\|/gm)]
-    .map((m) => ({ id: m[1], date: m[2], decision: m[3].trim(), category: categoriseer(m[3]) }))
-    .sort((a, b) => b.id.localeCompare(a.id))
-    .slice(0, 10);
+  const { entries, telling } = leesBesluiten(text);
   const { trust, note } = trustWithAge(entries.length, await lastCommitDate(CONTROL_REPO, 'CONTROL/DECISIONS.md'));
   return {
-    available: true, entries,
+    available: true, entries, rijen: telling,
     evidence: evidence(src, 'main', trust, proof, note),
   };
 }
@@ -411,9 +593,13 @@ export const BOUWLIJST_PATH = 'CONTROL/PLANNING/planning-bouwlijst.json';
  * Deze functie leest alleen; het vertalen naar het plaat-schema doet `planning-bron.mjs`.
  */
 export async function collectBouwlijst() {
-  const text = await fileFromRepo(CONTROL_REPO, BOUWLIJST_PATH, RAPPORTEN_REF);
+  const { text, tooLarge, size } = await fileFromRepo(CONTROL_REPO, BOUWLIJST_PATH, RAPPORTEN_REF);
   return {
     text,
+    // tooLarge/size gaan mee zodat een toekomstige aanroeper "te groot" kan onderscheiden van
+    // "leeg" — vertaalBouwlijst() zelf krijgt vandaag alleen text (LEEG-pad), dat is bestaand gedrag.
+    tooLarge,
+    size,
     // Onbekend spiegelmoment blijft null: de plaat zegt dan "spiegelmoment onbekend" i.p.v. vers.
     spiegelAt: text ? await lastCommitDate(CONTROL_REPO, BOUWLIJST_PATH, RAPPORTEN_REF) : null,
     proofUrl: `${repoUrl(CONTROL_REPO)}/blob/${RAPPORTEN_REF}/${BOUWLIJST_PATH}`,
@@ -424,18 +610,18 @@ export async function collectBouwlijst() {
 export async function collectLogbook() {
   const proof = `${repoUrl(CONTROL_REPO)}/blob/main/CONTROL/FABLE-JOURNAAL.md`;
   const src = `${CONTROL_REPO} / journaal`;
-  const text = await fileFromRepo(CONTROL_REPO, 'CONTROL/FABLE-JOURNAAL.md');
+  const { text, tooLarge, size } = await fileFromRepo(CONTROL_REPO, 'CONTROL/FABLE-JOURNAAL.md');
   if (!text) {
     return {
       available: false, entries: [],
       evidence: evidence(src, 'main', 'SOURCE_UNAVAILABLE', proof,
-        'Journaal staat nog niet op main — het zit in een openstaande PR.'),
+        onbereikbaarReden(tooLarge, size, 'Journaal staat nog niet op main — het zit in een openstaande PR.')),
     };
   }
-  const entries = [...text.matchAll(/^#{2,3}\s+(.{3,110})$/gm)].map((m) => ({ title: m[1].trim() })).slice(0, 6);
+  const { entries, telling } = leesJournaal(text);
   const { trust, note } = trustWithAge(entries.length, await lastCommitDate(CONTROL_REPO, 'CONTROL/FABLE-JOURNAAL.md'));
   return {
-    available: true, entries,
+    available: true, entries, rijen: telling,
     evidence: evidence(src, 'main', trust, proof, note),
   };
 }
