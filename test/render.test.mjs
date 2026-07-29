@@ -267,3 +267,42 @@ test('de rol wordt ge-escaped als hij er staat — de plaat is publiek', () => {
   s.vlootstand.vensters[0].rol = 'a<b>c';
   assert.match(renderHtml(s), /a&lt;b&gt;c/);
 });
+
+// --- Gedeelde weergave (O1, BOUWLIJST bouwvolgorde stap 4) ----------------------------------
+//
+// De kop moet zichtbaar zeggen dat dit de gedeelde/online tegenhanger is van het lokale
+// STACK-COCKPIT-bestand, en de pagina moet uitleggen wat DEMO-maskering hier concreet betekent
+// (uitsluiting bij de bron, geen patroonherkenning) en wat er bewust NIET in staat (bewijslinks,
+// modelbord) — anders belooft de pagina meer dan de sanitize-gate waarmaakt.
+
+test('de kop noemt zichtbaar "gedeelde weergave"', () => {
+  const html = renderHtml(fixture);
+  assert.match(html, /<h1>Stack-dashboard <small class="gedeeld">— gedeelde weergave<\/small><\/h1>/);
+});
+
+test('de pagina legt DEMO-maskering eerlijk uit: uitsluiting bij de bron, geen patroonraad', () => {
+  const html = renderHtml(fixture);
+  assert.match(html, /In deze gedeelde weergave betekent <strong>DEMO-maskering<\/strong>/);
+  assert.match(html, /nooit in de publieke data worden opgenomen/);
+  assert.match(html, /geen patroon dat ze moet raden/);
+});
+
+test('DEMO-maskering wordt niet als instelbare modus/schakelaar gepresenteerd', () => {
+  // Codex-bevinding op de diff: "staat hier standaard AAN" suggereert een modus die uit kán staan.
+  // Het is geen schakelaar — namen worden nooit verzameld, dus er is niets om aan of uit te zetten.
+  const html = renderHtml(fixture);
+  assert.doesNotMatch(html, /DEMO-maskering staat hier standaard AAN/);
+});
+
+test('de pagina benoemt expliciet wat hier NIET in staat t.o.v. het lokale cockpit-bestand', () => {
+  const html = renderHtml(fixture);
+  assert.match(html, /bewijslinks per regel/);
+  assert.match(html, /model-\/kanalenbord/);
+  assert.match(html, /tik-logs op een lokale machine/);
+});
+
+test('de publieke disclosure bindt zich niet aan een persoonsnaam', () => {
+  // Codex-bevinding: "op Richards machine" bindt een publieke tekst onnodig aan een persoon.
+  const html = renderHtml(fixture);
+  assert.doesNotMatch(html, /Richards machine/);
+});
