@@ -117,20 +117,43 @@ const evidence = (source, sourceRef, trust, proofUrl, error = null) => ({
 const repoUrl = (repo) => `https://github.com/${OWNER}/${repo}`;
 const seg = (s) => encodeURIComponent(s);
 
-/** Bestandsinhoud uit een repo halen via de contents-API. */
-async function fileFromRepo(repo, path, ref = 'main') {
-  const encoded = path.split('/').map(seg).join('/');
-  const res = await gh(
-    ['api', `repos/${OWNER}/${repo}/contents/${encoded}?ref=${seg(ref)}`, '-q', '.content'],
-    { json: false },
-  );
-  if (!res.ok || !res.data?.trim()) return null;
+/**
+ * Zuivere beslislogica voor één contents-API-respons — los van de `gh`-aanroep, zelfde patroon
+ * als `tracksFromListing`, zodat dit zonder netwerk te toetsen is.
+ *
+ * Boven ±1MB antwoordt de contents-API met HTTP 200, `encoding: "none"`, `content: ""` — geen
+ * foutcode. Toetsen op lege inhoud is dan fout: een 0-byte-bestand geeft óók lege `content`, maar
+ * met `encoding: "base64"`. Alleen `encoding` onderscheidt de twee gevallen exact (gemeten, niet
+ * aangenomen — PR-OPSCHONING, W-41, `2026-07-28-w41-blinde-leesroutes-gemeten.md` §2/§11). Zonder
+ * dit onderscheid valt "te groot om te lezen" stil samen met "leeg" — dezelfde blinde plek als
+ * `bezorging.py` (W-40), en precies de fout die de eigen regel bovenaan dit bestand verbiedt:
+ * een fout is geen leegte.
+ */
+export function decodeContentsResponse(data) {
+  if (!data || typeof data !== 'object') return { text: null, tooLarge: false, size: null };
+  const size = typeof data.size === 'number' ? data.size : null;
+  if (data.encoding === 'none') return { text: null, tooLarge: true, size };
+  const raw = typeof data.content === 'string' ? data.content : '';
+  if (!raw.trim()) return { text: null, tooLarge: false, size };
   try {
-    return Buffer.from(res.data.replace(/\s/g, ''), 'base64').toString('utf8');
+    return { text: Buffer.from(raw.replace(/\s/g, ''), 'base64').toString('utf8'), tooLarge: false, size };
   } catch {
-    return null;
+    return { text: null, tooLarge: false, size };
   }
 }
+
+/** Bestandsinhoud uit een repo halen via de contents-API. `{text, tooLarge, size}` — nooit een kale null. */
+async function fileFromRepo(repo, path, ref = 'main') {
+  const encoded = path.split('/').map(seg).join('/');
+  const res = await gh(['api', `repos/${OWNER}/${repo}/contents/${encoded}?ref=${seg(ref)}`]);
+  if (!res.ok || !res.data) return { text: null, tooLarge: false, size: null };
+  return decodeContentsResponse(res.data);
+}
+
+/** De standaardreden voor `evidence()` als een bron niets opleverde: too_large krijgt zijn eigen tekst. */
+const onbereikbaarReden = (tooLarge, size, fallback) => (tooLarge
+  ? `Bron is groter dan de leesgrens van de contents-API (±1MB; grootte ${size ?? 'onbekend'} bytes) — niet uitgelezen, geen lege bron.`
+  : fallback);
 
 /** Een bron die leesbaar was maar niets herkenbaars opleverde, is niet geverifieerd. */
 const trustFor = (count) => (count > 0 ? 'VERIFIED_CURRENT' : 'UNVERIFIED');
@@ -426,14 +449,15 @@ export function leesJournaal(text) {
 }
 
 export async function collectTracker() {
-  const text = await fileFromRepo(CONTROL_REPO, TRACKER_PATH);
+  const { text, tooLarge, size } = await fileFromRepo(CONTROL_REPO, TRACKER_PATH);
   const proof = `${repoUrl(CONTROL_REPO)}/blob/main/${TRACKER_PATH}`;
   const src = `${CONTROL_REPO} / tracker`;
 
   if (!text) {
     return {
       available: false, updates: [], decisionPoints: [],
-      evidence: evidence(src, 'main', 'SOURCE_UNAVAILABLE', proof, 'Tracker niet leesbaar met het huidige token.'),
+      evidence: evidence(src, 'main', 'SOURCE_UNAVAILABLE', proof,
+        onbereikbaarReden(tooLarge, size, 'Tracker niet leesbaar met het huidige token.')),
     };
   }
 
@@ -449,13 +473,13 @@ export async function collectTracker() {
 
 /** Besluitenregister — welke beslispunten zijn inmiddels beantwoord. */
 export async function collectDecisions() {
-  const text = await fileFromRepo(CONTROL_REPO, 'CONTROL/DECISIONS.md');
+  const { text, tooLarge, size } = await fileFromRepo(CONTROL_REPO, 'CONTROL/DECISIONS.md');
   const proof = `${repoUrl(CONTROL_REPO)}/blob/main/CONTROL/DECISIONS.md`;
   const src = `${CONTROL_REPO} / besluitenregister`;
   if (!text) {
     return {
       available: false, entries: [],
-      evidence: evidence(src, 'main', 'SOURCE_UNAVAILABLE', proof, 'Niet leesbaar.'),
+      evidence: evidence(src, 'main', 'SOURCE_UNAVAILABLE', proof, onbereikbaarReden(tooLarge, size, 'Niet leesbaar.')),
     };
   }
   const { entries, telling } = leesBesluiten(text);
@@ -569,9 +593,13 @@ export const BOUWLIJST_PATH = 'CONTROL/PLANNING/planning-bouwlijst.json';
  * Deze functie leest alleen; het vertalen naar het plaat-schema doet `planning-bron.mjs`.
  */
 export async function collectBouwlijst() {
-  const text = await fileFromRepo(CONTROL_REPO, BOUWLIJST_PATH, RAPPORTEN_REF);
+  const { text, tooLarge, size } = await fileFromRepo(CONTROL_REPO, BOUWLIJST_PATH, RAPPORTEN_REF);
   return {
     text,
+    // tooLarge/size gaan mee zodat een toekomstige aanroeper "te groot" kan onderscheiden van
+    // "leeg" — vertaalBouwlijst() zelf krijgt vandaag alleen text (LEEG-pad), dat is bestaand gedrag.
+    tooLarge,
+    size,
     // Onbekend spiegelmoment blijft null: de plaat zegt dan "spiegelmoment onbekend" i.p.v. vers.
     spiegelAt: text ? await lastCommitDate(CONTROL_REPO, BOUWLIJST_PATH, RAPPORTEN_REF) : null,
     proofUrl: `${repoUrl(CONTROL_REPO)}/blob/${RAPPORTEN_REF}/${BOUWLIJST_PATH}`,
@@ -582,12 +610,12 @@ export async function collectBouwlijst() {
 export async function collectLogbook() {
   const proof = `${repoUrl(CONTROL_REPO)}/blob/main/CONTROL/FABLE-JOURNAAL.md`;
   const src = `${CONTROL_REPO} / journaal`;
-  const text = await fileFromRepo(CONTROL_REPO, 'CONTROL/FABLE-JOURNAAL.md');
+  const { text, tooLarge, size } = await fileFromRepo(CONTROL_REPO, 'CONTROL/FABLE-JOURNAAL.md');
   if (!text) {
     return {
       available: false, entries: [],
       evidence: evidence(src, 'main', 'SOURCE_UNAVAILABLE', proof,
-        'Journaal staat nog niet op main — het zit in een openstaande PR.'),
+        onbereikbaarReden(tooLarge, size, 'Journaal staat nog niet op main — het zit in een openstaande PR.')),
     };
   }
   const { entries, telling } = leesJournaal(text);
