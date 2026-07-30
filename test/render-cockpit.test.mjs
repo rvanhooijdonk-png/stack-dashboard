@@ -56,11 +56,30 @@ test('"wacht op Richard" toont de wacht-op-Richard-feature en de kanaalpost-rij 
   assert.match(html, /Twee integratiegaten in het centrale modellenregister gedicht/);
 });
 
-test('het afsprakenspoor toont een eerlijke leegmelding, geen verzonnen rijen', () => {
+test('het afsprakenspoor toont tellers per status en de laatste-wijziging-datum, geen afspraaktekst', () => {
   const html = renderCockpit(fixture);
   assert.match(html, /id="afsprakenspoor"/);
-  assert.match(html, /nog niet gevuld/);
-  assert.match(html, /Liever deze eerlijke\s*\n?\s*leegmelding dan verzonnen rijen\./);
+  assert.match(html, /Afsprakenspoor <span class="badge">44<\/span>/);
+  assert.match(html, />vastgelegd<[\s\S]*?<span class="tag">3<\/span>/);
+  assert.match(html, />uitgezet \(in bak\)<[\s\S]*?<span class="tag">15<\/span>/);
+  assert.match(html, />verwerkt<[\s\S]*?<span class="tag">20<\/span>/);
+  assert.match(html, />staand<[\s\S]*?<span class="tag">5<\/span>/);
+  assert.match(html, /Laatste wijziging: 2026-07-23 09:00 UTC/);
+  // Geen enkel veld uit de interne `entries` (id, afspraaktekst, bewijs) hoort op de publieke plaat.
+  assert.equal(html.includes('A44'), false);
+});
+
+test('het afsprakenspoor toont een eerlijke leegmelding als de bron onbereikbaar is', () => {
+  const zonder = structuredClone(fixture);
+  zonder.afspraken = {
+    available: false,
+    statusCounts: { VASTGELEGD: 0, UITGEZET: 0, 'IN BOUW': 0, VERWERKT: 0, STAAND: 0 },
+    lastChangedAt: null,
+    evidence: { retrievedAt: fixture.generatedAt, trust: 'SOURCE_UNAVAILABLE', errorCode: 'BRON_ONBEREIKBAAR' },
+  };
+  const html = renderCockpit(zonder);
+  assert.match(html, /id="afsprakenspoor"/);
+  assert.match(html, /niet leesbaar — geen tellers te tonen/);
 });
 
 test('de stackkaart toont de vensters van de fixture met hun echte vlootstand-kleur', () => {

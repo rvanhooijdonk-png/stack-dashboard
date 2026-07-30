@@ -6,7 +6,7 @@
  */
 
 import {
-  esc, num, buildStamp, titelStamp, rollup, VLOOT_KLEUR, TRUST_LABEL, STYLE,
+  esc, num, dt, buildStamp, titelStamp, rollup, VLOOT_KLEUR, TRUST_LABEL, STYLE,
 } from './render.mjs';
 
 const BRON_NAAM = {
@@ -101,19 +101,40 @@ function wachtOpRichard(s) {
 </section>`;
 }
 
+/** Vaste weergavelabels voor de gesloten AFSPRAKEN-statuslijst — zelfde volgorde als CONTROL/AFSPRAKEN.md. */
+const AFSPRAKEN_STATUS_LABEL = {
+  VASTGELEGD: 'vastgelegd',
+  UITGEZET: 'uitgezet (in bak)',
+  'IN BOUW': 'in bouw',
+  VERWERKT: 'verwerkt',
+  STAAND: 'staand',
+};
+const AFSPRAKEN_STATUS_VOLGORDE = ['VASTGELEGD', 'UITGEZET', 'IN BOUW', 'VERWERKT', 'STAAND'];
+
 /**
- * AFSPRAKENSPOOR — er bestaat nog geen publieke spiegel van CONTROL/AFSPRAKEN.md (die leeft alleen
- * in het privé-repo stack-control). Een eerlijke leegmelding, in dezelfde stijl als VLOOT_REDEN /
- * KANAAL_REDEN elders in render.mjs — geen verzonnen rijen. Vaste tekst, geen brongebonden data,
- * dus geen sanitize-risico.
+ * AFSPRAKENSPOOR — CONTROL/AFSPRAKEN.md (privé stack-control), tweede spoor naast de
+ * vlootstand-hartslag. REGIE-besluit 30-07-2026: publiek toont uitsluitend structuur — tellers
+ * per status en het tijdstip van de laatste bestandswijziging. De afspraaktekst zelf, de ID's en
+ * de bewijsverwijzingen zijn onvoorwaardelijk intern (zie `toPublicSnapshot` in build.mjs); dit
+ * blok kent daarom bewust geen lijst van afzonderlijke rijen, alleen aantallen.
  */
-function afsprakenspoor() {
-  return `<section id="afsprakenspoor" class="card wide">
+function afsprakenspoor(a) {
+  if (!a?.available) {
+    return `<section id="afsprakenspoor" class="card wide">
   <h2>Afsprakenspoor</h2>
-  <p class="empty">Dit blok is nog niet gevuld: de afsprakenbron (CONTROL/AFSPRAKEN.md) leeft alleen in het
-  privé-repo stack-control en heeft nog geen publieke spiegel die de sanitize-poort is gepasseerd — analoog
-  aan hoe <code>data/kanaalpost-publiek.md</code> dat wél voor kanaalpost doet. Liever deze eerlijke
-  leegmelding dan verzonnen rijen.</p>
+  <p class="empty">CONTROL/AFSPRAKEN.md is bij deze build niet leesbaar — geen tellers te tonen.</p>
+</section>`;
+  }
+  const totaal = AFSPRAKEN_STATUS_VOLGORDE.reduce((sum, k) => sum + (a.statusCounts?.[k] ?? 0), 0);
+  const items = AFSPRAKEN_STATUS_VOLGORDE
+    .filter((k) => (a.statusCounts?.[k] ?? 0) > 0)
+    .map((k) => `<li><span class="dot"></span><span class="repo">${esc(AFSPRAKEN_STATUS_LABEL[k])}</span><span class="tag">${num(a.statusCounts[k])}</span></li>`)
+    .join('\n');
+  return `<section id="afsprakenspoor" class="card wide">
+  <h2>Afsprakenspoor <span class="badge">${num(totaal)}</span></h2>
+  <p class="lead muted">Alleen structuur — de afspraaktekst zelf is intern. Laatste wijziging: ${
+    a.lastChangedAt ? esc(dt(a.lastChangedAt)) : '<span class="muted">onbekend</span>'}.</p>
+  ${items ? `<ul class="lights">${items}</ul>` : '<p class="empty">Geen enkele rij herkend.</p>'}
 </section>`;
 }
 
@@ -175,7 +196,7 @@ ${watDraait(s)}
 
 ${wachtOpRichard(s)}
 
-${afsprakenspoor()}
+${afsprakenspoor(s.afspraken)}
 
 ${stackkaart(s.vlootstand)}
 

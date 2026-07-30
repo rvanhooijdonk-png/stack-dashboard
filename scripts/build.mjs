@@ -26,6 +26,7 @@ import { LANES } from './lib/kijk.mjs';
 import {
   collectPullRequests, collectMergedRecent, collectTracker,
   collectDecisions, collectTracks, collectLogbook, collectCi, collectBouwlijst,
+  collectAfspraken,
   setPublicRepos, setPublicTracks,
   CATEGORIEEN,
 } from './lib/collect.mjs';
@@ -51,8 +52,14 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  *        wie niets meldt kwam daar per definitie niet in voor, dus was leegstand alleen te zien door
  *        zelf de tabs af te lopen. Afgeleid uit dezelfde spiegel (geen tweede bron) en bewust NIET
  *        erin geschreven: het logboek is append-only, en een kop die je bijwerkt wist de vorige.
+ * 2.6.0: afsprakenspoor — CONTROL/AFSPRAKEN.md (privé stack-control), tweede spoor naast de
+ *        vlootstand-hartslag (REGIE-besluit 30-07-2026). Strenger dan tracker/decisions/logbook:
+ *        geen `publish-text.json`-schakelaar en geen `entries`-veld — de afspraaktekst zelf, de
+ *        ID's en de bewijsverwijzingen zijn onvoorwaardelijk intern. Publiek blijft alleen de
+ *        structuur: tellers per status (gesloten enum) en het tijdstip van de laatste
+ *        bestandswijziging. De volledige laatste-5 staat alleen in `.local/snapshot.json`.
  */
-const CONTRACT_VERSION = '2.5.0';
+const CONTRACT_VERSION = '2.6.0';
 const REFRESH_SECONDS = 900;
 /** Een titel is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
 const MAX_TITLE = 80;
@@ -213,7 +220,7 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
       }
       : null;
   };
-  const sources = ['pullRequests', 'merged', 'tracker', 'decisions', 'tracks', 'logbook', 'ci']
+  const sources = ['pullRequests', 'merged', 'tracker', 'decisions', 'tracks', 'logbook', 'ci', 'afspraken']
     .map((key) => ({
       key,
       trust: trustOf(raw[key].evidence),
@@ -297,6 +304,22 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
       hiddenCiRepositories: raw.ci.hiddenCiRepositories ?? 0,
       evidence: ev(raw.ci.evidence),
     },
+    // AFSPRAKENSPOOR (REGIE-besluit 30-07-2026): geen `entries`, geen tekst-schakelaar — strenger
+    // dan tracker/decisions/logbook hierboven. `statusCounts` wordt hier met de hand overgenomen,
+    // veld voor veld uit de gesloten lijst in collect.mjs, precies zoals de rest van deze functie
+    // nooit spreadt: een toekomstige zesde status in de bron verschijnt hier niet vanzelf.
+    afspraken: {
+      available: raw.afspraken.available,
+      statusCounts: {
+        VASTGELEGD: raw.afspraken.statusCounts.VASTGELEGD,
+        UITGEZET: raw.afspraken.statusCounts.UITGEZET,
+        'IN BOUW': raw.afspraken.statusCounts['IN BOUW'],
+        VERWERKT: raw.afspraken.statusCounts.VERWERKT,
+        STAAND: raw.afspraken.statusCounts.STAAND,
+      },
+      lastChangedAt: raw.afspraken.lastChangedAt,
+      evidence: ev(raw.afspraken.evidence),
+    },
   };
 }
 
@@ -336,9 +359,10 @@ export async function buildSnapshot() {
   setPublicTracks((await readJson('data/public-tracks.json', {})).tracks ?? []);
   const workstreams = (await readJson('data/workstreams.json', {})).workstreams ?? [];
   const ciRepos = await readJson('data/ci-repos.json', ['stack-control']);
-  const [pullRequests, merged, tracker, decisions, tracks, logbook, ci, bouwlijst] = await Promise.all([
+  const [pullRequests, merged, tracker, decisions, tracks, logbook, ci, bouwlijst, afspraken] = await Promise.all([
     collectPullRequests(), collectMergedRecent(7), collectTracker(),
     collectDecisions(), collectTracks(), collectLogbook(), collectCi(ciRepos), collectBouwlijst(),
+    collectAfspraken(),
   ]);
 
   // De bouwlijst komt uit de SPIEGEL op de rapporten-branch en gaat door de vertaler (backlog → §B).
@@ -374,7 +398,7 @@ export async function buildSnapshot() {
     planning,
     kanaalpost,
     vlootstand,
-    pullRequests, merged, tracker, decisions, tracks, logbook, ci,
+    pullRequests, merged, tracker, decisions, tracks, logbook, ci, afspraken,
   };
 }
 
