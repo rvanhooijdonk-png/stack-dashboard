@@ -14,7 +14,7 @@
   "properties": {
     "contractVersion": {
       "type": "string",
-      "const": "2.5.0"
+      "const": "2.6.0"
     },
     "generatedAt": {
       "type": "string",
@@ -46,7 +46,8 @@
               "decisions",
               "tracks",
               "logbook",
-              "ci"
+              "ci",
+              "afspraken"
             ],
             "description": "Vaste bronkeys. Een nieuwe bron moet hier eerst worden opgenomen — anders faalt de build, in plaats van stilletjes een nieuwe naam te publiceren."
           },

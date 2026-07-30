@@ -20,12 +20,13 @@
     "logbook",
     "ci",
     "kanaalpost",
-    "vlootstand"
+    "vlootstand",
+    "afspraken"
   ],
   "properties": {
     "contractVersion": {
       "type": "string",
-      "const": "2.5.0",
+      "const": "2.6.0",
       "description": "Vastgepind: een DTO die zich niet als exact deze contractversie meldt, hoort niet bij dit schema. Bump dit samen met CONTRACT_VERSION in scripts/build.mjs."
     },
     "generatedAt": {
@@ -907,6 +908,48 @@
           "type": "integer",
           "minimum": 0,
           "description": "Aantal CI-repo's dat niet bij naam getoond wordt (allowlist data/public-repos.json)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "afspraken": {
+      "type": "object",
+      "description": "v2.6: AFSPRAKENSPOOR — CONTROL/AFSPRAKEN.md (privé stack-control), tweede spoor naast de vlootstand-hartslag (REGIE-besluit 30-07-2026). Strenger dan tracker/decisions/logbook: geen `entries`-veld en geen `publish-text.json`-schakelaar — de afspraaktekst, de ID's en de bewijsverwijzingen zijn onvoorwaardelijk intern. Publiek is alleen de structuur: tellers per status en het tijdstip van de laatste bestandswijziging.",
+      "required": [
+        "available",
+        "statusCounts",
+        "lastChangedAt",
+        "evidence"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "statusCounts": {
+          "type": "object",
+          "description": "Telling over ALLE herkende rijen (niet alleen de interne laatste-5). Gesloten statuslijst, letterlijk de kop van CONTROL/AFSPRAKEN.md.",
+          "required": [
+            "VASTGELEGD",
+            "UITGEZET",
+            "IN BOUW",
+            "VERWERKT",
+            "STAAND"
+          ],
+          "properties": {
+            "VASTGELEGD": { "type": "integer", "minimum": 0 },
+            "UITGEZET": { "type": "integer", "minimum": 0 },
+            "IN BOUW": { "type": "integer", "minimum": 0 },
+            "VERWERKT": { "type": "integer", "minimum": 0 },
+            "STAAND": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "lastChangedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
         }
       },
       "additionalProperties": false

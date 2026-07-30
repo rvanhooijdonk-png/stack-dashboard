@@ -342,6 +342,48 @@ export function leesBesluiten(text) {
   return { entries, telling: tel(inBron, herkend.length, entries.length, afgekapt.n) };
 }
 
+/** Gesloten statuslijst uit CONTROL/AFSPRAKEN.md's eigen kop: alles daarbuiten is geen status. */
+const AFSPRAKEN_STATUSSEN = ['VASTGELEGD', 'UITGEZET', 'IN BOUW', 'VERWERKT', 'STAAND'];
+
+const nulStatusCounts = () => Object.fromEntries(AFSPRAKEN_STATUSSEN.map((s) => [s, 0]));
+
+/**
+ * AFSPRAKEN.md — REGIE-besluit 30-07-2026: de afspraaktekst zelf, de ID en de bewijsverwijzing
+ * zijn uitsluitend intern (deze `entries` verlaten `.local/snapshot.json` nooit); publiek blijft
+ * alleen de structuur over (zie `toPublicSnapshot` in build.mjs). Daarom geen `kort()` op de
+ * afspraaktekst hier — inkorten is een weergavekeuze voor tekst die sowieso nooit weergegeven
+ * wordt, en zou alleen een tweede interne versie toevoegen om uit elkaar te houden.
+ *
+ * `statusCounts` telt over ALLE herkende rijen (niet over de vijf getoonde) — de teller is de
+ * volledige stand, "laatste 5" is een apart, kleiner detail voor de ongemaskeerde weergave.
+ */
+export function leesAfspraken(text) {
+  const regels = String(text ?? '').split('\n');
+  const kandidaat = /^\s*\|\s*[Aa]\d+\s*\|/;
+  const anker = /^\s*\|\s*(A\d+)\s*\|(.*)$/i;
+  let inBron = 0;
+  const herkend = [];
+  for (const regel of regels) {
+    if (!kandidaat.test(regel)) continue;
+    inBron += 1;
+    const m = anker.exec(regel);
+    if (!m) continue;
+    const cellen = m[2].split('|');
+    const datum = (cellen[0] ?? '').trim();
+    const afspraak = (cellen[1] ?? '').trim();
+    const status = (cellen[2] ?? '').trim().toUpperCase();
+    const bewijs = (cellen[3] ?? '').trim();
+    if (!/^\d{2}-\d{2}$/.test(datum) || afspraak.length < 3 || !AFSPRAKEN_STATUSSEN.includes(status)) continue;
+    herkend.push({ id: m[1].toUpperCase(), date: datum, afspraak, status, bewijs });
+  }
+  // Numeriek sorteren, niet lexicaal: A9 vóór A10 zou als string achter A10 belanden.
+  herkend.sort((a, b) => Number(b.id.slice(1)) - Number(a.id.slice(1)));
+  const statusCounts = nulStatusCounts();
+  for (const e of herkend) statusCounts[e.status] += 1;
+  const entries = herkend.slice(0, 5);
+  return { entries, statusCounts, telling: tel(inBron, herkend.length, entries.length, 0) };
+}
+
 export function leesTracker(text) {
   const regels = String(text ?? '').split('\n');
   const updateKandidaat = /^ {0,3}\*\*Update\b/i;
@@ -490,9 +532,39 @@ export async function collectDecisions() {
   };
 }
 
+/**
+ * AFSPRAKENSPOOR — tweede spoor naast de vlootstand-hartslag (REGIE-besluit 30-07-2026). `entries`
+ * (laatste 5, volledige velden) is uitsluitend voor de interne snapshot; `toPublicSnapshot` in
+ * build.mjs neemt dit veld bewust NIET over — zie de opmerking daar.
+ */
 /** Klaar-rapporten staan als `YYYY-MM-DD-<onderwerp>.md` op deze branch van de control-repo. */
 const RAPPORTEN_PATH = 'CONTROL/RAPPORTEN';
 const RAPPORTEN_REF = 'rapporten';
+
+/**
+ * AFSPRAKEN.md leeft — net als KANAALPOST.md en de RAPPORTEN-map — alleen op `rapporten`, niet op
+ * `main` (bevestigd via de live contents-API: 404 op main, 200 op rapporten). REGIE is de enige
+ * schrijver en schrijft daar, niet naar main; deze lezer moet dus dezelfde branch lezen als
+ * `collectBouwlijst()` hierboven doet voor BOUWLIJST_PATH.
+ */
+export async function collectAfspraken() {
+  const { text, tooLarge, size } = await fileFromRepo(CONTROL_REPO, 'CONTROL/AFSPRAKEN.md', RAPPORTEN_REF);
+  const proof = `${repoUrl(CONTROL_REPO)}/blob/${RAPPORTEN_REF}/CONTROL/AFSPRAKEN.md`;
+  const src = `${CONTROL_REPO} / afsprakenspoor`;
+  if (!text) {
+    return {
+      available: false, entries: [], statusCounts: nulStatusCounts(), lastChangedAt: null,
+      evidence: evidence(src, RAPPORTEN_REF, 'SOURCE_UNAVAILABLE', proof, onbereikbaarReden(tooLarge, size, 'Niet leesbaar.')),
+    };
+  }
+  const { entries, statusCounts, telling } = leesAfspraken(text);
+  const lastChangedAt = await lastCommitDate(CONTROL_REPO, 'CONTROL/AFSPRAKEN.md', RAPPORTEN_REF);
+  const { trust, note } = trustWithAge(entries.length, lastChangedAt);
+  return {
+    available: true, entries, statusCounts, lastChangedAt, rijen: telling,
+    evidence: evidence(src, RAPPORTEN_REF, trust, proof, note),
+  };
+}
 
 /**
  * `YYYY-MM-DD` is pas een echte datum als hij een UTC-round-trip overleeft. `2026-02-30` past op de

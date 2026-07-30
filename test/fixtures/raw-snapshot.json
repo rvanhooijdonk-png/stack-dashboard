@@ -214,5 +214,33 @@
       "error": null
     },
     "hiddenCiRepositories": 1
+  },
+  "afspraken": {
+    "available": true,
+    "entries": [
+      {
+        "id": "A44",
+        "date": "23-07",
+        "afspraak": "NIET PUBLICEREN — interne afspraaktekst, mag nooit de DTO in",
+        "status": "STAAND",
+        "bewijs": "intern bewijspad, mag nooit de DTO in"
+      }
+    ],
+    "statusCounts": {
+      "VASTGELEGD": 1,
+      "UITGEZET": 2,
+      "IN BOUW": 0,
+      "VERWERKT": 3,
+      "STAAND": 1
+    },
+    "lastChangedAt": "2026-07-23T09:00:00Z",
+    "evidence": {
+      "source": "s",
+      "sourceRef": "i",
+      "retrievedAt": "2026-07-23T12:00:00.000Z",
+      "trust": "VERIFIED_CURRENT",
+      "proofUrl": "p",
+      "error": null
+    }
   }
 }
