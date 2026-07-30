@@ -12,7 +12,7 @@ const AMBER = {
   ONBEKEND: { dot: 'warn', label: 'niet op te halen' },
 };
 
-const TRUST_LABEL = {
+export const TRUST_LABEL = {
   VERIFIED_CURRENT: 'geverifieerd',
   STALE: 'verouderd',
   UNVERIFIED: 'ongeverifieerd',
@@ -36,7 +36,7 @@ export function num(value) {
   return Number.isFinite(n) ? String(Math.trunc(n)) : '—';
 }
 
-const dt = (iso) => {
+export const dt = (iso) => {
   if (!iso) return '—';
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '—' : d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
@@ -50,7 +50,7 @@ const dt = (iso) => {
 // (mandaat 25-07-2026, vierde herhaling; de eerdere datum-náást-tijd is op expliciet herhaald verzoek
 // teruggedraaid). De NL-tijd staat vooraan, zodat een verse plaat niet meer als oud leest; UTC blijft
 // tussen haakjes als tweede referentie.
-const klokTijden = (iso) => {
+export const klokTijden = (iso) => {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
@@ -62,7 +62,7 @@ const klokTijden = (iso) => {
   return { nl: `${p.hour}:${p.minute}`, utc: d.toISOString().slice(11, 16) };
 };
 
-const buildStamp = (iso) => {
+export const buildStamp = (iso) => {
   const k = klokTijden(iso);
   return k ? `gebouwd om ${k.nl} NL-tijd (${k.utc} UTC)` : '—';
 };
@@ -71,12 +71,12 @@ const buildStamp = (iso) => {
 // 19:53 UTC") en is een tweede plek waar Richard de versheid leest: met een NL-klok van 21:53 leest
 // die titel net zo hard als twee uur oud, ook als de kop in de pagina inmiddels klopt. Zelfde defect,
 // zelfde bestand, dus mee in deze fix in plaats van als vijfde misleesbeurt blijven staan.
-const titelStamp = (iso) => {
+export const titelStamp = (iso) => {
   const k = klokTijden(iso);
   return k ? `${k.nl} NL-tijd (${k.utc} UTC)` : '—';
 };
 
-const ago = (iso) => {
+export const ago = (iso) => {
   if (!iso) return '';
   const ms = Date.now() - new Date(iso).getTime();
   if (!Number.isFinite(ms)) return '';
@@ -230,7 +230,7 @@ const ONBEKEND_WAARDE = '<span class="unknown">onbekend</span>';
 const ONBEKEND_DETAIL = '<span class="muted">bron niet beschikbaar — geen stand af te leiden</span>';
 
 /** Eén tegel. `waarde` en `detail` zijn al-geëscapete fragmenten, nooit rauwe brontekst. */
-function stat(label, waarde, detail, cls) {
+export function stat(label, waarde, detail, cls) {
   return `<li class="stat${cls ? ` ${cls}` : ''}">
     <span class="stat-label">${esc(label)}</span>
     <span class="stat-value">${waarde}</span>
@@ -316,7 +316,7 @@ function overzicht(s) {
 </section>`;
 }
 
-function section(id, title, ev, body) {
+export function section(id, title, ev, body) {
   return `<section id="${esc(id)}" class="card">
   <h2>${esc(title)} ${badge(ev)}</h2>
   ${body}
@@ -666,7 +666,7 @@ const VLOOT_REDEN = {
   LEEG: 'De vensterlijst kwam leeg terug. Zolang niet vaststaat wie er tot de vloot hoort, valt er over leegstand niets te zeggen.',
   BRON_ONBEREIKBAAR: 'De spiegel kon niet gelezen worden, of de vensterlijst was niet als vensterlijst te lezen. Er staat hier bewust geen oude stand: geen bron is geen stand.',
 };
-const VLOOT_KLEUR = { WERKT: 'ok', LEEG: 'warn', ONBEKEND: 'bad' };
+export const VLOOT_KLEUR = { WERKT: 'ok', LEEG: 'warn', ONBEKEND: 'bad' };
 
 function vlootstand(v) {
   if (!v?.available) {
@@ -700,7 +700,7 @@ function vlootstand(v) {
 </section>`;
 }
 
-const STYLE = `
+export const STYLE = `
 :root{--bg:#0f1115;--card:#171a21;--line:#252a34;--fg:#e6e8ec;--mut:#9aa3b2;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#58a6ff}
 @media (prefers-color-scheme:light){:root{--bg:#f6f7f9;--card:#fff;--line:#e3e6ea;--fg:#1c2027;--mut:#5c6470;--acc:#0969da}}
 *{box-sizing:border-box}
@@ -754,10 +754,20 @@ tr:last-child td{border-bottom:0}
 .rood{color:var(--bad)}
 footer{margin-top:28px;color:var(--mut);font-size:12.5px;border-top:1px solid var(--line);padding-top:14px}
 a{color:var(--acc)}
+.pagenav{margin:0 0 14px;font-size:13px}
+.pagenav a{color:var(--acc);text-decoration:none}
+.pagenav a:hover{text-decoration:underline}
 `;
 
-/** Bouw de volledige pagina. `snapshot` moet al door assertPublishable zijn gegaan. */
-export function renderHtml(snapshot, { refreshSeconds = 900 } = {}) {
+/**
+ * Bouw de volledige pagina. `snapshot` moet al door assertPublishable zijn gegaan.
+ *
+ * `nav` is optioneel en standaard leeg: zonder dat argument is de uitvoer byte-identiek aan vóór
+ * de multi-pagina-bouwstap (regressietest render.test.mjs). Het is een vaste, intern door build.mjs
+ * samengestelde HTML-snippet (bv. een terug-naar-cockpit-link) — géén vrije of brongebonden tekst,
+ * dus geen nieuw sanitize-oppervlak.
+ */
+export function renderHtml(snapshot, { refreshSeconds = 900, nav = '' } = {}) {
   const s = snapshot;
   const stale = s.sources.filter((x) => x.trust !== 'VERIFIED_CURRENT');
   // Harde integer: deze waarde staat in een meta-tag en mag daar niets anders kunnen worden.
@@ -783,7 +793,7 @@ export function renderHtml(snapshot, { refreshSeconds = 900 } = {}) {
 </head>
 <body>
 <div class="wrap">
-<header>
+${nav ? `${nav}\n` : ''}<header>
   <h1>Stack-dashboard <small class="gedeeld">— gedeelde weergave</small></h1>
   <p class="stamp">Laatst bijgewerkt: <strong>${esc(buildStamp(s.generatedAt))}</strong> · deze pagina haalt zichzelf elke ${num(refresh / 60)} min opnieuw op</p>
 </header>

@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 import { assertPublishable, loadDenyTerms } from './lib/sanitize.mjs';
 import { renderHtml } from './lib/render.mjs';
+import { renderCockpit } from './lib/render-cockpit.mjs';
 import { validate } from './lib/validate.mjs';
 import { toPublicPlanning } from './lib/planning.mjs';
 import { vertaalBouwlijst } from './lib/planning-bron.mjs';
@@ -76,8 +77,18 @@ const ERROR_CODE_BY_TRUST = {
   CONFLICTING_EVIDENCE: 'TEGENSTRIJDIG',
 };
 
-/** Precies deze drie bestanden mogen gepubliceerd worden. Niets anders. */
-const PUBLISH_ALLOWLIST = ['index.html', 'status.json', '.nojekyll'];
+/**
+ * Precies deze bestanden mogen gepubliceerd worden. Niets anders.
+ * `index.html` is sinds de cockpit-ombouw (REGIE-3, 2026-07-30) het 10-secondenbord;
+ * `contentstroom.html` is de vaste doorstroom-plaat die tot dan de voorpagina was — volledig
+ * behouden, alleen verhuisd naar een eigen tab. `.github/workflows/publish.yml` heeft een eigen,
+ * hard-coded CI-poort met dezelfde lijst; die moet in lockstep meegroeien.
+ */
+const PUBLISH_ALLOWLIST = ['index.html', 'contentstroom.html', 'status.json', '.nojekyll'];
+
+/** Vaste, niet-brongebonden navigatie tussen de twee publieke pagina's. Geen sanitize-oppervlak. */
+const NAV_NAAR_CONTENTSTROOM = '<nav class="pagenav"><a href="./contentstroom.html">Contentstroom — de volledige doorstroom-plaat →</a></nav>';
+const NAV_NAAR_COCKPIT = '<nav class="pagenav"><a href="./">← terug naar de cockpit</a></nav>';
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -399,12 +410,14 @@ async function main() {
   ];
   if (errors.length) throw new Error(`contract geschonden:\n- ${errors.join('\n- ')}`);
 
-  const html = renderHtml(snapshot, { refreshSeconds: REFRESH_SECONDS });
+  const cockpitHtml = renderCockpit(snapshot, { refreshSeconds: REFRESH_SECONDS, nav: NAV_NAAR_CONTENTSTROOM });
+  const contentstroomHtml = renderHtml(snapshot, { refreshSeconds: REFRESH_SECONDS, nav: NAV_NAAR_COCKPIT });
 
   // Verse directory: nooit een oud of per ongeluk meegekomen bestand mee-uploaden.
   await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
-  await writeFile(join(outDir, 'index.html'), html, 'utf8');
+  await writeFile(join(outDir, 'index.html'), cockpitHtml, 'utf8');
+  await writeFile(join(outDir, 'contentstroom.html'), contentstroomHtml, 'utf8');
   await writeFile(join(outDir, 'status.json'), `${JSON.stringify(status, null, 2)}\n`, 'utf8');
   await writeFile(join(outDir, '.nojekyll'), '', 'utf8');
 

@@ -9,6 +9,15 @@ import { renderHtml, esc } from '../scripts/lib/render.mjs';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8'));
 
+test('zonder nav-argument is de uitvoer byte-identiek aan de vaste plaat vóór de multi-pagina-bouwstap', () => {
+  // renderHtml() kreeg een optionele `nav`-opt zodat build.mjs een terug-naar-cockpit-link kan
+  // injecteren op de Contentstroom-pagina. Bestaande call-sites geven dat argument niet mee, en
+  // voor hen mag er niets veranderen — geen leeg blok, geen extra witregel.
+  const html = renderHtml(fixture);
+  assert.equal(html.includes('<div class="wrap">\n<header>'), true);
+  assert.equal(html.includes('<nav'), false);
+});
+
 test('rendert een volledige pagina met verversing en tijdstempel', () => {
   const html = renderHtml(fixture, { refreshSeconds: 900 });
   assert.match(html, /^<!doctype html>/);
