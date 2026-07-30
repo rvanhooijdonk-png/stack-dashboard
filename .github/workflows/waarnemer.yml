@@ -70,7 +70,11 @@ jobs:
       - id: toets
         continue-on-error: true
         env:
-          BASE_URL: https://rvanhooijdonk-png.github.io/stack-dashboard/
+          # Niet de root: sinds #52 staat de cockpit op de root en zijn de bewaakte secties
+          # (kanaalpost + VERPLICHTE_SECTIES) verhuisd naar contentstroom.html. Beide pagina's
+          # krijgen in dezelfde build wel dezelfde bouwstempel, dus de stempel/leeftijd/contract-
+          # toetsen blijven kloppen.
+          BASE_URL: https://rvanhooijdonk-png.github.io/stack-dashboard/contentstroom.html
           SPIEGEL_URL: https://raw.githubusercontent.com/rvanhooijdonk-png/stack-dashboard/main/data/kanaalpost-publiek.md
           # Twee wegen naar de sabotagetest. Met de hand (workflow_dispatch) kan pas als deze
           # workflow op de hoofdtak staat; daarvóór — en later ook nog — kan het met een commit die
