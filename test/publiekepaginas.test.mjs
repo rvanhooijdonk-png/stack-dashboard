@@ -5,6 +5,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { renderHtml } from '../scripts/lib/render.mjs';
+import { renderCockpit } from '../scripts/lib/render-cockpit.mjs';
 import { failurePageHtml } from '../scripts/failure-page.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -21,7 +22,8 @@ const publish = await readFile(join(ROOT, '.github/workflows/publish.yml'), 'utf
 const foutpagina = () => failurePageHtml();
 
 const paginas = [
-  ['de gewone pagina', () => renderHtml(fixture)],
+  ['de cockpit (index.html)', () => renderCockpit(fixture)],
+  ['de contentstroom-pagina (voorheen de gewone pagina)', () => renderHtml(fixture)],
   ['de foutpagina (scripts/failure-page.mjs)', foutpagina],
 ];
 

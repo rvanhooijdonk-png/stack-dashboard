@@ -142,7 +142,7 @@ jobs:
         run: |
           set -euo pipefail
           onverwacht=$(find public -mindepth 1 \
-            ! -name 'index.html' ! -name 'status.json' ! -name '.nojekyll' -printf '%P\n')
+            ! -name 'index.html' ! -name 'contentstroom.html' ! -name 'status.json' ! -name '.nojekyll' -printf '%P\n')
           if [ -n "$onverwacht" ]; then
             echo "::error::onverwachte bestanden in public: $onverwacht"
             exit 1
