@@ -592,7 +592,7 @@ function planning(p, buildIso) {
   datum herrekend.</p>
   ${bronTekst(p.bron, buildIso)}
   <ul class="stats">${band}</ul>
-  <h3>Bouwlijst — ${num(p.features.length)} regels</h3>
+  <h3>TRECHTER-bouwlijst — ${num(p.features.length)} regels</h3>
   <div class="scroll bouwlijst"><table>
     <thead><tr><th>Feature</th><th>status</th><th>rol</th><th>oplevering</th><th>indicatie duur (bron)</th><th>afhankelijkheid</th></tr></thead>
     <tbody>${rows}</tbody>
