@@ -323,6 +323,46 @@ function section(id, title, ev, body) {
 </section>`;
 }
 
+/**
+ * GEDEELDE WEERGAVE — O1 (BOUWLIJST). Vaste, niet-brongebonden tekst: geen snapshot-veld voedt dit
+ * blok, dus er is hier geen sanitize-/contractrisico bij te houden. Legt uit wat deze pagina WEL en
+ * NIET is t.o.v. het lokale STACK-COCKPIT-bestand (CONTROL/cockpit/genereer.mjs, 10-seconden-versie).
+ *
+ * Bewust geen nieuwe "cockpit-sectie" met dezelfde soort rijen als Vlootstand hieronder: dat zou een
+ * tweede, bijna-identieke tabel zijn over dezelfde bron. Vlootstand IS de gedeelde tegenhanger van het
+ * lokale stilstand-alarm (G1) — deze tekst zegt dat met zoveel woorden, i.p.v. het te verzwijgen of te
+ * verdubbelen. Bewijslinks (G2) en het model-/kanalenbord (R3) staan er expliciet NIET in: G2 kan
+ * private repo- of padnamen prijsgeven (nog niet apart beoordeeld), R3's bron is lokale, niet-gedeelde
+ * tik-logs (`~/Library/Logs/wekker/*.tik`) op een lokale machine — die verlaten die machine niet en
+ * hebben hier geen publieke tegenhanger. Eén bewuste, benoemde weglating is eerlijker dan een pagina
+ * die stil meer belooft dan hij waarmaakt.
+ *
+ * Copy-aanpassingen na Codex-review op deze diff (2026-07-29): "dezelfde sanitize- en spiegelwet-
+ * poorten" was breder dan deze kaart kan onderbouwen (niet elke bron/het lokale cockpit-bestand
+ * doorloopt de spiegelwet) → vervangen door "de publieke sanitize- en publicatiepoorten". "DEMO-
+ * maskering staat hier standaard AAN" suggereerde een instelbare modus → herschreven naar "in deze
+ * gedeelde weergave betekent DEMO-maskering" om het uitsluiting-bij-de-bron-model ondubbelzinnig te
+ * maken. "Richards machine" vervangen door "een lokale machine" — een publieke disclosure hoeft niet
+ * aan een persoon vast te zitten.
+ */
+function gedeeldeWeergave() {
+  return `<section id="gedeelde-weergave" class="card wide">
+  <h2>Over deze gedeelde weergave</h2>
+  <p class="lead">Dit is de deelbare, online tegenhanger van het lokale STACK-COCKPIT-bestand: gebouwd
+  via de publieke sanitize- en publicatiepoorten, maar ververst per publicatierun (zie de stempel
+  hierboven) — niet elke 10 seconden zoals de lokale versie.</p>
+  <p class="lead muted"><strong>Vlootstand</strong> hieronder is de gedeelde versie van het lokale
+  stilstand-alarm per lane: wie werkt, wie zwijgt en hoe lang. Wat hier bewust <strong>niet</strong> in
+  staat: de bewijslinks per regel (die kunnen private repo- of padnamen prijsgeven — nog niet apart
+  beoordeeld) en het model-/kanalenbord (de bron daarvan is lokale tik-logs op een lokale machine, die
+  deze machine niet verlaten).</p>
+  <p class="lead muted">In deze gedeelde weergave betekent <strong>DEMO-maskering</strong>: klant- en
+  persoonsgevoelige namen komen hier niet doordat ze nooit in de publieke data worden opgenomen —
+  uitsluiting bij de bron, geen patroon dat ze moet raden. Bekende geheimen, paden en e-mailadressen
+  vangt de sanitize-gate hieronder daarnaast, als tweede en secundaire waarborg, fail-closed af.</p>
+</section>`;
+}
+
 function pullRequests(pr) {
   if (!pr?.available) return section('prs', 'Open pull requests', pr?.evidence, unavailable(pr?.evidence));
   const rows = pr.repositories.map((r) => `<tr>
@@ -744,7 +784,7 @@ export function renderHtml(snapshot, { refreshSeconds = 900 } = {}) {
 <body>
 <div class="wrap">
 <header>
-  <h1>Stack-dashboard</h1>
+  <h1>Stack-dashboard <small class="gedeeld">— gedeelde weergave</small></h1>
   <p class="stamp">Laatst bijgewerkt: <strong>${esc(buildStamp(s.generatedAt))}</strong> · deze pagina haalt zichzelf elke ${num(refresh / 60)} min opnieuw op</p>
 </header>
 <p class="muted">Weergave van bestaande canon — nooit een tweede waarheid. Alles is read-only en gesaneerd;
@@ -755,6 +795,8 @@ De geplande kwartierrun staat wel ingesteld, maar GitHub voert die hier niet bet
 stempel betekent dat déze pagina-kopie oud is — niet per se dat er niets is gepubliceerd: een verse
 publicatie kan door browser- of CDN-cache tot tien minuten later pas zichtbaar worden. De stempel geeft
 de leeftijd van déze kopie; losse brondata kan ouder zijn, dus lees ook de badges per bron.</p>
+
+${gedeeldeWeergave()}
 
 ${overzicht(s)}
 
