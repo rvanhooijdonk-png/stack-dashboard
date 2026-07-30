@@ -143,22 +143,38 @@ const UITZONDERINGEN = [
   { regel: 109, tekens: ['U+2026'], sha256: 'eb5192245ed712b7e71b9853898d4ab0f05c5afdb61d8461784d2ab96737204b' },
 ];
 
-test('de echte spiegel voldoet — de nulmeting die deze eis draagt', () => {
-  // De harde eis geldt voor NIEUWE regels; een regel die al gepubliceerd is mag niet verdwijnen, dus
-  // een oude regel die de vorm niet haalt blijft staan en is een waarschuwing. Wordt deze test rood,
-  // dan is er een regel bijgekomen die de eis niet haalt, of is een uitzonderingsregel herschreven —
-  // in beide gevallen is de fout die regel en niet deze test.
+test('de gekatalogiseerde uitzonderingen blijven precies zichzelf — de nulmeting die deze eis draagt', () => {
+  // Correctie 28-07-2026 (order KANAALPOST-IS-EEN-KNELPUNT, punt 2): deze test toetste eerder de HELE
+  // spiegel exact tegen een vaste lijst — elke keer dat de kanaalpost legitiem groeide met een regel
+  // van vóór de eis (append-only, kan niet weg), moest een mens een nieuwe regelnummer+hash toevoegen
+  // of de test stond rood. Dat is live gegevens tegen een momentopname toetsen, niet een eis bewaken.
+  // De harde eis geldt voor NIEUWE regels — dat vangt `nieuweNietCanoniekeRegels` (hierboven getest),
+  // niet deze test. Wat híér nog wel hard moet blijven: de bevroren uitzonderingen mogen niet
+  // stilletjes verdwijnen (append-only) of van inhoud veranderen (dan geldt de uitzondering niet meer
+  // voor wat er nu staat). Nieuwe, nog niet gekatalogiseerde niet-canonieke regels elders in het
+  // bestand laten deze test niet meer rood uitslaan — dat is geen momentopname meer, maar wel nog
+  // zichtbaar (zie de aparte telling hieronder, die WEL meegroeit en dus nooit hoeft te worden bijgewerkt).
   const bestand = readFileSync(join(ROOT, 'data/kanaalpost-publiek.md'), 'utf8');
   const regels = bestand.split('\n');
   const gevonden = nietCanoniekeRegels(bestand);
+  const perRegel = new Map(gevonden.map((b) => [b.regel, b]));
 
-  assert.deepEqual(
-    gevonden.map((b) => ({ regel: b.regel, tekens: b.tekens })),
-    UITZONDERINGEN.map((u) => ({ regel: u.regel, tekens: u.tekens })),
-  );
   for (const u of UITZONDERINGEN) {
     const hash = createHash('sha256').update(regels[u.regel - 1] ?? '', 'utf8').digest('hex');
     assert.equal(hash, u.sha256, `regel ${u.regel} is niet meer de regel waarvoor de uitzondering geldt`);
+    const b = perRegel.get(u.regel);
+    assert.ok(b, `regel ${u.regel} hoort nog steeds als niet-canoniek gevonden te worden — anders is de uitzondering overbodig geworden en hoort hij hier weg`);
+    assert.deepEqual(b.tekens, u.tekens, `regel ${u.regel} meldt nu andere tekens dan de uitzondering afdekt`);
+  }
+
+  // Zichtbaarheid zonder momentopname: dit telt mee, faalt nooit vanzelf, en laat zien hoeveel er nog
+  // niet gekatalogiseerd is zonder dat iemand de lijst hoeft bij te werken om de poort groen te houden.
+  const nietGekatalogiseerd = gevonden.filter((b) => !UITZONDERINGEN.some((u) => u.regel === b.regel));
+  if (nietGekatalogiseerd.length > 0) {
+    console.warn(
+      `spiegelwet: ${nietGekatalogiseerd.length} niet-canonieke regel(s) in de live spiegel nog niet gekatalogiseerd: `
+      + nietGekatalogiseerd.map((b) => `regel ${b.regel} (${b.tekens.join(', ')})`).join('; '),
+    );
   }
 });
 
