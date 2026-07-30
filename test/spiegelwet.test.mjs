@@ -131,8 +131,16 @@ test('alleen tabelregels tellen, met regelnummer en de tekens erbij', () => {
 // schrijfeis niet. Deze regel van 14:10 stond al op de hoofdlijn toen de eis er kwam en mag daar niet
 // meer weg (append-only), dus hij blijft staan als waarschuwing. Nieuwe regels typen drie punten.
 // Dat de eis normale typografie raakt, is een openstaand punt voor Fable — zie het rapport.
+// GEMETEN 29-07-2026: ná de doorstroom-fix (het 1MB-Contents-API-plafond, zie doorstroom.mjs) bereikten
+// twee eerder nooit-overgezette RAFFINADERIJ-rijen de plaat, elk met dezelfde bevroren commit-sha
+// `b694235cae13d…` — bewust verkort door `shaVerkort()` in kanaalpost.mjs (de PUBLIEKE_GIT_SHA1-
+// allowlist, Route C), niet toevallig ontsnapt. Diezelfde allowlist-comment noemde deze rijen al
+// vooraf ("RAFFINADERIJ 2026-07-27 08:16/09:53"), toen nog op regel 90/93; het append-only bestand is
+// sindsdien gegroeid, dus ze staan nu op 108/109. Geen nieuwe klasse, dezelfde goedgekeurde regel.
 const UITZONDERINGEN = [
   { regel: 68, tekens: ['U+2026'], sha256: 'c67cd796b0af5e0c4b7d6ab30f9a55ea637ec6896bd2e781cb824aaadcc2dbc9' },
+  { regel: 108, tekens: ['U+2026'], sha256: '01170f6e31ab2927b27c5d558458954512dba9b3062fe63fbcc3ac8456ab3f61' },
+  { regel: 109, tekens: ['U+2026'], sha256: 'eb5192245ed712b7e71b9853898d4ab0f05c5afdb61d8461784d2ab96737204b' },
 ];
 
 test('de echte spiegel voldoet — de nulmeting die deze eis draagt', () => {
