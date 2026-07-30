@@ -23,7 +23,7 @@ import {
   toets, alarmRij, magAppenden, alarmRijPubliceerbaar, DREMPEL_UREN, GRACE_MINUTEN,
 } from './lib/waarnemer.mjs';
 
-const BASE_URL = process.env.BASE_URL || 'https://rvanhooijdonk-png.github.io/stack-dashboard/';
+const BASE_URL = process.env.BASE_URL || 'https://rvanhooijdonk-png.github.io/stack-dashboard/contentstroom.html';
 const SPIEGEL_URL = process.env.SPIEGEL_URL
   || 'https://raw.githubusercontent.com/rvanhooijdonk-png/stack-dashboard/main/data/kanaalpost-publiek.md';
 const SABOTAGE = process.env.SABOTAGE || 'geen';
