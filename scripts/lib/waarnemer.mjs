@@ -349,6 +349,14 @@ const nlTijd = (ms) => {
 };
 
 /**
+ * De vaste kop van élke zelfmelding van de waarnemer. Geëxporteerd omdat hij het ENIGE
+ * machinekenmerk is waaraan een lezer een zelfmelding kan herkennen zonder te raden: de tab alleen
+ * volstaat niet, want dezelfde tab kan ook een inhoudelijke poort melden. Wie hierop filtert leest
+ * mee met de schrijver — daarom is deze constante de bron, en heeft niemand een eigen kopie.
+ */
+export const ALARM_KOP = '**De automatische controle ziet de openbare plaat afwijken van de bron.**';
+
+/**
  * De alarmregel voor de publieke spiegel. Falen hoort zichtbaar te zijn op de plek waar Richard
  * kijkt, niet alleen in een logboek dat niemand opent — dus schrijft de waarnemer zijn eigen melding
  * in dezelfde spiegel als elk ander venster, in dezelfde vorm en langs dezelfde poort.
@@ -361,7 +369,7 @@ export function alarmRij({ bevindingen, nu, sabotage = false, maxOnderwerp = 560
   const zinnen = [...new Set(bevindingen.map((b) => b.uitleg))].join('; ');
   const staart = ` (controlepunten: ${codes.map(codeWoord).join(', ')})`;
   const test = sabotage ? ' Dit is een geplande sabotagetest van de waarnemer zelf, geen echte storing.' : '';
-  const kop = '**De automatische controle ziet de openbare plaat afwijken van de bron.**';
+  const kop = ALARM_KOP;
   const ruimte = maxOnderwerp - kop.length - test.length - staart.length - 2;
   // Afkappen met drie punten en niet met het teken `…`: de spiegel eist op de schrijfkant één
   // canonieke vorm (besluit Fable, punt 3), en `…` is niet zijn eigen NFKC-vorm. De waarnemer krijgt

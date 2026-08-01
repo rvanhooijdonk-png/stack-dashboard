@@ -8,6 +8,7 @@
 import {
   esc, num, dt, buildStamp, titelStamp, rollup, VLOOT_KLEUR, TRUST_LABEL, STYLE,
 } from './render.mjs';
+import { ALARM_KOP } from './waarnemer.mjs';
 
 const BRON_NAAM = {
   pullRequests: 'open pull requests',
@@ -77,11 +78,36 @@ function watDraait(s) {
 }
 
 /**
- * Rollabels van de automatische controle zelf. Een waarnemer-rij noemt Richard als actiehouder,
- * maar is een zelfmelding over de plaat — geen poort waar iets van Richard op wacht. Ze worden
- * daarom niet verzwegen maar apart geteld: de rij verdwijnt uit de lijst, het aantal blijft staan.
+ * Wanneer is een waarnemer-rij een zelfmelding over de plaat, en wanneer een echte poort?
+ *
+ * Op de tab alleen filteren was te breed (bevinding Codex T2c-0198, 01-08-2026, middel): de
+ * waarnemer kan óók een inhoudelijke rij schrijven waar Richard wél over moet beslissen, en die
+ * verdween dan uit precies de sectie die al zijn gates moet tonen. Het kenmerk is daarom de vaste
+ * kop die `alarmRij()` in `waarnemer.mjs` vóór élke zelfmelding zet — geïmporteerd, niet
+ * overgeschreven, zodat de twee kanten niet uit elkaar kunnen lopen.
+ *
+ * De publieke DTO levert die kop zónder de nadrukken aan: gemeten op `data/kanaalpost-publiek.md`
+ * (02-08-2026, alle vier de waarnemer-rijen) beginnen de onderwerpen met de kale zin. Er wordt
+ * daarom op de kale vorm vergeleken, en met `startsWith` en niet op gelijkheid — het onderwerp
+ * draagt achter de kop de bevindingen en wordt bovendien op 600 tekens afgekapt.
+ *
+ * Fail-open in de eerlijke richting: herkent deze toets een rij niet, dan blijft hij als gate staan.
+ * Een rij te veel op de poort is een last; een gate te weinig is een gemist besluit.
  */
-const ZELFMELDER_TABS = new Set(['WAARNEMER']);
+const ZELFMELDING_KOP = ALARM_KOP.replace(/\*/g, '').trim();
+
+const isZelfmelding = (row) => String(row?.tab ?? '').trim().toUpperCase() === 'WAARNEMER'
+  && String(row?.onderwerp ?? '').replace(/^[\s*]+/, '').startsWith(ZELFMELDING_KOP);
+
+/**
+ * De drie bronnen van deze sectie, met de tekst die verschijnt zodra er één niet leesbaar was.
+ * Los benoemd, want "de PR-bron viel uit" is een ander bericht dan "de spiegel viel uit".
+ */
+const GATE_BRONNEN = [
+  { key: 'pullRequests', tekst: 'mergepoorten onbekend — de bron met open pull requests was bij deze build niet leesbaar' },
+  { key: 'planning', tekst: 'wacht-op-Richard onbekend — de planningbron was bij deze build niet leesbaar' },
+  { key: 'kanaalpost', tekst: 'kanaalpost-gates onbekend — de spiegel was bij deze build niet leesbaar' },
+];
 
 /**
  * TAKEN VOOR JOU — Z12-eis (Richard, via REGIE-5, 01-08-2026): de voorpagina toont permanent wat er
@@ -97,16 +123,27 @@ const ZELFMELDER_TABS = new Set(['WAARNEMER']);
  *
  * De sectie rendert ALTIJD — ook leeg. "Geen gate open" is zelf een antwoord dat Richard in tien
  * seconden moet kunnen aflezen; een sectie die bij leegte verdwijnt laat hem raden of hij hem mist.
+ *
+ * ONBEKEND IS GEEN NUL, en dat onderscheid is de kern (bevinding Codex T2c-0198, 01-08-2026, hoog).
+ * Een uitgevallen bron gaf hier eerst nul gates, en nul gates gaf de zin "er staat op dit moment
+ * niets op jouw poort" — de plaat verklaarde dus geruststellend dat Richard vrij was terwijl ze het
+ * niet wist. Elke bron die niet aantoonbaar `available === true` is, krijgt daarom een eigen rode
+ * regel bovenaan, en de geruststelling verschijnt uitsluitend als alle drie de bronnen gelezen zijn
+ * én leeg. De onbekend-regels staan vóór de echte gates: dat een gate onzichtbaar kan zijn, is
+ * dringender dan de gates die je wél ziet.
  */
 function takenVoorJou(s) {
   const features = s.planning?.available ? s.planning.features.filter((f) => f.status === 'wacht-op-Richard') : [];
   const genoemd = s.kanaalpost?.available
     ? s.kanaalpost.rows.filter((row) => typeof row.actie === 'string' && row.actie.toLowerCase().includes('richard'))
     : [];
-  const zelfmeldingen = genoemd.filter((row) => ZELFMELDER_TABS.has(String(row.tab ?? '').toUpperCase()));
-  const rows = genoemd.filter((row) => !ZELFMELDER_TABS.has(String(row.tab ?? '').toUpperCase()));
+  const zelfmeldingen = genoemd.filter((row) => isZelfmelding(row));
+  const rows = genoemd.filter((row) => !isZelfmelding(row));
   const teMergen = s.pullRequests?.available ? (s.pullRequests.totals?.ready ?? 0) : 0;
+  const onbekend = GATE_BRONNEN.filter((b) => s[b.key]?.available !== true);
   const items = [
+    ...onbekend.map((b) => `<li><span class="dot bad"></span><span class="repo">${esc(b.tekst)}</span>
+      <span class="muted">geen meting — geen nulstand</span></li>`),
     ...(teMergen > 0 ? [`<li><span class="dot warn"></span><span class="repo">${num(teMergen)} open pull request(s) staan klaar om gemerged te worden</span>
       <span class="muted">merge is jouw poort</span></li>`] : []),
     ...features.map((f) => `<li><span class="dot warn"></span><span class="repo">${esc(f.label)}</span>${
@@ -120,14 +157,15 @@ function takenVoorJou(s) {
   staan hier bewust niet tussen — dat is geen gate op jouw poort. Ze staan onverkort op de Contentstroom-pagina.</p>`
     : '';
   if (items.length === 0) {
+    // Bereikbaar zolang `onbekend` leeg is — alle drie de bronnen zijn dus gelezen en leeg.
     return `<section id="taken-voor-jou" class="card wide">
   <h2>Taken voor jou</h2>
-  <p class="lead muted">Geen pull request klaar om te mergen, niets op wacht-op-Richard, geen kanaalpost-rij
-  met jou als actiehouder. Er staat op dit moment niets op jouw poort.</p>${voetnoot}
+  <p class="lead muted">Alle drie de bronnen zijn gelezen: geen pull request klaar om te mergen, niets op
+  wacht-op-Richard, geen kanaalpost-rij met jou als actiehouder. Er staat op dit moment niets op jouw poort.</p>${voetnoot}
 </section>`;
   }
   return `<section id="taken-voor-jou" class="card wide">
-  <h2>Taken voor jou <span class="badge warn">${num(items.length)}</span></h2>
+  <h2>Taken voor jou <span class="badge ${onbekend.length ? 'bad' : 'warn'}">${num(items.length)}</span></h2>
   <ul class="lights">${items.join('\n')}</ul>${voetnoot}
 </section>`;
 }

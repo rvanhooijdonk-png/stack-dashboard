@@ -83,6 +83,39 @@ test('"taken voor jou" houdt waarnemer-zelfmeldingen buiten de lijst maar telt z
     'de echte gate blijft wel staan');
 });
 
+test('"taken voor jou" laat een waarnemer-rij die géén zelfmelding is gewoon als gate staan', () => {
+  const met = structuredClone(fixture);
+  met.kanaalpost.rows = [
+    ...met.kanaalpost.rows,
+    {
+      tab: 'WAARNEMER',
+      onderwerp: 'Nieuwe drempelwaarde voor de stempelcontrole — akkoord nodig voor die live gaat.',
+      status: 'WACHT OP AKKOORD',
+      actie: 'Richard',
+      datum: '2026-08-01 10:00',
+    },
+  ];
+  const html = renderCockpit(met);
+  assert.match(html, /Nieuwe drempelwaarde voor de stempelcontrole/,
+    'een inhoudelijke waarnemer-poort hoort zichtbaar te blijven');
+  assert.equal(html.includes('rij(en) van de automatische controle over de plaat zelf'), false,
+    'er is niets ingehouden, dus ook geen voetnoot');
+});
+
+test('"taken voor jou" herkent de zelfmelding aan de kop van de waarnemer, niet aan de tab alleen', async () => {
+  const { ALARM_KOP } = await import('../scripts/lib/waarnemer.mjs');
+  const met = structuredClone(fixture);
+  // Zoals de publieke DTO hem aflevert: zonder nadrukken, met de bevindingen erachter.
+  const onderwerp = `${ALARM_KOP.replace(/\*/g, '')} de openbare pagina was niet op te halen. (controlepunten: pagina-onbereikbaar)`;
+  met.kanaalpost.rows = [
+    ...met.kanaalpost.rows,
+    { tab: 'WAARNEMER', onderwerp, status: 'GEBLOKKEERD', actie: 'Richard of Fable', datum: '2026-08-01 11:12' },
+  ];
+  const html = renderCockpit(met);
+  assert.equal(html.includes('de openbare pagina was niet op te halen'), false);
+  assert.match(html, /1 rij\(en\) van de automatische controle over de plaat zelf/);
+});
+
 test('"taken voor jou" rendert ook als er geen enkele gate open staat', () => {
   const leeg = structuredClone(fixture);
   leeg.kanaalpost.rows = [];
@@ -90,7 +123,43 @@ test('"taken voor jou" rendert ook als er geen enkele gate open staat', () => {
   leeg.pullRequests.totals = { open: 0, draft: 0, ready: 0 };
   const html = renderCockpit(leeg);
   assert.match(html, /id="taken-voor-jou"/);
+  assert.match(html, /Alle drie de bronnen zijn gelezen/);
   assert.match(html, /Er staat op dit moment niets op jouw poort/);
+  assert.equal(html.includes('geen meting — geen nulstand'), false);
+});
+
+test('"taken voor jou" meldt een uitgevallen PR-bron als onbekend en nooit als "niets op jouw poort"', () => {
+  const leeg = structuredClone(fixture);
+  leeg.kanaalpost.rows = [];
+  leeg.planning.features = leeg.planning.features.filter((f) => f.status !== 'wacht-op-Richard');
+  // Precies wat collectPullRequests() bij een mislukte zoekopdracht teruggeeft.
+  leeg.pullRequests = { ...leeg.pullRequests, available: false, totals: { open: 0, draft: 0, ready: 0 } };
+  const html = renderCockpit(leeg);
+  assert.match(html, /mergepoorten onbekend/);
+  assert.match(html, /geen meting — geen nulstand/);
+  assert.equal(html.includes('Er staat op dit moment niets op jouw poort'), false,
+    'een onleesbare bron mag nooit als geruststelling verschijnen');
+});
+
+test('"taken voor jou" meldt een uitgevallen planning- of kanaalpostbron apart als onbekend', () => {
+  const leeg = structuredClone(fixture);
+  leeg.planning = { ...leeg.planning, available: false, features: [] };
+  leeg.kanaalpost = { ...leeg.kanaalpost, available: false, rows: [] };
+  const html = renderCockpit(leeg);
+  assert.match(html, /wacht-op-Richard onbekend/);
+  assert.match(html, /kanaalpost-gates onbekend/);
+  assert.equal(html.includes('mergepoorten onbekend'), false, 'de PR-bron is hier wél leesbaar');
+  assert.equal(html.includes('Er staat op dit moment niets op jouw poort'), false);
+});
+
+test('"taken voor jou" zet de onbekend-melding bovenaan en kleurt de teller rood', () => {
+  const uit = structuredClone(fixture);
+  uit.pullRequests = { ...uit.pullRequests, available: false, totals: { open: 0, draft: 0, ready: 0 } };
+  const html = renderCockpit(uit);
+  assert.match(html, /Taken voor jou <span class="badge bad">/);
+  const sectie = html.slice(html.indexOf('id="taken-voor-jou"'));
+  assert.ok(sectie.indexOf('mergepoorten onbekend') < sectie.indexOf('Twee integratiegaten'),
+    'de onbekende bron staat vóór de bekende gates');
 });
 
 test('het afsprakenspoor toont tellers per status en de laatste-wijziging-datum, geen afspraaktekst', () => {
