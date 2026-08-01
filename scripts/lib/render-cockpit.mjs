@@ -1,6 +1,6 @@
 /**
- * COCKPIT — de voorpagina. Tien-secondenbord: rood eerst, wat draait, wat wacht op Richard,
- * afsprakenspoor, stackkaart. Consumeert dezelfde al-gesaneerde/contract-gated snapshot als
+ * COCKPIT — de voorpagina. Tien-secondenbord: rood eerst, wat draait, taken voor jou (Richards
+ * open gates), afsprakenspoor, stackkaart. Consumeert dezelfde al-gesaneerde/contract-gated snapshot als
  * renderHtml() (de Contentstroom-pagina) — geen eigen databron, geen eigen sanitize-oppervlak.
  * Pure functie: geen fetch, geen state, alles komt uit `snapshot`.
  */
@@ -76,28 +76,59 @@ function watDraait(s) {
 </section>`;
 }
 
-/** WAT WACHT OP RICHARD — planning-features op wacht-op-Richard, kanaalpost-rijen die hem noemen. */
-function wachtOpRichard(s) {
+/**
+ * Rollabels van de automatische controle zelf. Een waarnemer-rij noemt Richard als actiehouder,
+ * maar is een zelfmelding over de plaat — geen poort waar iets van Richard op wacht. Ze worden
+ * daarom niet verzwegen maar apart geteld: de rij verdwijnt uit de lijst, het aantal blijft staan.
+ */
+const ZELFMELDER_TABS = new Set(['WAARNEMER']);
+
+/**
+ * TAKEN VOOR JOU — Z12-eis (Richard, via REGIE-5, 01-08-2026): de voorpagina toont permanent wat er
+ * op Richards poort staat. Drie gesloten bronnen, in volgorde van hardheid:
+ *  1. open, niet-draft pull requests — merges zijn per werkwijze-regel een Richard-gate;
+ *  2. planning-features op `wacht-op-Richard`;
+ *  3. kanaalpost-rijen die hem als actiehouder noemen, MINUS de zelfmeldingen van de waarnemer.
+ *
+ * Die aftrek is de kern van de eis. Gemeten op de live-plaat van 01-08 bestond deze sectie voor
+ * 4 van de 4 rijen uit waarnemer-alarm over de plaat zelf en toonde hij nul echte gates: de sectie
+ * stond er wel, maar de plaats was bezet door ruis. De ingehouden rijen staan onverkort op de
+ * Contentstroom-pagina (`kanaalpost`-sectie); hier staat alleen hoeveel het er waren.
+ *
+ * De sectie rendert ALTIJD — ook leeg. "Geen gate open" is zelf een antwoord dat Richard in tien
+ * seconden moet kunnen aflezen; een sectie die bij leegte verdwijnt laat hem raden of hij hem mist.
+ */
+function takenVoorJou(s) {
   const features = s.planning?.available ? s.planning.features.filter((f) => f.status === 'wacht-op-Richard') : [];
-  const rows = s.kanaalpost?.available
+  const genoemd = s.kanaalpost?.available
     ? s.kanaalpost.rows.filter((row) => typeof row.actie === 'string' && row.actie.toLowerCase().includes('richard'))
     : [];
+  const zelfmeldingen = genoemd.filter((row) => ZELFMELDER_TABS.has(String(row.tab ?? '').toUpperCase()));
+  const rows = genoemd.filter((row) => !ZELFMELDER_TABS.has(String(row.tab ?? '').toUpperCase()));
+  const teMergen = s.pullRequests?.available ? (s.pullRequests.totals?.ready ?? 0) : 0;
   const items = [
+    ...(teMergen > 0 ? [`<li><span class="dot warn"></span><span class="repo">${num(teMergen)} open pull request(s) staan klaar om gemerged te worden</span>
+      <span class="muted">merge is jouw poort</span></li>`] : []),
     ...features.map((f) => `<li><span class="dot warn"></span><span class="repo">${esc(f.label)}</span>${
       f.afhankelijkheid ? `<span class="muted">${esc(f.afhankelijkheid)}</span>` : ''}</li>`),
     ...rows.map((row) => `<li><span class="dot warn"></span><span class="repo">${
       row.onderwerp ? esc(row.onderwerp) : '<span class="muted">—</span>'}</span>${
       row.tab ? `<span class="tag">${esc(row.tab)}</span>` : ''}</li>`),
   ];
+  const voetnoot = zelfmeldingen.length > 0
+    ? `\n  <p class="muted">${num(zelfmeldingen.length)} rij(en) van de automatische controle over de plaat zelf
+  staan hier bewust niet tussen — dat is geen gate op jouw poort. Ze staan onverkort op de Contentstroom-pagina.</p>`
+    : '';
   if (items.length === 0) {
-    return `<section id="wacht-op-richard" class="card wide">
-  <h2>Wacht op Richard</h2>
-  <p class="lead muted">Niets staat op wacht-op-Richard en geen kanaalpost-rij noemt hem als actiehouder.</p>
+    return `<section id="taken-voor-jou" class="card wide">
+  <h2>Taken voor jou</h2>
+  <p class="lead muted">Geen pull request klaar om te mergen, niets op wacht-op-Richard, geen kanaalpost-rij
+  met jou als actiehouder. Er staat op dit moment niets op jouw poort.</p>${voetnoot}
 </section>`;
   }
-  return `<section id="wacht-op-richard" class="card wide">
-  <h2>Wacht op Richard <span class="badge warn">${num(items.length)}</span></h2>
-  <ul class="lights">${items.join('\n')}</ul>
+  return `<section id="taken-voor-jou" class="card wide">
+  <h2>Taken voor jou <span class="badge warn">${num(items.length)}</span></h2>
+  <ul class="lights">${items.join('\n')}</ul>${voetnoot}
 </section>`;
 }
 
@@ -194,7 +225,7 @@ ${roodEerst(s)}
 
 ${watDraait(s)}
 
-${wachtOpRichard(s)}
+${takenVoorJou(s)}
 
 ${afsprakenspoor(s.afspraken)}
 

@@ -49,11 +49,48 @@ test('"wat draait" toont het WERKT-venster en de in-bouw-feature uit de fixture'
   assert.match(html, /Planning-plaat op het dashboard/);
 });
 
-test('"wacht op Richard" toont de wacht-op-Richard-feature en de kanaalpost-rij met actie Richard', () => {
+test('"taken voor jou" toont de wacht-op-Richard-feature en de kanaalpost-rij met actie Richard', () => {
   const html = renderCockpit(fixture);
-  assert.match(html, /id="wacht-op-richard"/);
+  assert.match(html, /id="taken-voor-jou"/);
   assert.match(html, /Tijdstempel in Nederlandse tijd/);
   assert.match(html, /Twee integratiegaten in het centrale modellenregister gedicht/);
+});
+
+test('"taken voor jou" zet de te mergen pull requests als eerste gate bovenaan', () => {
+  const html = renderCockpit(fixture);
+  // fixture: totals.ready = 2 (3 open, waarvan 1 draft)
+  assert.match(html, /2 open pull request\(s\) staan klaar om gemerged te worden/);
+  assert.match(html, /merge is jouw poort/);
+});
+
+test('"taken voor jou" houdt waarnemer-zelfmeldingen buiten de lijst maar telt ze zichtbaar', () => {
+  const met = structuredClone(fixture);
+  met.kanaalpost.rows = [
+    ...met.kanaalpost.rows,
+    {
+      tab: 'WAARNEMER',
+      onderwerp: 'De automatische controle ziet de openbare plaat afwijken van de bron.',
+      status: 'GEBLOKKEERD',
+      actie: 'Richard of Fable',
+      datum: '2026-07-30 09:05',
+    },
+  ];
+  const html = renderCockpit(met);
+  assert.equal(html.includes('De automatische controle ziet de openbare plaat afwijken'), false,
+    'de zelfmelding staat niet als gate in de lijst');
+  assert.match(html, /1 rij\(en\) van de automatische controle over de plaat zelf/);
+  assert.match(html, /Twee integratiegaten in het centrale modellenregister gedicht/,
+    'de echte gate blijft wel staan');
+});
+
+test('"taken voor jou" rendert ook als er geen enkele gate open staat', () => {
+  const leeg = structuredClone(fixture);
+  leeg.kanaalpost.rows = [];
+  leeg.planning.features = leeg.planning.features.filter((f) => f.status !== 'wacht-op-Richard');
+  leeg.pullRequests.totals = { open: 0, draft: 0, ready: 0 };
+  const html = renderCockpit(leeg);
+  assert.match(html, /id="taken-voor-jou"/);
+  assert.match(html, /Er staat op dit moment niets op jouw poort/);
 });
 
 test('het afsprakenspoor toont tellers per status en de laatste-wijziging-datum, geen afspraaktekst', () => {
