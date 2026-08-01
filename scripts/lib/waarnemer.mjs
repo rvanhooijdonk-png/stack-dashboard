@@ -25,7 +25,9 @@
  * gebouwd vóór die sectie bestond. Daarom kijkt hij naar de contractversie die de pagina zelf
  * meldt: onder `KANAALPOST_VANAF` is het een waarschuwing (de sectie is nog niet gepubliceerd),
  * vanaf die versie een harde fout. De toets zet zichzelf aan zodra de plaat hem kan halen; er is
- * geen schakelaar die iemand kan vergeten om te zetten.
+ * geen schakelaar die iemand kan vergeten om te zetten. Sinds 02-08-2026 geldt datzelfde mechanisme
+ * voor élke sectie die later op de plaat kwam, via `SECTIES_VANAF` — één tabel in plaats van één
+ * ingebakken uitzondering.
  */
 
 import { kanaalpostUitTekst, toPublicKanaalpost, ontdaan } from './kanaalpost.mjs';
@@ -61,8 +63,36 @@ export const HERHAAL_UREN = 12;
  */
 export const VEROUDERD_MARKER = 'data-verouderd="ja"';
 
-/** Secties die er altijd horen te staan. `kanaalpost` komt erbij vanaf `KANAALPOST_VANAF`. */
-export const VERPLICHTE_SECTIES = ['overzicht', 'planning', 'prs', 'ci', 'tracker', 'tracks', 'merged', 'logbook'];
+/**
+ * Secties die er op élke bouw horen te staan, ongeacht de contractversie. Ze bestaan sinds 2.0.0 en
+ * `render.mjs` geeft ze in beide takken terug — ook als hun bron onbereikbaar is, dan met de
+ * `Geen data`-uitleg. Hun afwezigheid is dus nooit een leeftijdskwestie maar altijd een renderfout.
+ *
+ * `decisions` stond hier tot 02-08-2026 niet in, zonder aanwijsbare reden: het besluitenregister
+ * staat sinds de eerste bouw op de plaat en heeft nooit een eigen versiepoort gehad.
+ *
+ * BEWUST NIET IN DEZE LIJST: `roadmap`. Die sectie is voorwaardelijk — `workstreams()` geeft een
+ * lege string terug bij een lege lijst, dus een roadmaploze bouw hóórt hem niet te tonen. Verplicht
+ * stellen zou de waarnemer vals rood maken op een pagina die precies doet wat ze moet doen.
+ */
+export const VERPLICHTE_SECTIES = ['overzicht', 'planning', 'prs', 'ci', 'tracker', 'decisions', 'tracks', 'merged', 'logbook'];
+
+/**
+ * Secties die pas vanaf een bepaalde contractversie op de plaat staan, met dezelfde zelf-bewapening
+ * als `KANAALPOST_VANAF`: onder die versie eist de waarnemer ze niet, vanaf die versie hard. Zo kan
+ * een oudere gepubliceerde kopie niet rood worden voor iets wat ze onmogelijk kon hebben, en hoeft
+ * niemand een schakelaar om te zetten zodra de nieuwe versie live gaat.
+ *
+ * De versies zijn gemeten aan de bump waarin de sectie gegarandeerd meekomt, niet aan de commit
+ * waarin ze ontstond. Dat verschil is bij `gedeelde-weergave` echt: die landde in #51 mídden in
+ * 2.5.0 zonder eigen bump, dus een 2.5.0-pagina kan hem hebben of niet — 2.6.0 (#53) is de eerste
+ * versie waarin zijn aanwezigheid vaststaat. `vlootstand` kwam mét zijn bump mee in 2.5.0 (#39).
+ */
+export const SECTIES_VANAF = {
+  kanaalpost: KANAALPOST_VANAF,
+  vlootstand: '2.5.0',
+  'gedeelde-weergave': '2.6.0',
+};
 
 /**
  * Sporen van een renderfout die er als data uitzien. Bewust op de GERENDERDE vorm (`>undefined<`)
@@ -318,8 +348,14 @@ export function toets({
     }
   }
 
-  // 4 — verplichte secties aanwezig, niet leeg, niet kapot.
-  const verplicht = kanaalpostVerplicht ? [...VERPLICHTE_SECTIES, 'kanaalpost'] : VERPLICHTE_SECTIES;
+  // 4 — verplichte secties aanwezig, niet leeg, niet kapot. De versie-gepoorte secties komen uit
+  // één tabel, zodat een nieuwe sectie hier niet vergeten kan worden zoals `vlootstand` en
+  // `gedeelde-weergave` dat tot 02-08-2026 waren: `kanaalpost` was de enige die een eigen poort had,
+  // dus elke sectie die daarna op de plaat kwam viel stilzwijgend buiten toets 4.
+  const verplicht = [
+    ...VERPLICHTE_SECTIES,
+    ...Object.entries(SECTIES_VANAF).filter(([, vanaf]) => versieMinstens(contractVersie, vanaf)).map(([id]) => id),
+  ];
   for (const id of verplicht) {
     const inhoud = sectieUitHtml(html, id);
     if (inhoud === null) { meld('SECTIE_ONTBREEKT', `sectie ${id}`); continue; }
