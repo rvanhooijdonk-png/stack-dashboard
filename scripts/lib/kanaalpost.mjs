@@ -61,6 +61,17 @@ const ZELFALARM_TAB = /^WAARNEMER$/i;
 /** De gesloten statuslijst uit de kop van de spiegel zelf. Alles daarbuiten wordt ingehouden. */
 export const STATUSSEN = ['AFGEROND', 'WACHT OP AKKOORD', 'GEBLOKKEERD'];
 
+/**
+ * De twee statussen die "nog niet gesloten" betekenen. Expliciet opgesomd en niet afgeleid als
+ * `!== 'AFGEROND'`, zodat een vierde status die later aan `STATUSSEN` wordt toegevoegd niet stil als
+ * open gate binnenkomt maar hier zichtbaar een keuze afdwingt.
+ *
+ * Gemeten aanleiding (bevinding Codex, 02-08-2026, middel): `toPublicGates` selecteerde alleen op de
+ * actie-cel. Op de kandidaatbron leverde dat 43 rijen op, waarvan 7 met status `AFGEROND` — voltooide,
+ * historische meldingen die de cockpit onder "TAKEN VOOR JOU" als actuele taak presenteerde.
+ */
+const OPEN_STATUSSEN = ['WACHT OP AKKOORD', 'GEBLOKKEERD'];
+
 const MAX_TAB = 40;
 /**
  * De spiegelrijen zijn hele alinea's in gewone taal — dat is hun waarde. Afkappen mag daarom pas
@@ -744,10 +755,16 @@ export function toPublicKanaalpost(raw) {
  * `totaal` is het aantal echte gates vóór het knippen op `max`, zodat de plaat kan tonen dat er meer
  * zijn dan er passen.
  *
- * EERLIJKE GRENS, tweemaal. (1) De selectie is één patroon op de actie-cel: een rij die "Richard: geen
- * actie" schrijft telt hier mee als gate. Dat is bewust — de andere kant op filteren betekent intentie
- * raden uit vrije tekst, en dan verdwijnt er stil een echte gate. (2) Twee identieke meldingen in de
- * spiegel zijn hier twee gates; deze functie ontdubbelt niet.
+ * OPEN, niet alleen genoemd. Een rij telt pas als gate wanneer haar status in `OPEN_STATUSSEN` staat.
+ * `AFGEROND` is een eindstatus: die melding is klaar en hoort niet onder "TAKEN VOOR JOU". Dit is een
+ * mechanische toets op een gesloten statuslijst, geen tekstheuristiek — precies daarom mag hij hier
+ * wél filteren waar de actie-cel dat niet mag.
+ *
+ * EERLIJKE GRENS, tweemaal. (1) De selectie is verder één patroon op de actie-cel: een rij die
+ * "Richard: geen actie" schrijft telt hier mee als gate. Dat is bewust — de andere kant op filteren
+ * betekent intentie raden uit vrije tekst, en dan verdwijnt er stil een echte gate. Die grens
+ * verdwijnt pas met een expliciet gate-veld in de bron, niet met een nieuwe heuristiek. (2) Twee
+ * identieke meldingen in de spiegel zijn hier twee gates; deze functie ontdubbelt niet.
  */
 export function toPublicGates(raw, { max = GATE_RIJEN } = {}) {
   const leeg = (reason) => ({ available: false, reason, rows: [], totaal: 0, zelfalarm: 0 });
@@ -758,7 +775,8 @@ export function toPublicGates(raw, { max = GATE_RIJEN } = {}) {
   // Geen enkele leesbare rij is iets anders dan "wel rijen, geen gate": in het eerste geval is er niets
   // gemeten en mag de plaat geen geruststelling tonen. Vandaar twee verschillende eindstanden.
   if (!veilig.length) return leeg(raw.rows.length ? 'INGEHOUDEN' : 'LEEG');
-  const genoemd = veilig.filter((r) => GATE_ACTIE.test(r.actie));
+  const open = veilig.filter((r) => OPEN_STATUSSEN.includes(r.status));
+  const genoemd = open.filter((r) => GATE_ACTIE.test(r.actie));
   const zelfalarm = genoemd.filter((r) => ZELFALARM_TAB.test(r.tab)).length;
   const echt = genoemd.filter((r) => !ZELFALARM_TAB.test(r.tab));
   const rows = echt.slice(-Math.max(1, Math.trunc(max))).reverse();

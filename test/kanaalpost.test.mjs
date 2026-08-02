@@ -169,6 +169,43 @@ test('alleen rijen die Richard als actiehouder noemen tellen als gate', () => {
   assert.deepEqual(g.rows.map((r) => r.onderwerp), ['gate 3', 'gate 1']);
 });
 
+test('een AFGEROND-rij is geen gate — ook niet als hij Richard noemt', () => {
+  // Bevinding Codex 02-08-2026 (middel) in één regel: de selectie keek alleen naar de actie-cel, dus
+  // stonden voltooide meldingen als actuele taak onder "TAKEN VOOR JOU". Op de bron van dat moment
+  // waren dat 7 van de 43 geselecteerde rijen.
+  const g = toPublicGates(bron([
+    gateRij(1, { status: 'AFGEROND' }),
+    gateRij(2),
+    gateRij(3, { status: 'AFGEROND', actie: 'Richard (ter kennisgeving)' }),
+  ]));
+  assert.deepEqual(g.rows.map((r) => r.onderwerp), ['gate 2']);
+  assert.equal(g.totaal, 1, 'het totaal telt alleen open gates — anders belooft de badge werk dat af is');
+});
+
+test('een spiegel met uitsluitend afgeronde Richard-rijen is GEEN_GATE, niet "een gate"', () => {
+  const g = toPublicGates(bron([gateRij(1, { status: 'AFGEROND' }), gateRij(2, { status: 'AFGEROND' })]));
+  assert.equal(g.available, true);
+  assert.equal(g.reason, 'GEEN_GATE');
+  assert.deepEqual(g.rows, []);
+  assert.equal(g.totaal, 0);
+});
+
+test('een afgerond zelfalarm telt ook niet mee in de zelfalarm-teller', () => {
+  const g = toPublicGates(bron([
+    gateRij(1),
+    gateRij(2, { tab: 'WAARNEMER', status: 'AFGEROND', actie: 'Richard of Fable' }),
+    gateRij(3, { tab: 'WAARNEMER', status: 'GEBLOKKEERD', actie: 'Richard of Fable' }),
+  ]));
+  assert.equal(g.zelfalarm, 1, 'een gesloten zelfalarm is opgelost; meetellen laat de plaat alarmeren over verleden tijd');
+  assert.equal(g.totaal, 1);
+});
+
+test('een GEBLOKKEERD-gate blijft staan — alleen de eindstatus valt af', () => {
+  const g = toPublicGates(bron([gateRij(1, { status: 'GEBLOKKEERD' }), gateRij(2)]));
+  assert.deepEqual(g.rows.map((r) => r.onderwerp), ['gate 2', 'gate 1']);
+  assert.equal(g.totaal, 2);
+});
+
 test('zelfalarm van de automatische controle staat niet in de lijst maar wordt wel geteld', () => {
   const g = toPublicGates(bron([
     gateRij(1),
