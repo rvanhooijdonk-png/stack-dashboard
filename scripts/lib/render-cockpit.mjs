@@ -144,8 +144,8 @@ function takenVoorJou(s) {
   const items = [
     ...onbekend.map((b) => `<li><span class="dot bad"></span><span class="repo">${esc(b.tekst)}</span>
       <span class="muted">geen meting — geen nulstand</span></li>`),
-    ...(teMergen > 0 ? [`<li><span class="dot warn"></span><span class="repo">${num(teMergen)} open pull request(s) staan klaar om gemerged te worden</span>
-      <span class="muted">merge is jouw poort</span></li>`] : []),
+    ...(teMergen > 0 ? [`<li><span class="dot warn"></span><span class="repo">${num(teMergen)} open pull request(s) zonder draft-status</span>
+      <span class="muted">merge is jouw poort — mergebaarheid en checks zijn hier niet gemeten</span></li>`] : []),
     ...features.map((f) => `<li><span class="dot warn"></span><span class="repo">${esc(f.label)}</span>${
       f.afhankelijkheid ? `<span class="muted">${esc(f.afhankelijkheid)}</span>` : ''}</li>`),
     ...rows.map((row) => `<li><span class="dot warn"></span><span class="repo">${
@@ -158,14 +158,26 @@ function takenVoorJou(s) {
     : '';
   if (items.length === 0) {
     // Bereikbaar zolang `onbekend` leeg is — alle drie de bronnen zijn dus gelezen en leeg.
+    // De derde deelzin is voorwaardelijk: bij een aftrek zeggen dat er "geen kanaalpost-rij met jou
+    // als actiehouder" is, spreekt de voetnoot een regel lager tegen — de bron zweeg niet, er is
+    // ingehouden. Dat verschil moet in dezelfde zin staan waarin de lezer wordt gerustgesteld.
+    const derde = zelfmeldingen.length > 0
+      ? `geen kanaalpost-rij met jou als actiehouder behalve de ${num(zelfmeldingen.length)} hieronder genoemde`
+      : 'geen kanaalpost-rij met jou als actiehouder';
     return `<section id="taken-voor-jou" class="card wide">
   <h2>Taken voor jou</h2>
-  <p class="lead muted">Alle drie de bronnen zijn gelezen: geen pull request klaar om te mergen, niets op
-  wacht-op-Richard, geen kanaalpost-rij met jou als actiehouder. Er staat op dit moment niets op jouw poort.</p>${voetnoot}
+  <p class="lead muted">Alle drie de bronnen zijn gelezen: geen open pull request zonder draft-status, niets op
+  wacht-op-Richard, ${derde}. Er staat op dit moment niets op jouw poort.</p>${voetnoot}
 </section>`;
   }
+  // Twee getallen, twee badges: taken en meetstoringen zijn niet optelbaar. Eén badge met
+  // `items.length` liet bij één uitgevallen bron en twee gates "3" zien terwijl er twee taken zijn.
+  const takenBadge = `<span class="badge warn">${num(items.length - onbekend.length)}</span>`;
+  const bronBadge = onbekend.length > 0
+    ? ` <span class="badge bad">${num(onbekend.length)} bron${onbekend.length === 1 ? '' : 'nen'} onbekend</span>`
+    : '';
   return `<section id="taken-voor-jou" class="card wide">
-  <h2>Taken voor jou <span class="badge ${onbekend.length ? 'bad' : 'warn'}">${num(items.length)}</span></h2>
+  <h2>Taken voor jou ${takenBadge}${bronBadge}</h2>
   <ul class="lights">${items.join('\n')}</ul>${voetnoot}
 </section>`;
 }

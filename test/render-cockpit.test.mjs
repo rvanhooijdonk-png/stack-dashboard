@@ -59,8 +59,16 @@ test('"taken voor jou" toont de wacht-op-Richard-feature en de kanaalpost-rij me
 test('"taken voor jou" zet de te mergen pull requests als eerste gate bovenaan', () => {
   const html = renderCockpit(fixture);
   // fixture: totals.ready = 2 (3 open, waarvan 1 draft)
-  assert.match(html, /2 open pull request\(s\) staan klaar om gemerged te worden/);
+  assert.match(html, /2 open pull request\(s\) zonder draft-status/);
   assert.match(html, /merge is jouw poort/);
+});
+
+test('"taken voor jou" belooft geen mergebaarheid die de teller niet meet', () => {
+  const html = renderCockpit(fixture);
+  // `totals.ready` telt in collect.mjs uitsluitend `!pr.isDraft` — niets over mergeable,
+  // checks of reviews. De regel mag dus niet "klaar om gemerged te worden" beweren.
+  assert.equal(html.includes('staan klaar om gemerged te worden'), false);
+  assert.match(html, /mergebaarheid en checks zijn hier niet gemeten/);
 });
 
 test('"taken voor jou" houdt waarnemer-zelfmeldingen buiten de lijst maar telt ze zichtbaar', () => {
@@ -126,6 +134,25 @@ test('"taken voor jou" rendert ook als er geen enkele gate open staat', () => {
   assert.match(html, /Alle drie de bronnen zijn gelezen/);
   assert.match(html, /Er staat op dit moment niets op jouw poort/);
   assert.equal(html.includes('geen meting — geen nulstand'), false);
+  // Niets ingehouden: dan is de onvoorwaardelijke deelzin waar en hoort er geen uitzondering bij.
+  assert.match(html, /geen kanaalpost-rij met jou als actiehouder\. Er staat/);
+});
+
+test('de lege staat spreekt de aftrek niet tegen: de ingehouden rijen staan in dezelfde zin', async () => {
+  const { ALARM_KOP } = await import('../scripts/lib/waarnemer.mjs');
+  const leeg = structuredClone(fixture);
+  leeg.planning.features = leeg.planning.features.filter((f) => f.status !== 'wacht-op-Richard');
+  leeg.pullRequests.totals = { open: 0, draft: 0, ready: 0 };
+  // Enige kanaalpost-rijen met Richard als actiehouder zijn zelfmeldingen: de bron sprak wél.
+  leeg.kanaalpost.rows = [
+    { tab: 'WAARNEMER', onderwerp: `${ALARM_KOP.replace(/\*/g, '')} de plaat wijkt af van de bron.`, status: 'GEBLOKKEERD', actie: 'Richard of Fable', datum: '2026-08-01 11:12' },
+    { tab: 'WAARNEMER', onderwerp: `${ALARM_KOP.replace(/\*/g, '')} de spiegel liep achter.`, status: 'GEBLOKKEERD', actie: 'Richard of Fable', datum: '2026-08-01 12:12' },
+  ];
+  const html = renderCockpit(leeg);
+  assert.match(html, /behalve de 2 hieronder genoemde/);
+  assert.equal(html.includes('geen kanaalpost-rij met jou als actiehouder. Er staat'), false,
+    'de geruststelling mag niet beweren dat de bron zweeg terwijl er is ingehouden');
+  assert.match(html, /2 rij\(en\) van de automatische controle over de plaat zelf/);
 });
 
 test('"taken voor jou" meldt een uitgevallen PR-bron als onbekend en nooit als "niets op jouw poort"', () => {
@@ -156,10 +183,30 @@ test('"taken voor jou" zet de onbekend-melding bovenaan en kleurt de teller rood
   const uit = structuredClone(fixture);
   uit.pullRequests = { ...uit.pullRequests, available: false, totals: { open: 0, draft: 0, ready: 0 } };
   const html = renderCockpit(uit);
-  assert.match(html, /Taken voor jou <span class="badge bad">/);
+  assert.match(html, /Taken voor jou <span class="badge warn">\d+<\/span> <span class="badge bad">1 bron onbekend<\/span>/);
   const sectie = html.slice(html.indexOf('id="taken-voor-jou"'));
   assert.ok(sectie.indexOf('mergepoorten onbekend') < sectie.indexOf('Twee integratiegaten'),
     'de onbekende bron staat vóór de bekende gates');
+});
+
+test('de teller in de kop telt taken, niet meetstoringen', () => {
+  const uit = structuredClone(fixture);
+  uit.pullRequests = { ...uit.pullRequests, available: false, totals: { open: 0, draft: 0, ready: 0 } };
+  const gates = renderCockpit(fixture).match(/Taken voor jou <span class="badge warn">(\d+)<\/span>/)[1];
+  const html = renderCockpit(uit);
+  const metStoring = html.match(/Taken voor jou <span class="badge warn">(\d+)<\/span>/)[1];
+  // De uitgevallen PR-bron kost één gate-regel (de te-mergen-regel valt weg) en voegt één
+  // onbekend-regel toe. De takenteller mag daardoor niet omhoog gaan.
+  assert.equal(Number(metStoring), Number(gates) - 1);
+  assert.match(html, /<span class="badge bad">1 bron onbekend<\/span>/);
+});
+
+test('twee uitgevallen bronnen tellen als "2 bronnen onbekend", meervoud en al', () => {
+  const uit = structuredClone(fixture);
+  uit.planning = { ...uit.planning, available: false, features: [] };
+  uit.kanaalpost = { ...uit.kanaalpost, available: false, rows: [] };
+  const html = renderCockpit(uit);
+  assert.match(html, /<span class="badge bad">2 bronnen onbekend<\/span>/);
 });
 
 test('het afsprakenspoor toont tellers per status en de laatste-wijziging-datum, geen afspraaktekst', () => {
