@@ -39,6 +39,25 @@ import { denyTermsMaxLen, sanitizeString } from './sanitize.mjs';
 /** De plaat toont het staartstuk van het doorgeefluik: de laatste vijftien rijen, nieuwste boven. */
 export const KANAAL_RIJEN = 15;
 
+/** Hoeveel gates de cockpit toont. Los van `KANAAL_RIJEN`: zie `toPublicGates`. */
+export const GATE_RIJEN = 12;
+
+/**
+ * Het venster waarbinnen naar Richard-gates wordt gezocht is de HELE spiegel, niet het staartstuk.
+ * Gemeten aanleiding (01-08-2026): de vier rijen onder *Wacht op Richard* op de voorpagina waren alle
+ * vier automatische controle-meldingen, en nul echte gates — niet omdat er geen gates waren, maar
+ * omdat `toPublicKanaalpost` op de laatste vijftien rijen knipt en de echte gates (28-07: RAFFINADERIJ,
+ * TRECHTER, PR-OPSCHONING, KEYNOTE-2) daar buiten waren geschoven. Een gate veroudert niet vanzelf; hij
+ * blijft staan tot Richard hem sluit. Daarom leest deze functie álle rijen.
+ */
+const GATE_ACTIE = /richard/i;
+/**
+ * De automatische controle schrijft haar eigen alarm terug in de spiegel met actie "Richard of Fable".
+ * Die rijen zijn geen gate maar zelfalarm: de plaat zou dan om aandacht vragen voor haar eigen meting.
+ * Ze worden hier geteld, niet weggemoffeld — de cockpit meldt het aantal.
+ */
+const ZELFALARM_TAB = /^WAARNEMER$/i;
+
 /** De gesloten statuslijst uit de kop van de spiegel zelf. Alles daarbuiten wordt ingehouden. */
 export const STATUSSEN = ['AFGEROND', 'WACHT OP AKKOORD', 'GEBLOKKEERD'];
 
@@ -710,6 +729,41 @@ export function toPublicKanaalpost(raw) {
   const rows = veilig.slice(-KANAAL_RIJEN).reverse();
   if (!rows.length) return leeg(ingehouden ? 'INGEHOUDEN' : 'LEEG', ingehouden);
   return { available: true, reason: null, rows, ingehouden };
+}
+
+/**
+ * GATES — de rijen uit de spiegel die Richard als actiehouder noemen, over de HELE spiegel en niet
+ * over het venster van vijftien. Zelfde sanitize- en publicatiepoort als `toPublicKanaalpost`
+ * (`veiligePubliekeRijen`), zodat hier geen tweede publicatie-oppervlak ontstaat: wat de gates-lijst
+ * kan tonen, kan de kanaalpost-sectie ook tonen.
+ *
+ * `zelfalarm` telt de rijen die wél Richard noemen maar van de automatische controle komen. Die staan
+ * bewust niet in `rows`; het getal blijft zichtbaar zodat "0 gates" niet kan betekenen "wel meldingen,
+ * maar allemaal verstopt".
+ *
+ * `totaal` is het aantal echte gates vóór het knippen op `max`, zodat de plaat kan tonen dat er meer
+ * zijn dan er passen.
+ *
+ * EERLIJKE GRENS, tweemaal. (1) De selectie is één patroon op de actie-cel: een rij die "Richard: geen
+ * actie" schrijft telt hier mee als gate. Dat is bewust — de andere kant op filteren betekent intentie
+ * raden uit vrije tekst, en dan verdwijnt er stil een echte gate. (2) Twee identieke meldingen in de
+ * spiegel zijn hier twee gates; deze functie ontdubbelt niet.
+ */
+export function toPublicGates(raw, { max = GATE_RIJEN } = {}) {
+  const leeg = (reason) => ({ available: false, reason, rows: [], totaal: 0, zelfalarm: 0 });
+  if (!raw || raw.available !== true || !Array.isArray(raw.rows)) {
+    return leeg(raw?.reason === 'LEEG' ? 'LEEG' : 'BRON_ONBEREIKBAAR');
+  }
+  const { veilig } = veiligePubliekeRijen(raw);
+  // Geen enkele leesbare rij is iets anders dan "wel rijen, geen gate": in het eerste geval is er niets
+  // gemeten en mag de plaat geen geruststelling tonen. Vandaar twee verschillende eindstanden.
+  if (!veilig.length) return leeg(raw.rows.length ? 'INGEHOUDEN' : 'LEEG');
+  const genoemd = veilig.filter((r) => GATE_ACTIE.test(r.actie));
+  const zelfalarm = genoemd.filter((r) => ZELFALARM_TAB.test(r.tab)).length;
+  const echt = genoemd.filter((r) => !ZELFALARM_TAB.test(r.tab));
+  const rows = echt.slice(-Math.max(1, Math.trunc(max))).reverse();
+  if (!rows.length) return { available: true, reason: 'GEEN_GATE', rows: [], totaal: 0, zelfalarm };
+  return { available: true, reason: null, rows, totaal: echt.length, zelfalarm };
 }
 
 /**

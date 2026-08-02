@@ -20,7 +20,7 @@ import { renderCockpit } from './lib/render-cockpit.mjs';
 import { validate } from './lib/validate.mjs';
 import { toPublicPlanning } from './lib/planning.mjs';
 import { vertaalBouwlijst } from './lib/planning-bron.mjs';
-import { kanaalpostUitTekst, toPublicKanaalpost } from './lib/kanaalpost.mjs';
+import { kanaalpostUitTekst, toPublicKanaalpost, toPublicGates } from './lib/kanaalpost.mjs';
 import { VLOOT_ONBEKEND_MINUTEN, toPublicVlootstand, vlootstand as vlootstandVan } from './lib/doorstroom.mjs';
 import { LANES } from './lib/kijk.mjs';
 import {
@@ -58,8 +58,13 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  *        ID's en de bewijsverwijzingen zijn onvoorwaardelijk intern. Publiek blijft alleen de
  *        structuur: tellers per status (gesloten enum) en het tijdstip van de laatste
  *        bestandswijziging. De volledige laatste-5 staat alleen in `.local/snapshot.json`.
+ * 2.7.0: gates — de kanaalpost-rijen die Richard als actiehouder noemen, gelezen over de HELE spiegel
+ *        in plaats van over het venster van vijftien dat `kanaalpost` toont. Zelfde bron en zelfde
+ *        publicatiepoort, ander venster: een gate veroudert niet vanzelf, hij blijft staan tot hij
+ *        gesloten wordt, en schoof daardoor stil uit beeld (gemeten 01-08-2026: 4 van de 4 rijen
+ *        onder *Wacht op Richard* waren zelfalarm van de automatische controle, 0 echte gates).
  */
-const CONTRACT_VERSION = '2.6.0';
+const CONTRACT_VERSION = '2.7.0';
 const REFRESH_SECONDS = 900;
 /** Een titel is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
 const MAX_TITLE = 80;
@@ -240,6 +245,9 @@ export function toPublicSnapshot(raw, textPolicy = {}) {
     // Vloot-breed doorgeefluik, zelfde fail-closed-per-sectie-regel als planning: geen `sources`-bron,
     // dus een onleesbare spiegel degradeert de rest van de pagina niet.
     kanaalpost: toPublicKanaalpost(raw.kanaalpost),
+    // Zelfde bron als `kanaalpost`, zelfde publicatiepoort, ANDER venster: alle rijen in plaats van de
+    // laatste vijftien. Een gate wacht tot hij gesloten wordt en mag dus niet uit beeld verouderen.
+    gates: toPublicGates(raw.kanaalpost),
     // Zelfde fail-closed-per-sectie-regel: een onleesbare spiegel maakt deze sectie onbeschikbaar met
     // een nette melding en laat de rest van de pagina staan.
     vlootstand: toPublicVlootstand(raw.vlootstand),
