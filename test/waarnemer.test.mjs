@@ -19,12 +19,15 @@ import { kanaalpostUitTekst, toPublicKanaalpost } from '../scripts/lib/kanaalpos
 import {
   toets, alarmRij, magAppenden, alarmRijPubliceerbaar, stempelUitHtml, sectieUitHtml,
   eersteKanaalpostRij, rijMoment, versieMinstens, codeWoord, CODES, VEROUDERD_MARKER, KANAALPOST_VANAF,
+  SECTIES_VANAF,
 } from '../scripts/lib/waarnemer.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8'));
 
 const NU = Date.parse('2026-07-26T12:00:00.000Z');
+/** De contractversie die de plaat vandaag stempelt — uit de fixture, niet nagetypt. */
+const NIEUWSTE_CONTRACT = fixture.contractVersion;
 const KOP = ['| datum-tijd | tab-rol | onderwerp | status | actie voor |',
   '| --- | --- | --- | --- | --- |'].join('\n');
 
@@ -237,6 +240,72 @@ test('een onberekende waarde op de pagina is een afwijking', () => {
     paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: KANAALPOST_VANAF, nu: NU,
   });
   assert.ok(r.bevindingen.some((b) => b.code === 'PAGINA_KAPOT'));
+});
+
+// --- toets 4: de lijst dekt de plaat zoals die vandaag gebouwd wordt ---
+
+/** Haalt één sectie uit de gerenderde pagina weg, zoals een renderfout dat zou doen. */
+const zonderSectie = (html, id) => html.replace(new RegExp(`<section id="${id}"[\\s\\S]*?</section>`), '');
+
+test('de verplichte-sectielijst eist niets wat de plaat op de huidige contractversie niet bouwt', () => {
+  // De belangrijkste toets van deze ronde en bewust twee kanten op: een lijst die te weinig eist maakt
+  // de waarnemer blind, een lijst die te veel eist maakt hem permanent rood. Een volledig gerenderde
+  // pagina op de nieuwste contractversie moet dus zonder één bevinding door alle vier de toetsen.
+  for (const [id, vanaf] of Object.entries(SECTIES_VANAF)) {
+    assert.ok(versieMinstens(NIEUWSTE_CONTRACT, vanaf), `poort ${id} (${vanaf}) ligt boven contract ${NIEUWSTE_CONTRACT}`);
+  }
+  const html = pagina(basisSpiegel, { contract: NIEUWSTE_CONTRACT });
+  const r = toets({
+    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: NIEUWSTE_CONTRACT, nu: NU,
+  });
+  assert.deepEqual(r.bevindingen, []);
+});
+
+test('een weggevallen besluitenregister wordt gemeld — die sectie staat er sinds 2.0.0 altijd', () => {
+  const html = zonderSectie(pagina(basisSpiegel), 'decisions');
+  const r = toets({
+    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: KANAALPOST_VANAF, nu: NU,
+  });
+  const bev = r.bevindingen.find((b) => b.code === 'SECTIE_ONTBREEKT');
+  assert.ok(bev);
+  assert.match(bev.uitleg, /sectie decisions/);
+});
+
+test('vlootstand is verplicht vanaf 2.5.0 en daarvóór niet — de toets wapent zichzelf', () => {
+  const bouw = (contract) => zonderSectie(pagina(basisSpiegel, { contract }), 'vlootstand');
+  const meld = (contract) => toets({
+    paginaStatus: 200, paginaHtml: bouw(contract), spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: contract, nu: NU,
+  }).bevindingen.filter((b) => b.code === 'SECTIE_ONTBREEKT');
+  assert.equal(meld('2.4.0').length, 0);
+  assert.match(meld(SECTIES_VANAF.vlootstand)[0].uitleg, /sectie vlootstand/);
+});
+
+test('de gedeelde-weergave-kop is verplicht vanaf 2.6.0, niet vanaf 2.5.0 waarin hij ontstond', () => {
+  // Hij landde in #51 mídden in 2.5.0, zonder eigen versiebump. Een 2.5.0-pagina kan hem dus wél of
+  // niet hebben; 2.6.0 is de eerste versie waarin zijn aanwezigheid vaststaat. De waarnemer eist niet
+  // meer dan de versie belooft.
+  const bouw = (contract) => zonderSectie(pagina(basisSpiegel, { contract }), 'gedeelde-weergave');
+  const meld = (contract) => toets({
+    paginaStatus: 200, paginaHtml: bouw(contract), spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: contract, nu: NU,
+  }).bevindingen.filter((b) => b.code === 'SECTIE_ONTBREEKT');
+  assert.equal(meld('2.5.0').length, 0);
+  assert.match(meld(SECTIES_VANAF['gedeelde-weergave'])[0].uitleg, /sectie gedeelde-weergave/);
+});
+
+test('de roadmap-sectie is bewust niet verplicht: zonder workstreams hoort ze er niet te staan', () => {
+  // `workstreams()` geeft een lege string terug bij een lege lijst — die sectie is voorwaardelijk en
+  // hoort daarom niet in de lijst. Stond ze er wél in, dan was elke roadmaploze bouw vals rood.
+  const snap = structuredClone(fixture);
+  snap.contractVersion = NIEUWSTE_CONTRACT;
+  snap.generatedAt = '2026-07-26T11:55:00.000Z';
+  snap.kanaalpost = toPublicKanaalpost(kanaalpostUitTekst(basisSpiegel));
+  snap.workstreams = [];
+  const html = renderHtml(snap);
+  assert.equal(sectieUitHtml(html, 'roadmap'), null);
+  const r = toets({
+    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: NIEUWSTE_CONTRACT, nu: NU,
+  });
+  assert.deepEqual(r.bevindingen, []);
 });
 
 // --- leeshulpjes ---
