@@ -15,7 +15,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  spiegelUitTekst, kanaalpostUitTekst, toPublicKanaalpost, publishVeilig,
+  spiegelUitTekst, kanaalpostUitTekst, toPublicKanaalpost, toPublicGates, publishVeilig, GATE_RIJEN,
 } from '../scripts/lib/kanaalpost.mjs';
 import { renderHtml } from '../scripts/lib/render.mjs';
 
@@ -145,6 +145,105 @@ test('een onbereikbare of lege bron geeft een nette melding, nooit een kapotte p
   assert.deepEqual(onbereikbaar.rows, []);
   assert.equal(toPublicKanaalpost(null).available, false);
   assert.equal(toPublicKanaalpost(bron([])).reason, 'LEEG');
+});
+
+// --- gates: dezelfde bron, ander venster (v2.7) ---
+
+const gateRij = (n, extra = {}) => ({
+  tab: 'CONTROL', onderwerp: `gate ${n}`, status: 'WACHT OP AKKOORD', actie: 'Richard', datum: '2026-07-25 10:00', ...extra,
+});
+
+test('een gate uit het begin van de spiegel blijft staan, ook als hij uit de laatste vijftien is geschoven', () => {
+  // Dit is de fout van 01-08-2026 in één regel: 1 gate, daarna 20 gewone rijen. De plaat toonde hem
+  // niet meer omdat `toPublicKanaalpost` op vijftien knipt; `toPublicGates` leest de hele spiegel.
+  const rows = [gateRij(1), ...Array.from({ length: 20 }, (_, i) => rij(i + 1))];
+  assert.equal(toPublicKanaalpost(bron(rows)).rows.some((r) => r.onderwerp === 'gate 1'), false);
+  const g = toPublicGates(bron(rows));
+  assert.equal(g.rows.length, 1);
+  assert.equal(g.rows[0].onderwerp, 'gate 1');
+  assert.equal(g.totaal, 1);
+});
+
+test('alleen rijen die Richard als actiehouder noemen tellen als gate', () => {
+  const g = toPublicGates(bron([gateRij(1), rij(2), gateRij(3, { actie: 'CONTROL en richard samen' })]));
+  assert.deepEqual(g.rows.map((r) => r.onderwerp), ['gate 3', 'gate 1']);
+});
+
+test('een AFGEROND-rij is geen gate — ook niet als hij Richard noemt', () => {
+  // Bevinding Codex 02-08-2026 (middel) in één regel: de selectie keek alleen naar de actie-cel, dus
+  // stonden voltooide meldingen als actuele taak onder "TAKEN VOOR JOU". Op de bron van dat moment
+  // waren dat 7 van de 43 geselecteerde rijen.
+  const g = toPublicGates(bron([
+    gateRij(1, { status: 'AFGEROND' }),
+    gateRij(2),
+    gateRij(3, { status: 'AFGEROND', actie: 'Richard (ter kennisgeving)' }),
+  ]));
+  assert.deepEqual(g.rows.map((r) => r.onderwerp), ['gate 2']);
+  assert.equal(g.totaal, 1, 'het totaal telt alleen open gates — anders belooft de badge werk dat af is');
+});
+
+test('een spiegel met uitsluitend afgeronde Richard-rijen is GEEN_GATE, niet "een gate"', () => {
+  const g = toPublicGates(bron([gateRij(1, { status: 'AFGEROND' }), gateRij(2, { status: 'AFGEROND' })]));
+  assert.equal(g.available, true);
+  assert.equal(g.reason, 'GEEN_GATE');
+  assert.deepEqual(g.rows, []);
+  assert.equal(g.totaal, 0);
+});
+
+test('een afgerond zelfalarm telt ook niet mee in de zelfalarm-teller', () => {
+  const g = toPublicGates(bron([
+    gateRij(1),
+    gateRij(2, { tab: 'WAARNEMER', status: 'AFGEROND', actie: 'Richard of Fable' }),
+    gateRij(3, { tab: 'WAARNEMER', status: 'GEBLOKKEERD', actie: 'Richard of Fable' }),
+  ]));
+  assert.equal(g.zelfalarm, 1, 'een gesloten zelfalarm is opgelost; meetellen laat de plaat alarmeren over verleden tijd');
+  assert.equal(g.totaal, 1);
+});
+
+test('een GEBLOKKEERD-gate blijft staan — alleen de eindstatus valt af', () => {
+  const g = toPublicGates(bron([gateRij(1, { status: 'GEBLOKKEERD' }), gateRij(2)]));
+  assert.deepEqual(g.rows.map((r) => r.onderwerp), ['gate 2', 'gate 1']);
+  assert.equal(g.totaal, 2);
+});
+
+test('zelfalarm van de automatische controle staat niet in de lijst maar wordt wel geteld', () => {
+  const g = toPublicGates(bron([
+    gateRij(1),
+    gateRij(2, { tab: 'WAARNEMER', status: 'GEBLOKKEERD', actie: 'Richard of Fable' }),
+    gateRij(3, { tab: 'WAARNEMER', status: 'GEBLOKKEERD', actie: 'Richard of Fable' }),
+  ]));
+  assert.deepEqual(g.rows.map((r) => r.onderwerp), ['gate 1']);
+  assert.equal(g.zelfalarm, 2);
+  assert.equal(g.totaal, 1);
+});
+
+test('de gates-lijst knipt op GATE_RIJEN, nieuwste boven, en meldt het totaal apart', () => {
+  const g = toPublicGates(bron(Array.from({ length: GATE_RIJEN + 4 }, (_, i) => gateRij(i + 1))));
+  assert.equal(g.rows.length, GATE_RIJEN);
+  assert.equal(g.rows[0].onderwerp, `gate ${GATE_RIJEN + 4}`);
+  assert.equal(g.totaal, GATE_RIJEN + 4, 'het totaal telt vóór het knippen — anders is "meer dan dit" niet te tonen');
+});
+
+test('een leesbare spiegel zonder gates is GEEN_GATE, een onleesbare blijft onbeschikbaar', () => {
+  const geen = toPublicGates(bron([rij(1)]));
+  assert.equal(geen.available, true);
+  assert.equal(geen.reason, 'GEEN_GATE');
+  assert.deepEqual(geen.rows, []);
+  assert.equal(toPublicGates({ available: false, reason: 'BRON_ONBEREIKBAAR', rows: [] }).available, false);
+  assert.equal(toPublicGates(null).reason, 'BRON_ONBEREIKBAAR');
+  assert.equal(toPublicGates(bron([])).reason, 'LEEG');
+});
+
+test('alle rijen ingehouden is geen "geen gate" — dat verschil moet zichtbaar blijven', () => {
+  const g = toPublicGates(bron([gateRij(1, { onderwerp: 'fix in /Users/iemand/geheim/pad.md' })]));
+  assert.equal(g.available, false);
+  assert.equal(g.reason, 'INGEHOUDEN');
+  assert.deepEqual(g.rows, []);
+});
+
+test('een gate die de publicatiepoort niet haalt komt ook hier niet door', () => {
+  const g = toPublicGates(bron([gateRij(1, { onderwerp: 'fix in /Users/iemand/geheim/pad.md' }), gateRij(2)]));
+  assert.deepEqual(g.rows.map((r) => r.onderwerp), ['gate 2']);
 });
 
 // --- publish-poort: de rijen dragen vrije tekst van álle vensters ---

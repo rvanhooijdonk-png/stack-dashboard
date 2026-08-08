@@ -20,13 +20,14 @@
     "logbook",
     "ci",
     "kanaalpost",
+    "gates",
     "vlootstand",
     "afspraken"
   ],
   "properties": {
     "contractVersion": {
       "type": "string",
-      "const": "2.6.0",
+      "const": "2.7.0",
       "description": "Vastgepind: een DTO die zich niet als exact deze contractversie meldt, hoort niet bij dit schema. Bump dit samen met CONTRACT_VERSION in scripts/build.mjs."
     },
     "generatedAt": {
@@ -364,6 +365,86 @@
           "type": "integer",
           "minimum": 0,
           "description": "Aantal rijen dat de publicatie-poort niet haalde. Zichtbaar op de plaat: inhouden mag, stilzwijgend inhouden niet."
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "description": "v2.7: de open gates van Richard — dezelfde spiegelrijen als `kanaalpost` en door dezelfde publicatiepoort, maar over ÁLLE rijen in plaats van de laatste vijftien. Reden, gemeten op 01-08-2026: de sectie op de voorpagina toonde 4 van de 4 rijen zelfalarm van de automatische controle en 0 echte gates, niet omdat er geen gates waren maar omdat het venster van vijftien ze eruit had geschoven. Een gate veroudert niet vanzelf; hij staat tot hij gesloten wordt. `zelfalarm` telt de rijen die Richard wél noemen maar van de controle zelf komen — die staan niet in `rows`, en het getal blijft zichtbaar zodat een lege lijst niet als 'niets aan de hand' leest terwijl er meldingen zijn. `totaal` is het aantal echte gates vóór het knippen, zodat de plaat kan tonen dat er meer zijn dan er passen. `reason: GEEN_GATE` is een geldige, niet-kapotte eindstand bij een leesbare spiegel zonder gates; net als kanaalpost staat deze sectie niet in `sources`.",
+      "required": [
+        "available",
+        "reason",
+        "rows",
+        "totaal",
+        "zelfalarm"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "BRON_ONBEREIKBAAR",
+            "LEEG",
+            "INGEHOUDEN",
+            "GEEN_GATE",
+            null
+          ]
+        },
+        "rows": {
+          "type": "array",
+          "description": "In omgekeerde spiegelvolgorde — wat het laatst is bijgeschreven staat boven, net als in `kanaalpost` (de spiegel is append-only, niet op datum gesorteerd). Hoogstens `GATE_RIJEN` rijen. Zelfde rijvorm als `kanaalpost.rows`: wat hier getoond kan worden, kan daar ook getoond worden — geen tweede publicatie-oppervlak.",
+          "items": {
+            "type": "object",
+            "required": [
+              "tab",
+              "onderwerp",
+              "status",
+              "actie",
+              "datum"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "tab": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9]*(?:[ -][A-Z0-9]+)*$",
+                "description": "Het meldende venster. WAARNEMER kan hier per constructie niet staan: dat is het zelfalarm en dat wordt apart geteld."
+              },
+              "onderwerp": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "AFGEROND",
+                  "WACHT OP AKKOORD",
+                  "GEBLOKKEERD"
+                ]
+              },
+              "actie": {
+                "type": "string",
+                "description": "Noemt Richard — dat is precies het selectiecriterium. Afgekapt op 80 tekens, zoals in `kanaalpost`."
+              },
+              "datum": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}( [0-9]{2}:[0-9]{2})?$"
+              }
+            }
+          }
+        },
+        "totaal": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Aantal echte gates vóór het knippen op `GATE_RIJEN`."
+        },
+        "zelfalarm": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Aantal Richard-rijen dat van de automatische controle zelf komt en daarom niet in `rows` staat."
         }
       }
     },

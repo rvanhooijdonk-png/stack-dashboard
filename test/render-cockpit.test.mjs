@@ -49,7 +49,7 @@ test('"wat draait" toont het WERKT-venster en de in-bouw-feature uit de fixture'
   assert.match(html, /Planning-plaat op het dashboard/);
 });
 
-test('"taken voor jou" toont de wacht-op-Richard-feature en de kanaalpost-rij met actie Richard', () => {
+test('"taken voor jou" toont de wacht-op-Richard-feature en de gate-rijen met actie Richard', () => {
   const html = renderCockpit(fixture);
   assert.match(html, /id="taken-voor-jou"/);
   assert.match(html, /Tijdstempel in Nederlandse tijd/);
@@ -71,62 +71,11 @@ test('"taken voor jou" belooft geen mergebaarheid die de teller niet meet', () =
   assert.match(html, /mergebaarheid en checks zijn hier niet gemeten/);
 });
 
-test('"taken voor jou" houdt waarnemer-zelfmeldingen buiten de lijst maar telt ze zichtbaar', () => {
-  const met = structuredClone(fixture);
-  met.kanaalpost.rows = [
-    ...met.kanaalpost.rows,
-    {
-      tab: 'WAARNEMER',
-      onderwerp: 'De automatische controle ziet de openbare plaat afwijken van de bron.',
-      status: 'GEBLOKKEERD',
-      actie: 'Richard of Fable',
-      datum: '2026-07-30 09:05',
-    },
-  ];
-  const html = renderCockpit(met);
-  assert.equal(html.includes('De automatische controle ziet de openbare plaat afwijken'), false,
-    'de zelfmelding staat niet als gate in de lijst');
-  assert.match(html, /1 rij\(en\) van de automatische controle over de plaat zelf/);
-  assert.match(html, /Twee integratiegaten in het centrale modellenregister gedicht/,
-    'de echte gate blijft wel staan');
-});
-
-test('"taken voor jou" laat een waarnemer-rij die géén zelfmelding is gewoon als gate staan', () => {
-  const met = structuredClone(fixture);
-  met.kanaalpost.rows = [
-    ...met.kanaalpost.rows,
-    {
-      tab: 'WAARNEMER',
-      onderwerp: 'Nieuwe drempelwaarde voor de stempelcontrole — akkoord nodig voor die live gaat.',
-      status: 'WACHT OP AKKOORD',
-      actie: 'Richard',
-      datum: '2026-08-01 10:00',
-    },
-  ];
-  const html = renderCockpit(met);
-  assert.match(html, /Nieuwe drempelwaarde voor de stempelcontrole/,
-    'een inhoudelijke waarnemer-poort hoort zichtbaar te blijven');
-  assert.equal(html.includes('rij(en) van de automatische controle over de plaat zelf'), false,
-    'er is niets ingehouden, dus ook geen voetnoot');
-});
-
-test('"taken voor jou" herkent de zelfmelding aan de kop van de waarnemer, niet aan de tab alleen', async () => {
-  const { ALARM_KOP } = await import('../scripts/lib/waarnemer.mjs');
-  const met = structuredClone(fixture);
-  // Zoals de publieke DTO hem aflevert: zonder nadrukken, met de bevindingen erachter.
-  const onderwerp = `${ALARM_KOP.replace(/\*/g, '')} de openbare pagina was niet op te halen. (controlepunten: pagina-onbereikbaar)`;
-  met.kanaalpost.rows = [
-    ...met.kanaalpost.rows,
-    { tab: 'WAARNEMER', onderwerp, status: 'GEBLOKKEERD', actie: 'Richard of Fable', datum: '2026-08-01 11:12' },
-  ];
-  const html = renderCockpit(met);
-  assert.equal(html.includes('de openbare pagina was niet op te halen'), false);
-  assert.match(html, /1 rij\(en\) van de automatische controle over de plaat zelf/);
-});
-
 test('"taken voor jou" rendert ook als er geen enkele gate open staat', () => {
   const leeg = structuredClone(fixture);
-  leeg.kanaalpost.rows = [];
+  leeg.gates = {
+    available: true, reason: 'GEEN_GATE', rows: [], totaal: 0, zelfalarm: 0,
+  };
   leeg.planning.features = leeg.planning.features.filter((f) => f.status !== 'wacht-op-Richard');
   leeg.pullRequests.totals = { open: 0, draft: 0, ready: 0 };
   const html = renderCockpit(leeg);
@@ -138,26 +87,26 @@ test('"taken voor jou" rendert ook als er geen enkele gate open staat', () => {
   assert.match(html, /geen kanaalpost-rij met jou als actiehouder\. Er staat/);
 });
 
-test('de lege staat spreekt de aftrek niet tegen: de ingehouden rijen staan in dezelfde zin', async () => {
-  const { ALARM_KOP } = await import('../scripts/lib/waarnemer.mjs');
+test('de lege staat spreekt de aftrek niet tegen: de ingehouden rijen staan in dezelfde zin', () => {
   const leeg = structuredClone(fixture);
   leeg.planning.features = leeg.planning.features.filter((f) => f.status !== 'wacht-op-Richard');
   leeg.pullRequests.totals = { open: 0, draft: 0, ready: 0 };
-  // Enige kanaalpost-rijen met Richard als actiehouder zijn zelfmeldingen: de bron sprak wél.
-  leeg.kanaalpost.rows = [
-    { tab: 'WAARNEMER', onderwerp: `${ALARM_KOP.replace(/\*/g, '')} de plaat wijkt af van de bron.`, status: 'GEBLOKKEERD', actie: 'Richard of Fable', datum: '2026-08-01 11:12' },
-    { tab: 'WAARNEMER', onderwerp: `${ALARM_KOP.replace(/\*/g, '')} de spiegel liep achter.`, status: 'GEBLOKKEERD', actie: 'Richard of Fable', datum: '2026-08-01 12:12' },
-  ];
+  // Enige gates met Richard als actiehouder zijn zelfalarm: de bron sprak wél, de plaat hield in.
+  leeg.gates = {
+    available: true, reason: 'GEEN_GATE', rows: [], totaal: 0, zelfalarm: 2,
+  };
   const html = renderCockpit(leeg);
   assert.match(html, /behalve de 2 hieronder genoemde/);
   assert.equal(html.includes('geen kanaalpost-rij met jou als actiehouder. Er staat'), false,
     'de geruststelling mag niet beweren dat de bron zweeg terwijl er is ingehouden');
-  assert.match(html, /2 rij\(en\) van de automatische controle over de plaat zelf/);
+  assert.match(html, /2 melding\(en\) hier komen van de automatische controle zelf/);
 });
 
 test('"taken voor jou" meldt een uitgevallen PR-bron als onbekend en nooit als "niets op jouw poort"', () => {
   const leeg = structuredClone(fixture);
-  leeg.kanaalpost.rows = [];
+  leeg.gates = {
+    available: true, reason: 'GEEN_GATE', rows: [], totaal: 0, zelfalarm: 0,
+  };
   leeg.planning.features = leeg.planning.features.filter((f) => f.status !== 'wacht-op-Richard');
   // Precies wat collectPullRequests() bij een mislukte zoekopdracht teruggeeft.
   leeg.pullRequests = { ...leeg.pullRequests, available: false, totals: { open: 0, draft: 0, ready: 0 } };
@@ -168,10 +117,12 @@ test('"taken voor jou" meldt een uitgevallen PR-bron als onbekend en nooit als "
     'een onleesbare bron mag nooit als geruststelling verschijnen');
 });
 
-test('"taken voor jou" meldt een uitgevallen planning- of kanaalpostbron apart als onbekend', () => {
+test('"taken voor jou" meldt een uitgevallen planning- of gates-bron apart als onbekend', () => {
   const leeg = structuredClone(fixture);
   leeg.planning = { ...leeg.planning, available: false, features: [] };
-  leeg.kanaalpost = { ...leeg.kanaalpost, available: false, rows: [] };
+  leeg.gates = {
+    available: false, reason: 'BRON_ONBEREIKBAAR', rows: [], totaal: 0, zelfalarm: 0,
+  };
   const html = renderCockpit(leeg);
   assert.match(html, /wacht-op-Richard onbekend/);
   assert.match(html, /kanaalpost-gates onbekend/);
@@ -192,21 +143,80 @@ test('"taken voor jou" zet de onbekend-melding bovenaan en kleurt de teller rood
 test('de teller in de kop telt taken, niet meetstoringen', () => {
   const uit = structuredClone(fixture);
   uit.pullRequests = { ...uit.pullRequests, available: false, totals: { open: 0, draft: 0, ready: 0 } };
-  const gates = renderCockpit(fixture).match(/Taken voor jou <span class="badge warn">(\d+)<\/span>/)[1];
+  const taken = renderCockpit(fixture).match(/Taken voor jou <span class="badge warn">(\d+)<\/span>/)[1];
   const html = renderCockpit(uit);
   const metStoring = html.match(/Taken voor jou <span class="badge warn">(\d+)<\/span>/)[1];
   // De uitgevallen PR-bron kost één gate-regel (de te-mergen-regel valt weg) en voegt één
   // onbekend-regel toe. De takenteller mag daardoor niet omhoog gaan.
-  assert.equal(Number(metStoring), Number(gates) - 1);
+  assert.equal(Number(metStoring), Number(taken) - 1);
   assert.match(html, /<span class="badge bad">1 bron onbekend<\/span>/);
 });
 
 test('twee uitgevallen bronnen tellen als "2 bronnen onbekend", meervoud en al', () => {
   const uit = structuredClone(fixture);
   uit.planning = { ...uit.planning, available: false, features: [] };
-  uit.kanaalpost = { ...uit.kanaalpost, available: false, rows: [] };
+  uit.gates = {
+    available: false, reason: 'BRON_ONBEREIKBAAR', rows: [], totaal: 0, zelfalarm: 0,
+  };
   const html = renderCockpit(uit);
   assert.match(html, /<span class="badge bad">2 bronnen onbekend<\/span>/);
+});
+
+test('"taken voor jou" leest de gates, niet het venster van vijftien kanaalpost-rijen', () => {
+  // De kern van v2.7: een gate die uit het staartstuk is geschoven blijft staan. In de fixture staat
+  // de PR-OPSCHONING-gate (18-07) WEL in `gates` en NIET in de laatste kanaalpost-rijen.
+  const onderwerpen = fixture.kanaalpost.rows.map((r) => r.onderwerp);
+  assert.equal(onderwerpen.some((o) => o.startsWith('Acht scraper-voorstellen')), false, 'fixture-aanname');
+  const html = renderCockpit(fixture);
+  assert.match(html, /Acht scraper-voorstellen beoordeeld/);
+});
+
+test('een gate leidt met de actie; de melding erachter is kort en zichtbaar afgekapt', () => {
+  const lang = structuredClone(fixture);
+  lang.gates.rows[0].actie = 'Richard: merge PR 61 of wijs hem af';
+  lang.gates.rows[0].onderwerp = `${'w'.repeat(400)}EINDE`;
+  const html = renderCockpit(lang);
+  assert.match(html, /<span class="repo">Richard: merge PR 61 of wijs hem af<\/span>/);
+  assert.equal(html.includes('EINDE'), false, 'de alinea van 400 tekens hoort niet voluit op het bord');
+  assert.match(html, /w{119}…/);
+});
+
+test('"taken voor jou" toont het aantal zelfalarmen dat bewust buiten de lijst blijft', () => {
+  const html = renderCockpit(fixture);
+  assert.match(html, /3 melding\(en\) hier komen van de automatische controle zelf/);
+});
+
+test('"taken voor jou" meldt hoeveel oudere gates niet in de lijst passen', () => {
+  const meer = structuredClone(fixture);
+  meer.gates.totaal = 9;
+  const html = renderCockpit(meer);
+  assert.match(html, /7 oudere gate\(s\) passen niet in deze lijst/);
+});
+
+test('"taken voor jou" onderscheidt "niets te doen" van "niet gemeten"', () => {
+  const leeg = structuredClone(fixture);
+  leeg.planning.features = leeg.planning.features.filter((f) => f.status !== 'wacht-op-Richard');
+  leeg.pullRequests.totals = { open: 0, draft: 0, ready: 0 };
+  leeg.gates = {
+    available: true, reason: 'GEEN_GATE', rows: [], totaal: 0, zelfalarm: 0,
+  };
+  assert.match(renderCockpit(leeg), /Er staat op dit moment niets op jouw poort/);
+
+  const stuk = structuredClone(leeg);
+  stuk.gates = {
+    available: false, reason: 'BRON_ONBEREIKBAAR', rows: [], totaal: 0, zelfalarm: 0,
+  };
+  const html = renderCockpit(stuk);
+  assert.match(html, /kanaalpost-gates onbekend/);
+  assert.equal(html.includes('Er staat op dit moment niets op jouw poort'), false);
+});
+
+test('een snapshot zonder gates-veld telt als onbekende bron, geen valse leegte', () => {
+  const oud = structuredClone(fixture);
+  delete oud.gates;
+  const html = renderCockpit(oud);
+  assert.match(html, /kanaalpost-gates onbekend/);
+  assert.equal(html.includes('Er staat op dit moment niets op jouw poort'), false);
 });
 
 test('het afsprakenspoor toont tellers per status en de laatste-wijziging-datum, geen afspraaktekst', () => {
@@ -242,12 +252,20 @@ test('de stackkaart toont de vensters van de fixture met hun echte vlootstand-kl
   for (const venster of ['DASHBOARD', 'CONTROL', 'MARKT']) assert.match(html, new RegExp(`>${venster}<`));
 });
 
-test('escapet HTML uit bronnen (kanaalpost-onderwerp)', () => {
+test('escapet HTML uit bronnen (gate-onderwerp)', () => {
   const evil = structuredClone(fixture);
-  evil.kanaalpost.rows[1].onderwerp = '<img src=x onerror=alert(1)>';
+  evil.gates.rows[0].onderwerp = '<img src=x onerror=alert(1)>';
   const html = renderCockpit(evil);
   assert.equal(html.includes('<img src=x'), false);
   assert.match(html, /&lt;img src=x/);
+});
+
+test('escapet HTML uit bronnen (gate-actie)', () => {
+  const evil = structuredClone(fixture);
+  evil.gates.rows[0].actie = '<img src=y onerror=alert(1)>';
+  const html = renderCockpit(evil);
+  assert.equal(html.includes('<img src=y'), false);
+  assert.match(html, /&lt;img src=y/);
 });
 
 test('een nav-snippet wordt vlak na de wrap-opening geïnjecteerd', () => {
