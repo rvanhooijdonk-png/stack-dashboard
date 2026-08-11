@@ -1,5 +1,5 @@
 {
-  "contractVersion": "2.6.0",
+  "contractVersion": "2.7.0",
   "generatedAt": "2026-07-23T12:00:00.000Z",
   "overallStatus": "DEGRADED",
   "sources": [
@@ -113,6 +113,28 @@
         "status": "AFGEROND",
         "actie": "niemand",
         "datum": "2026-07-25 22:15"
+      }
+    ]
+  },
+  "gates": {
+    "available": true,
+    "reason": null,
+    "totaal": 2,
+    "zelfalarm": 3,
+    "rows": [
+      {
+        "tab": "CONTROL",
+        "onderwerp": "Twee integratiegaten in het centrale modellenregister gedicht, met een falende test vooraf.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard",
+        "datum": "2026-07-25 20:11"
+      },
+      {
+        "tab": "PR-OPSCHONING",
+        "onderwerp": "Acht scraper-voorstellen beoordeeld; geen enkele tikbaar zonder tweede oordeel op dezelfde kop.",
+        "status": "WACHT OP AKKOORD",
+        "actie": "Richard: tweede familie laten oordelen, of eerst de poortwissel repareren",
+        "datum": "2026-07-18 05:02"
       }
     ]
   },
