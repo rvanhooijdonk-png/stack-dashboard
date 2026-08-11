@@ -8,7 +8,7 @@
     { "id": "studio", "name": "Studio / Content Factory", "features": ["Intake", "Productie", "Kwaliteitscontrole", "Distributievoorbereiding"] },
     { "id": "research", "name": "Research & Intelligence", "features": ["Onderzoeksvraag", "Bronverzameling", "Synthese", "Evidencecontrole"] },
     { "id": "website", "name": "Website", "features": ["Content", "Frontend", "Publicatiepad", "Beschikbaarheid"] },
-    { "id": "crm-outreach", "name": "CRM / Outreach", "features": ["Contactbeheer", "Segmentatie", "Outreachflow", "Opvolging"] },
+    { "id": "crm-outreach", "name": "CRM / Sales / Outreach", "features": ["Contactbeheer", "Segmentatie", "Outreachflow", "Opvolging"] },
     { "id": "publishing", "name": "Publishing / Newsletter", "features": ["Redactie", "Planning", "Verzending", "Resultaatmeting"] },
     { "id": "nq", "name": "NQ / Trading Intelligence", "features": ["Marktdata", "Signaalvorming", "Risicocontrole", "Rapportage"] },
     { "id": "knowledge", "name": "Knowledge Base", "features": ["Inname", "Classificatie", "Zoeken", "Actualiteitscontrole"] },
