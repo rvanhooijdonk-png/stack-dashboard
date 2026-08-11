@@ -11,12 +11,14 @@
  */
 
 import { mkdir, writeFile, readFile, rm } from 'node:fs/promises';
-import { join, dirname, relative } from 'node:path';
+import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { assertPublishable, loadDenyTerms } from './lib/sanitize.mjs';
 import { renderHtml } from './lib/render.mjs';
-import { renderCockpit } from './lib/render-cockpit.mjs';
+import { renderCockpit, renderProducts, renderTicker } from './lib/render-cockpit.mjs';
+import { buildProductModel, lifecycleEvents } from './lib/product-model.mjs';
+import { PUBLISH_ALLOWLIST, assertPublishFiles, outputDirectory } from './lib/publish-files.mjs';
 import { validate } from './lib/validate.mjs';
 import { toPublicPlanning } from './lib/planning.mjs';
 import { vertaalBouwlijst } from './lib/planning-bron.mjs';
@@ -91,8 +93,6 @@ const ERROR_CODE_BY_TRUST = {
  * behouden, alleen verhuisd naar een eigen tab. `.github/workflows/publish.yml` heeft een eigen,
  * hard-coded CI-poort met dezelfde lijst; die moet in lockstep meegroeien.
  */
-const PUBLISH_ALLOWLIST = ['index.html', 'contentstroom.html', 'status.json', '.nojekyll'];
-
 /** Vaste, niet-brongebonden navigatie tussen de twee publieke pagina's. Geen sanitize-oppervlak. */
 const NAV_NAAR_CONTENTSTROOM = '<nav class="pagenav"><a href="./contentstroom.html">Contentstroom — de volledige doorstroom-plaat →</a></nav>';
 const NAV_NAAR_COCKPIT = '<nav class="pagenav"><a href="./">← terug naar de cockpit</a></nav>';
@@ -404,7 +404,7 @@ export async function buildSnapshot() {
 
 async function main() {
   const outName = arg('out', 'public');
-  const outDir = join(ROOT, outName);
+  const outDir = outputDirectory(ROOT, outName);
   const strict = !process.argv.includes('--no-strict');
 
   // Strikt: een ontbrekend of kapot policybestand stopt de bouw. Zonder dat draaide de publieke
@@ -434,16 +434,31 @@ async function main() {
   ];
   if (errors.length) throw new Error(`contract geschonden:\n- ${errors.join('\n- ')}`);
 
-  const cockpitHtml = renderCockpit(snapshot, { refreshSeconds: REFRESH_SECONDS, nav: NAV_NAAR_CONTENTSTROOM });
-  const contentstroomHtml = renderHtml(snapshot, { refreshSeconds: REFRESH_SECONDS, nav: NAV_NAAR_COCKPIT });
+  // PRODUCTCANON — repository-owned allowlist, streng op vorm en dubbele feiten. Operationele
+  // waarden worden uitsluitend uit de reeds gereduceerde publieke snapshot afgeleid.
+  const productCanon = await readJson('data/product-canon.json', null);
+  const productResult = assertPublishable(buildProductModel(productCanon, snapshot), { strict });
+  const tickerResult = assertPublishable(lifecycleEvents(snapshot), { strict });
+  const products = productResult.snapshot;
+  const ticker = tickerResult.snapshot;
+
+  const cockpitHtml = renderCockpit(snapshot, { products, ticker, refreshSeconds: REFRESH_SECONDS });
+  const productsHtml = renderProducts(snapshot, products, { refreshSeconds: REFRESH_SECONDS });
+  const tickerHtml = renderTicker(snapshot, ticker, { refreshSeconds: REFRESH_SECONDS });
+  const contentstroomHtml = renderHtml(snapshot, {
+    refreshSeconds: REFRESH_SECONDS, nav: NAV_NAAR_COCKPIT, pagePath: './contentstroom.html',
+  });
 
   // Verse directory: nooit een oud of per ongeluk meegekomen bestand mee-uploaden.
   await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
   await writeFile(join(outDir, 'index.html'), cockpitHtml, 'utf8');
+  await writeFile(join(outDir, 'producten.html'), productsHtml, 'utf8');
+  await writeFile(join(outDir, 'stack-ticker.html'), tickerHtml, 'utf8');
   await writeFile(join(outDir, 'contentstroom.html'), contentstroomHtml, 'utf8');
   await writeFile(join(outDir, 'status.json'), `${JSON.stringify(status, null, 2)}\n`, 'utf8');
   await writeFile(join(outDir, '.nojekyll'), '', 'utf8');
+  await assertPublishFiles(outDir);
 
   // De volledige interne snapshot blijft lokaal — buiten de publicatiemap, buiten git.
   await mkdir(join(ROOT, '.local'), { recursive: true });
@@ -457,7 +472,7 @@ async function main() {
   console.log(`status: ${snapshot.overallStatus}${degraded.length ? ` · niet-geverifieerd: ${degraded.map((s) => `${s.key}=${s.trust}`).join(', ')}` : ''}`);
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   // Alleen de melding, nooit de stack: een stacktrace bevat absolute runnerpaden.
   main().catch((err) => { console.error(err.message); process.exit(1); });
 }

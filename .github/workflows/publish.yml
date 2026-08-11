@@ -139,14 +139,7 @@ jobs:
 
       - name: Alleen toegestane bestanden in de publicatiemap
         id: allowed_files
-        run: |
-          set -euo pipefail
-          onverwacht=$(find public -mindepth 1 \
-            ! -name 'index.html' ! -name 'contentstroom.html' ! -name 'status.json' ! -name '.nojekyll' -printf '%P\n')
-          if [ -n "$onverwacht" ]; then
-            echo "::error::onverwachte bestanden in public: $onverwacht"
-            exit 1
-          fi
+        run: node scripts/check-public.mjs
 
       - name: gitleaks op de output
         id: gitleaks_output

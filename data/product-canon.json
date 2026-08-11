@@ -1,0 +1,18 @@
+{
+  "version": "1.0.0",
+  "products": [
+    { "id": "cockpit", "name": "Dashboard / Cockpit", "features": ["Dagelijkse cockpit", "Productoverzicht", "Productdetail", "STACK-TICKER"] },
+    { "id": "autocoding", "name": "Autocoding", "features": ["Werkselectie", "Code-uitvoering", "Reviewpoort", "Opleverbewijs"] },
+    { "id": "keynote", "name": "KEYNOTE", "features": ["Verhaallijn", "Slideproductie", "Broncontrole", "Oplevering"] },
+    { "id": "chief-coa", "name": "CHIEF / COA", "features": ["Regie", "Besluitvorming", "Taakverdeling", "Voortgangsbewijs"] },
+    { "id": "studio", "name": "Studio / Content Factory", "features": ["Intake", "Productie", "Kwaliteitscontrole", "Distributievoorbereiding"] },
+    { "id": "research", "name": "Research & Intelligence", "features": ["Onderzoeksvraag", "Bronverzameling", "Synthese", "Evidencecontrole"] },
+    { "id": "website", "name": "Website", "features": ["Content", "Frontend", "Publicatiepad", "Beschikbaarheid"] },
+    { "id": "crm-outreach", "name": "CRM / Outreach", "features": ["Contactbeheer", "Segmentatie", "Outreachflow", "Opvolging"] },
+    { "id": "publishing", "name": "Publishing / Newsletter", "features": ["Redactie", "Planning", "Verzending", "Resultaatmeting"] },
+    { "id": "nq", "name": "NQ / Trading Intelligence", "features": ["Marktdata", "Signaalvorming", "Risicocontrole", "Rapportage"] },
+    { "id": "knowledge", "name": "Knowledge Base", "features": ["Inname", "Classificatie", "Zoeken", "Actualiteitscontrole"] },
+    { "id": "admin-finance", "name": "Admin / Finance", "features": ["Administratie", "Facturatie", "Rapportage", "Controle"] },
+    { "id": "security", "name": "Security / Identity / Monitoring", "features": ["Identiteit", "Toegangscontrole", "Monitoring", "Incidentopvolging"] }
+  ]
+}

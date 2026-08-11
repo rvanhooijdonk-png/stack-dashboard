@@ -3,259 +3,199 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-
-import { renderCockpit } from '../scripts/lib/render-cockpit.mjs';
+import { renderCockpit, renderProducts, renderTicker, ownerGates, activeWork } from '../scripts/lib/render-cockpit.mjs';
+import { buildProductModel, lifecycleEvents, validateProductCanon } from '../scripts/lib/product-model.mjs';
+import { renderHtml } from '../scripts/lib/render.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const fixture = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8'));
+const snapshot = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8'));
+const canon = JSON.parse(await readFile(join(ROOT, 'data/product-canon.json'), 'utf8'));
+const products = buildProductModel(canon, snapshot);
+const ticker = lifecycleEvents(snapshot);
 
-test('rendert een volledige pagina met verversing, CSP en tijdstempel', () => {
-  const html = renderCockpit(fixture, { refreshSeconds: 900 });
+test('hoofdpagina bevat uitsluitend de zeven rustige hoofdsecties', () => {
+  const html = renderCockpit(snapshot, { products, ticker });
+  const ids = [...html.matchAll(/<section id="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(ids, ['wacht-op-richard', 'nu-actief', 'vandaag-geleverd', 'producten', 'incidenten', 'accountcapaciteit', 'laatste-ticker-events']);
+});
+
+test('cockpit is semantische, mobiele, scriptloze HTML', () => {
+  const html = renderCockpit(snapshot, { products, ticker });
   assert.match(html, /^<!doctype html>/);
-  assert.match(html, /<meta http-equiv="refresh" content="900; url=\.\/\?v=\d+">/);
-  assert.match(html, /content-security-policy/i);
-  assert.match(html, /default-src 'none'/);
-  assert.match(html, /Laatst bijgewerkt: <strong>gebouwd om 14:00 NL-tijd \(12:00 UTC\)<\/strong>/);
+  assert.match(html, /name="viewport" content="width=device-width,initial-scale=1"/);
+  assert.match(html, /@media \(max-width:42rem\)/);
+  assert.match(html, /<header>[\s\S]*<main>[\s\S]*<footer>/);
+  assert.match(html, /aria-label="Hoofdnavigatie"/);
+  assert.equal(/<script/i.test(html), false);
+  assert.equal(/(src|href)=["']https?:/i.test(html), false);
 });
 
-test('haalt geen externe bronnen op en draait geen script', () => {
-  const html = renderCockpit(fixture);
-  assert.equal(/<script/i.test(html), false, 'geen script-tags');
-  assert.equal(/(src|href)=["']https?:/i.test(html), false, 'geen externe assets');
+test('elke statische pagina ververst naar zichzelf en niet terug naar de cockpit', () => {
+  assert.match(renderCockpit(snapshot, { products, ticker }), /content="900; url=\.\/\?v=\d+"/);
+  assert.match(renderProducts(snapshot, products), /content="900; url=\.\/producten\.html\?v=\d+"/);
+  assert.match(renderTicker(snapshot, ticker), /content="900; url=\.\/stack-ticker\.html\?v=\d+"/);
+  assert.match(renderHtml(snapshot, { pagePath: './contentstroom.html' }), /content="900; url=\.\/contentstroom\.html\?v=\d+"/);
 });
 
-test('"rood eerst" toont de niet-VERIFIED_CURRENT bron en het ONBEKEND-venster uit de fixture', () => {
-  const html = renderCockpit(fixture);
-  assert.match(html, /id="rood-eerst"/);
-  assert.match(html, /journaal/, 'logbook staat in de fixture op SOURCE_UNAVAILABLE');
-  assert.match(html, /ongeverifieerd|bron onbereikbaar/i);
-  assert.match(html, /MARKT/, 'MARKT staat in de fixture op ONBEKEND');
-  assert.match(html, /stil, stand onbekend/);
+test('ontbrekende planning is UNKNOWN en nooit groen of een nulstand', () => {
+  const missing = structuredClone(snapshot); missing.planning.available = false; missing.planning.features = [];
+  const html = renderCockpit(missing, { products: buildProductModel(canon, missing), ticker });
+  assert.match(html, /UNKNOWN — planningbron niet beschikbaar/);
+  assert.doesNotMatch(html, /0 actief|0 geleverd|alles groen/i);
 });
 
-test('"rood eerst" toont een eerlijke leegmelding zonder enig roodpunt', () => {
-  const schoon = structuredClone(fixture);
-  schoon.sources = schoon.sources.map((s) => ({ ...s, trust: 'VERIFIED_CURRENT' }));
-  schoon.vlootstand.vensters = schoon.vlootstand.vensters.map((v) => ({ ...v, toestand: 'WERKT' }));
-  schoon.ci.lights = schoon.ci.lights.map((l) => ({ ...l, state: 'GROEN' }));
-  const html = renderCockpit(schoon);
-  assert.match(html, /Niets roods/);
+test('onbekende vlootlanes staan eenmaal geaggregeerd op de rustige hoofdpagina', () => {
+  const input = structuredClone(snapshot);
+  input.vlootstand.vensters.push({ venster: 'TWEEDE', toestand: 'ONBEKEND', rol: null });
+  const html = renderCockpit(input, { products, ticker });
+  assert.match(html, /2 vlootlanes/);
+  assert.match(html, /details op technische drill-down/);
+  assert.doesNotMatch(html, />MARKT<|>TWEEDE</);
 });
 
-test('"wat draait" toont het WERKT-venster en de in-bouw-feature uit de fixture', () => {
-  const html = renderCockpit(fixture);
-  assert.match(html, /id="wat-draait"/);
-  assert.match(html, /DASHBOARD/);
-  assert.match(html, /Planning-plaat op het dashboard/);
+test('Wacht op Richard bevat alleen expliciete owner-gates', () => {
+  const result = ownerGates(snapshot);
+  assert.equal(result.unavailable.length, 0);
+  assert.equal(result.gates.length, 3, 'PR-merge, planning-ownerpoort en kanaalpost-ownerpoort');
+  assert.ok(result.gates.some((gate) => gate.label.includes('open pull request')));
+  assert.ok(result.gates.some((gate) => gate.label === 'Tijdstempel in Nederlandse tijd'));
+  assert.ok(result.gates.some((gate) => gate.label.includes('integratiegaten')));
 });
 
-test('"taken voor jou" toont de wacht-op-Richard-feature en de kanaalpost-rij met actie Richard', () => {
-  const html = renderCockpit(fixture);
-  assert.match(html, /id="taken-voor-jou"/);
-  assert.match(html, /Tijdstempel in Nederlandse tijd/);
-  assert.match(html, /Twee integratiegaten in het centrale modellenregister gedicht/);
+test('een wachtstatus zonder owner, afhankelijkheid of akkoordactie is geen owner-gate', () => {
+  const input = structuredClone(snapshot);
+  input.planning.features.push({ label: 'Geen echte ownerpoort', status: 'wacht-op-Richard', worker: null, afhankelijkheid: null });
+  input.kanaalpost.rows.push({ tab: 'CONTROL', onderwerp: 'Alleen geblokkeerd', status: 'GEBLOKKEERD', actie: 'worker', datum: '2026-07-25 20:12' });
+  assert.equal(ownerGates(input).gates.some((gate) => gate.label === 'Geen echte ownerpoort'), false);
+  assert.equal(ownerGates(input).gates.some((gate) => gate.label === 'Alleen geblokkeerd'), false);
 });
 
-test('"taken voor jou" zet de te mergen pull requests als eerste gate bovenaan', () => {
-  const html = renderCockpit(fixture);
-  // fixture: totals.ready = 2 (3 open, waarvan 1 draft)
-  assert.match(html, /2 open pull request\(s\) zonder draft-status/);
-  assert.match(html, /merge is jouw poort/);
-});
-
-test('"taken voor jou" belooft geen mergebaarheid die de teller niet meet', () => {
-  const html = renderCockpit(fixture);
-  // `totals.ready` telt in collect.mjs uitsluitend `!pr.isDraft` — niets over mergeable,
-  // checks of reviews. De regel mag dus niet "klaar om gemerged te worden" beweren.
-  assert.equal(html.includes('staan klaar om gemerged te worden'), false);
-  assert.match(html, /mergebaarheid en checks zijn hier niet gemeten/);
-});
-
-test('"taken voor jou" houdt waarnemer-zelfmeldingen buiten de lijst maar telt ze zichtbaar', () => {
-  const met = structuredClone(fixture);
-  met.kanaalpost.rows = [
-    ...met.kanaalpost.rows,
-    {
-      tab: 'WAARNEMER',
-      onderwerp: 'De automatische controle ziet de openbare plaat afwijken van de bron.',
-      status: 'GEBLOKKEERD',
-      actie: 'Richard of Fable',
-      datum: '2026-07-30 09:05',
-    },
-  ];
-  const html = renderCockpit(met);
-  assert.equal(html.includes('De automatische controle ziet de openbare plaat afwijken'), false,
-    'de zelfmelding staat niet als gate in de lijst');
-  assert.match(html, /1 rij\(en\) van de automatische controle over de plaat zelf/);
-  assert.match(html, /Twee integratiegaten in het centrale modellenregister gedicht/,
-    'de echte gate blijft wel staan');
-});
-
-test('"taken voor jou" laat een waarnemer-rij die géén zelfmelding is gewoon als gate staan', () => {
-  const met = structuredClone(fixture);
-  met.kanaalpost.rows = [
-    ...met.kanaalpost.rows,
-    {
-      tab: 'WAARNEMER',
-      onderwerp: 'Nieuwe drempelwaarde voor de stempelcontrole — akkoord nodig voor die live gaat.',
-      status: 'WACHT OP AKKOORD',
-      actie: 'Richard',
-      datum: '2026-08-01 10:00',
-    },
-  ];
-  const html = renderCockpit(met);
-  assert.match(html, /Nieuwe drempelwaarde voor de stempelcontrole/,
-    'een inhoudelijke waarnemer-poort hoort zichtbaar te blijven');
-  assert.equal(html.includes('rij(en) van de automatische controle over de plaat zelf'), false,
-    'er is niets ingehouden, dus ook geen voetnoot');
-});
-
-test('"taken voor jou" herkent de zelfmelding aan de kop van de waarnemer, niet aan de tab alleen', async () => {
+test('waarnemer-zelfmeldingen bezetten de ownerpoort niet', async () => {
   const { ALARM_KOP } = await import('../scripts/lib/waarnemer.mjs');
-  const met = structuredClone(fixture);
-  // Zoals de publieke DTO hem aflevert: zonder nadrukken, met de bevindingen erachter.
-  const onderwerp = `${ALARM_KOP.replace(/\*/g, '')} de openbare pagina was niet op te halen. (controlepunten: pagina-onbereikbaar)`;
-  met.kanaalpost.rows = [
-    ...met.kanaalpost.rows,
-    { tab: 'WAARNEMER', onderwerp, status: 'GEBLOKKEERD', actie: 'Richard of Fable', datum: '2026-08-01 11:12' },
-  ];
-  const html = renderCockpit(met);
-  assert.equal(html.includes('de openbare pagina was niet op te halen'), false);
-  assert.match(html, /1 rij\(en\) van de automatische controle over de plaat zelf/);
+  const input = structuredClone(snapshot);
+  input.kanaalpost.rows.push({
+    tab: 'WAARNEMER', onderwerp: `${ALARM_KOP.replace(/\*/g, '')} de plaat wijkt af.`,
+    status: 'WACHT OP AKKOORD', actie: 'Richard', datum: '2026-07-25 20:12',
+  });
+  assert.equal(ownerGates(input).gates.some((gate) => gate.label.includes('plaat wijkt af')), false);
 });
 
-test('"taken voor jou" rendert ook als er geen enkele gate open staat', () => {
-  const leeg = structuredClone(fixture);
-  leeg.kanaalpost.rows = [];
-  leeg.planning.features = leeg.planning.features.filter((f) => f.status !== 'wacht-op-Richard');
-  leeg.pullRequests.totals = { open: 0, draft: 0, ready: 0 };
-  const html = renderCockpit(leeg);
-  assert.match(html, /id="taken-voor-jou"/);
-  assert.match(html, /Alle drie de bronnen zijn gelezen/);
-  assert.match(html, /Er staat op dit moment niets op jouw poort/);
-  assert.equal(html.includes('geen meting — geen nulstand'), false);
-  // Niets ingehouden: dan is de onvoorwaardelijke deelzin waar en hoort er geen uitzondering bij.
-  assert.match(html, /geen kanaalpost-rij met jou als actiehouder\. Er staat/);
-});
-
-test('de lege staat spreekt de aftrek niet tegen: de ingehouden rijen staan in dezelfde zin', async () => {
-  const { ALARM_KOP } = await import('../scripts/lib/waarnemer.mjs');
-  const leeg = structuredClone(fixture);
-  leeg.planning.features = leeg.planning.features.filter((f) => f.status !== 'wacht-op-Richard');
-  leeg.pullRequests.totals = { open: 0, draft: 0, ready: 0 };
-  // Enige kanaalpost-rijen met Richard als actiehouder zijn zelfmeldingen: de bron sprak wél.
-  leeg.kanaalpost.rows = [
-    { tab: 'WAARNEMER', onderwerp: `${ALARM_KOP.replace(/\*/g, '')} de plaat wijkt af van de bron.`, status: 'GEBLOKKEERD', actie: 'Richard of Fable', datum: '2026-08-01 11:12' },
-    { tab: 'WAARNEMER', onderwerp: `${ALARM_KOP.replace(/\*/g, '')} de spiegel liep achter.`, status: 'GEBLOKKEERD', actie: 'Richard of Fable', datum: '2026-08-01 12:12' },
-  ];
-  const html = renderCockpit(leeg);
-  assert.match(html, /behalve de 2 hieronder genoemde/);
-  assert.equal(html.includes('geen kanaalpost-rij met jou als actiehouder. Er staat'), false,
-    'de geruststelling mag niet beweren dat de bron zweeg terwijl er is ingehouden');
-  assert.match(html, /2 rij\(en\) van de automatische controle over de plaat zelf/);
-});
-
-test('"taken voor jou" meldt een uitgevallen PR-bron als onbekend en nooit als "niets op jouw poort"', () => {
-  const leeg = structuredClone(fixture);
-  leeg.kanaalpost.rows = [];
-  leeg.planning.features = leeg.planning.features.filter((f) => f.status !== 'wacht-op-Richard');
-  // Precies wat collectPullRequests() bij een mislukte zoekopdracht teruggeeft.
-  leeg.pullRequests = { ...leeg.pullRequests, available: false, totals: { open: 0, draft: 0, ready: 0 } };
-  const html = renderCockpit(leeg);
-  assert.match(html, /mergepoorten onbekend/);
+test('uitgevallen ownerbronnen blijven UNKNOWN en tellen niet als gate', () => {
+  const input = structuredClone(snapshot);
+  input.pullRequests.available = false;
+  input.planning.available = false;
+  const result = ownerGates(input);
+  assert.equal(result.unavailable.length, 2);
+  const html = renderCockpit(input, { products, ticker });
+  assert.match(html, /2 bronnen UNKNOWN/);
   assert.match(html, /geen meting — geen nulstand/);
-  assert.equal(html.includes('Er staat op dit moment niets op jouw poort'), false,
-    'een onleesbare bron mag nooit als geruststelling verschijnen');
 });
 
-test('"taken voor jou" meldt een uitgevallen planning- of kanaalpostbron apart als onbekend', () => {
-  const leeg = structuredClone(fixture);
-  leeg.planning = { ...leeg.planning, available: false, features: [] };
-  leeg.kanaalpost = { ...leeg.kanaalpost, available: false, rows: [] };
-  const html = renderCockpit(leeg);
-  assert.match(html, /wacht-op-Richard onbekend/);
-  assert.match(html, /kanaalpost-gates onbekend/);
-  assert.equal(html.includes('mergepoorten onbekend'), false, 'de PR-bron is hier wél leesbaar');
-  assert.equal(html.includes('Er staat op dit moment niets op jouw poort'), false);
+test('Nu actief wordt niet groen zonder worker, actor, start en verse heartbeat', () => {
+  const state = activeWork(snapshot);
+  assert.equal(state.active.length, 0);
+  assert.equal(state.incomplete, 1, 'fixture heeft één in-bouwregel zonder volledig bewijs');
+  const html = renderCockpit(snapshot, { products, ticker });
+  const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
+  assert.doesNotMatch(section, /dot ok/);
+  assert.match(section, /worker, actor, start of verse heartbeat ontbreekt/);
 });
 
-test('"taken voor jou" zet de onbekend-melding bovenaan en kleurt de teller rood', () => {
-  const uit = structuredClone(fixture);
-  uit.pullRequests = { ...uit.pullRequests, available: false, totals: { open: 0, draft: 0, ready: 0 } };
-  const html = renderCockpit(uit);
-  assert.match(html, /Taken voor jou <span class="badge warn">\d+<\/span> <span class="badge bad">1 bron onbekend<\/span>/);
-  const sectie = html.slice(html.indexOf('id="taken-voor-jou"'));
-  assert.ok(sectie.indexOf('mergepoorten onbekend') < sectie.indexOf('Twee integratiegaten'),
-    'de onbekende bron staat vóór de bekende gates');
+test('Nu actief wordt pas groen met geordend en vers volledig bewijs', () => {
+  const input = structuredClone(snapshot);
+  input.generatedAt = '2026-07-23T12:00:00.000Z';
+  const feature = input.planning.features.find((item) => item.status === 'in-bouw');
+  Object.assign(feature, { actor: 'CODEX1', startedAt: '2026-07-23T11:00:00.000Z', heartbeatAt: '2026-07-23T11:50:00.000Z' });
+  assert.equal(activeWork(input).active.length, 1);
+  const html = renderCockpit(input, { products, ticker });
+  const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
+  assert.match(section, /dot ok/);
+  assert.match(section, /CODEX1/);
 });
 
-test('de teller in de kop telt taken, niet meetstoringen', () => {
-  const uit = structuredClone(fixture);
-  uit.pullRequests = { ...uit.pullRequests, available: false, totals: { open: 0, draft: 0, ready: 0 } };
-  const gates = renderCockpit(fixture).match(/Taken voor jou <span class="badge warn">(\d+)<\/span>/)[1];
-  const html = renderCockpit(uit);
-  const metStoring = html.match(/Taken voor jou <span class="badge warn">(\d+)<\/span>/)[1];
-  // De uitgevallen PR-bron kost één gate-regel (de te-mergen-regel valt weg) en voegt één
-  // onbekend-regel toe. De takenteller mag daardoor niet omhoog gaan.
-  assert.equal(Number(metStoring), Number(gates) - 1);
-  assert.match(html, /<span class="badge bad">1 bron onbekend<\/span>/);
+test('een stale heartbeat levert nooit groene ontwikkelstatus', () => {
+  const input = structuredClone(snapshot);
+  const feature = input.planning.features.find((item) => item.status === 'in-bouw');
+  Object.assign(feature, { actor: 'CODEX1', startedAt: '2026-07-23T10:00:00.000Z', heartbeatAt: '2026-07-23T11:00:00.000Z' });
+  assert.equal(activeWork(input).active.length, 0);
+  assert.equal(activeWork(input).incomplete, 1);
 });
 
-test('twee uitgevallen bronnen tellen als "2 bronnen onbekend", meervoud en al', () => {
-  const uit = structuredClone(fixture);
-  uit.planning = { ...uit.planning, available: false, features: [] };
-  uit.kanaalpost = { ...uit.kanaalpost, available: false, rows: [] };
-  const html = renderCockpit(uit);
-  assert.match(html, /<span class="badge bad">2 bronnen onbekend<\/span>/);
+test('alle hoofdproducten en exact hun canonieke features staan op de drill-down', () => {
+  const html = renderProducts(snapshot, products);
+  assert.equal(products.products.length, canon.products.length);
+  for (const p of canon.products) {
+    const model = products.products.find((item) => item.id === p.id);
+    assert.equal(model.denominator, p.features.length);
+    assert.equal(model.features.length, p.features.length, `${p.name} houdt exact de canonieke noemer`);
+    assert.match(html, new RegExp(`id="${p.id}"`));
+    for (const feature of p.features) assert.ok(html.includes(feature), `${p.name}: ${feature}`);
+  }
+  for (const label of ['Fase', 'Echt af', 'Nu', 'Volgende mijlpaal', 'Blocker', 'Freshness', 'Evidence']) assert.ok(html.includes(label));
 });
 
-test('het afsprakenspoor toont tellers per status en de laatste-wijziging-datum, geen afspraaktekst', () => {
-  const html = renderCockpit(fixture);
+test('productstatus blijft UNKNOWN en toont geen fictief percentage', () => {
+  const html = renderProducts(snapshot, products);
+  assert.match(html, /Freshness: UNKNOWN/);
+  assert.match(html, /statuspercentages worden niet berekend/);
+  assert.doesNotMatch(html, /geleverd \d+%|bekend \d+%/);
+});
+
+test('dubbele feature-identiteit, extra velden en hostile canon worden fail-closed geweigerd', () => {
+  const duplicate = structuredClone(canon); duplicate.products[0].features.push('Dagelijkse-cockpit');
+  duplicate.products[0].features[0] = 'Dagelijkse cockpit';
+  assert.throws(() => validateProductCanon(duplicate), /dubbele feature-identiteit/);
+  const extra = structuredClone(canon); extra.products[0].status = 'groen';
+  assert.throws(() => validateProductCanon(extra), /onbekende velden/);
+  const hostile = structuredClone(canon); hostile.products[0].features[0] = '<img src=x onerror=alert(1)>';
+  assert.throws(() => validateProductCanon(hostile), /ongeldig label/);
+});
+
+test('hostile operationele tekst wordt op elke renderer als tekst geëscaped', () => {
+  const hostileTicker = structuredClone(ticker); hostileTicker.events[0].summary = '<img src=x onerror=alert(1)>';
+  const tickerHtml = renderTicker(snapshot, hostileTicker);
+  assert.match(tickerHtml, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(tickerHtml, /<img src=x/);
+  const hostileSnapshot = structuredClone(snapshot);
+  hostileSnapshot.planning.features.find((item) => item.status === 'wacht-op-Richard').afhankelijkheid = '<svg onload=alert(1)>';
+  const cockpitHtml = renderCockpit(hostileSnapshot, { products, ticker });
+  assert.match(cockpitHtml, /&lt;svg onload=alert\(1\)&gt;/);
+  assert.doesNotMatch(cockpitHtml, /<svg onload/);
+});
+
+test('lange tickertekst kan op mobiel breken zonder inhoud af te kappen', () => {
+  const html = renderTicker(snapshot, ticker);
+  assert.match(html, /\.ticker li\{[^}]*overflow-wrap:anywhere/);
+  assert.ok(html.includes(ticker.events[0].summary));
+});
+
+test('ticker toont alle gesloten lifecyclewaarden, sorteert en dedupliceert', () => {
+  const input = structuredClone(snapshot);
+  input.generatedAt = '2026-08-11T12:00:00.000Z';
+  input.kanaalpost.rows = [
+    { tab: 'CONTROL', onderwerp: 'Geblokkeerd feit', status: 'GEBLOKKEERD', actie: 'niemand', datum: '2026-07-26 10:00' },
+    { tab: 'CONTROL', onderwerp: 'Geblokkeerd feit', status: 'GEBLOKKEERD', actie: 'niemand', datum: '2026-07-26 10:00' },
+    ...input.kanaalpost.rows,
+  ];
+  const data = lifecycleEvents(input);
+  assert.equal(data.events.filter((event) => event.summary === 'Geblokkeerd feit').length, 1);
+  assert.equal(data.events[0].lifecycle, 'GEBLOKKEERD');
+  assert.equal(data.freshness, 'STALE');
+});
+
+test('ticker met ontbrekende, lege of ongeldige bron is UNKNOWN en verzint geen events', () => {
+  const missing = structuredClone(snapshot); missing.kanaalpost.available = false;
+  assert.deepEqual(lifecycleEvents(missing), { freshness: 'UNKNOWN', events: [] });
+  const empty = structuredClone(snapshot); empty.kanaalpost.rows = [];
+  assert.deepEqual(lifecycleEvents(empty), { freshness: 'UNKNOWN', events: [] });
+  const invalid = structuredClone(snapshot); invalid.kanaalpost.rows = [{ tab: 'X', onderwerp: 'Y', status: 'AFGEROND', datum: '2026-02-30 10:00' }];
+  assert.deepEqual(lifecycleEvents(invalid), { freshness: 'UNKNOWN', events: [] });
+});
+
+test('afsprakenspoor blijft op de technische drill-down zichtbaar zonder afspraaktekst', () => {
+  const html = renderHtml(snapshot);
   assert.match(html, /id="afsprakenspoor"/);
-  assert.match(html, /Afsprakenspoor <span class="badge">44<\/span>/);
-  assert.match(html, />vastgelegd<[\s\S]*?<span class="tag">3<\/span>/);
-  assert.match(html, />uitgezet \(in bak\)<[\s\S]*?<span class="tag">15<\/span>/);
-  assert.match(html, />verwerkt<[\s\S]*?<span class="tag">20<\/span>/);
-  assert.match(html, />staand<[\s\S]*?<span class="tag">5<\/span>/);
-  assert.match(html, /Laatste wijziging: 2026-07-23 09:00 UTC/);
-  // Geen enkel veld uit de interne `entries` (id, afspraaktekst, bewijs) hoort op de publieke plaat.
-  assert.equal(html.includes('A44'), false);
-});
-
-test('het afsprakenspoor toont een eerlijke leegmelding als de bron onbereikbaar is', () => {
-  const zonder = structuredClone(fixture);
-  zonder.afspraken = {
-    available: false,
-    statusCounts: { VASTGELEGD: 0, UITGEZET: 0, 'IN BOUW': 0, VERWERKT: 0, STAAND: 0 },
-    lastChangedAt: null,
-    evidence: { retrievedAt: fixture.generatedAt, trust: 'SOURCE_UNAVAILABLE', errorCode: 'BRON_ONBEREIKBAAR' },
-  };
-  const html = renderCockpit(zonder);
-  assert.match(html, /id="afsprakenspoor"/);
-  assert.match(html, /niet leesbaar — geen tellers te tonen/);
-});
-
-test('de stackkaart toont de vensters van de fixture met hun echte vlootstand-kleur', () => {
-  const html = renderCockpit(fixture);
-  assert.match(html, /id="stackkaart"/);
-  assert.match(html, /niet de volledige\s*\n?\s*business-lane\/fase-indeling/);
-  for (const venster of ['DASHBOARD', 'CONTROL', 'MARKT']) assert.match(html, new RegExp(`>${venster}<`));
-});
-
-test('escapet HTML uit bronnen (kanaalpost-onderwerp)', () => {
-  const evil = structuredClone(fixture);
-  evil.kanaalpost.rows[1].onderwerp = '<img src=x onerror=alert(1)>';
-  const html = renderCockpit(evil);
-  assert.equal(html.includes('<img src=x'), false);
-  assert.match(html, /&lt;img src=x/);
-});
-
-test('een nav-snippet wordt vlak na de wrap-opening geïnjecteerd', () => {
-  const html = renderCockpit(fixture, { nav: '<nav id="test-nav">naar contentstroom</nav>' });
-  assert.match(html, /<div class="wrap">\n<nav id="test-nav">naar contentstroom<\/nav>\n<header>/);
-});
-
-test('zonder nav-argument staat er geen lege regel of nav-element in de pagina', () => {
-  const html = renderCockpit(fixture);
-  assert.equal(html.includes('<nav'), false);
+  assert.match(html, /Afsprakenspoor \(44\)/);
+  assert.match(html, /Laatste bronwijziging: 2026-07-23 09:00 UTC/);
+  assert.doesNotMatch(html, /A44/);
 });
