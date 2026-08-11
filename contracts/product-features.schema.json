@@ -9,7 +9,6 @@
     "catalogStatus": {"enum": ["PARTIAL", "VERIFIED_CURRENT", "STALE", "CONFLICTING_EVIDENCE"]},
     "products": {
       "type": "array",
-      "minItems": 1,
       "items": {"$ref": "#/$defs/product"}
     }
   },
@@ -23,7 +22,7 @@
       "required": ["id", "label", "state"],
       "properties": {
         "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,79}$"},
-        "label": {"type": "string", "minLength": 1, "maxLength": 100},
+        "label": {"type": "string"},
         "state": {"$ref": "#/$defs/state"}
       }
     },
@@ -33,10 +32,9 @@
       "required": ["id", "label", "features"],
       "properties": {
         "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,79}$"},
-        "label": {"type": "string", "minLength": 1, "maxLength": 100},
+        "label": {"type": "string"},
         "features": {
           "type": "array",
-          "minItems": 1,
           "items": {"$ref": "#/$defs/feature"}
         }
       }
@@ -47,16 +45,15 @@
       "required": ["id", "label", "category", "lifecycle", "freshness", "source", "status", "evidenceId", "featureGroups"],
       "properties": {
         "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,79}$"},
-        "label": {"type": "string", "minLength": 1, "maxLength": 100},
+        "label": {"type": "string"},
         "category": {"enum": ["PRODUCT", "KNOWLEDGE", "PLATFORM", "OPERATIONS"]},
         "lifecycle": {"enum": ["DISCOVERY", "BUILD", "PILOT", "LIVE", "RECOVERY", "UNKNOWN"]},
         "freshness": {"enum": ["CURRENT", "STALE", "UNMEASURED", "CONFLICTING"]},
-        "source": {"type": "string", "minLength": 1, "maxLength": 120},
+        "source": {"type": "string"},
         "status": {"$ref": "#/$defs/state"},
         "evidenceId": {"type": "string", "pattern": "^[A-Z0-9][A-Z0-9._-]{2,99}$"},
         "featureGroups": {
           "type": "array",
-          "minItems": 1,
           "items": {"$ref": "#/$defs/group"}
         }
       }
