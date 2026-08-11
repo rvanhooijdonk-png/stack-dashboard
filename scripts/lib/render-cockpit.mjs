@@ -1,292 +1,48 @@
-/**
- * COCKPIT — de voorpagina. Tien-secondenbord: rood eerst, wat draait, taken voor jou (Richards
- * open gates), afsprakenspoor, stackkaart. Consumeert dezelfde al-gesaneerde/contract-gated snapshot als
- * renderHtml() (de Contentstroom-pagina) — geen eigen databron, geen eigen sanitize-oppervlak.
- * Pure functie: geen fetch, geen state, alles komt uit `snapshot`.
- */
+/** Rustige cockpit en drill-downs; pure renderers op reeds gesaneerde modellen. */
+import { esc, num, buildStamp, titelStamp, STYLE, TRUST_LABEL } from './render.mjs';
 
-import {
-  esc, num, dt, buildStamp, titelStamp, rollup, VLOOT_KLEUR, TRUST_LABEL, STYLE,
-} from './render.mjs';
-import { ALARM_KOP } from './waarnemer.mjs';
-
-const BRON_NAAM = {
-  pullRequests: 'open pull requests',
-  merged: 'gemerged',
-  tracker: 'tracker',
-  decisions: 'besluitenregister',
-  tracks: 'tracks',
-  logbook: 'journaal',
-  ci: 'CI-ampels',
-};
-
-/**
- * ROOD EERST — CI-ampels op rood, bronnen die niet VERIFIED_CURRENT zijn, en vlootstand-vensters
- * op ONBEKEND (stil genoeg om niet te weten of ze werken). Drie gesloten bronnen, geen vierde.
- */
-function roodEerst(s) {
-  const r = rollup(s);
-  const items = [];
-  if (r.ci.available && r.ci.rood > 0) {
-    items.push(`<li><span class="dot bad"></span><span class="repo">${r.ci.roodRepos
-      ? `CI rood: ${r.ci.roodRepos.map((x) => esc(x)).join(', ')}`
-      : `${num(r.ci.rood)} repo('s) CI rood`}</span></li>`);
-  }
-  (s.sources ?? []).filter((x) => x.trust !== 'VERIFIED_CURRENT').forEach((x) => {
-    items.push(`<li><span class="dot warn"></span><span class="repo">${esc(BRON_NAAM[x.key] ?? x.key)}</span>
-      <span class="muted">${esc(TRUST_LABEL[x.trust] ?? x.trust)}</span></li>`);
-  });
-  (s.vlootstand?.available ? s.vlootstand.vensters : [])
-    .filter((v) => v.toestand === 'ONBEKEND')
-    .forEach((v) => {
-      items.push(`<li><span class="dot bad"></span><span class="repo">${esc(v.venster)}</span>
-      <span class="muted">stil, stand onbekend</span></li>`);
-    });
-  if (items.length === 0) {
-    return `<section id="rood-eerst" class="card wide">
-  <h2>Rood eerst</h2>
-  <p class="lead muted">Niets roods: geen CI in het rood, alle bronnen geverifieerd, geen venster stil
-  genoeg om onbekend te zijn.</p>
-</section>`;
-  }
-  return `<section id="rood-eerst" class="card wide">
-  <h2>Rood eerst <span class="badge bad">${num(items.length)}</span></h2>
-  <ul class="lights">${items.join('\n')}</ul>
-</section>`;
-}
-
-/** WAT DRAAIT — vensters die WERKT melden, features die in-bouw staan. */
-function watDraait(s) {
-  const werkend = s.vlootstand?.available ? s.vlootstand.vensters.filter((v) => v.toestand === 'WERKT') : [];
-  const inBouw = s.planning?.available ? s.planning.features.filter((f) => f.status === 'in-bouw') : [];
-  const items = [
-    ...werkend.map((v) => `<li><span class="dot ok"></span><span class="repo">${esc(v.venster)}</span>${
-      v.rol ? `<span class="muted">${esc(v.rol)}</span>` : ''}</li>`),
-    ...inBouw.map((f) => `<li><span class="dot ok"></span><span class="repo">${esc(f.label)}</span>${
-      f.worker ? `<span class="muted">${esc(f.worker)}</span>` : ''}</li>`),
-  ];
-  if (items.length === 0) {
-    return `<section id="wat-draait" class="card wide">
-  <h2>Wat draait</h2>
-  <p class="empty">Geen venster meldt WERKT en geen feature staat op in-bouw.</p>
-</section>`;
-  }
-  return `<section id="wat-draait" class="card wide">
-  <h2>Wat draait <span class="badge ok">${num(items.length)}</span></h2>
-  <ul class="lights">${items.join('\n')}</ul>
-</section>`;
-}
-
-/**
- * Wanneer is een waarnemer-rij een zelfmelding over de plaat, en wanneer een echte poort?
- *
- * Op de tab alleen filteren was te breed (bevinding Codex T2c-0198, 01-08-2026, middel): de
- * waarnemer kan óók een inhoudelijke rij schrijven waar Richard wél over moet beslissen, en die
- * verdween dan uit precies de sectie die al zijn gates moet tonen. Het kenmerk is daarom de vaste
- * kop die `alarmRij()` in `waarnemer.mjs` vóór élke zelfmelding zet — geïmporteerd, niet
- * overgeschreven, zodat de twee kanten niet uit elkaar kunnen lopen.
- *
- * De publieke DTO levert die kop zónder de nadrukken aan: gemeten op `data/kanaalpost-publiek.md`
- * (02-08-2026, alle vier de waarnemer-rijen) beginnen de onderwerpen met de kale zin. Er wordt
- * daarom op de kale vorm vergeleken, en met `startsWith` en niet op gelijkheid — het onderwerp
- * draagt achter de kop de bevindingen en wordt bovendien op 600 tekens afgekapt.
- *
- * Fail-open in de eerlijke richting: herkent deze toets een rij niet, dan blijft hij als gate staan.
- * Een rij te veel op de poort is een last; een gate te weinig is een gemist besluit.
- */
-const ZELFMELDING_KOP = ALARM_KOP.replace(/\*/g, '').trim();
-
-const isZelfmelding = (row) => String(row?.tab ?? '').trim().toUpperCase() === 'WAARNEMER'
-  && String(row?.onderwerp ?? '').replace(/^[\s*]+/, '').startsWith(ZELFMELDING_KOP);
-
-/**
- * De drie bronnen van deze sectie, met de tekst die verschijnt zodra er één niet leesbaar was.
- * Los benoemd, want "de PR-bron viel uit" is een ander bericht dan "de spiegel viel uit".
- */
-const GATE_BRONNEN = [
-  { key: 'pullRequests', tekst: 'mergepoorten onbekend — de bron met open pull requests was bij deze build niet leesbaar' },
-  { key: 'planning', tekst: 'wacht-op-Richard onbekend — de planningbron was bij deze build niet leesbaar' },
-  { key: 'kanaalpost', tekst: 'kanaalpost-gates onbekend — de spiegel was bij deze build niet leesbaar' },
-];
-
-/**
- * TAKEN VOOR JOU — Z12-eis (Richard, via REGIE-5, 01-08-2026): de voorpagina toont permanent wat er
- * op Richards poort staat. Drie gesloten bronnen, in volgorde van hardheid:
- *  1. open, niet-draft pull requests — merges zijn per werkwijze-regel een Richard-gate;
- *  2. planning-features op `wacht-op-Richard`;
- *  3. kanaalpost-rijen die hem als actiehouder noemen, MINUS de zelfmeldingen van de waarnemer.
- *
- * Die aftrek is de kern van de eis. Gemeten op de live-plaat van 01-08 bestond deze sectie voor
- * 4 van de 4 rijen uit waarnemer-alarm over de plaat zelf en toonde hij nul echte gates: de sectie
- * stond er wel, maar de plaats was bezet door ruis. De ingehouden rijen staan onverkort op de
- * Contentstroom-pagina (`kanaalpost`-sectie); hier staat alleen hoeveel het er waren.
- *
- * De sectie rendert ALTIJD — ook leeg. "Geen gate open" is zelf een antwoord dat Richard in tien
- * seconden moet kunnen aflezen; een sectie die bij leegte verdwijnt laat hem raden of hij hem mist.
- *
- * ONBEKEND IS GEEN NUL, en dat onderscheid is de kern (bevinding Codex T2c-0198, 01-08-2026, hoog).
- * Een uitgevallen bron gaf hier eerst nul gates, en nul gates gaf de zin "er staat op dit moment
- * niets op jouw poort" — de plaat verklaarde dus geruststellend dat Richard vrij was terwijl ze het
- * niet wist. Elke bron die niet aantoonbaar `available === true` is, krijgt daarom een eigen rode
- * regel bovenaan, en de geruststelling verschijnt uitsluitend als alle drie de bronnen gelezen zijn
- * én leeg. De onbekend-regels staan vóór de echte gates: dat een gate onzichtbaar kan zijn, is
- * dringender dan de gates die je wél ziet.
- */
-function takenVoorJou(s) {
-  const features = s.planning?.available ? s.planning.features.filter((f) => f.status === 'wacht-op-Richard') : [];
-  const genoemd = s.kanaalpost?.available
-    ? s.kanaalpost.rows.filter((row) => typeof row.actie === 'string' && row.actie.toLowerCase().includes('richard'))
-    : [];
-  const zelfmeldingen = genoemd.filter((row) => isZelfmelding(row));
-  const rows = genoemd.filter((row) => !isZelfmelding(row));
-  const teMergen = s.pullRequests?.available ? (s.pullRequests.totals?.ready ?? 0) : 0;
-  const onbekend = GATE_BRONNEN.filter((b) => s[b.key]?.available !== true);
-  const items = [
-    ...onbekend.map((b) => `<li><span class="dot bad"></span><span class="repo">${esc(b.tekst)}</span>
-      <span class="muted">geen meting — geen nulstand</span></li>`),
-    ...(teMergen > 0 ? [`<li><span class="dot warn"></span><span class="repo">${num(teMergen)} open pull request(s) zonder draft-status</span>
-      <span class="muted">merge is jouw poort — mergebaarheid en checks zijn hier niet gemeten</span></li>`] : []),
-    ...features.map((f) => `<li><span class="dot warn"></span><span class="repo">${esc(f.label)}</span>${
-      f.afhankelijkheid ? `<span class="muted">${esc(f.afhankelijkheid)}</span>` : ''}</li>`),
-    ...rows.map((row) => `<li><span class="dot warn"></span><span class="repo">${
-      row.onderwerp ? esc(row.onderwerp) : '<span class="muted">—</span>'}</span>${
-      row.tab ? `<span class="tag">${esc(row.tab)}</span>` : ''}</li>`),
-  ];
-  const voetnoot = zelfmeldingen.length > 0
-    ? `\n  <p class="muted">${num(zelfmeldingen.length)} rij(en) van de automatische controle over de plaat zelf
-  staan hier bewust niet tussen — dat is geen gate op jouw poort. Ze staan onverkort op de Contentstroom-pagina.</p>`
-    : '';
-  if (items.length === 0) {
-    // Bereikbaar zolang `onbekend` leeg is — alle drie de bronnen zijn dus gelezen en leeg.
-    // De derde deelzin is voorwaardelijk: bij een aftrek zeggen dat er "geen kanaalpost-rij met jou
-    // als actiehouder" is, spreekt de voetnoot een regel lager tegen — de bron zweeg niet, er is
-    // ingehouden. Dat verschil moet in dezelfde zin staan waarin de lezer wordt gerustgesteld.
-    const derde = zelfmeldingen.length > 0
-      ? `geen kanaalpost-rij met jou als actiehouder behalve de ${num(zelfmeldingen.length)} hieronder genoemde`
-      : 'geen kanaalpost-rij met jou als actiehouder';
-    return `<section id="taken-voor-jou" class="card wide">
-  <h2>Taken voor jou</h2>
-  <p class="lead muted">Alle drie de bronnen zijn gelezen: geen open pull request zonder draft-status, niets op
-  wacht-op-Richard, ${derde}. Er staat op dit moment niets op jouw poort.</p>${voetnoot}
-</section>`;
-  }
-  // Twee getallen, twee badges: taken en meetstoringen zijn niet optelbaar. Eén badge met
-  // `items.length` liet bij één uitgevallen bron en twee gates "3" zien terwijl er twee taken zijn.
-  const takenBadge = `<span class="badge warn">${num(items.length - onbekend.length)}</span>`;
-  const bronBadge = onbekend.length > 0
-    ? ` <span class="badge bad">${num(onbekend.length)} bron${onbekend.length === 1 ? '' : 'nen'} onbekend</span>`
-    : '';
-  return `<section id="taken-voor-jou" class="card wide">
-  <h2>Taken voor jou ${takenBadge}${bronBadge}</h2>
-  <ul class="lights">${items.join('\n')}</ul>${voetnoot}
-</section>`;
-}
-
-/** Vaste weergavelabels voor de gesloten AFSPRAKEN-statuslijst — zelfde volgorde als CONTROL/AFSPRAKEN.md. */
-const AFSPRAKEN_STATUS_LABEL = {
-  VASTGELEGD: 'vastgelegd',
-  UITGEZET: 'uitgezet (in bak)',
-  'IN BOUW': 'in bouw',
-  VERWERKT: 'verwerkt',
-  STAAND: 'staand',
-};
-const AFSPRAKEN_STATUS_VOLGORDE = ['VASTGELEGD', 'UITGEZET', 'IN BOUW', 'VERWERKT', 'STAAND'];
-
-/**
- * AFSPRAKENSPOOR — CONTROL/AFSPRAKEN.md (privé stack-control), tweede spoor naast de
- * vlootstand-hartslag. REGIE-besluit 30-07-2026: publiek toont uitsluitend structuur — tellers
- * per status en het tijdstip van de laatste bestandswijziging. De afspraaktekst zelf, de ID's en
- * de bewijsverwijzingen zijn onvoorwaardelijk intern (zie `toPublicSnapshot` in build.mjs); dit
- * blok kent daarom bewust geen lijst van afzonderlijke rijen, alleen aantallen.
- */
-function afsprakenspoor(a) {
-  if (!a?.available) {
-    return `<section id="afsprakenspoor" class="card wide">
-  <h2>Afsprakenspoor</h2>
-  <p class="empty">CONTROL/AFSPRAKEN.md is bij deze build niet leesbaar — geen tellers te tonen.</p>
-</section>`;
-  }
-  const totaal = AFSPRAKEN_STATUS_VOLGORDE.reduce((sum, k) => sum + (a.statusCounts?.[k] ?? 0), 0);
-  const items = AFSPRAKEN_STATUS_VOLGORDE
-    .filter((k) => (a.statusCounts?.[k] ?? 0) > 0)
-    .map((k) => `<li><span class="dot"></span><span class="repo">${esc(AFSPRAKEN_STATUS_LABEL[k])}</span><span class="tag">${num(a.statusCounts[k])}</span></li>`)
-    .join('\n');
-  return `<section id="afsprakenspoor" class="card wide">
-  <h2>Afsprakenspoor <span class="badge">${num(totaal)}</span></h2>
-  <p class="lead muted">Alleen structuur — de afspraaktekst zelf is intern. Laatste wijziging: ${
-    a.lastChangedAt ? esc(dt(a.lastChangedAt)) : '<span class="muted">onbekend</span>'}.</p>
-  ${items ? `<ul class="lights">${items}</ul>` : '<p class="empty">Geen enkele rij herkend.</p>'}
-</section>`;
-}
-
-/**
- * STACKKAART — vereenvoudigde versie van CONTROL/ONTWERP/stackkaart-v2-referentie.html. De volledige
- * v2-norm groepeert per business-lane met fase-kleuren (gepland/in-aanbouw/werkt-lokaal/in-gebruik);
- * die groepering bestaat als data niet in dit repo. Deze kaart toont daarom de 15 vaste lanes op hun
- * ECHTE vlootstand (WERKT/LEEG/ONBEKEND) — een bewuste vereenvoudiging, geen v2-norm-claim.
- */
-function stackkaart(v) {
-  if (!v?.available) {
-    return `<section id="stackkaart" class="card wide">
-  <h2>Stackkaart</h2>
-  <p class="empty">Geen vlootstand beschikbaar — geen kaart te tonen.</p>
-</section>`;
-  }
-  const rows = v.vensters.map((r) => `<li><span class="dot ${VLOOT_KLEUR[r.toestand] ?? 'bad'}"></span><span class="repo">${esc(r.venster)}</span>${
-    r.rol ? `<span class="muted">${esc(r.rol)}</span>` : ''}</li>`).join('\n');
-  return `<section id="stackkaart" class="card wide">
-  <h2>Stackkaart <span class="badge">${num(v.vensters.length)} lanes</span></h2>
-  <p class="lead muted">Vereenvoudigde kaart op echte vlootstand-data — niet de volledige
-  business-lane/fase-indeling uit het v2-referentieontwerp; die groepering bestaat als data nog niet in
-  deze repo.</p>
-  <ul class="lights">${rows}</ul>
-</section>`;
-}
-
-/**
- * Bouw de cockpit-pagina. `snapshot` moet al door assertPublishable zijn gegaan — zelfde contract
- * als renderHtml(). `nav` is een vaste, intern door build.mjs samengestelde HTML-snippet (link naar
- * de Contentstroom-pagina), géén vrije of brongebonden tekst.
- */
-export function renderCockpit(snapshot, { refreshSeconds = 900, nav = '' } = {}) {
-  const s = snapshot;
+const page = (s, title, body, nav, refreshSeconds = 900) => {
   const refresh = Math.min(3600, Math.max(60, Math.trunc(Number(refreshSeconds)) || 900));
-  const cacheBust = String(s.generatedAt).replace(/[^0-9]/g, '') || '0';
-
+  const bust = String(s.generatedAt).replace(/[^0-9]/g, '') || '0';
   return `<!doctype html>
-<html lang="nl">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="${refresh}; url=./?v=${cacheBust}">
-<meta name="robots" content="noindex,nofollow">
+<html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="${refresh}; url=./?v=${bust}"><meta name="robots" content="noindex,nofollow">
 <meta http-equiv="content-security-policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
-<title>Stack-dashboard — ${esc(titelStamp(s.generatedAt))}</title>
-<style>${STYLE}</style>
-</head>
-<body>
-<div class="wrap">
-${nav ? `${nav}\n` : ''}<header>
-  <h1>Stack-dashboard <small class="gedeeld">— cockpit</small></h1>
-  <p class="stamp">Laatst bijgewerkt: <strong>${esc(buildStamp(s.generatedAt))}</strong> · deze pagina haalt zichzelf elke ${num(refresh / 60)} min opnieuw op</p>
-</header>
+<title>${esc(title)} — ${esc(titelStamp(s.generatedAt))}</title><style>${STYLE}
+.product-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(16rem,1fr));gap:1rem}.product{display:block;text-decoration:none;color:inherit}.metric{font-size:1.6rem;font-weight:700}.unknown{color:#936b00}.feature{margin:1rem 0;padding-top:1rem;border-top:1px solid #ddd}.feature dl{display:grid;grid-template-columns:minmax(8rem,12rem) 1fr;gap:.35rem 1rem}.feature dt{color:#667}.feature dd{margin:0}.ticker{list-style:none;padding:0}.ticker li{padding:.8rem 0;border-bottom:1px solid #ddd}.topnav a{margin-right:1rem}
+</style></head><body><div class="wrap"><nav class="topnav">${nav}</nav><header><h1>${esc(title)}</h1><p class="stamp">Laatst bijgewerkt: <strong>${esc(buildStamp(s.generatedAt))}</strong></p></header>
+<main>${body}</main><footer>Statische, read-only weergave van gevalideerde bronnen. UNKNOWN is geen nulstand.</footer></div></body></html>`;
+};
 
-${roodEerst(s)}
+const list = (items, empty) => items.length ? `<ul class="lights">${items.join('')}</ul>` : `<p class="empty">${esc(empty)}</p>`;
+const featureName = (f) => `<span class="repo">${esc(f.label)}</span>`;
 
-${watDraait(s)}
+export function renderCockpit(snapshot, { products, ticker, refreshSeconds = 900 } = {}) {
+  const waiting = snapshot.planning?.available ? snapshot.planning.features.filter((f) => f.status === 'wacht-op-Richard') : [];
+  const active = snapshot.planning?.available ? snapshot.planning.features.filter((f) => ['in-bouw', 'in-review'].includes(f.status)) : [];
+  const today = String(snapshot.generatedAt).slice(0, 10);
+  const delivered = snapshot.planning?.available ? snapshot.planning.features.filter((f) => f.status === 'live' && f.oplevering?.date === today) : [];
+  const incidents = (snapshot.sources ?? []).filter((x) => x.trust !== 'VERIFIED_CURRENT');
+  const productCards = (products?.products ?? []).map((p) => `<a class="card product" href="./producten.html#${esc(p.id)}"><h3>${esc(p.name)}</h3><span class="metric">${p.known ? `${num(p.known)}/${num(p.denominator)} bekend` : 'UNKNOWN'}</span><p class="muted">${num(p.denominator)} canonieke features</p></a>`);
+  const events = (ticker?.events ?? []).slice(0, 5).map((e) => `<li><span class="tag">${esc(e.lifecycle)}</span> <span class="repo">${esc(e.product)}</span> <span class="muted">${esc(e.at)}</span></li>`);
+  const body = `<section id="wacht-op-richard" class="card"><h2>Wacht op Richard</h2>${snapshot.planning?.available ? list(waiting.map((f) => `<li>${featureName(f)}</li>`), 'Geen gevalideerde wachtende items.') : '<p class="unknown">UNKNOWN — planningbron niet beschikbaar.</p>'}</section>
+<section id="nu-actief" class="card"><h2>Nu actief</h2>${snapshot.planning?.available ? list(active.map((f) => `<li>${featureName(f)} <span class="muted">${esc(f.status)}</span></li>`), 'Geen gevalideerde actieve items.') : '<p class="unknown">UNKNOWN — planningbron niet beschikbaar.</p>'}</section>
+<section id="vandaag-geleverd" class="card"><h2>Vandaag geleverd</h2>${snapshot.planning?.available ? list(delivered.map((f) => `<li>${featureName(f)}</li>`), 'Niets met een gevalideerde opleverdatum van vandaag.') : '<p class="unknown">UNKNOWN — planningbron niet beschikbaar.</p>'}</section>
+<section id="producten" class="card wide"><h2>Producten</h2><div class="product-grid">${productCards.join('')}</div></section>
+<section id="incidenten" class="card"><h2>Incidenten</h2>${list(incidents.map((x) => `<li><span class="repo">${esc(x.key)}</span> <span class="unknown">${esc(TRUST_LABEL[x.trust] ?? x.trust)}</span></li>`), 'Geen gevalideerde bronincidenten.')}</section>
+<section id="accountcapaciteit" class="card"><h2>Accountcapaciteit</h2><p class="unknown">UNKNOWN — geen canonieke capaciteitsbron aangesloten.</p></section>
+<section id="laatste-ticker-events" class="card wide"><h2>Laatste ticker-events</h2><p class="muted">${ticker?.freshness === 'CURRENT' ? 'Actuele statische snapshot' : `${esc(ticker?.freshness ?? 'UNKNOWN')} — events kunnen vertraagd zijn`}. GitHub-data is niet realtime.</p>${list(events, 'Geen gevalideerde lifecycle-events.')}</section>`;
+  return page(snapshot, 'Richards cockpit', body, '<a href="./producten.html">Producten</a><a href="./stack-ticker.html">STACK-TICKER</a><a href="./contentstroom.html">Technische drill-down</a>', refreshSeconds);
+}
 
-${takenVoorJou(s)}
+const value = (v) => v === null || v === undefined ? '<span class="unknown">UNKNOWN</span>' : esc(v);
+export function renderProducts(snapshot, model, { refreshSeconds = 900 } = {}) {
+  const products = model.products.map((p) => `<section id="${esc(p.id)}" class="card wide"><h2>${esc(p.name)}</h2><p class="muted">Canonieke noemer: ${num(p.denominator)} features${p.known === p.denominator ? ` · geleverd ${num(Math.round(p.delivered / p.denominator * 100))}%` : ' · percentage ingehouden zolang fasen UNKNOWN zijn'}</p>${p.features.map((f) => `<article class="feature"><h3>${esc(f.name)}</h3><dl><dt>Fase</dt><dd>${esc(f.phase.replaceAll('_', ' ').toLowerCase())}</dd><dt>Echt af</dt><dd>${value(f.done)}</dd><dt>Nu</dt><dd>${value(f.now)}</dd><dt>Volgende mijlpaal</dt><dd>${value(f.next)}</dd><dt>Blocker</dt><dd>${value(f.blocker)}</dd><dt>Freshness</dt><dd>${esc(f.freshness)}</dd><dt>Evidence</dt><dd>${esc(f.evidence)}</dd></dl></article>`).join('')}</section>`).join('');
+  return page(snapshot, 'Producten en features', products, '<a href="./">Cockpit</a><a href="./stack-ticker.html">STACK-TICKER</a>', refreshSeconds);
+}
 
-${afsprakenspoor(s.afspraken)}
-
-${stackkaart(s.vlootstand)}
-
-<footer>
-  Gegenereerd door <code>stack-dashboard</code> (contract ${esc(s.contractVersion)}) uit gecureerde bronnen
-  op GitHub. Dit is het 10-secondenbord; de volledige doorstroom-plaat staat op de Contentstroom-pagina.
-</footer>
-</div>
-</body>
-</html>
-`;
+export function renderTicker(snapshot, ticker, { refreshSeconds = 900 } = {}) {
+  const rows = ticker.events.map((e) => `<li><span class="tag">${esc(e.lifecycle)}</span> <strong>${esc(e.product)}</strong><br><span>${esc(e.summary)}</span><br><span class="muted">${esc(e.at)} · gevalideerde statische snapshot</span></li>`);
+  const body = `<section class="card wide"><h2>Lifecycle-events</h2><p class="${ticker.freshness === 'CURRENT' ? 'muted' : 'unknown'}">Freshness: ${esc(ticker.freshness)}. Statische GitHub-bron; nooit realtime. STALE betekent dat het nieuwste event ouder is dan 24 uur.</p><ol class="ticker">${rows.join('')}</ol></section>`;
+  return page(snapshot, 'STACK-TICKER', body, '<a href="./">Cockpit</a><a href="./producten.html">Producten</a>', refreshSeconds);
 }
