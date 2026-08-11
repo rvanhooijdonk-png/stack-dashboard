@@ -6,6 +6,16 @@ terug.
 
 Live: **https://rvanhooijdonk-png.github.io/stack-dashboard/**
 
+De publicatie bestaat uit vier vaste, scriptloze pagina's:
+
+- `/` — rustige cockpit met echte ownerpoorten, bewijsbaar actief werk en incidentrollup;
+- `/producten.html` — alle canonieke productfamilies en features, UNKNOWN waar bewijs ontbreekt;
+- `/stack-ticker.html` — gevalideerde lifecycle-events met expliciete freshness;
+- `/contentstroom.html` — de bestaande volledige technische doorstroom-drill-down.
+
+Statuspercentages worden niet berekend zolang niet iedere canonieke feature een gevalideerde
+bronkoppeling heeft. Een ontbrekende of oude bron blijft zichtbaar `UNKNOWN` of `STALE`.
+
 ## Wat er op staat
 
 | Sectie | Bron |
@@ -32,7 +42,8 @@ vrijgeven kan, met de hand, in `data/publish-text.json`; de reden en de voorwaar
 
 ```sh
 node --test 'test/*.test.mjs'   # tests
-node scripts/build.mjs          # bouwt public/index.html + public/status.json
+node scripts/build.mjs          # bouwt de vier pagina's + public/status.json
+node scripts/check-public.mjs   # controleert de exacte publicatie-allowlist
 open public/index.html
 ```
 
@@ -65,7 +76,7 @@ gh workflow run publish.yml --repo rvanhooijdonk-png/stack-dashboard
 
 Dat commando garandeert een *aanvraag*, niet dat build en deploy slagen — controleer de run.
 
-Beide publieke pagina's zeggen dit ook zelf: geen interval beloven, en melden dat een oude stempel
+Alle publieke pagina's zeggen dit ook zelf: geen interval beloven, en melden dat een oude stempel
 betekent dat er sindsdien niets is gepubliceerd. `data/verboden-beloftes.json` houdt de
 formuleringen bij die dat zouden ondermijnen; `test/publiekepaginas.test.mjs` toetst ze op de
 gewone pagina én op de foutpagina in de workflow.

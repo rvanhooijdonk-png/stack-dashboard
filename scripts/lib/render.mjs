@@ -460,6 +460,25 @@ function ci(c) {
   return section('ci', 'CI-ampels', c.evidence, `${hidden}<ul class="lights">${items}</ul>`);
 }
 
+const AFSPRAKEN_STATUS_LABEL = {
+  VASTGELEGD: 'vastgelegd', UITGEZET: 'uitgezet (in bak)', 'IN BOUW': 'in bouw',
+  VERWERKT: 'verwerkt', STAAND: 'staand',
+};
+const AFSPRAKEN_STATUS_VOLGORDE = ['VASTGELEGD', 'UITGEZET', 'IN BOUW', 'VERWERKT', 'STAAND'];
+
+/** Afspraken blijven zichtbaar op de technische drill-down, uitsluitend als veilige structuur. */
+function afsprakenspoor(a) {
+  if (!a?.available) return section('afsprakenspoor', 'Afsprakenspoor', a?.evidence, unavailable(a?.evidence));
+  const total = AFSPRAKEN_STATUS_VOLGORDE.reduce((sum, status) => sum + (a.statusCounts?.[status] ?? 0), 0);
+  const items = AFSPRAKEN_STATUS_VOLGORDE.filter((status) => (a.statusCounts?.[status] ?? 0) > 0)
+    .map((status) => `<li><span class="dot"></span><span class="repo">${esc(AFSPRAKEN_STATUS_LABEL[status])}</span><span class="tag">${num(a.statusCounts[status])}</span></li>`)
+    .join('');
+  return section('afsprakenspoor', `Afsprakenspoor (${num(total)})`, a.evidence, `
+  <p class="lead muted">Alleen statusstructuur; afspraaktekst, ID's en bewijsverwijzingen blijven intern.
+  Laatste bronwijziging: ${a.lastChangedAt ? esc(dt(a.lastChangedAt)) : '<span class="unknown">UNKNOWN</span>'}.</p>
+  ${items ? `<ul class="lights">${items}</ul>` : '<p class="empty">Geen herkende afspraakstatussen.</p>'}`);
+}
+
 function workstreams(ws) {
   if (!ws?.length) return '';
   const rows = ws.map((w) => `<tr>
@@ -767,7 +786,7 @@ a{color:var(--acc)}
  * samengestelde HTML-snippet (bv. een terug-naar-cockpit-link) — géén vrije of brongebonden tekst,
  * dus geen nieuw sanitize-oppervlak.
  */
-export function renderHtml(snapshot, { refreshSeconds = 900, nav = '' } = {}) {
+export function renderHtml(snapshot, { refreshSeconds = 900, nav = '', pagePath = './' } = {}) {
   const s = snapshot;
   const stale = s.sources.filter((x) => x.trust !== 'VERIFIED_CURRENT');
   // Harde integer: deze waarde staat in een meta-tag en mag daar niets anders kunnen worden.
@@ -779,13 +798,14 @@ export function renderHtml(snapshot, { refreshSeconds = 900, nav = '' } = {}) {
   // geen cache-kopie van en trekt vers. Alleen cijfers uit generatedAt — dezelfde tuchtregel als bij
   // `refresh`: wat in een meta-tag staat mag niets anders kunnen worden dan bedoeld.
   const cacheBust = String(s.generatedAt).replace(/[^0-9]/g, '') || '0';
+  const refreshPath = pagePath === './contentstroom.html' ? pagePath : './';
 
   return `<!doctype html>
 <html lang="nl">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="${refresh}; url=./?v=${cacheBust}">
+<meta http-equiv="refresh" content="${refresh}; url=${refreshPath}?v=${cacheBust}">
 <meta name="robots" content="noindex,nofollow">
 <meta http-equiv="content-security-policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
 <title>Stack-dashboard — ${esc(titelStamp(s.generatedAt))}</title>
@@ -821,6 +841,7 @@ ${kanaalpost(s.kanaalpost)}
   ${ci(s.ci)}
   ${tracker(s.tracker)}
   ${decisions(s.decisions)}
+  ${afsprakenspoor(s.afspraken)}
   ${tracks(s.tracks)}
   ${merged(s.merged)}
   ${logbook(s.logbook)}
