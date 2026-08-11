@@ -133,3 +133,4 @@ volgorde is die van het toevoegen, niet strikt die van de klok.
 | 2026-08-01 11:12 | WAARNEMER | **De automatische controle ziet de openbare plaat afwijken van de bron.** de openbare pagina was niet op te halen. (controlepunten: pagina-onbereikbaar) | GEBLOKKEERD | Richard of Fable |
 | 2026-08-07 08:20 | WAARNEMER | **De automatische controle ziet de openbare plaat afwijken van de bron.** de openbare pagina was niet op te halen. (controlepunten: pagina-onbereikbaar) | GEBLOKKEERD | Richard of Fable |
 | 2026-08-10 14:54 | WAARNEMER | **De automatische controle ziet de openbare plaat afwijken van de bron.** de openbare pagina was niet op te halen. (controlepunten: pagina-onbereikbaar) | GEBLOKKEERD | Richard of Fable |
+| 2026-08-11 19:08 | WAARNEMER | **De automatische controle ziet de openbare plaat afwijken van de bron.** de bouwstempel op de pagina was niet te lezen. (controlepunten: stempel-onleesbaar) | GEBLOKKEERD | Richard of Fable |
