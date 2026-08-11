@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stack-dashboard.invalid/contracts/product-features.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "catalogStatus", "products"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "catalogStatus": {"enum": ["PARTIAL", "VERIFIED_CURRENT", "STALE", "CONFLICTING_EVIDENCE"]},
+    "products": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/product"}
+    }
+  },
+  "$defs": {
+    "state": {
+      "enum": ["WORKING", "BUILT", "PARTIAL", "MISSING", "UNKNOWN", "STALE", "BLOCKED"]
+    },
+    "feature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "state"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,79}$"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 100},
+        "state": {"$ref": "#/$defs/state"}
+      }
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "features"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,79}$"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 100},
+        "features": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/feature"}
+        }
+      }
+    },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "category", "lifecycle", "freshness", "source", "status", "evidenceId", "featureGroups"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,79}$"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 100},
+        "category": {"enum": ["PRODUCT", "KNOWLEDGE", "PLATFORM", "OPERATIONS"]},
+        "lifecycle": {"enum": ["DISCOVERY", "BUILD", "PILOT", "LIVE", "RECOVERY", "UNKNOWN"]},
+        "freshness": {"enum": ["CURRENT", "STALE", "UNMEASURED", "CONFLICTING"]},
+        "source": {"type": "string", "minLength": 1, "maxLength": 120},
+        "status": {"$ref": "#/$defs/state"},
+        "evidenceId": {"type": "string", "pattern": "^[A-Z0-9][A-Z0-9._-]{2,99}$"},
+        "featureGroups": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/group"}
+        }
+      }
+    }
+  }
+}
