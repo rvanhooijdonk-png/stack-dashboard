@@ -1,0 +1,484 @@
+{
+  "schemaVersion": 1,
+  "catalogStatus": "PARTIAL",
+  "products": [
+    {
+      "id": "keynote",
+      "label": "KEYNOTE",
+      "category": "PRODUCT",
+      "lifecycle": "PILOT",
+      "freshness": "UNMEASURED",
+      "source": "stack-control + keynote-archief",
+      "status": "PARTIAL",
+      "evidenceId": "KEYNOTE-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "keynote-library",
+          "label": "Presentatiebibliotheek",
+          "features": [
+            {"id": "keynote-deck-inventory", "label": "Deckinventaris", "state": "BUILT"},
+            {"id": "keynote-slide-index", "label": "Slide-index", "state": "PARTIAL"},
+            {"id": "keynote-text-hash-dedup", "label": "Teksthash-dubbelkandidaten", "state": "PARTIAL"},
+            {"id": "keynote-media-similarity", "label": "Beeld- en mediasimilariteit", "state": "MISSING"}
+          ]
+        },
+        {
+          "id": "keynote-finder-structure",
+          "label": "Finder-structuur",
+          "features": [
+            {"id": "keynote-sector-folders", "label": "Mappen per sector", "state": "PARTIAL"},
+            {"id": "keynote-technology-folders", "label": "Mappen per technologie", "state": "PARTIAL"},
+            {"id": "keynote-leadership-folders", "label": "Mappen voor leiderschap en transformatie", "state": "PARTIAL"},
+            {"id": "keynote-copy-only-pilot", "label": "Copy-only Finderpilot", "state": "PARTIAL"},
+            {"id": "keynote-source-preservation", "label": "Bronbestanden onaangeraakt bewaren", "state": "BUILT"}
+          ]
+        },
+        {
+          "id": "keynote-content-production",
+          "label": "Nieuwe presentaties",
+          "features": [
+            {"id": "keynote-research-dossier", "label": "Researchdossier naar slides", "state": "UNKNOWN"},
+            {"id": "keynote-slide-candidates", "label": "Slide-kandidatenlijst", "state": "PARTIAL"},
+            {"id": "keynote-golden-template", "label": "Golden template en vormtaal", "state": "UNKNOWN"},
+            {"id": "keynote-review-proof", "label": "Visueel review- en bewijsproces", "state": "MISSING"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "chief-coa",
+      "label": "CHIEF / COA",
+      "category": "PRODUCT",
+      "lifecycle": "LIVE",
+      "freshness": "UNMEASURED",
+      "source": "COA",
+      "status": "PARTIAL",
+      "evidenceId": "CHIEF-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "chief-capture",
+          "label": "Capture",
+          "features": [
+            {"id": "chief-idea-capture", "label": "Ideeën vastleggen", "state": "WORKING"},
+            {"id": "chief-expanded-idea", "label": "Idee uitbreiden met AI", "state": "WORKING"},
+            {"id": "chief-keynote-url", "label": "Keynote-URL verwerken", "state": "PARTIAL"},
+            {"id": "chief-conversation-notes", "label": "Gespreksverslag vastleggen", "state": "PARTIAL"},
+            {"id": "chief-intake-safety-net", "label": "Append-only intake safety-net", "state": "WORKING"}
+          ]
+        },
+        {
+          "id": "chief-assistant",
+          "label": "Persoonlijke assistent",
+          "features": [
+            {"id": "chief-natural-language", "label": "Natuurlijke-taalvoordeur", "state": "PARTIAL"},
+            {"id": "chief-todoist", "label": "Todoist-taakrouting", "state": "PARTIAL"},
+            {"id": "chief-daily-log", "label": "Daglog en briefing", "state": "WORKING"},
+            {"id": "chief-waiting-view", "label": "Wachten- en actieoverzicht", "state": "PARTIAL"},
+            {"id": "chief-dev-review", "label": "dev:-contenttriage", "state": "PARTIAL"}
+          ]
+        },
+        {
+          "id": "chief-runtime",
+          "label": "Runtime en betrouwbaarheid",
+          "features": [
+            {"id": "chief-telegram-poller", "label": "Telegram-poller", "state": "WORKING"},
+            {"id": "chief-heartbeat", "label": "Heartbeat", "state": "WORKING"},
+            {"id": "chief-watchdog", "label": "Watchdog en herstart", "state": "PARTIAL"},
+            {"id": "chief-icloud-buffer", "label": "iCloud staging-buffer", "state": "PARTIAL"},
+            {"id": "chief-full-suite-gate", "label": "Volledige suite-acceptatie", "state": "MISSING"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "studio-content-factory",
+      "label": "Studio / Content Factory",
+      "category": "PRODUCT",
+      "lifecycle": "BUILD",
+      "freshness": "UNMEASURED",
+      "source": "stack-control + content-conversie",
+      "status": "PARTIAL",
+      "evidenceId": "STUDIO-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "studio-workspace",
+          "label": "Werkruimte",
+          "features": [
+            {"id": "studio-home", "label": "Home", "state": "UNKNOWN"},
+            {"id": "studio-inbox", "label": "Inbox", "state": "UNKNOWN"},
+            {"id": "studio-review", "label": "Review", "state": "UNKNOWN"},
+            {"id": "studio-video", "label": "Video", "state": "UNKNOWN"},
+            {"id": "studio-stack", "label": "Stack", "state": "UNKNOWN"},
+            {"id": "studio-logbook", "label": "Logboek", "state": "UNKNOWN"},
+            {"id": "studio-dev-board", "label": "Dev-board", "state": "UNKNOWN"}
+          ]
+        },
+        {
+          "id": "studio-editorial-flow",
+          "label": "Redactionele flow",
+          "features": [
+            {"id": "studio-topics", "label": "Topics", "state": "MISSING"},
+            {"id": "studio-research-brief", "label": "Researchbrief", "state": "MISSING"},
+            {"id": "studio-research", "label": "Research", "state": "PARTIAL"},
+            {"id": "studio-comments", "label": "Comments en review", "state": "MISSING"},
+            {"id": "studio-detail-research", "label": "Detailresearch", "state": "MISSING"},
+            {"id": "studio-long-copy", "label": "Artikel schrijven — long copy", "state": "MISSING"},
+            {"id": "studio-editorial-review", "label": "Editorial review", "state": "MISSING"},
+            {"id": "studio-publish-ready", "label": "Publish-ready draft", "state": "MISSING"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "research-intelligence",
+      "label": "Research & Intelligence",
+      "category": "PRODUCT",
+      "lifecycle": "BUILD",
+      "freshness": "UNMEASURED",
+      "source": "trend-pipeline + content-conversie",
+      "status": "PARTIAL",
+      "evidenceId": "RESEARCH-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "research-production",
+          "label": "Onderzoek",
+          "features": [
+            {"id": "research-topic-intake", "label": "Topic-intake", "state": "UNKNOWN"},
+            {"id": "research-source-discovery", "label": "Bronontdekking", "state": "PARTIAL"},
+            {"id": "research-briefing", "label": "Onderzoeksbriefing", "state": "PARTIAL"},
+            {"id": "research-detail-pass", "label": "Verdiepende onderzoekspass", "state": "PARTIAL"},
+            {"id": "research-source-evidence", "label": "Bron- en bewijsbinding", "state": "PARTIAL"},
+            {"id": "research-comments-loop", "label": "Commentaar- en revisielus", "state": "MISSING"}
+          ]
+        },
+        {
+          "id": "research-radars",
+          "label": "Radars",
+          "features": [
+            {"id": "research-model-radar", "label": "AI-modelradar", "state": "PARTIAL"},
+            {"id": "research-trend-radar", "label": "Trendradar", "state": "PARTIAL"},
+            {"id": "research-market-watch", "label": "Markt- en prijswijzigingen", "state": "PARTIAL"},
+            {"id": "research-weekly-output", "label": "Periodiek onderzoeksrapport", "state": "PARTIAL"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "knowledge-base",
+      "label": "Knowledge Base / Obsidian",
+      "category": "KNOWLEDGE",
+      "lifecycle": "PILOT",
+      "freshness": "STALE",
+      "source": "content-conversie + vault-mirror",
+      "status": "PARTIAL",
+      "evidenceId": "KNOWLEDGE-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "knowledge-ingest",
+          "label": "Inname",
+          "features": [
+            {"id": "knowledge-drive-import", "label": "Google Drive-import", "state": "BUILT"},
+            {"id": "knowledge-evernote-import", "label": "Evernote-import", "state": "BUILT"},
+            {"id": "knowledge-notion-import", "label": "Notion-import", "state": "PARTIAL"},
+            {"id": "knowledge-dedup", "label": "Deduplicatie en conflictbewaking", "state": "PARTIAL"}
+          ]
+        },
+        {
+          "id": "knowledge-use",
+          "label": "Gebruik",
+          "features": [
+            {"id": "knowledge-review-buckets", "label": "Reviewbuckets", "state": "BUILT"},
+            {"id": "knowledge-top-index", "label": "Topbronnen-index", "state": "BUILT"},
+            {"id": "knowledge-cards", "label": "Kenniskaarten", "state": "PARTIAL"},
+            {"id": "knowledge-visual-navigation", "label": "Visueel navigeerbare kennisinterface", "state": "MISSING"},
+            {"id": "knowledge-search", "label": "Betrouwbaar zoeken en terugvinden", "state": "PARTIAL"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "website",
+      "label": "richardvanhooijdonk.com",
+      "category": "PRODUCT",
+      "lifecycle": "BUILD",
+      "freshness": "UNMEASURED",
+      "source": "richardvanhooijdonk.com",
+      "status": "PARTIAL",
+      "evidenceId": "WEBSITE-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "website-content",
+          "label": "Contentmodel",
+          "features": [
+            {"id": "website-languages", "label": "Nederlands en Engels", "state": "PARTIAL"},
+            {"id": "website-lectures", "label": "Lezingenportfolio", "state": "PARTIAL"},
+            {"id": "website-sectors", "label": "Sectorpagina's", "state": "PARTIAL"},
+            {"id": "website-work-areas", "label": "Werkgebieden en afdelingen", "state": "PARTIAL"},
+            {"id": "website-case-proof", "label": "Bewijs, cases en referenties", "state": "UNKNOWN"}
+          ]
+        },
+        {
+          "id": "website-platform",
+          "label": "Platform",
+          "features": [
+            {"id": "website-cms", "label": "CMS", "state": "UNKNOWN"},
+            {"id": "website-seo", "label": "SEO en metadata", "state": "UNKNOWN"},
+            {"id": "website-forms", "label": "Boekings- en contactflows", "state": "UNKNOWN"},
+            {"id": "website-analytics", "label": "Analytics en conversiemeting", "state": "UNKNOWN"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "crm-outreach",
+      "label": "CRM / Sales / Outreach",
+      "category": "PRODUCT",
+      "lifecycle": "BUILD",
+      "freshness": "STALE",
+      "source": "crm-intelligence-control + scraper",
+      "status": "PARTIAL",
+      "evidenceId": "CRM-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "crm-data",
+          "label": "Lead- en contactdata",
+          "features": [
+            {"id": "crm-onepage", "label": "OnePageCRM-koppeling", "state": "PARTIAL"},
+            {"id": "crm-apollo", "label": "Contactverrijking", "state": "PARTIAL"},
+            {"id": "crm-email-validation", "label": "E-mailvalidatie", "state": "PARTIAL"},
+            {"id": "crm-speaker-agencies", "label": "Sprekersbureau-inventaris", "state": "PARTIAL"}
+          ]
+        },
+        {
+          "id": "crm-campaigns",
+          "label": "Campagnes",
+          "features": [
+            {"id": "crm-cold-email", "label": "Cold-emailcampagnes", "state": "PARTIAL"},
+            {"id": "crm-linkedin", "label": "LinkedIn-opvolging", "state": "UNKNOWN"},
+            {"id": "crm-whatsapp", "label": "WhatsApp-opvolging", "state": "UNKNOWN"},
+            {"id": "crm-reply-triage", "label": "Reply-triage en CRM-terugschrijving", "state": "MISSING"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "publishing",
+      "label": "Publishing / Newsletter",
+      "category": "PRODUCT",
+      "lifecycle": "BUILD",
+      "freshness": "UNMEASURED",
+      "source": "content-conversie + publishing specs",
+      "status": "PARTIAL",
+      "evidenceId": "PUBLISHING-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "publishing-content",
+          "label": "Redactie",
+          "features": [
+            {"id": "publishing-newsletter-sources", "label": "Nieuwsbronnen en afzenders", "state": "BUILT"},
+            {"id": "publishing-newsletter-draft", "label": "Nieuwsbriefdraft", "state": "UNKNOWN"},
+            {"id": "publishing-social", "label": "Social posts", "state": "UNKNOWN"},
+            {"id": "publishing-video-script", "label": "Videoscripts", "state": "UNKNOWN"},
+            {"id": "publishing-editorial-gate", "label": "Editorial gate", "state": "MISSING"}
+          ]
+        },
+        {
+          "id": "publishing-delivery",
+          "label": "Publicatie",
+          "features": [
+            {"id": "publishing-cms", "label": "CMS-publicatie", "state": "UNKNOWN"},
+            {"id": "publishing-newsletter-platform", "label": "Nieuwsbriefplatform", "state": "UNKNOWN"},
+            {"id": "publishing-proof", "label": "Publicatiebewijs en rollback", "state": "MISSING"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "nq-radar",
+      "label": "NQ Human Consensus Radar",
+      "category": "PRODUCT",
+      "lifecycle": "PILOT",
+      "freshness": "CURRENT",
+      "source": "nq-human-consensus-radar",
+      "status": "PARTIAL",
+      "evidenceId": "NQ-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "nq-capture",
+          "label": "Live capture",
+          "features": [
+            {"id": "nq-eight-sources", "label": "Acht traderbronnen", "state": "WORKING"},
+            {"id": "nq-session-paths", "label": "Unieke sessiepaden", "state": "WORKING"},
+            {"id": "nq-reconnect", "label": "Reconnect en gapmeting", "state": "PARTIAL"},
+            {"id": "nq-storage", "label": "Externe opslag en disk guard", "state": "PARTIAL"}
+          ]
+        },
+        {
+          "id": "nq-intelligence",
+          "label": "Intelligentie",
+          "features": [
+            {"id": "nq-stt", "label": "Spraak-naar-tekst", "state": "PARTIAL"},
+            {"id": "nq-position-language", "label": "Positietaal detecteren", "state": "PARTIAL"},
+            {"id": "nq-long-short-flat", "label": "LONG / SHORT / FLAT", "state": "PARTIAL"},
+            {"id": "nq-conditional-live", "label": "Conditioneel versus live", "state": "PARTIAL"},
+            {"id": "nq-consensus", "label": "Consensusberekening", "state": "UNKNOWN"},
+            {"id": "nq-evidence", "label": "Transcript- en audiobewijs", "state": "PARTIAL"}
+          ]
+        },
+        {
+          "id": "nq-output",
+          "label": "Output",
+          "features": [
+            {"id": "nq-dashboard-beta", "label": "Dashboard Beta", "state": "MISSING"},
+            {"id": "nq-alert-readiness", "label": "Alert-readiness", "state": "PARTIAL"},
+            {"id": "nq-no-auto-trading", "label": "Geen automatische handel", "state": "WORKING"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "autocoding",
+      "label": "Autocoding / Stack Control",
+      "category": "PLATFORM",
+      "lifecycle": "RECOVERY",
+      "freshness": "CURRENT",
+      "source": "stack-control",
+      "status": "BLOCKED",
+      "evidenceId": "AUTOCODING-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "autocoding-control",
+          "label": "Control plane",
+          "features": [
+            {"id": "autocoding-issue-ingest", "label": "GitHub issue-ingest", "state": "PARTIAL"},
+            {"id": "autocoding-command-envelope", "label": "State-bound command-envelop", "state": "PARTIAL"},
+            {"id": "autocoding-queue", "label": "Duurzame queue", "state": "PARTIAL"},
+            {"id": "autocoding-receipts", "label": "Workerreceipts en eventketen", "state": "PARTIAL"},
+            {"id": "autocoding-refill", "label": "Automatische backlog-refill", "state": "MISSING"}
+          ]
+        },
+        {
+          "id": "autocoding-actors",
+          "label": "Actors",
+          "features": [
+            {"id": "autocoding-codex1", "label": "CODEX1-worker", "state": "PARTIAL"},
+            {"id": "autocoding-codex2", "label": "CODEX2-failover", "state": "UNKNOWN"},
+            {"id": "autocoding-claude-pool", "label": "Claude developmentpool", "state": "MISSING"},
+            {"id": "autocoding-actor-local", "label": "Actor-lokale blokkades", "state": "PARTIAL"},
+            {"id": "autocoding-multi-actor", "label": "Multi-actor parallelisme", "state": "MISSING"}
+          ]
+        },
+        {
+          "id": "autocoding-continuity",
+          "label": "Continuïteit",
+          "features": [
+            {"id": "autocoding-watcher", "label": "Watcher / executor", "state": "PARTIAL"},
+            {"id": "autocoding-planner", "label": "24/7 planner", "state": "MISSING"},
+            {"id": "autocoding-restart", "label": "Kill en automatische herstart", "state": "PARTIAL"},
+            {"id": "autocoding-next-task", "label": "NEXT_TASK_STARTED na terminale taak", "state": "MISSING"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cockpit",
+      "label": "Cockpit / Stack-ticker",
+      "category": "PLATFORM",
+      "lifecycle": "LIVE",
+      "freshness": "CURRENT",
+      "source": "stack-dashboard",
+      "status": "PARTIAL",
+      "evidenceId": "COCKPIT-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "cockpit-main",
+          "label": "Hoofdscherm",
+          "features": [
+            {"id": "cockpit-owner-gates", "label": "Wacht op Richard", "state": "PARTIAL"},
+            {"id": "cockpit-active", "label": "Nu actief", "state": "PARTIAL"},
+            {"id": "cockpit-delivered", "label": "Vandaag geleverd", "state": "PARTIAL"},
+            {"id": "cockpit-products", "label": "Productstatus", "state": "MISSING"},
+            {"id": "cockpit-incidents", "label": "Actuele incidenten", "state": "PARTIAL"},
+            {"id": "cockpit-capacity", "label": "Accountcapaciteit", "state": "MISSING"},
+            {"id": "cockpit-ticker", "label": "Chronologische ticker", "state": "PARTIAL"}
+          ]
+        },
+        {
+          "id": "cockpit-depth",
+          "label": "Klikdiepte",
+          "features": [
+            {"id": "cockpit-product-detail", "label": "Productdetail met alle features", "state": "MISSING"},
+            {"id": "cockpit-actor-detail", "label": "Actordetail", "state": "MISSING"},
+            {"id": "cockpit-evidence-detail", "label": "Evidence en receipts", "state": "PARTIAL"},
+            {"id": "cockpit-host-detail", "label": "Hosts en runtime", "state": "MISSING"},
+            {"id": "cockpit-mobile", "label": "Mobiele cockpit", "state": "PARTIAL"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "platform-security",
+      "label": "Data / Identity / Security / Monitoring",
+      "category": "PLATFORM",
+      "lifecycle": "BUILD",
+      "freshness": "UNMEASURED",
+      "source": "platform-core + stack-control",
+      "status": "PARTIAL",
+      "evidenceId": "PLATFORM-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "platform-identity",
+          "label": "Identity en accounts",
+          "features": [
+            {"id": "platform-profile-isolation", "label": "Gescheiden modelprofielen", "state": "PARTIAL"},
+            {"id": "platform-headless-auth", "label": "Headless authenticatie", "state": "PARTIAL"},
+            {"id": "platform-capacity", "label": "Capaciteitsmeting", "state": "MISSING"},
+            {"id": "platform-actor-health", "label": "Actor-healthreceipts", "state": "PARTIAL"}
+          ]
+        },
+        {
+          "id": "platform-resilience",
+          "label": "Veerkracht",
+          "features": [
+            {"id": "platform-backups", "label": "Backups", "state": "PARTIAL"},
+            {"id": "platform-restore", "label": "Restore-verificatie", "state": "PARTIAL"},
+            {"id": "platform-monitoring", "label": "Monitoring en alarmen", "state": "PARTIAL"},
+            {"id": "platform-disk-guard", "label": "Disk guard", "state": "PARTIAL"},
+            {"id": "platform-launch-agents", "label": "LaunchAgents en KeepAlive", "state": "PARTIAL"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "finance-admin",
+      "label": "Finance / Admin",
+      "category": "OPERATIONS",
+      "lifecycle": "BUILD",
+      "freshness": "UNMEASURED",
+      "source": "office + office-reconcile + office-db-backup",
+      "status": "PARTIAL",
+      "evidenceId": "FINANCE-CATALOG-001",
+      "featureGroups": [
+        {
+          "id": "finance-processing",
+          "label": "Financiële verwerking",
+          "features": [
+            {"id": "finance-jortt", "label": "Jortt-koppeling", "state": "UNKNOWN"},
+            {"id": "finance-reconciliation", "label": "Reconciliatie", "state": "PARTIAL"},
+            {"id": "finance-invoices", "label": "Facturen en documenten", "state": "UNKNOWN"},
+            {"id": "finance-reporting", "label": "Financiële rapportage", "state": "UNKNOWN"}
+          ]
+        },
+        {
+          "id": "finance-resilience",
+          "label": "Continuïteit",
+          "features": [
+            {"id": "finance-db-backup", "label": "Databasebackup", "state": "PARTIAL"},
+            {"id": "finance-restore-check", "label": "Clean-room restorecheck", "state": "PARTIAL"},
+            {"id": "finance-owner-gates", "label": "Geld- en deploypoorten", "state": "PARTIAL"}
+          ]
+        }
+      ]
+    }
+  ]
+}
