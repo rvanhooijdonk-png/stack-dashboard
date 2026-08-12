@@ -35,12 +35,16 @@ const spiegelMet = (...rijen) => [KOP, ...rijen].join('\n');
 const rij = (datum, tab, onderwerp, status = 'AFGEROND', actie = 'niemand') => `| ${datum} | ${tab} | ${onderwerp} | ${status} | ${actie} |`;
 
 /** Een pagina zoals de plaat hem echt bouwt, met een kanaalpost uit deze spiegeltekst. */
-function pagina(spiegelTekst, { contract = KANAALPOST_VANAF, generatedAt = '2026-07-26T11:55:00.000Z' } = {}) {
+function pagina(spiegelTekst, {
+  contract = KANAALPOST_VANAF,
+  generatedAt = '2026-07-26T11:55:00.000Z',
+  pagePath = './',
+} = {}) {
   const snap = structuredClone(fixture);
   snap.contractVersion = contract;
   snap.generatedAt = generatedAt;
   snap.kanaalpost = toPublicKanaalpost(kanaalpostUitTekst(spiegelTekst));
-  return renderHtml(snap);
+  return renderHtml(snap, { pagePath });
 }
 
 const basisSpiegel = spiegelMet(
@@ -68,6 +72,24 @@ test('de stempel wordt uit de echte pagina gelezen, niet uit een tweede bron', (
   assert.equal(s.iso, '2026-07-26T11:55:00.000Z');
   // 11:55 UTC is 13:55 in NL — de leesbare stempel toont die UTC-helft, en die moet kloppen.
   assert.equal(s.utcHhmm, '11:55');
+});
+
+test('de stempelparser accepteert alleen de vier vaste zelfroutes', () => {
+  const contentstroom = stempelUitHtml(pagina(basisSpiegel, {
+    generatedAt: '2026-07-26T11:55:00.000Z',
+    pagePath: './contentstroom.html',
+  }));
+  assert.equal(contentstroom.iso, '2026-07-26T11:55:00.000Z',
+    'de live waarnemer leest contentstroom.html, dus deze zelfroute is verplicht');
+
+  const root = pagina(basisSpiegel, { generatedAt: '2026-07-26T11:55:00.000Z' });
+  for (const route of ['./', './producten.html', './stack-ticker.html']) {
+    const html = root.replace('url=./?v=', `url=${route}?v=`);
+    assert.equal(stempelUitHtml(html).iso, '2026-07-26T11:55:00.000Z', route);
+  }
+
+  const onbekend = root.replace('url=./?v=', 'url=./beheer.html?v=');
+  assert.equal(stempelUitHtml(onbekend).iso, null, 'een willekeurige route is geen bouwbewijs');
 });
 
 // --- toets 1: bereikbaar en bestempeld ---
