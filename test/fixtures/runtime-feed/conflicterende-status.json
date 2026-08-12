@@ -1,0 +1,29 @@
+{
+  "measured_at": "2026-08-12T11:59:00Z",
+  "control_host": "control-host-01",
+  "processes": { "planner": null, "watcher": null, "supervisor": null },
+  "queue_counts": [],
+  "actors": [
+    {
+      "actor_id": "actor-alpha",
+      "current_task": {
+        "task_id": "task-shared",
+        "worker_started": "2026-08-12T11:40:00Z",
+        "last_heartbeat": "2026-08-12T11:58:00Z"
+      },
+      "closed": [],
+      "incidents": []
+    },
+    {
+      "actor_id": "actor-bravo",
+      "current_task": {
+        "task_id": "task-shared",
+        "worker_started": "2026-08-12T11:45:00Z",
+        "last_heartbeat": "2026-08-12T11:57:00Z"
+      },
+      "closed": [],
+      "incidents": []
+    }
+  ],
+  "accounts": []
+}

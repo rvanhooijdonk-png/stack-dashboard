@@ -1,0 +1,12 @@
+{
+  "measured_at": "2099-01-01T00:00:00Z",
+  "control_host": "control-host-01",
+  "processes": {
+    "planner": { "pid": 101, "boot_id": "boot-x", "loaded_sha": "abc123abc123", "heartbeat": "2099-01-01T00:00:00Z" },
+    "watcher": null,
+    "supervisor": null
+  },
+  "queue_counts": [],
+  "actors": [],
+  "accounts": []
+}

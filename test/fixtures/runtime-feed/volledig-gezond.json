@@ -1,0 +1,31 @@
+{
+  "measured_at": "2026-08-12T11:59:00Z",
+  "control_host": "control-host-01",
+  "processes": {
+    "planner": { "pid": 101, "boot_id": "boot-abc123", "loaded_sha": "a1b2c3d4e5f6", "heartbeat": "2026-08-12T11:58:30Z" },
+    "watcher": { "pid": 102, "boot_id": "boot-abc123", "loaded_sha": "a1b2c3d4e5f6", "heartbeat": "2026-08-12T11:58:45Z" },
+    "supervisor": { "pid": 103, "boot_id": "boot-abc123", "loaded_sha": "a1b2c3d4e5f6", "heartbeat": "2026-08-12T11:58:50Z" }
+  },
+  "queue_counts": [
+    { "name": "planner_queue", "count": 3 },
+    { "name": "retry_queue", "count": 0 }
+  ],
+  "actors": [
+    {
+      "actor_id": "actor-alpha",
+      "current_task": { "task_id": "task-100", "worker_started": "2026-08-12T11:50:00Z", "last_heartbeat": "2026-08-12T11:58:00Z" },
+      "closed": [{ "task_id": "task-099", "closed_at": "2026-08-12T11:55:00Z", "result": "OK" }],
+      "incidents": []
+    },
+    {
+      "actor_id": "actor-bravo",
+      "current_task": null,
+      "closed": [{ "task_id": "task-098", "closed_at": "2026-08-12T11:56:00Z", "result": "OK" }],
+      "incidents": []
+    }
+  ],
+  "accounts": [
+    { "account_id": "acct-mini", "label": "Mac Mini", "status": "OK", "last_seen": "2026-08-12T11:59:30Z" },
+    { "account_id": "acct-macbook", "label": "MacBook", "status": "OK", "last_seen": "2026-08-12T11:59:45Z" }
+  ]
+}
