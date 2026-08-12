@@ -74,6 +74,21 @@ test('een verse stempel is groen en stopt de lus onmiddellijk', () => {
   assert.equal(versheidEindstand({ vers: true, verstrekenMs: 60_000, rondes: 2 }).kleur, 'groen');
 });
 
+test('napublicatie accepteert geen verse stempel van een kruis-verversende pagina', () => {
+  const referentieMs = Date.parse('2026-07-26T08:00:00Z');
+  const kruisroute = pagina(referentieMs + 30_000)
+    .replace('url=./?v=', 'url=./contentstroom.html?v=');
+  const r = versheidRonde({
+    paginaStatus: 200,
+    paginaHtml: kruisroute,
+    paginaRoute: './',
+    referentieMs,
+    nu: referentieMs + 60_000,
+  });
+  assert.equal(r.vers, false);
+  assert.equal(r.code, 'GEEN_STEMPEL');
+});
+
 test('de stempel van de VORIGE bouw geldt niet als vers', () => {
   const referentieMs = Date.parse('2026-07-26T08:00:00Z');
   const r = versheidRonde({

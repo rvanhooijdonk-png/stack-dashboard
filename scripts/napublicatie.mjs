@@ -20,9 +20,11 @@ import { appendFileSync } from 'node:fs';
 import {
   versheidRonde, versheidEindstand, POLL_MS, DEADLINE_MS, MAX_RONDEN, SPIEGELALARM_AAN,
 } from './lib/napublicatie.mjs';
+import { zelfRouteUitUrl } from './lib/waarnemer.mjs';
 
 const BASE_URL = process.env.BASE_URL || 'https://rvanhooijdonk-png.github.io/stack-dashboard/';
 const SABOTAGE = process.env.SABOTAGE || 'geen';
+const PAGINA_ROUTE = zelfRouteUitUrl(BASE_URL);
 // Alleen de WACHTTIJD wordt korter, niet de logica: zelfde rondes, zelfde beslissingen. Een groene
 // zelftest bewijst dus de keten, niet dat 8 minuten genoeg is — dat staat er ook zo in het log.
 const SNELHEID = process.env.ZELFTEST === '1' ? 60 : 1;
@@ -79,7 +81,8 @@ let laatste = null;
 do {
   const pagina = await haal(BASE_URL);
   const r = versheidRonde({
-    paginaStatus: pagina.status, paginaHtml: pagina.tekst, referentieMs, nu: Date.now(),
+    paginaStatus: pagina.status, paginaHtml: pagina.tekst, paginaRoute: PAGINA_ROUTE,
+    referentieMs, nu: Date.now(),
   });
   rondes += 1;
   laatste = r;

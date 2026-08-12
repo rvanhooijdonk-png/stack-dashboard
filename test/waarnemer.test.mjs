@@ -19,7 +19,7 @@ import { kanaalpostUitTekst, toPublicKanaalpost } from '../scripts/lib/kanaalpos
 import {
   toets, alarmRij, magAppenden, alarmRijPubliceerbaar, stempelUitHtml, sectieUitHtml,
   eersteKanaalpostRij, rijMoment, versieMinstens, codeWoord, CODES, VEROUDERD_MARKER, KANAALPOST_VANAF,
-  SECTIES_VANAF,
+  SECTIES_VANAF, zelfRouteUitUrl,
 } from '../scripts/lib/waarnemer.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -90,6 +90,39 @@ test('de stempelparser accepteert alleen de vier vaste zelfroutes', () => {
 
   const onbekend = root.replace('url=./?v=', 'url=./beheer.html?v=');
   assert.equal(stempelUitHtml(onbekend).iso, null, 'een willekeurige route is geen bouwbewijs');
+});
+
+test('een bekende kruisroute is geen self-refreshbewijs voor de opgehaalde pagina', () => {
+  const contentstroom = pagina(basisSpiegel, {
+    generatedAt: '2026-07-26T11:55:00.000Z',
+    pagePath: './contentstroom.html',
+  });
+  const kruisroute = contentstroom.replace('url=./contentstroom.html?v=', 'url=./?v=');
+
+  assert.equal(stempelUitHtml(kruisroute).iso, '2026-07-26T11:55:00.000Z',
+    'zonder route blijft de backwards-compatible vier-routelijst gelden');
+  assert.equal(stempelUitHtml(kruisroute, { route: './contentstroom.html' }).iso, null,
+    'met de opgehaalde route moet een kruis-verversing fail-closed worden geweigerd');
+
+  const oordeel = toets({
+    paginaStatus: 200,
+    paginaHtml: kruisroute,
+    paginaRoute: './contentstroom.html',
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: KANAALPOST_VANAF,
+    nu: NU,
+  });
+  assert.ok(oordeel.bevindingen.some((item) => item.code === 'STEMPEL_ONLEESBAAR'));
+});
+
+test('alleen de vier publieke paginaroutes zijn uit een URL af te leiden', () => {
+  assert.equal(zelfRouteUitUrl('https://example.invalid/stack-dashboard/'), './');
+  assert.equal(zelfRouteUitUrl('https://example.invalid/stack-dashboard/producten.html?x=1'), './producten.html');
+  assert.equal(zelfRouteUitUrl('https://example.invalid/stack-dashboard/stack-ticker.html'), './stack-ticker.html');
+  assert.equal(zelfRouteUitUrl('https://example.invalid/stack-dashboard/contentstroom.html'), './contentstroom.html');
+  assert.equal(zelfRouteUitUrl('https://example.invalid/stack-dashboard/beheer.html'), null);
+  assert.equal(zelfRouteUitUrl('geen URL'), null);
 });
 
 // --- toets 1: bereikbaar en bestempeld ---

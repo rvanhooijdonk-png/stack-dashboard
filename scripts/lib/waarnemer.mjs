@@ -62,6 +62,19 @@ export const HERHAAL_UREN = 12;
  * ineens rood wordt voor eerlijkheid.
  */
 export const VEROUDERD_MARKER = 'data-verouderd="ja"';
+const SELF_REFRESH_ROUTES = new Set(['./', './producten.html', './stack-ticker.html', './contentstroom.html']);
+
+/** Leid de vaste relatieve self-refreshroute af zonder een willekeurig URL-pad te vertrouwen. */
+export function zelfRouteUitUrl(url) {
+  try {
+    const pathname = new URL(String(url)).pathname;
+    const bestand = pathname.endsWith('/') ? '' : pathname.split('/').pop();
+    const route = bestand ? `./${bestand}` : './';
+    return SELF_REFRESH_ROUTES.has(route) ? route : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Secties die er op élke bouw horen te staan, ongeacht de contractversie. Ze bestaan sinds 2.0.0 en
@@ -158,7 +171,7 @@ export function versieMinstens(gevonden, minimaal) {
  * Zo hangt de leeftijdstoets niet aan `status.json`, dat door de CDN uit een ándere publicatie kan
  * komen dan de pagina die ernaast wordt geserveerd.
  */
-export function stempelUitHtml(html) {
+export function stempelUitHtml(html, { route } = {}) {
   const s = String(html ?? '');
   // Alleen in de kop zoeken, en precies één treffer eisen. Anders kan de INHOUD van de plaat de
   // stempel namaken: één kanaalpost-regel die letterlijk `url=./?v=<17 cijfers>` bevat zou een
@@ -166,16 +179,17 @@ export function stempelUitHtml(html) {
   const kopEind = s.indexOf('</head>');
   const kop = kopEind === -1 ? '' : s.slice(0, kopEind);
   const busters = [...kop.matchAll(
-    /url=\.\/(?:(?:producten|stack-ticker|contentstroom)\.html)?\?v=(\d{17})\b/g,
+    /url=(\.\/(?:(?:producten|stack-ticker|contentstroom)\.html)?)\?v=(\d{17})\b/g,
   )];
-  const buster = busters.length === 1 ? busters[0] : null;
+  const buster = busters.length === 1 && (route === undefined || busters[0][1] === route)
+    ? busters[0] : null;
   const leesbaar = s.match(/class="stamp">Laatst bijgewerkt: <strong>gebouwd om (\d{2}):(\d{2}) NL-tijd \((\d{2}):(\d{2}) UTC\)<\/strong>/);
   const zicht = leesbaar
     ? { utcHhmm: `${leesbaar[3]}:${leesbaar[4]}`, nlHhmm: `${leesbaar[1]}:${leesbaar[2]}` }
     : { utcHhmm: null, nlHhmm: null };
   if (!busters.length && !leesbaar) return { gevonden: false, iso: null, ...zicht, leesbaar: null };
   if (!buster || !leesbaar) return { gevonden: true, iso: null, ...zicht, leesbaar: Boolean(leesbaar) };
-  const d = buster[1];
+  const d = buster[2];
   const iso = `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}T${d.slice(8, 10)}:${d.slice(10, 12)}:${d.slice(12, 14)}.${d.slice(14, 17)}Z`;
   const t = new Date(iso);
   if (Number.isNaN(t.getTime()) || t.toISOString() !== iso) {
@@ -254,7 +268,7 @@ export function rijMoment(datum) {
  */
 export function toets({
   paginaStatus, paginaHtml, spiegelStatus, spiegelTekst,
-  contractVersie = null, nu = 0,
+  paginaRoute, contractVersie = null, nu = 0,
   drempelMs = DREMPEL_UREN * UUR, graceMs = GRACE_MINUTEN * MIN,
 } = {}) {
   const bevindingen = [];
@@ -272,7 +286,7 @@ export function toets({
     meld('PAGINA_LEEG');
     return { ok: false, bevindingen, waarschuwingen, gemeten };
   }
-  const stempel = stempelUitHtml(html);
+  const stempel = stempelUitHtml(html, { route: paginaRoute });
   if (!stempel.gevonden) meld('STEMPEL_ONTBREEKT');
   else if (!stempel.iso) meld('STEMPEL_ONLEESBAAR');
   else {
