@@ -6,12 +6,15 @@ import { fileURLToPath } from 'node:url';
 import { renderCockpit, renderProducts, renderTicker, ownerGates, activeWork } from '../scripts/lib/render-cockpit.mjs';
 import { buildProductModel, lifecycleEvents, validateProductCanon } from '../scripts/lib/product-model.mjs';
 import { renderHtml } from '../scripts/lib/render.mjs';
+import { parseRuntimeFeed } from '../scripts/lib/runtime-feed.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const snapshot = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8'));
 const canon = JSON.parse(await readFile(join(ROOT, 'data/product-canon.json'), 'utf8'));
 const products = buildProductModel(canon, snapshot);
 const ticker = lifecycleEvents(snapshot);
+const runtimeRaw = JSON.parse(await readFile(join(ROOT, 'test/fixtures/runtime-feed/volledig-gezond.json'), 'utf8'));
+const runtimeHealthy = parseRuntimeFeed(runtimeRaw, { now: new Date('2026-08-12T12:00:00Z') });
 
 test('hoofdpagina bevat uitsluitend de zeven rustige hoofdsecties', () => {
   const html = renderCockpit(snapshot, { products, ticker });
@@ -28,6 +31,12 @@ test('cockpit is semantische, mobiele, scriptloze HTML', () => {
   assert.match(html, /aria-label="Hoofdnavigatie"/);
   assert.equal(/<script/i.test(html), false);
   assert.equal(/(src|href)=["']https?:/i.test(html), false);
+});
+
+test('een synthetische preview is in de pagina zelf ondubbelzinnig als niet-live gemarkeerd', () => {
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed: runtimeHealthy, preview: true });
+  assert.match(html, /TESTPREVIEW/);
+  assert.match(html, /synthetische runtimefeed; dit is geen live stand/);
 });
 
 test('elke statische pagina ververst naar zichzelf en niet terug naar de cockpit', () => {
@@ -140,34 +149,57 @@ test('uitgevallen ownerbronnen blijven UNKNOWN en tellen niet als gate', () => {
   assert.match(html, /geen meting — geen nulstand/);
 });
 
-test('Nu actief wordt niet groen zonder worker, actor, start en verse heartbeat', () => {
-  const state = activeWork(snapshot);
+test('Nu actief wordt niet groen zonder task-id, actor, WORKER_STARTED en latere verse heartbeat', () => {
+  const raw = structuredClone(runtimeRaw);
+  raw.actors[0].current_task.worker_started = null;
+  const runtimeIncomplete = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  const state = activeWork(runtimeIncomplete);
   assert.equal(state.active.length, 0);
-  assert.equal(state.incomplete, 1, 'fixture heeft één in-bouwregel zonder volledig bewijs');
-  const html = renderCockpit(snapshot, { products, ticker });
+  assert.equal(state.incomplete, 1);
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed: runtimeIncomplete });
   const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
   assert.doesNotMatch(section, /dot ok/);
-  assert.match(section, /worker, actor, start of verse heartbeat ontbreekt/);
+  assert.match(section, /task-id, actor, WORKER_STARTED of latere verse heartbeat ontbreekt/);
 });
 
 test('Nu actief wordt pas groen met geordend en vers volledig bewijs', () => {
-  const input = structuredClone(snapshot);
-  input.generatedAt = '2026-07-23T12:00:00.000Z';
-  const feature = input.planning.features.find((item) => item.status === 'in-bouw');
-  Object.assign(feature, { actor: 'CODEX1', startedAt: '2026-07-23T11:00:00.000Z', heartbeatAt: '2026-07-23T11:50:00.000Z' });
-  assert.equal(activeWork(input).active.length, 1);
-  const html = renderCockpit(input, { products, ticker });
+  assert.equal(activeWork(runtimeHealthy).active.length, 1);
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed: runtimeHealthy });
   const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
   assert.match(section, /dot ok/);
-  assert.match(section, /CODEX1/);
+  assert.match(section, /IN UITVOERING · task-100/);
+  assert.match(section, /actor-alpha/);
+  assert.match(section, /WORKER_STARTED 2026-08-12T11:50:00Z/);
+  assert.match(section, /heartbeat 2026-08-12T11:58:00Z/);
 });
 
 test('een stale heartbeat levert nooit groene ontwikkelstatus', () => {
+  const raw = structuredClone(runtimeRaw);
+  raw.actors[0].current_task.worker_started = '2026-08-12T10:00:00Z';
+  raw.actors[0].current_task.last_heartbeat = '2026-08-12T10:10:00Z';
+  const stale = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  assert.equal(activeWork(stale).active.length, 0);
+  assert.equal(activeWork(stale).incomplete, 1);
+});
+
+test('planningvelden kunnen zonder runtimebewijs nooit IN UITVOERING veroorzaken', () => {
   const input = structuredClone(snapshot);
   const feature = input.planning.features.find((item) => item.status === 'in-bouw');
-  Object.assign(feature, { actor: 'CODEX1', startedAt: '2026-07-23T10:00:00.000Z', heartbeatAt: '2026-07-23T11:00:00.000Z' });
-  assert.equal(activeWork(input).active.length, 0);
-  assert.equal(activeWork(input).incomplete, 1);
+  Object.assign(feature, {
+    task_id: 'planning-is-geen-runtime', actor: 'CODEX1',
+    startedAt: '2026-08-12T11:00:00Z', heartbeatAt: '2026-08-12T11:59:00Z',
+  });
+  const html = renderCockpit(input, { products, ticker });
+  const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
+  assert.match(section, /UNKNOWN — runtimefeed niet beschikbaar/);
+  assert.doesNotMatch(section, /IN UITVOERING/);
+});
+
+test('runtime task-id vergroot de gesloten productcanon niet', () => {
+  const voor = products.products.map((product) => [product.id, product.denominator]);
+  renderCockpit(snapshot, { products, ticker, runtimeFeed: runtimeHealthy });
+  assert.deepEqual(products.products.map((product) => [product.id, product.denominator]), voor);
+  assert.equal(products.products.reduce((total, product) => total + product.denominator, 0), 52);
 });
 
 test('alle hoofdproducten en exact hun canonieke features staan op de drill-down', () => {

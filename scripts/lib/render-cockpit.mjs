@@ -84,21 +84,31 @@ export function ownerGates(snapshot) {
   return { unavailable, gates: gates.filter((gate) => !seen.has(gate.identity) && seen.add(gate.identity)) };
 }
 
-/** Groen actief vereist worker, actor, start en een niet-verouderde heartbeat. */
-export function activeWork(snapshot) {
-  if (snapshot?.planning?.available !== true) return { available: false, active: [], incomplete: 0 };
-  const now = Date.parse(snapshot.generatedAt);
+/**
+ * Groen actief komt uitsluitend uit het runtimecontract. De renderer herhaalt de bewijscheck
+ * defensief: task-id, actor, WORKER_STARTED, aantoonbaar latere heartbeat en CURRENT-freshness.
+ * Een planning/backlogregel kan hierdoor nooit meer zelf als actieve runtimeclaim verschijnen.
+ */
+export function activeWork(runtimeFeed) {
+  if (runtimeFeed?.available !== true) return { available: false, active: [], incomplete: 0 };
   const active = [];
   let incomplete = 0;
-  for (const feature of snapshot.planning.features ?? []) {
-    if (!['in-bouw', 'in-review'].includes(feature?.status)) continue;
-    const hasIdentity = typeof feature.worker === 'string' && feature.worker.trim()
-      && typeof feature.actor === 'string' && feature.actor.trim();
-    const ordered = validIso(feature.startedAt) && validIso(feature.heartbeatAt)
-      && Date.parse(feature.heartbeatAt) >= Date.parse(feature.startedAt);
-    const heartbeatAge = now - Date.parse(feature.heartbeatAt);
-    if (hasIdentity && ordered && Number.isFinite(heartbeatAge) && heartbeatAge >= 0 && heartbeatAge <= 30 * 60 * 1000) {
-      active.push(feature);
+  for (const actor of runtimeFeed.actors ?? []) {
+    const task = actor?.current_task;
+    if (!task) continue;
+    const actorId = typeof actor.actor_id === 'string' ? actor.actor_id.trim() : '';
+    const taskId = typeof task.task_id === 'string' ? task.task_id.trim() : '';
+    const visibleIdentity = actorId && taskId
+      && !actorId.includes('[REDACTED') && !taskId.includes('[REDACTED');
+    const startedAt = task.worker_started?.value;
+    const heartbeatAt = task.last_heartbeat?.value;
+    const ordered = validIso(startedAt) && validIso(heartbeatAt)
+      && Date.parse(heartbeatAt) > Date.parse(startedAt);
+    const proven = runtimeFeed.freshness === 'CURRENT'
+      && actor.identity === 'OK' && task.identity === 'OK' && task.active === true
+      && visibleIdentity && ordered && task.last_heartbeat?.freshness === 'CURRENT';
+    if (proven) {
+      active.push({ actor: actorId, taskId, startedAt, heartbeatAt });
     } else incomplete += 1;
   }
   return { available: true, active, incomplete };
@@ -114,13 +124,23 @@ function renderOwnerGates(snapshot) {
   return `<section id="wacht-op-richard" class="card wide"><h2>Wacht op Richard <span class="badge warn">${num(gates.length)}</span>${warnings.length ? ` <span class="badge bad">${num(warnings.length)} bron${warnings.length === 1 ? '' : 'nen'} UNKNOWN</span>` : ''}</h2>${body}</section>`;
 }
 
-function renderActive(snapshot) {
-  const state = activeWork(snapshot);
-  if (!state.available) return '<section id="nu-actief" class="card"><h2>Nu actief</h2><p class="unknown">UNKNOWN — planningbron niet beschikbaar.</p></section>';
-  const items = state.active.map((f) => `<li><span class="dot ok"></span>${featureName(f)} <span class="muted">${esc(f.actor)} · heartbeat ${esc(f.heartbeatAt)}</span></li>`);
+function renderActive(runtimeFeed) {
+  const state = activeWork(runtimeFeed);
+  if (!state.available) return '<section id="nu-actief" class="card"><h2>Nu actief</h2><p class="unknown">UNKNOWN — runtimefeed niet beschikbaar of niet contractgeldig.</p></section>';
+  const items = state.active.map((task) => `<li><span class="dot ok"></span><span class="repo">IN UITVOERING · ${esc(task.taskId)}</span> <span class="muted">${esc(task.actor)} · WORKER_STARTED ${esc(task.startedAt)} · heartbeat ${esc(task.heartbeatAt)}</span></li>`);
   const incomplete = state.incomplete
-    ? `<p class="unknown evidence-warning">${num(state.incomplete)} kandidaat/kandidaten niet als actief getoond: worker, actor, start of verse heartbeat ontbreekt.</p>` : '';
-  return `<section id="nu-actief" class="card"><h2>Nu actief</h2>${list(items, 'Geen werk met volledig worker/actor/start/heartbeatbewijs.')}${incomplete}</section>`;
+    ? `<p class="unknown evidence-warning">${num(state.incomplete)} kandidaat/kandidaten niet als actief getoond: task-id, actor, WORKER_STARTED of latere verse heartbeat ontbreekt.</p>` : '';
+  const processFreshness = Object.entries(runtimeFeed.processes ?? {})
+    .map(([name, process]) => `${name}: ${process?.heartbeat?.freshness ?? 'UNKNOWN'}`).join(' · ');
+  const queues = (runtimeFeed.queue_counts ?? [])
+    .map((queue) => `${queue.name}: ${queue.valid ? num(queue.count) : 'UNKNOWN'}`).join(' · ');
+  return `<section id="nu-actief" class="card"><h2>Nu actief</h2><p class="${runtimeFeed.freshness === 'CURRENT' ? 'muted' : 'unknown'}">Runtime freshness: ${esc(runtimeFeed.freshness)}${processFreshness ? ` · ${esc(processFreshness)}` : ''}</p>${list(items, 'Geen werk met volledig task-id/actor/WORKER_STARTED/heartbeatbewijs.')}${incomplete}${queues ? `<p class="muted">Wachtrijen · ${esc(queues)}</p>` : ''}</section>`;
+}
+
+function renderAccounts(runtimeFeed) {
+  if (runtimeFeed?.available !== true) return '<section id="accountcapaciteit" class="card"><h2>Accountcapaciteit</h2><p class="unknown">UNKNOWN — runtimefeed niet beschikbaar.</p></section>';
+  const rows = (runtimeFeed.accounts ?? []).map((account) => `<li><span class="repo">${esc(account.label ?? account.account_id)}</span> <span class="${account.status === 'OK' ? 'muted' : 'unknown'}">${esc(account.status)} · ${esc(account.last_seen?.freshness ?? 'UNKNOWN')}</span></li>`);
+  return `<section id="accountcapaciteit" class="card"><h2>Accountcapaciteit</h2>${list(rows, 'UNKNOWN — geen gevalideerde accountmetingen.')}</section>`;
 }
 
 function incidentFacts(snapshot) {
@@ -140,18 +160,23 @@ function incidentFacts(snapshot) {
   return facts.filter((fact) => !seen.has(fact.identity) && seen.add(fact.identity));
 }
 
-export function renderCockpit(snapshot, { products, ticker, refreshSeconds = 900 } = {}) {
+export function renderCockpit(snapshot, {
+  products, ticker, runtimeFeed, refreshSeconds = 900, preview = false,
+} = {}) {
   const today = String(snapshot.generatedAt).slice(0, 10);
   const delivered = snapshot.planning?.available ? snapshot.planning.features.filter((f) => f.status === 'live' && f.oplevering?.date === today) : [];
   const incidents = incidentFacts(snapshot);
   const productCards = (products?.products ?? []).map((p) => `<a class="card product" href="./producten.html#${esc(p.id)}"><h3>${esc(p.name)}</h3><span class="metric unknown">UNKNOWN</span><p class="muted">${num(p.denominator)} canonieke features · geen gekoppeld featurebewijs</p></a>`);
   const events = (ticker?.events ?? []).slice(0, 3).map((e) => `<li><span class="tag">${esc(e.lifecycle)}</span> <span class="repo">${esc(e.product)}</span> <span class="muted">${esc(e.at)}</span></li>`);
-  const body = `${renderOwnerGates(snapshot)}
-${renderActive(snapshot)}
+  const previewBanner = preview
+    ? '<p class="unknown evidence-warning"><strong>TESTPREVIEW</strong> — synthetische runtimefeed; dit is geen live stand.</p>'
+    : '';
+  const body = `${previewBanner}${renderOwnerGates(snapshot)}
+${renderActive(runtimeFeed)}
 <section id="vandaag-geleverd" class="card"><h2>Vandaag geleverd</h2>${snapshot.planning?.available ? list(delivered.map((f) => `<li>${featureName(f)}</li>`), 'Niets met een gevalideerde opleverdatum van vandaag.') : '<p class="unknown">UNKNOWN — planningbron niet beschikbaar.</p>'}</section>
 <section id="producten" class="card wide"><h2>Producten</h2><div class="product-grid">${productCards.join('')}</div></section>
 <section id="incidenten" class="card"><h2>Incidenten</h2>${incidents.length ? `<ul class="lights incident-list">${incidents.map((x) => `<li><span class="repo">${esc(x.label)}</span> <span class="unknown">${esc(x.detail)}</span></li>`).join('')}</ul>` : '<p class="empty">Geen gevalideerde bron-, vloot- of CI-incidenten.</p>'}</section>
-<section id="accountcapaciteit" class="card"><h2>Accountcapaciteit</h2><p class="unknown">UNKNOWN — geen canonieke capaciteitsbron aangesloten.</p></section>
+${renderAccounts(runtimeFeed)}
 <section id="laatste-ticker-events" class="card wide"><h2>Laatste ticker-events</h2><p class="muted">${ticker?.freshness === 'CURRENT' ? 'CURRENT — statische snapshot' : `${esc(ticker?.freshness ?? 'UNKNOWN')} — actualiteit niet bevestigd`}. GitHub-data is niet realtime. De volledige tijdlijn staat op STACK-TICKER.</p>${events.length ? `<ul class="lights ticker-summary">${events.join('')}</ul>` : '<p class="empty">Geen gevalideerde lifecycle-events.</p>'}</section>`;
   return page(snapshot, 'Richards cockpit', body, '<a href="./producten.html">Producten</a><a href="./stack-ticker.html">STACK-TICKER</a><a href="./contentstroom.html">Technische drill-down</a>', refreshSeconds, './');
 }

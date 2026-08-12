@@ -25,6 +25,16 @@ test('redigeert lokale paden en e-mailadressen', () => {
   assert.equal(e.value.includes('@voorbeeld.nl'), false);
 });
 
+test('redigeert absolute /private-, /etc- en /var-paden zonder gewone webpaden te raken', () => {
+  for (const pad of ['/private/tmp/control.sock', '/etc/hosts', '/var/run/service.pid']) {
+    const { value, findings } = sanitizeString(`fout bij ${pad}`);
+    assert.equal(value.includes(pad), false, pad);
+    assert.ok(findings.some((finding) => finding.id === 'system-path'), pad);
+  }
+  const url = 'https://voorbeeld.invalid/var/publiek';
+  assert.equal(sanitizeString(url).value, url);
+});
+
 test('redigeert ook een losstaande 40-hexwaarde — die vorm is niet alleen van git', () => {
   // Review Gemini: een legacy-token of session-ID heeft exact de vorm van een SHA. De
   // publieke DTO draagt geen SHA's meer, dus de oude uitzondering kostte alleen dekking.

@@ -40,8 +40,13 @@ export const DENY_PATTERNS = [
   { id: 'secret-name-camel', re: /\b[a-z][a-z0-9]*(?:Token|Secret|Password|Passwd|Credentials?|ApiKey|AccessKey|PrivateKey)\b/g },
   { id: 'secret-assignment', re: /\b(?:password|passwd|secret|token|apikey|api_key)\s*[:=]\s*\S{4,}/gi },
 
-  // Gevoelige paden: home-, runner- en containerpaden, Windows-drives en UNC-shares.
+  // Gevoelige paden: home-, runner- en containerpaden, algemene Unix-systeempaden,
+  // Windows-drives en UNC-shares. De aparte system-path-regel is nodig omdat runtimefeeds
+  // vrije tekst kunnen dragen die buiten een home-map ligt (/private, /etc, /var). De
+  // negatieve lookbehind voorkomt dat een gewone URL met bijvoorbeeld `/var/` als webpad
+  // wordt aangezien voor een lokaal absoluut pad.
   { id: 'home-path', re: /(?:\/Users\/|\/home\/|\/root\/|\/workspace\/|\/github\/workspace\/)[^\s"'`,;)\]]*/g },
+  { id: 'system-path', re: /(?<![A-Za-z0-9])\/(?:private|etc|var)\/[^\s"'`,;)\]]*/g },
   { id: 'windows-path', re: /(?:[A-Za-z]:\\|\\\\)[^\s"'`,;)\]]+/g },
 
   // Persoonsgegevens en netwerkadressen

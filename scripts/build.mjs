@@ -22,6 +22,7 @@ import { PUBLISH_ALLOWLIST, assertPublishFiles, outputDirectory } from './lib/pu
 import { validate } from './lib/validate.mjs';
 import { toPublicPlanning } from './lib/planning.mjs';
 import { vertaalBouwlijst } from './lib/planning-bron.mjs';
+import { loadRuntimeFeed } from './lib/runtime-feed-input.mjs';
 import { kanaalpostUitTekst, toPublicKanaalpost } from './lib/kanaalpost.mjs';
 import { VLOOT_ONBEKEND_MINUTEN, toPublicVlootstand, vlootstand as vlootstandVan } from './lib/doorstroom.mjs';
 import { LANES } from './lib/kijk.mjs';
@@ -441,8 +442,18 @@ async function main() {
   const tickerResult = assertPublishable(lifecycleEvents(snapshot), { strict });
   const products = productResult.snapshot;
   const ticker = tickerResult.snapshot;
+  // RUNTIMEFEED — alleen een expliciet aangeleverd bestand wordt gelezen. Op productie/main is
+  // nog geen canonieke producerlocatie beschikbaar; ontbreken blijft daarom zichtbaar UNKNOWN.
+  // De parser gebruikt exact het bouwmoment als klok, zodat renderer en contract hetzelfde
+  // freshness-oordeel hanteren. Het bronpad wordt nergens gelogd of gepubliceerd.
+  const runtimePath = arg('runtime-feed');
+  const runtimeResult = await loadRuntimeFeed(runtimePath, { now: new Date(snapshot.generatedAt) });
+  const runtimeFeed = assertPublishable(runtimeResult, { strict }).snapshot;
 
-  const cockpitHtml = renderCockpit(snapshot, { products, ticker, refreshSeconds: REFRESH_SECONDS });
+  const cockpitHtml = renderCockpit(snapshot, {
+    products, ticker, runtimeFeed, refreshSeconds: REFRESH_SECONDS,
+    preview: process.argv.includes('--preview'),
+  });
   const productsHtml = renderProducts(snapshot, products, { refreshSeconds: REFRESH_SECONDS });
   const tickerHtml = renderTicker(snapshot, ticker, { refreshSeconds: REFRESH_SECONDS });
   const contentstroomHtml = renderHtml(snapshot, {
