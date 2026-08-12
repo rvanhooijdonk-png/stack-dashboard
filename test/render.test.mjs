@@ -28,6 +28,17 @@ test('rendert een volledige pagina met verversing en tijdstempel', () => {
   assert.match(html, /Laatst bijgewerkt: <strong>gebouwd om 14:00 NL-tijd \(12:00 UTC\)<\/strong>/);
 });
 
+test('technische drill-down blijft binnen een smalle mobiele viewport', () => {
+  const html = renderHtml(fixture);
+  // Op 320px houdt de wrap na padding minder dan 320px over. Een kale
+  // minmax(320px,1fr) dwingt de grid dan breder dan de viewport; min(...,100%)
+  // bindt dezelfde desktopkaart op mobiel aan de werkelijk beschikbare ruimte.
+  assert.match(html, /\.grid\{[^}]*minmax\(min\(320px,100%\),1fr\)/);
+  assert.doesNotMatch(html, /\.grid\{[^}]*minmax\(320px,1fr\)/);
+  assert.match(html, /\.scroll\{overflow-x:auto\}/,
+    'brede tabellen blijven in hun eigen scrollcontainer');
+});
+
 // --- Tijdstempel in Richards tijd (Europe/Amsterdam, DST-correct) ---
 
 test('de stempel toont NL-tijd als hoofdweergave met UTC tussen haakjes', () => {

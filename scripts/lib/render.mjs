@@ -730,7 +730,7 @@ h1{font-size:22px;margin:0;letter-spacing:-.01em}
 h2{font-size:15px;margin:0 0 12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 h3{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:18px 0 8px}
 .stamp{color:var(--mut);font-size:13px}
-.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin-top:20px}
+.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));margin-top:20px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
 .card.wide{grid-column:1/-1}
 .lead{margin:0 0 12px}
