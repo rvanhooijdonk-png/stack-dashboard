@@ -67,6 +67,7 @@ test('Wacht op Richard bevat alleen expliciete owner-gates', () => {
 
 test('nul non-draft PRs is geen gate en een ongeldige telling blijft UNKNOWN', () => {
   const empty = structuredClone(snapshot);
+  empty.pullRequests.totals.open = empty.pullRequests.totals.draft;
   empty.pullRequests.totals.ready = 0;
   assert.equal(ownerGates(empty).unavailable.length, 0);
   assert.equal(ownerGates(empty).gates.some((gate) => gate.identity.startsWith('pull-requests:')), false);
@@ -76,6 +77,10 @@ test('nul non-draft PRs is geen gate en een ongeldige telling blijft UNKNOWN', (
   const result = ownerGates(corrupt);
   assert.equal(result.unavailable.length, 1);
   assert.match(result.unavailable[0], /geldige pull-requesttelling ontbreekt/);
+
+  const inconsistent = structuredClone(empty);
+  inconsistent.pullRequests.totals.open += 1;
+  assert.equal(ownerGates(inconsistent).unavailable.length, 1, 'open moet exact draft + ready zijn');
 });
 
 test('een wachtstatus zonder owner, afhankelijkheid of akkoordactie is geen owner-gate', () => {
