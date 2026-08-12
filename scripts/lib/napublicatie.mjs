@@ -97,11 +97,11 @@ export function jobUitkomstKleur(resultaat) {
  * Eén ronde: wat zegt deze ophaal? Geen uitzonderingen, alleen uitkomsten — een netwerkfout is een
  * ronde die "nog niet vers" zegt, want de volgende ronde kan alsnog lukken.
  */
-export function versheidRonde({ paginaStatus, paginaHtml, referentieMs, nu }) {
+export function versheidRonde({ paginaStatus, paginaHtml, paginaRoute, referentieMs, nu }) {
   const nietVers = (code) => ({ vers: false, code, stempelIso: null, uitleg: CODES[code] });
   if (paginaStatus !== 200) return nietVers('PAGINA_ONBEREIKBAAR');
 
-  const stempel = stempelUitHtml(paginaHtml);
+  const stempel = stempelUitHtml(paginaHtml, { route: paginaRoute });
   if (!stempel.gevonden || stempel.iso === null) return nietVers('GEEN_STEMPEL');
 
   const stempelMs = Date.parse(stempel.iso);

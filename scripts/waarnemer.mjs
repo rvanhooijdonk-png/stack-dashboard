@@ -20,7 +20,7 @@
 
 import { writeFileSync } from 'node:fs';
 import {
-  toets, alarmRij, magAppenden, alarmRijPubliceerbaar, DREMPEL_UREN, GRACE_MINUTEN,
+  toets, alarmRij, magAppenden, alarmRijPubliceerbaar, zelfRouteUitUrl, DREMPEL_UREN, GRACE_MINUTEN,
 } from './lib/waarnemer.mjs';
 
 const BASE_URL = process.env.BASE_URL || 'https://rvanhooijdonk-png.github.io/stack-dashboard/contentstroom.html';
@@ -28,6 +28,7 @@ const SPIEGEL_URL = process.env.SPIEGEL_URL
   || 'https://raw.githubusercontent.com/rvanhooijdonk-png/stack-dashboard/main/data/kanaalpost-publiek.md';
 const SABOTAGE = process.env.SABOTAGE || 'geen';
 const RIJ_BESTAND = process.env.RIJ_BESTAND || '';
+const PAGINA_ROUTE = zelfRouteUitUrl(BASE_URL);
 const UUR = 3600 * 1000;
 const MIN = 60 * 1000;
 
@@ -75,6 +76,7 @@ const drempelMs = SABOTAGE === 'stempel' ? 0 : getal('DREMPEL_UREN', DREMPEL_URE
 const r = toets({
   paginaStatus: pagina.status,
   paginaHtml: pagina.tekst,
+  paginaRoute: PAGINA_ROUTE,
   spiegelStatus: spiegel.status,
   spiegelTekst: spiegel.tekst,
   contractVersie: contract,
