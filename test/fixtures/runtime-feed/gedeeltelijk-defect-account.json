@@ -1,0 +1,15 @@
+{
+  "measured_at": "2026-08-12T11:59:00Z",
+  "control_host": "control-host-01",
+  "processes": {
+    "planner": { "pid": 101, "boot_id": "b", "loaded_sha": "aaaa1111bbbb", "heartbeat": "2026-08-12T11:58:00Z" },
+    "watcher": null,
+    "supervisor": null
+  },
+  "queue_counts": [],
+  "actors": [],
+  "accounts": [
+    { "account_id": "acct-macbook", "label": "MacBook", "status": "OK", "last_seen": "2026-08-12T11:59:00Z" },
+    { "account_id": "acct-mini", "label": "Mac Mini", "status": "OK", "last_seen": "2026-08-12T02:00:00Z" }
+  ]
+}
