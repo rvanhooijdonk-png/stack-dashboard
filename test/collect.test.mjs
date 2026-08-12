@@ -3,8 +3,37 @@ import assert from 'node:assert/strict';
 
 import {
   ageTrust, categoriseer, CATEGORIEEN, parseTrackDefs, isEchteDatum, tracksFromListing,
-  leesBesluiten, leesTracker, leesJournaal, decodeContentsResponse,
+  leesBesluiten, leesTracker, leesJournaal, decodeContentsResponse, pullRequestsFromSearchResult,
 } from '../scripts/lib/collect.mjs';
+
+test('een geslaagde PR-query met nul resultaten is geverifieerd, geen onbekende nul', () => {
+  const result = pullRequestsFromSearchResult({ ok: true, data: [] });
+  assert.equal(result.available, true);
+  assert.deepEqual(result.totals, { open: 0, draft: 0, ready: 0 });
+  assert.equal(result.evidence.trust, 'VERIFIED_CURRENT');
+  assert.equal(result.evidence.error, null);
+});
+
+test('alleen een geslaagde resultatenlijst opent de PR-bron', () => {
+  const gevuld = pullRequestsFromSearchResult({
+    ok: true,
+    data: [
+      { repository: { name: 'intern-a' }, isDraft: false },
+      { repository: { name: 'intern-b' }, isDraft: true },
+    ],
+  });
+  assert.equal(gevuld.available, true);
+  assert.deepEqual(gevuld.totals, { open: 2, draft: 1, ready: 1 });
+  assert.equal(gevuld.evidence.trust, 'VERIFIED_CURRENT');
+
+  const mislukt = pullRequestsFromSearchResult({ ok: false, data: null });
+  assert.equal(mislukt.available, false);
+  assert.equal(mislukt.evidence.trust, 'SOURCE_UNAVAILABLE');
+
+  const onleesbaar = pullRequestsFromSearchResult({ ok: true, data: null });
+  assert.equal(onleesbaar.available, false);
+  assert.equal(onleesbaar.evidence.trust, 'UNVERIFIED');
+});
 
 // --- Bevinding uit de derde review (Codex, 23-07-2026): de leeftijdsgrens lekte een dag ---
 

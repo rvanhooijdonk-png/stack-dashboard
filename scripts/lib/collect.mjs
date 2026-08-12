@@ -204,23 +204,22 @@ export function ageTrust(lastChangeAt, now = Date.now()) {
   return { trust: 'VERIFIED_CURRENT', note: null };
 }
 
-/** Org-brede open PR's, gegroepeerd per repo. Vereist een read-token met org-bereik. */
-export async function collectPullRequests() {
-  const res = await gh([
-    'search', 'prs', '--owner', OWNER, '--state', 'open', '--limit', '1000',
-    '--json', 'repository,isDraft',
-  ]);
-
-  if (!res.ok) {
+/** Zuivere omzetting van de zoekuitkomst: een geslaagde lege query is bewijs voor nul. */
+export function pullRequestsFromSearchResult(res) {
+  if (!res?.ok || !Array.isArray(res.data)) {
+    const onleesbaar = res?.ok === true;
     return {
       available: false, repositories: [], hiddenRepositories: 0, totals: { open: 0, draft: 0, ready: 0 },
-      evidence: evidence('GitHub search API', `owner:${OWNER} state:open`, 'SOURCE_UNAVAILABLE',
+      evidence: evidence('GitHub search API', `owner:${OWNER} state:open`,
+        onleesbaar ? 'UNVERIFIED' : 'SOURCE_UNAVAILABLE',
         `https://github.com/${OWNER}`,
-        'PR-zoekopdracht mislukt — ontbrekend of te smal gescoopt read-token in CI.'),
+        onleesbaar
+          ? 'PR-zoekopdracht gaf geen geldige resultatenlijst.'
+          : 'PR-zoekopdracht mislukt — ontbrekend of te smal gescoopt read-token in CI.'),
     };
   }
 
-  const open = res.data ?? [];
+  const open = res.data;
   const byRepo = new Map();
   const totals = { open: 0, draft: 0, ready: 0 };
   let hidden = 0;
@@ -240,9 +239,18 @@ export async function collectPullRequests() {
     repositories: [...byRepo.values()].sort((a, b) => b.open - a.open),
     hiddenRepositories: hidden,
     totals,
-    evidence: evidence('GitHub search API', `owner:${OWNER} state:open`, trustFor(open.length),
-      `https://github.com/${OWNER}`, open.length ? null : 'Nul open PR\'s gerapporteerd — controleer het tokenbereik.'),
+    evidence: evidence('GitHub search API', `owner:${OWNER} state:open`, 'VERIFIED_CURRENT',
+      `https://github.com/${OWNER}`),
   };
+}
+
+/** Org-brede open PR's, gegroepeerd per repo. Vereist een read-token met org-bereik. */
+export async function collectPullRequests() {
+  const res = await gh([
+    'search', 'prs', '--owner', OWNER, '--state', 'open', '--limit', '1000',
+    '--json', 'repository,isDraft',
+  ]);
+  return pullRequestsFromSearchResult(res);
 }
 
 /** Recent gemergede PR's — het tempo waarmee werk landt, niet alleen wat openstaat. */
