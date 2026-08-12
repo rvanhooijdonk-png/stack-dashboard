@@ -30,18 +30,32 @@ const validIso = (value) => typeof value === 'string' && Number.isFinite(Date.pa
 const SELF_REPORT_PREFIX = ALARM_KOP.replace(/\*/g, '').trim();
 const isSelfReport = (row) => normalized(row?.tab) === 'waarnemer'
   && String(row?.onderwerp ?? '').replace(/^[\s*]+/, '').startsWith(SELF_REPORT_PREFIX);
+const OWNER_SOURCE_TRUST = new Set(['VERIFIED_CURRENT', 'STALE']);
 
 /** Alleen expliciete ownerhandelingen; meetstoringen zijn waarschuwingen en tellen niet als gate. */
 export function ownerGates(snapshot) {
   const unavailable = [];
   const gates = [];
-  if (snapshot?.pullRequests?.available === true) {
-    const ready = snapshot.pullRequests.totals?.ready;
-    if (Number.isInteger(ready) && ready > 0) gates.push({
-      identity: 'pull-requests:non-draft',
-      label: `${ready} open pull request(s) zonder draft-status`,
-      detail: 'merge is de ownerpoort; mergebaarheid en checks zijn hier niet gemeten',
-    });
+  if (snapshot?.pullRequests?.available === true
+      && OWNER_SOURCE_TRUST.has(snapshot.pullRequests.evidence?.trust)) {
+    const totals = snapshot.pullRequests.totals;
+    const open = totals?.open;
+    const draft = totals?.draft;
+    const ready = totals?.ready;
+    // `ready` betekent in de collector alleen "niet draft". Zonder mergeability
+    // én vereiste checks is dat geen bewezen ownerhandeling: een conflicterende
+    // of rode PR bij Richard neerleggen maakt van meetruis een eigenaarspoort.
+    // Wel zichtbaar houden als UNKNOWN, zodat een ontbrekend contract nooit als
+    // nul open poorten wordt gelezen.
+    const validTotals = [open, draft, ready].every((value) => Number.isInteger(value) && value >= 0)
+      && open === draft + ready;
+    if (!validTotals) {
+      unavailable.push('Mergepoorten UNKNOWN — geldige pull-requesttelling ontbreekt.');
+    } else if (ready > 0) {
+      unavailable.push(`Mergepoorten UNKNOWN — ${ready} niet-draft PR${ready === 1 ? '' : 's'}; mergebaarheid en vereiste checks zijn niet gemeten.`);
+    }
+  } else if (snapshot?.pullRequests?.available === true) {
+    unavailable.push('Mergepoorten UNKNOWN — pull-requestbron niet geverifieerd.');
   } else unavailable.push('Mergepoorten UNKNOWN — pull-requestbron niet leesbaar.');
 
   if (snapshot?.planning?.available === true) {

@@ -55,11 +55,60 @@ test('onbekende vlootlanes staan eenmaal geaggregeerd op de rustige hoofdpagina'
 
 test('Wacht op Richard bevat alleen expliciete owner-gates', () => {
   const result = ownerGates(snapshot);
-  assert.equal(result.unavailable.length, 0);
-  assert.equal(result.gates.length, 3, 'PR-merge, planning-ownerpoort en kanaalpost-ownerpoort');
-  assert.ok(result.gates.some((gate) => gate.label.includes('open pull request')));
+  assert.equal(result.unavailable.length, 1, 'non-draft zonder mergeability/checks blijft UNKNOWN');
+  assert.equal(result.gates.length, 2, 'alleen planning- en kanaalpost-ownerpoort zijn bewezen');
+  assert.equal(result.gates.some((gate) => gate.label.includes('open pull request')), false);
   assert.ok(result.gates.some((gate) => gate.label === 'Tijdstempel in Nederlandse tijd'));
   assert.ok(result.gates.some((gate) => gate.label.includes('integratiegaten')));
+  const html = renderCockpit(snapshot, { products, ticker });
+  assert.match(html, /2 niet-draft PRs; mergebaarheid en vereiste checks zijn niet gemeten/);
+  assert.match(html, /2<\/span> <span class="badge bad">1 bron UNKNOWN/);
+});
+
+test('nul non-draft PRs is geen gate en een ongeldige telling blijft UNKNOWN', () => {
+  const empty = structuredClone(snapshot);
+  empty.pullRequests.totals.open = empty.pullRequests.totals.draft;
+  empty.pullRequests.totals.ready = 0;
+  assert.equal(ownerGates(empty).unavailable.length, 0);
+  assert.equal(ownerGates(empty).gates.some((gate) => gate.identity.startsWith('pull-requests:')), false);
+
+  const corrupt = structuredClone(snapshot);
+  corrupt.pullRequests.totals.ready = '2';
+  const result = ownerGates(corrupt);
+  assert.equal(result.unavailable.length, 1);
+  assert.match(result.unavailable[0], /geldige pull-requesttelling ontbreekt/);
+
+  const inconsistent = structuredClone(empty);
+  inconsistent.pullRequests.totals.open += 1;
+  assert.equal(ownerGates(inconsistent).unavailable.length, 1, 'open moet exact draft + ready zijn');
+});
+
+test('een beschikbare maar niet-geverifieerde PR-bron blijft UNKNOWN, ook bij een consistente nul', () => {
+  for (const trust of ['UNVERIFIED', 'CONFLICTING_EVIDENCE', 'SOURCE_UNAVAILABLE', undefined]) {
+    const input = structuredClone(snapshot);
+    input.pullRequests.totals = { open: 0, draft: 0, ready: 0 };
+    input.pullRequests.evidence.trust = trust;
+    input.planning.features = [];
+    input.kanaalpost.rows = [];
+
+    const result = ownerGates(input);
+    assert.equal(result.gates.length, 0, trust);
+    assert.equal(result.unavailable.length, 1, trust);
+    assert.match(result.unavailable[0], /pull-requestbron niet geverifieerd/, trust);
+
+    const html = renderCockpit(input, { products: buildProductModel(canon, input), ticker });
+    assert.match(html, /Mergepoorten UNKNOWN/, trust);
+    assert.doesNotMatch(html, /Alle drie de ownerbronnen zijn gelezen/, trust);
+  }
+});
+
+test('VERIFIED_CURRENT en STALE zijn de gesloten bruikbare trustlijst voor de PR-bron', () => {
+  for (const trust of ['VERIFIED_CURRENT', 'STALE']) {
+    const input = structuredClone(snapshot);
+    input.pullRequests.totals = { open: 0, draft: 0, ready: 0 };
+    input.pullRequests.evidence.trust = trust;
+    assert.equal(ownerGates(input).unavailable.length, 0, trust);
+  }
 });
 
 test('een wachtstatus zonder owner, afhankelijkheid of akkoordactie is geen owner-gate', () => {
