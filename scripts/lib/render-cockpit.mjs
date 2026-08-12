@@ -30,12 +30,14 @@ const validIso = (value) => typeof value === 'string' && Number.isFinite(Date.pa
 const SELF_REPORT_PREFIX = ALARM_KOP.replace(/\*/g, '').trim();
 const isSelfReport = (row) => normalized(row?.tab) === 'waarnemer'
   && String(row?.onderwerp ?? '').replace(/^[\s*]+/, '').startsWith(SELF_REPORT_PREFIX);
+const OWNER_SOURCE_TRUST = new Set(['VERIFIED_CURRENT', 'STALE']);
 
 /** Alleen expliciete ownerhandelingen; meetstoringen zijn waarschuwingen en tellen niet als gate. */
 export function ownerGates(snapshot) {
   const unavailable = [];
   const gates = [];
-  if (snapshot?.pullRequests?.available === true) {
+  if (snapshot?.pullRequests?.available === true
+      && OWNER_SOURCE_TRUST.has(snapshot.pullRequests.evidence?.trust)) {
     const totals = snapshot.pullRequests.totals;
     const open = totals?.open;
     const draft = totals?.draft;
@@ -50,8 +52,10 @@ export function ownerGates(snapshot) {
     if (!validTotals) {
       unavailable.push('Mergepoorten UNKNOWN — geldige pull-requesttelling ontbreekt.');
     } else if (ready > 0) {
-      unavailable.push('Mergepoorten UNKNOWN — mergebaarheid en vereiste checks zijn niet gemeten.');
+      unavailable.push(`Mergepoorten UNKNOWN — ${ready} niet-draft PR${ready === 1 ? '' : 's'}; mergebaarheid en vereiste checks zijn niet gemeten.`);
     }
+  } else if (snapshot?.pullRequests?.available === true) {
+    unavailable.push('Mergepoorten UNKNOWN — pull-requestbron niet geverifieerd.');
   } else unavailable.push('Mergepoorten UNKNOWN — pull-requestbron niet leesbaar.');
 
   if (snapshot?.planning?.available === true) {
