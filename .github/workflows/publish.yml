@@ -331,7 +331,7 @@ jobs:
       page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
 
   # Gepusht is niet live — maar "live" toetsen we hier NIET via de publieke URL. Gemeten op
   # 2026-07-24: GitHub Pages/Fastly gebruikt de query-string niet als aparte cachesleutel
