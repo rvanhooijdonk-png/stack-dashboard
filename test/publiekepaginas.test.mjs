@@ -34,6 +34,19 @@ test('publish.yml genereert de foutpagina uit het geteste bestand (geen losse he
     'de failure-page-job hoort de noodpagina uit scripts/failure-page.mjs te genereren');
 });
 
+test('beide publicatiepaden gebruiken de immutable Node 24 Pages-artifactactie', () => {
+  // v4.0.0 trok intern upload-artifact v4.6.2 binnen en gaf daardoor op iedere
+  // Pages-run een Node 20-deprecation. De officiële v5.0.0-release gebruikt
+  // upload-artifact v7. Bewaak zowel de immutable release-SHA als beide paden:
+  // de gewone build en de datavrije failure-page mogen niet uiteenlopen.
+  const pin = 'actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0';
+  assert.equal(publish.split(pin).length - 1, 2,
+    'build en failure-page horen exact dezelfde officiële v5.0.0-pin te gebruiken');
+  assert.doesNotMatch(publish,
+    /actions\/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b/,
+    'de Node 20-v4-pin mag niet terugkomen');
+});
+
 // De patronen zijn letterlijke formuleringen, geen regexen. Zonder escapen zou een punt of
 // haakje in een later toegevoegde zin stilletjes iets anders gaan betekenen dan bedoeld.
 const letterlijk = (s) => new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
