@@ -47,6 +47,17 @@ test('beide publicatiepaden gebruiken de immutable Node 24 Pages-artifactactie',
     'de Node 20-v4-pin mag niet terugkomen');
 });
 
+test('de Pages-deploy gebruikt de immutable officiële Node 24-actie', () => {
+  // deploy-pages v4.0.5 richt zich op Node 20 en gaf na de artifactupgrade nog
+  // de laatste deprecation-annotatie. v5.0.0 verklaart zelf `using: node24`.
+  assert.match(publish,
+    /actions\/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5\.0\.0/,
+    'de deployjob hoort de officiële immutable v5.0.0-pin te gebruiken');
+  assert.doesNotMatch(publish,
+    /actions\/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e/,
+    'de Node 20-v4.0.5-pin mag niet terugkomen');
+});
+
 // De patronen zijn letterlijke formuleringen, geen regexen. Zonder escapen zou een punt of
 // haakje in een later toegevoegde zin stilletjes iets anders gaan betekenen dan bedoeld.
 const letterlijk = (s) => new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
