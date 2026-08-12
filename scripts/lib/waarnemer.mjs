@@ -151,8 +151,10 @@ export function versieMinstens(gevonden, minimaal) {
 /**
  * De pagina draagt haar eigen bouwmoment op twee plekken: leesbaar in de kop ("gebouwd om HH:MM
  * NL-tijd (HH:MM UTC)") en machinaal in de cache-buster van de zelf-refresh, die de cijfers van
- * `generatedAt` bevat. De machinale vorm is compleet (datum + tijd + milliseconden), de leesbare
- * niet — daarom rekent de waarnemer met de eerste en gebruikt hij de tweede als kruiscontrole.
+ * `generatedAt` bevat. De refresh mag uitsluitend naar een van de vier vaste pagina-routes wijzen;
+ * sinds de multi-pagebouw ververst elke pagina naar zichzelf. De machinale vorm is compleet (datum
+ * + tijd + milliseconden), de leesbare niet — daarom rekent de waarnemer met de eerste en gebruikt
+ * hij de tweede als kruiscontrole.
  * Zo hangt de leeftijdstoets niet aan `status.json`, dat door de CDN uit een ándere publicatie kan
  * komen dan de pagina die ernaast wordt geserveerd.
  */
@@ -163,7 +165,9 @@ export function stempelUitHtml(html) {
   // weggevallen refresh-tag maskeren, en dat is precies het soort groen dat niets bewijst.
   const kopEind = s.indexOf('</head>');
   const kop = kopEind === -1 ? '' : s.slice(0, kopEind);
-  const busters = [...kop.matchAll(/url=\.\/\?v=(\d{17})\b/g)];
+  const busters = [...kop.matchAll(
+    /url=\.\/(?:(?:producten|stack-ticker|contentstroom)\.html)?\?v=(\d{17})\b/g,
+  )];
   const buster = busters.length === 1 ? busters[0] : null;
   const leesbaar = s.match(/class="stamp">Laatst bijgewerkt: <strong>gebouwd om (\d{2}):(\d{2}) NL-tijd \((\d{2}):(\d{2}) UTC\)<\/strong>/);
   const zicht = leesbaar
