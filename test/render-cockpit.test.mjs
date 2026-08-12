@@ -55,11 +55,27 @@ test('onbekende vlootlanes staan eenmaal geaggregeerd op de rustige hoofdpagina'
 
 test('Wacht op Richard bevat alleen expliciete owner-gates', () => {
   const result = ownerGates(snapshot);
-  assert.equal(result.unavailable.length, 0);
-  assert.equal(result.gates.length, 3, 'PR-merge, planning-ownerpoort en kanaalpost-ownerpoort');
-  assert.ok(result.gates.some((gate) => gate.label.includes('open pull request')));
+  assert.equal(result.unavailable.length, 1, 'non-draft zonder mergeability/checks blijft UNKNOWN');
+  assert.equal(result.gates.length, 2, 'alleen planning- en kanaalpost-ownerpoort zijn bewezen');
+  assert.equal(result.gates.some((gate) => gate.label.includes('open pull request')), false);
   assert.ok(result.gates.some((gate) => gate.label === 'Tijdstempel in Nederlandse tijd'));
   assert.ok(result.gates.some((gate) => gate.label.includes('integratiegaten')));
+  const html = renderCockpit(snapshot, { products, ticker });
+  assert.match(html, /mergebaarheid en vereiste checks zijn niet gemeten/);
+  assert.match(html, /2<\/span> <span class="badge bad">1 bron UNKNOWN/);
+});
+
+test('nul non-draft PRs is geen gate en een ongeldige telling blijft UNKNOWN', () => {
+  const empty = structuredClone(snapshot);
+  empty.pullRequests.totals.ready = 0;
+  assert.equal(ownerGates(empty).unavailable.length, 0);
+  assert.equal(ownerGates(empty).gates.some((gate) => gate.identity.startsWith('pull-requests:')), false);
+
+  const corrupt = structuredClone(snapshot);
+  corrupt.pullRequests.totals.ready = '2';
+  const result = ownerGates(corrupt);
+  assert.equal(result.unavailable.length, 1);
+  assert.match(result.unavailable[0], /geldige pull-requesttelling ontbreekt/);
 });
 
 test('een wachtstatus zonder owner, afhankelijkheid of akkoordactie is geen owner-gate', () => {
