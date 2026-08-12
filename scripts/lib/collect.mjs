@@ -20,6 +20,7 @@ const OWNER = validName(process.env.DASHBOARD_OWNER ?? 'rvanhooijdonk-png', 'DAS
 const CONTROL_REPO = validName(process.env.DASHBOARD_CONTROL_REPO ?? 'stack-control', 'DASHBOARD_CONTROL_REPO');
 const TRACKER_PATH = 'AUDIT-INPUT/stack-open-beslispunten.md';
 const GH_TIMEOUT_MS = 60_000;
+const PR_SEARCH_LIMIT = 1000;
 
 /**
  * Een bron die leesbaar is maar al weken niet is aangeraakt, is niet "actueel" — hij is oud.
@@ -239,15 +240,19 @@ export function pullRequestsFromSearchResult(res) {
     repositories: [...byRepo.values()].sort((a, b) => b.open - a.open),
     hiddenRepositories: hidden,
     totals,
-    evidence: evidence('GitHub search API', `owner:${OWNER} state:open`, 'VERIFIED_CURRENT',
-      `https://github.com/${OWNER}`),
+    evidence: evidence('GitHub search API', `owner:${OWNER} state:open`,
+      open.length >= PR_SEARCH_LIMIT ? 'UNVERIFIED' : 'VERIFIED_CURRENT',
+      `https://github.com/${OWNER}`,
+      open.length >= PR_SEARCH_LIMIT
+        ? `PR-zoekresultaat raakt de zoeklimiet van ${PR_SEARCH_LIMIT}; de telling is zichtbaar maar niet bewezen compleet.`
+        : null),
   };
 }
 
 /** Org-brede open PR's, gegroepeerd per repo. Vereist een read-token met org-bereik. */
 export async function collectPullRequests() {
   const res = await gh([
-    'search', 'prs', '--owner', OWNER, '--state', 'open', '--limit', '1000',
+    'search', 'prs', '--owner', OWNER, '--state', 'open', '--limit', String(PR_SEARCH_LIMIT),
     '--json', 'repository,isDraft',
   ]);
   return pullRequestsFromSearchResult(res);

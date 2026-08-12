@@ -35,6 +35,23 @@ test('alleen een geslaagde resultatenlijst opent de PR-bron', () => {
   assert.equal(onleesbaar.evidence.trust, 'UNVERIFIED');
 });
 
+test('een PR-resultaat op de zoeklimiet is zichtbaar maar niet bewezen compleet', () => {
+  const opLimiet = pullRequestsFromSearchResult({
+    ok: true,
+    data: Array.from({ length: 1000 }, () => ({ repository: { name: 'intern' }, isDraft: false })),
+  });
+  assert.equal(opLimiet.available, true);
+  assert.deepEqual(opLimiet.totals, { open: 1000, draft: 0, ready: 1000 });
+  assert.equal(opLimiet.evidence.trust, 'UNVERIFIED');
+  assert.match(opLimiet.evidence.error, /zoeklimiet|niet bewezen compleet/i);
+
+  const onderLimiet = pullRequestsFromSearchResult({
+    ok: true,
+    data: Array.from({ length: 999 }, () => ({ repository: { name: 'intern' }, isDraft: true })),
+  });
+  assert.equal(onderLimiet.evidence.trust, 'VERIFIED_CURRENT');
+});
+
 // --- Bevinding uit de derde review (Codex, 23-07-2026): de leeftijdsgrens lekte een dag ---
 
 test('veertien dagen is veertien dagen, niet bijna vijftien', () => {
