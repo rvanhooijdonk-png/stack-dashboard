@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "runtime-feed.schema.json",
+  "title": "RuntimeFeedRawV1",
+  "description": "Gesanitiseerde runtimefeed die CODEX2 levert (control-plane: planner/watcher/supervisor, wachtrijen, actoren, accounts). Dit schema keurt uitsluitend de VORM van het contract — inhoudelijke regels (vervaldrempels, dubbele ID's, negatieve tellers, toekomstige tijdstempels, secret-achtige tekst) zitten in scripts/lib/runtime-feed.mjs, niet hier. Elk trefwoord buiten scripts/lib/validate.mjs se ondersteunde subset (zie het KNOWN-blok daar) is een schemafout, geen stilzwijgende no-op. additionalProperties: false staat overal — één onbekend veld ergens in de boom keurt de héle feed af (SCHEMA_ONBEKEND), precies zoals de startopdracht eist: \"onbekende velden fail-closed ... volgens één vast contract\".",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["measured_at", "control_host", "processes", "queue_counts", "actors", "accounts"],
+  "properties": {
+    "measured_at": {
+      "type": ["string", "null"],
+      "description": "ISO-8601-tijdstempel van de meting, met expliciete zone (Z of ±HH:MM). null = onbekend meetmoment (mag, wordt UNKNOWN)."
+    },
+    "control_host": {
+      "type": ["string", "null"],
+      "description": "Opaque host-/machine-ID van de control-plane-machine. Geen hostname-validatie hier — vrije tekst gaat door de SANITIZE-GATE in runtime-feed.mjs."
+    },
+    "processes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["planner", "watcher", "supervisor"],
+      "properties": {
+        "planner": { "$ref": "#/$defs/Process" },
+        "watcher": { "$ref": "#/$defs/Process" },
+        "supervisor": { "$ref": "#/$defs/Process" }
+      }
+    },
+    "queue_counts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/QueueCount" }
+    },
+    "actors": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Actor" }
+    },
+    "accounts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Account" }
+    }
+  },
+  "$defs": {
+    "Process": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["pid", "boot_id", "loaded_sha", "heartbeat"],
+      "properties": {
+        "pid": { "type": ["integer", "null"] },
+        "boot_id": { "type": ["string", "null"] },
+        "loaded_sha": { "type": ["string", "null"] },
+        "heartbeat": { "type": ["string", "null"] }
+      }
+    },
+    "QueueCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "count"],
+      "properties": {
+        "name": { "type": "string" },
+        "count": { "type": "integer" }
+      }
+    },
+    "CurrentTask": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["task_id", "worker_started", "last_heartbeat"],
+      "properties": {
+        "task_id": { "type": "string" },
+        "worker_started": { "type": ["string", "null"] },
+        "last_heartbeat": { "type": ["string", "null"] }
+      }
+    },
+    "ClosedResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "closed_at", "result"],
+      "properties": {
+        "task_id": { "type": "string" },
+        "closed_at": { "type": ["string", "null"] },
+        "result": { "type": "string", "enum": ["OK", "FAILED", "UNKNOWN"] }
+      }
+    },
+    "Incident": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["incident_id", "opened_at", "severity", "note"],
+      "properties": {
+        "incident_id": { "type": "string" },
+        "opened_at": { "type": ["string", "null"] },
+        "severity": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+        "note": { "type": ["string", "null"] }
+      }
+    },
+    "Actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actor_id", "current_task", "closed", "incidents"],
+      "properties": {
+        "actor_id": { "type": "string" },
+        "current_task": { "$ref": "#/$defs/CurrentTask" },
+        "closed": { "type": "array", "items": { "$ref": "#/$defs/ClosedResult" } },
+        "incidents": { "type": "array", "items": { "$ref": "#/$defs/Incident" } }
+      }
+    },
+    "Account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "label", "status", "last_seen"],
+      "properties": {
+        "account_id": { "type": "string" },
+        "label": { "type": ["string", "null"] },
+        "status": { "type": "string", "enum": ["OK", "DEGRADED", "DOWN", "UNKNOWN"] },
+        "last_seen": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "measured_at": "2026-08-12T06:00:00Z",
+  "control_host": "control-host-01",
+  "processes": {
+    "planner": { "pid": 101, "boot_id": "boot-old", "loaded_sha": "deadbeef0000", "heartbeat": "2026-08-12T06:00:00Z" },
+    "watcher": { "pid": 102, "boot_id": "boot-old", "loaded_sha": "deadbeef0000", "heartbeat": "2026-08-12T05:59:00Z" },
+    "supervisor": null
+  },
+  "queue_counts": [{ "name": "planner_queue", "count": 12 }],
+  "actors": [
+    { "actor_id": "actor-alpha", "current_task": null, "closed": [], "incidents": [] }
+  ],
+  "accounts": [
+    { "account_id": "acct-mini", "label": "Mac Mini", "status": "UNKNOWN", "last_seen": "2026-08-12T06:00:00Z" }
+  ]
+}

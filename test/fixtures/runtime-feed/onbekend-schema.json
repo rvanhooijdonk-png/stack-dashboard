@@ -1,0 +1,9 @@
+{
+  "measured_at": "2026-08-12T11:59:00Z",
+  "control_host": "control-host-01",
+  "processes": { "planner": null, "watcher": null, "supervisor": null },
+  "queue_counts": [],
+  "actors": [],
+  "accounts": [],
+  "extra_field": "verrassing"
+}

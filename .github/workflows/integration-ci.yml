@@ -1,0 +1,100 @@
+name: integration-ci
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  runtime-feed-integration:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+
+      - name: Volledige testsuite
+        run: node --test --test-reporter=tap
+
+      - name: Diffcheck
+        run: git diff --check origin/${{ github.base_ref }}...HEAD
+
+      - name: Productiebouw zonder producer blijft fail-closed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/build.mjs
+          node scripts/check-public.mjs
+          grep -F 'UNKNOWN — runtimefeed niet beschikbaar of niet contractgeldig.' public/index.html
+          if grep -F 'IN UITVOERING' public/index.html; then
+            echo '::error::productiebouw zonder feed toont actief werk'
+            exit 1
+          fi
+
+      - name: Verse synthetische previewfeed maken
+        env:
+          PREVIEW_FEED: ${{ runner.temp }}/runtime-feed-preview.json
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const raw = JSON.parse(fs.readFileSync("test/fixtures/runtime-feed/volledig-gezond.json", "utf8"));
+            const now = Date.now();
+            const iso = (delta) => new Date(now + delta).toISOString();
+            raw.measured_at = iso(-30_000);
+            for (const process of Object.values(raw.processes)) if (process) process.heartbeat = iso(-45_000);
+            raw.actors[0].current_task.worker_started = iso(-300_000);
+            raw.actors[0].current_task.last_heartbeat = iso(-30_000);
+            for (const actor of raw.actors) for (const item of actor.closed) item.closed_at = iso(-60_000);
+            for (const account of raw.accounts) account.last_seen = iso(-30_000);
+            fs.writeFileSync(process.env.PREVIEW_FEED, JSON.stringify(raw));
+          '
+
+      - name: Previewbouw en owner-smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW_FEED: ${{ runner.temp }}/runtime-feed-preview.json
+        run: |
+          node scripts/build.mjs --out preview --runtime-feed "$PREVIEW_FEED" --preview
+          node --input-type=module -e 'import { assertPublishFiles } from "./scripts/lib/publish-files.mjs"; await assertPublishFiles("preview")'
+          grep -F 'TESTPREVIEW' preview/index.html
+          grep -F 'IN UITVOERING · task-100' preview/index.html
+          grep -F 'actor-alpha' preview/index.html
+          grep -F 'WORKER_STARTED' preview/index.html
+          grep -F 'heartbeat' preview/index.html
+          # Onafhankelijke publicatiepoort voor alle expliciete Unix-, tilde-, drive- en UNC-vormen
+          # uit Dashboard-review B-1. Houd deze naast de canonieke sanitizer en zijn unittests.
+          if grep -E '/(Users|home|root|workspace|github/workspace|private|etc|var|tmp|opt|usr|Library|Volumes|Applications|mnt|srv)/|~/|[A-Za-z]:\\|\\\\' preview/index.html; then
+            echo '::error::preview bevat een lokaal pad'
+            exit 1
+          fi
+
+      - name: Gitleaks ophalen en checksum verifiëren
+        run: |
+          curl -sSL --fail -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
+
+      - name: Privacy- en secretscan
+        run: |
+          ./gitleaks git --redact --no-banner
+          ./gitleaks dir public --redact --no-banner
+          ./gitleaks dir preview --redact --no-banner
+
+      - name: Publieke, niet-live preview als Actions-artefact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dashboard-runtime-preview
+          path: preview
+          if-no-files-found: error
+          include-hidden-files: true
