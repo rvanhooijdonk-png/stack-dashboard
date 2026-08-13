@@ -40,10 +40,16 @@ test('een synthetische preview is in de pagina zelf ondubbelzinnig als niet-live
 });
 
 test('elke statische pagina ververst naar zichzelf en niet terug naar de cockpit', () => {
-  assert.match(renderCockpit(snapshot, { products, ticker }), /content="900; url=\.\/\?v=\d+"/);
+  assert.match(renderCockpit(snapshot, { products, ticker }), /content="10; url=\.\/\?v=\d+"/);
   assert.match(renderProducts(snapshot, products), /content="900; url=\.\/producten\.html\?v=\d+"/);
   assert.match(renderTicker(snapshot, ticker), /content="900; url=\.\/stack-ticker\.html\?v=\d+"/);
   assert.match(renderHtml(snapshot, { pagePath: './contentstroom.html' }), /content="900; url=\.\/contentstroom\.html\?v=\d+"/);
+});
+
+test('cockpit refresh is standaard ≤10s en de vloer is 5s, niet 60s', () => {
+  assert.match(renderCockpit(snapshot, { products, ticker }), /content="10; /);
+  assert.match(renderCockpit(snapshot, { products, ticker, refreshSeconds: 3 }), /content="5; /);
+  assert.match(renderCockpit(snapshot, { products, ticker, refreshSeconds: 4000 }), /content="3600; /);
 });
 
 test('ontbrekende planning is UNKNOWN en nooit groen of een nulstand', () => {
@@ -158,8 +164,12 @@ test('Nu actief wordt niet groen zonder task-id, actor, WORKER_STARTED en latere
   assert.equal(state.incomplete, 1);
   const html = renderCockpit(snapshot, { products, ticker, runtimeFeed: runtimeIncomplete });
   const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
-  assert.doesNotMatch(section, /dot ok/);
+  // "dot ok" mag hier wél voorkomen voor een AFGEROND OK-taak uit closed[] (bewezen terminaal
+  // bewijs) — alleen een IN UITVOERING-claim mag nooit groen zijn zonder het volledige bewijs.
+  assert.doesNotMatch(section, /IN UITVOERING/);
   assert.match(section, /task-id, actor, WORKER_STARTED of latere verse heartbeat ontbreekt/);
+  assert.match(section, /ONBEKEND · task-100/);
+  assert.match(section, /taak heeft geen worker_started/);
 });
 
 test('Nu actief wordt pas groen met geordend en vers volledig bewijs', () => {
@@ -271,6 +281,126 @@ test('ticker met ontbrekende, lege of ongeldige bron is UNKNOWN en verzint geen 
   assert.deepEqual(lifecycleEvents(empty), { freshness: 'UNKNOWN', events: [] });
   const invalid = structuredClone(snapshot); invalid.kanaalpost.rows = [{ tab: 'X', onderwerp: 'Y', status: 'AFGEROND', datum: '2026-02-30 10:00' }];
   assert.deepEqual(lifecycleEvents(invalid), { freshness: 'UNKNOWN', events: [] });
+});
+
+test('een stale feed toont de laatst bekende taakdata nog steeds — VEROUDERD, niet weggeveegd', () => {
+  const raw = structuredClone(runtimeRaw); raw.actors[0].current_task = null;
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date('2026-08-12T13:00:00Z') });
+  assert.equal(runtimeFeed.freshness, 'STALE');
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
+  assert.match(section, /Runtime freshness: STALE/);
+  assert.doesNotMatch(section, /IN UITVOERING/);
+});
+
+test('een op zichzelf verse heartbeat op een verouderde feed toont VEROUDERD met het volledige task-bewijs intact, niet als opaque teller', () => {
+  const raw = structuredClone(runtimeRaw); raw.measured_at = '2026-08-12T10:00:00Z';
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  assert.equal(runtimeFeed.freshness, 'STALE');
+  assert.equal(runtimeFeed.actors[0].current_task.last_heartbeat.freshness, 'CURRENT');
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
+  assert.doesNotMatch(section, /IN UITVOERING/);
+  assert.match(section, /VEROUDERD · task-100/);
+  assert.match(section, /actor-alpha/);
+  assert.match(section, /heartbeat 2026-08-12T11:58:00Z/);
+  assert.match(section, /metingsklok van de hele feed is veroudered/);
+});
+
+test('afgeronde taken (OK, FAILED, UNKNOWN) verschijnen als terminale bewijsregels met evidence-pointer', () => {
+  const raw = structuredClone(runtimeRaw);
+  raw.actors[0].closed.push(
+    { task_id: 'task-097', closed_at: '2026-08-12T11:30:00Z', result: 'FAILED' },
+    { task_id: 'task-096', closed_at: '2026-08-12T11:20:00Z', result: 'UNKNOWN' },
+  );
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
+  assert.match(section, /AFGEROND OK · task-099/);
+  assert.match(section, /AFGEROND FAILED · task-097/);
+  assert.match(section, /AFGEROND UNKNOWN · task-096/);
+  assert.match(section, /bewijs: meting 2026-08-12T11:59:00Z op control-host-01/);
+});
+
+test('bewezen actief werk krijgt ook een evidence-pointer en een leeftijdsaanduiding op de heartbeat', () => {
+  // Leeftijd wordt vast berekend t.o.v. snapshot.generatedAt (het bouwmoment) — zelfde klok als
+  // build.mjs aan loadRuntimeFeed geeft. Hier expliciet uitgelijnd zodat de leeftijd zinvol is.
+  const raw = structuredClone(runtimeRaw);
+  raw.measured_at = snapshot.generatedAt;
+  raw.actors[0].current_task.worker_started = '2026-07-23T11:50:00Z';
+  raw.actors[0].current_task.last_heartbeat = '2026-07-23T11:58:00Z';
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date(snapshot.generatedAt) });
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
+  assert.match(section, /heartbeat 2026-07-23T11:58:00Z \(2m geleden\)/);
+  assert.match(section, new RegExp(`bewijs: meting ${snapshot.generatedAt} op control-host-01`));
+});
+
+test('dubbele task-pickup (twee actoren, dezelfde task_id) verschijnt als incident, nooit als twee actieve werkers', async () => {
+  const raw = JSON.parse(await readFile(join(ROOT, 'test/fixtures/runtime-feed/conflicterende-status.json'), 'utf8'));
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  assert.equal(activeWork(runtimeFeed).active.length, 0);
+  const activeSection = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
+  assert.doesNotMatch(activeSection, /IN UITVOERING/);
+  const incidentSection = html.slice(html.indexOf('id="incidenten"'), html.indexOf('id="accountcapaciteit"'));
+  assert.match(incidentSection, /Dubbele task-ID · task-shared/);
+});
+
+test('dubbele actor-ID verschijnt als incident op de rustige hoofdpagina', async () => {
+  const raw = JSON.parse(await readFile(join(ROOT, 'test/fixtures/runtime-feed/dubbele-actors.json'), 'utf8'));
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  const incidentSection = html.slice(html.indexOf('id="incidenten"'), html.indexOf('id="accountcapaciteit"'));
+  assert.match(incidentSection, /Dubbele actor-ID · actor-alpha/);
+});
+
+test('een actor-gemelde incident wordt op de hoofdpagina getoond, geredigeerd en zonder gefabriceerd percentage', () => {
+  const raw = structuredClone(runtimeRaw);
+  raw.actors[0].incidents.push({
+    incident_id: 'inc-1', opened_at: '2026-08-12T11:45:00Z', severity: 'HIGH', note: 'dubbele opstart gedetecteerd',
+  });
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  const incidentSection = html.slice(html.indexOf('id="incidenten"'), html.indexOf('id="accountcapaciteit"'));
+  assert.match(incidentSection, /actor-alpha · inc-1/);
+  assert.match(incidentSection, /HIGH/);
+  assert.match(incidentSection, /dubbele opstart gedetecteerd/);
+});
+
+test('hostile task-id/actor-id/incidentnotitie in de nieuwe VEROUDERD-, AFGEROND- en incidentregels wordt geëscaped, nooit als markup', () => {
+  const raw = structuredClone(runtimeRaw);
+  raw.actors[0].current_task.worker_started = null;
+  raw.actors[0].current_task.task_id = '<img src=x onerror=alert(1)>';
+  raw.actors[0].closed[0].task_id = '<svg onload=alert(2)>';
+  raw.actors[0].incidents.push({
+    incident_id: '<b>i</b>', opened_at: '2026-08-12T11:45:00Z', severity: 'LOW', note: '<script>alert(3)</script>',
+  });
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.doesNotMatch(html, /<svg onload/);
+  assert.doesNotMatch(html, /<script>alert/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(html, /&lt;svg onload=alert\(2\)&gt;/);
+  assert.match(html, /&lt;script&gt;alert\(3\)&lt;\/script&gt;/);
+});
+
+test('absolute lokale paden in evidence-relevante velden (control_host) worden vóór weergave geredigeerd', () => {
+  const raw = structuredClone(runtimeRaw);
+  raw.control_host = '/Users/richard/geheim';
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  assert.equal(html.includes('/Users/'), false);
+});
+
+test('een leeg actorenoverzicht laat exact nul onbewezen actieve werkers zien — geen enkele fictieve IN UITVOERING-regel', () => {
+  const raw = structuredClone(runtimeRaw); raw.actors = [];
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  assert.equal(activeWork(runtimeFeed).active.length, 0);
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
+  assert.doesNotMatch(section, /IN UITVOERING/);
 });
 
 test('afsprakenspoor blijft op de technische drill-down zichtbaar zonder afspraaktekst', () => {

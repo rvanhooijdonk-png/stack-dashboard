@@ -64,6 +64,12 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  */
 const CONTRACT_VERSION = '2.6.0';
 const REFRESH_SECONDS = 900;
+/** Alleen de cockpit ("Nu actief") is de real-time waarheidslaag; producten/ticker/drill-down
+ * blijven op REFRESH_SECONDS. Let op: GitHub Pages serveert met cache-control max-age=600 —
+ * een 10s clientrefresh is dus noodzakelijk maar niet voldoende voor end-to-end 10s-versheid
+ * zolang de statische build zelf niet even vaak met een verse --runtime-feed herdraait; dat is
+ * een publicatiepijplijnvraag buiten deze taak, niet een renderergat. */
+const COCKPIT_REFRESH_SECONDS = 10;
 /** Een titel is een naam, geen alinea. Langer = iemand plakt iets waar het niet hoort. */
 const MAX_TITLE = 80;
 /** Een raming is een duur. Alles wat daar niet op lijkt is status- of proza-tekst. */
@@ -451,7 +457,7 @@ async function main() {
   const runtimeFeed = assertPublishable(runtimeResult, { strict }).snapshot;
 
   const cockpitHtml = renderCockpit(snapshot, {
-    products, ticker, runtimeFeed, refreshSeconds: REFRESH_SECONDS,
+    products, ticker, runtimeFeed, refreshSeconds: COCKPIT_REFRESH_SECONDS,
     preview: process.argv.includes('--preview'),
   });
   const productsHtml = renderProducts(snapshot, products, { refreshSeconds: REFRESH_SECONDS });

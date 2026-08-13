@@ -1,6 +1,7 @@
 /** Rustige cockpit en drill-downs; pure renderers op reeds gesaneerde modellen. */
 import { esc, num, buildStamp, titelStamp, STYLE, TRUST_LABEL } from './render.mjs';
 import { ALARM_KOP } from './waarnemer.mjs';
+import { CODES } from './runtime-feed.mjs';
 
 const PAGE_PATHS = new Set(['./', './producten.html', './stack-ticker.html']);
 const SOURCE_NAMES = {
@@ -9,7 +10,10 @@ const SOURCE_NAMES = {
 };
 
 const page = (s, title, body, nav, refreshSeconds = 900, pagePath = './') => {
-  const refresh = Math.min(3600, Math.max(60, Math.trunc(Number(refreshSeconds)) || 900));
+  // Vloer op 5s (niet 60s): de cockpit heeft een real-time waarheidslaag nodig (≤10s standaard
+  // refresh); producten/ticker/drill-down blijven zelf op 900s en zijn dus onveranderd door deze
+  // verlaagde vloer. Plafond blijft 3600s.
+  const refresh = Math.min(3600, Math.max(5, Math.trunc(Number(refreshSeconds)) || 900));
   const bust = String(s.generatedAt).replace(/[^0-9]/g, '') || '0';
   const refreshPath = PAGE_PATHS.has(pagePath) ? pagePath : './';
   return `<!doctype html>
@@ -124,17 +128,92 @@ function renderOwnerGates(snapshot) {
   return `<section id="wacht-op-richard" class="card wide"><h2>Wacht op Richard <span class="badge warn">${num(gates.length)}</span>${warnings.length ? ` <span class="badge bad">${num(warnings.length)} bron${warnings.length === 1 ? '' : 'nen'} UNKNOWN</span>` : ''}</h2>${body}</section>`;
 }
 
-function renderActive(runtimeFeed) {
+const AGE_UNITS = [['d', 86400000], ['u', 3600000], ['m', 60000], ['s', 1000]];
+/** Vaste leeftijd t.o.v. het bouwmoment (`snapshot.generatedAt`) — bewust geen live "x geleden"
+ * in JS: dezelfde reden als `render.mjs` se `buildStamp` (een no-JS pagina mag niet vanzelf "oud"
+ * gaan lezen door verstreken kloktijd sinds laden). Elke refresh van de statische meta-tag herrekent
+ * dit opnieuw vanaf een vers bouwmoment. */
+function ageSince(iso, nowMs) {
+  if (typeof iso !== 'string' || !Number.isFinite(nowMs)) return null;
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms) || nowMs < ms) return null;
+  const delta = nowMs - ms;
+  for (const [unit, size] of AGE_UNITS) if (delta >= size) return `${Math.floor(delta / size)}${unit}`;
+  return '0s';
+}
+
+const REASON_LABEL = {
+  ...CODES,
+  FEED_VEROUDERD: 'de metingsklok van de hele feed is veroudered — een losse verse heartbeat bewijst geen huidige activiteit',
+  GEREDIGEERDE_IDENTITEIT: 'actor- of task-id is voor publicatie geredigeerd — geen zichtbaar identiteitsbewijs',
+  DUBBELE_IDENTITEIT: 'twee of meer regels delen dezelfde identiteit — niet eenduidig toe te wijzen',
+};
+
+/** Bewijspointer met uitsluitend al-gepubliceerde, al-gesaneerde velden — geen nieuwe URL verzonnen. */
+function evidencePointer(runtimeFeed) {
+  const when = typeof runtimeFeed.measured_at?.value === 'string' ? runtimeFeed.measured_at.value : 'onbekend meetmoment';
+  const host = typeof runtimeFeed.control_host === 'string' && runtimeFeed.control_host ? ` op ${runtimeFeed.control_host}` : '';
+  return `bewijs: meting ${when}${host}`;
+}
+
+/**
+ * Classificeert één actor.current_task voor weergave BUITEN de al-bewezen ACTIVE-lijst
+ * (`activeWork()`, ongewijzigd gelaten). STALE dekt twee losse paden: de heartbeat zelf is
+ * verouderd (`active_reason==='VEROUDERD'`), óf de heartbeat is op zichzelf vers maar de hele feed
+ * is dat niet (`task.active===true` bij `runtimeFeed.freshness!=='CURRENT'`) — exact het scenario
+ * uit de bestaande test "een stale feed kan met een los verse heartbeat geen actief werk claimen".
+ */
+function classifyCurrentTask(runtimeFeed, actor, task) {
+  if (actor.identity === 'CONFLICT' || task.identity === 'CONFLICT') return { state: 'CONFLICT', code: 'DUBBELE_IDENTITEIT' };
+  const actorId = typeof actor.actor_id === 'string' ? actor.actor_id.trim() : '';
+  const taskId = typeof task.task_id === 'string' ? task.task_id.trim() : '';
+  const visibleIdentity = actorId && taskId && !actorId.includes('[REDACTED') && !taskId.includes('[REDACTED');
+  if (task.active === true) {
+    if (!visibleIdentity) return { state: 'UNKNOWN', code: 'GEREDIGEERDE_IDENTITEIT' };
+    return runtimeFeed.freshness === 'CURRENT' ? { state: 'ACTIVE', code: null } : { state: 'STALE', code: 'FEED_VEROUDERD' };
+  }
+  if (task.active_reason === 'VEROUDERD') return { state: 'STALE', code: 'VEROUDERD' };
+  return { state: 'UNKNOWN', code: task.active_reason ?? (visibleIdentity ? null : 'GEREDIGEERDE_IDENTITEIT') };
+}
+
+function renderActive(runtimeFeed, nowMs) {
   const state = activeWork(runtimeFeed);
   if (!state.available) return '<section id="nu-actief" class="card"><h2>Nu actief</h2><p class="unknown">UNKNOWN — runtimefeed niet beschikbaar of niet contractgeldig.</p></section>';
-  const items = state.active.map((task) => `<li><span class="dot ok"></span><span class="repo">IN UITVOERING · ${esc(task.taskId)}</span> <span class="muted">${esc(task.actor)} · WORKER_STARTED ${esc(task.startedAt)} · heartbeat ${esc(task.heartbeatAt)}</span></li>`);
+  const evidence = evidencePointer(runtimeFeed);
+  const items = state.active.map((task) => {
+    const age = ageSince(task.heartbeatAt, nowMs);
+    return `<li><span class="dot ok"></span><span class="repo">IN UITVOERING · ${esc(task.taskId)}</span> <span class="muted">${esc(task.actor)} · WORKER_STARTED ${esc(task.startedAt)} · heartbeat ${esc(task.heartbeatAt)}${age ? ` (${esc(age)} geleden)` : ''} · ${esc(evidence)}</span></li>`;
+  });
   const incomplete = state.incomplete
     ? `<p class="unknown evidence-warning">${num(state.incomplete)} kandidaat/kandidaten niet als actief getoond: task-id, actor, WORKER_STARTED of latere verse heartbeat ontbreekt.</p>` : '';
+
+  const staleOrUnknown = [];
+  const terminal = [];
+  for (const actor of runtimeFeed.actors ?? []) {
+    const task = actor.current_task;
+    if (task) {
+      const classification = classifyCurrentTask(runtimeFeed, actor, task);
+      if (classification.state === 'STALE' || classification.state === 'UNKNOWN') {
+        const hbAge = ageSince(task.last_heartbeat?.value, nowMs);
+        const label = classification.state === 'STALE' ? 'VEROUDERD' : 'ONBEKEND';
+        const dot = classification.state === 'STALE' ? 'warn' : 'bad';
+        const reason = REASON_LABEL[classification.code] ?? classification.code ?? 'onvoldoende bewijs';
+        staleOrUnknown.push(`<li><span class="dot ${dot}"></span><span class="repo">${label} · ${esc(task.task_id)}</span> <span class="unknown">${esc(actor.actor_id)}${task.last_heartbeat?.value ? ` · heartbeat ${esc(task.last_heartbeat.value)}${hbAge ? ` (${esc(hbAge)} geleden)` : ''}` : ''} · ${esc(reason)} · ${esc(evidence)}</span></li>`);
+      }
+    }
+    for (const closed of actor.closed ?? []) {
+      const dot = closed.result === 'OK' ? 'ok' : closed.result === 'FAILED' ? 'bad' : 'warn';
+      const age = ageSince(closed.closed_at?.value, nowMs);
+      terminal.push(`<li><span class="dot ${dot}"></span><span class="repo">AFGEROND ${esc(closed.result)} · ${esc(closed.task_id)}</span> <span class="muted">${esc(actor.actor_id)}${closed.closed_at?.value ? ` · ${esc(closed.closed_at.value)}${age ? ` (${esc(age)} geleden)` : ''}` : ''} · ${esc(evidence)}</span></li>`);
+    }
+  }
+
   const processFreshness = Object.entries(runtimeFeed.processes ?? {})
     .map(([name, process]) => `${name}: ${process?.heartbeat?.freshness ?? 'UNKNOWN'}`).join(' · ');
   const queues = (runtimeFeed.queue_counts ?? [])
     .map((queue) => `${queue.name}: ${queue.valid ? num(queue.count) : 'UNKNOWN'}`).join(' · ');
-  return `<section id="nu-actief" class="card"><h2>Nu actief</h2><p class="${runtimeFeed.freshness === 'CURRENT' ? 'muted' : 'unknown'}">Runtime freshness: ${esc(runtimeFeed.freshness)}${processFreshness ? ` · ${esc(processFreshness)}` : ''}</p>${list(items, 'Geen werk met volledig task-id/actor/WORKER_STARTED/heartbeatbewijs.')}${incomplete}${queues ? `<p class="muted">Wachtrijen · ${esc(queues)}</p>` : ''}</section>`;
+  const feedAge = ageSince(runtimeFeed.measured_at?.value, nowMs);
+  return `<section id="nu-actief" class="card"><h2>Nu actief</h2><p class="${runtimeFeed.freshness === 'CURRENT' ? 'muted' : 'unknown'}">Runtime freshness: ${esc(runtimeFeed.freshness)}${feedAge ? ` · meting ${esc(feedAge)} geleden` : ''}${processFreshness ? ` · ${esc(processFreshness)}` : ''}</p>${list(items, 'Geen werk met volledig task-id/actor/WORKER_STARTED/heartbeatbewijs.')}${incomplete}${staleOrUnknown.length ? `<ul class="lights">${staleOrUnknown.join('')}</ul>` : ''}${terminal.length ? `<h3>Recent afgerond</h3><ul class="lights">${terminal.join('')}</ul>` : ''}${queues ? `<p class="muted">Wachtrijen · ${esc(queues)}</p>` : ''}</section>`;
 }
 
 function renderAccounts(runtimeFeed) {
@@ -143,7 +222,36 @@ function renderAccounts(runtimeFeed) {
   return `<section id="accountcapaciteit" class="card"><h2>Accountcapaciteit</h2>${list(rows, 'UNKNOWN — geen gevalideerde accountmetingen.')}</section>`;
 }
 
-function incidentFacts(snapshot) {
+/** Dubbele identiteit en actor-gemelde incidenten uit de runtimefeed als incidentregels —
+ * "duplicate pickup must show as an incident, not two active workers". */
+function runtimeIncidentFacts(runtimeFeed) {
+  if (runtimeFeed?.available !== true) return [];
+  const facts = [];
+  for (const actor of runtimeFeed.actors ?? []) {
+    if (actor.identity === 'CONFLICT') {
+      facts.push({
+        identity: `runtime-conflict:actor:${actor.actor_id}`, label: `Dubbele actor-ID · ${actor.actor_id}`,
+        detail: 'twee of meer actoren delen deze identiteit; telt niet als bewezen actief werk',
+      });
+    }
+    const task = actor.current_task;
+    if (task && task.identity === 'CONFLICT') {
+      facts.push({
+        identity: `runtime-conflict:task:${task.task_id}`, label: `Dubbele task-ID · ${task.task_id}`,
+        detail: `${actor.actor_id} · telt niet als bewezen actief werk`,
+      });
+    }
+    for (const incident of actor.incidents ?? []) {
+      facts.push({
+        identity: `runtime-incident:${incident.incident_id}`, label: `${actor.actor_id} · ${incident.incident_id}`,
+        detail: `${incident.severity} · geopend ${incident.opened_at?.value ?? 'onbekend'} (${incident.opened_at?.freshness ?? 'UNKNOWN'})${incident.note ? ` · ${incident.note}` : ''}`,
+      });
+    }
+  }
+  return facts;
+}
+
+function incidentFacts(snapshot, runtimeFeed) {
   const facts = (snapshot.sources ?? []).filter((x) => x.trust !== 'VERIFIED_CURRENT').map((x) => ({
     identity: `source:${x.key}`, label: SOURCE_NAMES[x.key] ?? x.key, detail: TRUST_LABEL[x.trust] ?? x.trust,
   }));
@@ -156,23 +264,25 @@ function incidentFacts(snapshot) {
   for (const light of snapshot.ci?.available ? snapshot.ci.lights ?? [] : []) {
     if (light.state === 'ROOD') facts.push({ identity: `ci:${light.repository}`, label: light.repository, detail: 'CI rood' });
   }
+  facts.push(...runtimeIncidentFacts(runtimeFeed));
   const seen = new Set();
   return facts.filter((fact) => !seen.has(fact.identity) && seen.add(fact.identity));
 }
 
 export function renderCockpit(snapshot, {
-  products, ticker, runtimeFeed, refreshSeconds = 900, preview = false,
+  products, ticker, runtimeFeed, refreshSeconds = 10, preview = false,
 } = {}) {
   const today = String(snapshot.generatedAt).slice(0, 10);
   const delivered = snapshot.planning?.available ? snapshot.planning.features.filter((f) => f.status === 'live' && f.oplevering?.date === today) : [];
-  const incidents = incidentFacts(snapshot);
+  const nowMs = Date.parse(snapshot.generatedAt);
+  const incidents = incidentFacts(snapshot, runtimeFeed);
   const productCards = (products?.products ?? []).map((p) => `<a class="card product" href="./producten.html#${esc(p.id)}"><h3>${esc(p.name)}</h3><span class="metric unknown">UNKNOWN</span><p class="muted">${num(p.denominator)} canonieke features · geen gekoppeld featurebewijs</p></a>`);
   const events = (ticker?.events ?? []).slice(0, 3).map((e) => `<li><span class="tag">${esc(e.lifecycle)}</span> <span class="repo">${esc(e.product)}</span> <span class="muted">${esc(e.at)}</span></li>`);
   const previewBanner = preview
     ? '<p class="unknown evidence-warning"><strong>TESTPREVIEW</strong> — synthetische runtimefeed; dit is geen live stand.</p>'
     : '';
   const body = `${previewBanner}${renderOwnerGates(snapshot)}
-${renderActive(runtimeFeed)}
+${renderActive(runtimeFeed, nowMs)}
 <section id="vandaag-geleverd" class="card"><h2>Vandaag geleverd</h2>${snapshot.planning?.available ? list(delivered.map((f) => `<li>${featureName(f)}</li>`), 'Niets met een gevalideerde opleverdatum van vandaag.') : '<p class="unknown">UNKNOWN — planningbron niet beschikbaar.</p>'}</section>
 <section id="producten" class="card wide"><h2>Producten</h2><div class="product-grid">${productCards.join('')}</div></section>
 <section id="incidenten" class="card"><h2>Incidenten</h2>${incidents.length ? `<ul class="lights incident-list">${incidents.map((x) => `<li><span class="repo">${esc(x.label)}</span> <span class="unknown">${esc(x.detail)}</span></li>`).join('')}</ul>` : '<p class="empty">Geen gevalideerde bron-, vloot- of CI-incidenten.</p>'}</section>
