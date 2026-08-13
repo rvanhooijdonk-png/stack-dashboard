@@ -312,15 +312,17 @@ test('markup uit een kanaalpost-rij wordt geëscaped, niet uitgevoerd', () => {
 
 // --- de echte spiegel in deze repo is leesbaar met deze parser ---
 
-test('de meegeleverde spiegel levert rijen op — de plaat leest een bestaand bestand', async () => {
+test('de meegeleverde spiegel levert rijen op en houdt een lokaal systeempad fail-closed tegen', async () => {
   const tekst = await readFile(join(ROOT, 'data/kanaalpost-publiek.md'), 'utf8');
   const bronDto = kanaalpostUitTekst(tekst);
   assert.equal(bronDto.available, true, 'de spiegel in deze repo hoort herkende rijen te bevatten');
   const dto = toPublicKanaalpost(bronDto);
   assert.equal(dto.available, true);
   assert.ok(dto.rows.length > 0 && dto.rows.length <= 15);
-  // Geen enkele rij hoort een pad, sleutel of adres te dragen: de spiegel is al voor publiek geschreven.
-  assert.equal(dto.ingehouden, 0, 'een ingehouden rij betekent dat een venster iets schreef dat er niet hoort');
+  // De aangescherpte B-1-poort vindt één bestaande rij met een /Volumes/-pad. Brondata wijzigen
+  // valt buiten deze reparatie; de publieke DTO moet die rij daarom zichtbaar tellen én inhouden.
+  assert.equal(dto.ingehouden, 1, 'het bestaande lokale pad moet als ingehouden rij meetbaar blijven');
+  assert.equal(JSON.stringify(dto.rows).includes('/Volumes/'), false);
 });
 
 // --- SHA-verkorting: botsing spiegelwet (volle SHA verplicht in de bron) vs sanitize-poort

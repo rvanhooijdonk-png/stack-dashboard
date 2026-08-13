@@ -42,11 +42,14 @@ export const DENY_PATTERNS = [
 
   // Gevoelige paden: home-, runner- en containerpaden, algemene Unix-systeempaden,
   // Windows-drives en UNC-shares. De aparte system-path-regel is nodig omdat runtimefeeds
-  // vrije tekst kunnen dragen die buiten een home-map ligt (/private, /etc, /var). De
+  // vrije tekst kunnen dragen die buiten een home-map ligt. De expliciete roots hieronder
+  // komen uit de B-1-aanvalsset; `~/` dekt de gebruikelijke verkorte home-notatie. De
   // negatieve lookbehind voorkomt dat een gewone URL met bijvoorbeeld `/var/` als webpad
-  // wordt aangezien voor een lokaal absoluut pad.
+  // wordt aangezien voor een lokaal absoluut pad. Een systeempad mag spaties bevatten
+  // (`/Library/Application Support/...`); bij zo'n privacybevinding redigeren we daarom
+  // fail-closed tot een harde veldscheider in plaats van een herkenbaar padrestant te bewaren.
   { id: 'home-path', re: /(?:\/Users\/|\/home\/|\/root\/|\/workspace\/|\/github\/workspace\/)[^\s"'`,;)\]]*/g },
-  { id: 'system-path', re: /(?<![A-Za-z0-9])\/(?:private|etc|var)\/[^\s"'`,;)\]]*/g },
+  { id: 'system-path', re: /(?<![A-Za-z0-9])(?:~\/|\/(?:private|etc|var|tmp|opt|usr|Library|Volumes|Applications|mnt|srv)\/)[^\n\r"'`,;)\]]*/g },
   { id: 'windows-path', re: /(?:[A-Za-z]:\\|\\\\)[^\s"'`,;)\]]+/g },
 
   // Persoonsgegevens en netwerkadressen

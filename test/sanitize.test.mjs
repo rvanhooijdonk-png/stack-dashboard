@@ -25,14 +25,58 @@ test('redigeert lokale paden en e-mailadressen', () => {
   assert.equal(e.value.includes('@voorbeeld.nl'), false);
 });
 
-test('redigeert absolute /private-, /etc- en /var-paden zonder gewone webpaden te raken', () => {
-  for (const pad of ['/private/tmp/control.sock', '/etc/hosts', '/var/run/service.pid']) {
+test('redigeert alle expliciet opgesomde lokale padvormen uit Dashboard-review B-1', () => {
+  const paden = [
+    '/Users/test/project/file.txt',
+    '/home/test/project/file.txt',
+    '/root/project/file.txt',
+    '/private/tmp/control.sock',
+    '/etc/hosts',
+    '/var/run/service.pid',
+    'C:\\Users\\test\\file.txt',
+    '\\\\server\\share\\file.txt',
+    'file:///Users/test/project/file.txt',
+    '/tmp/stack-control/feed.json',
+    '/opt/homebrew/run/agent.sock',
+    '/usr/local/share/stack/file.json',
+    '/Library/Application Support/Stack/file.json',
+    '/Volumes/Backup/test/file.json',
+    '/Applications/Stack.app/state.json',
+    '/mnt/stack/feed.json',
+    '/srv/stack/feed.json',
+    '~/stack/feed.json',
+  ];
+  for (const pad of paden) {
     const { value, findings } = sanitizeString(`fout bij ${pad}`);
     assert.equal(value.includes(pad), false, pad);
-    assert.ok(findings.some((finding) => finding.id === 'system-path'), pad);
+    assert.ok(findings.some((finding) => ['home-path', 'system-path', 'windows-path'].includes(finding.id)), pad);
   }
-  const url = 'https://voorbeeld.invalid/var/publiek';
-  assert.equal(sanitizeString(url).value, url);
+  assert.equal(
+    sanitizeString('fout bij /Library/Application Support/Stack/file.json').value,
+    'fout bij [REDACTED]',
+    'een spatie in een lokaal pad mag geen herkenbaar restant bewaren',
+  );
+});
+
+test('padpoort spaart gewone tekst, relatieve identifiers en geldige publieke URLs', () => {
+  const veilig = [
+    'Open pull requests per repo, stand van vandaag.',
+    'tmp/stack-control/feed.json',
+    'opt-runner',
+    'usr_local',
+    'task-100',
+    '/producten.html',
+    './stack-ticker.html',
+    'https://voorbeeld.invalid/tmp/publiek',
+    'https://voorbeeld.invalid/usr/documentatie',
+    'https://voorbeeld.invalid/Library/handleiding',
+    'https://cdn.voorbeeld.invalid/Volumes/afbeelding.svg',
+  ];
+  for (const tekst of veilig) {
+    const { value, findings } = sanitizeString(tekst);
+    assert.equal(value, tekst, tekst);
+    assert.equal(findings.length, 0, tekst);
+  }
 });
 
 test('redigeert ook een losstaande 40-hexwaarde — die vorm is niet alleen van git', () => {

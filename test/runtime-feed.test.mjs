@@ -125,6 +125,41 @@ test('absolute-lokale-paden: thuismap-pad in notitie wordt geredigeerd, nooit ge
   assert.ok(!r.actors[0].incidents[0].note.includes('/Users/'));
 });
 
+test('B-1-padset: alle voorheen gelekte lokale roots worden in zichtbare feedvelden geredigeerd', () => {
+  const gelektePaden = [
+    '/tmp/stack-control/feed.json',
+    '/opt/homebrew/run/agent.sock',
+    '/usr/local/share/stack/state.json',
+    '/Library/Application Support/Stack/feed.json',
+    '/Volumes/Backup/test.json',
+    '/Applications/Stack.app/state.json',
+    '/mnt/stack/feed.json',
+    '/srv/stack/feed.json',
+    '~/stack/feed.json',
+  ];
+  const raw = {
+    measured_at: '2026-08-12T11:59:00Z', control_host: null,
+    processes: { planner: null, watcher: null, supervisor: null },
+    queue_counts: gelektePaden.slice(0, 5).map((name, count) => ({ name, count })),
+    actors: [{
+      actor_id: `actor-alpha ${gelektePaden[8]}`,
+      current_task: {
+        task_id: `task-100 ${gelektePaden[2]}`,
+        worker_started: '2026-08-12T11:50:00Z',
+        last_heartbeat: '2026-08-12T11:58:00Z',
+      },
+      closed: [], incidents: [],
+    }],
+    accounts: gelektePaden.slice(5, 8).map((label, i) => ({
+      account_id: `acct-${i}`, label, status: 'OK', last_seen: '2026-08-12T11:59:00Z',
+    })),
+  };
+  const r = parseRuntimeFeed(raw, { now: NU });
+  const publiek = JSON.stringify(r);
+  for (const pad of gelektePaden) assert.equal(publiek.includes(pad), false, pad);
+  assert.ok(r.findings.filter((finding) => finding.pattern === 'system-path').length >= 9);
+});
+
 test('conflicterende-status: twee actoren op dezelfde task_id krijgen beide CONFLICT, rest van de actor blijft intact', async () => {
   const r = parseRuntimeFeed(await laad('conflicterende-status'), { now: NU });
   assert.equal(r.actors[0].current_task.identity, 'CONFLICT');

@@ -71,7 +71,9 @@ jobs:
           grep -F 'actor-alpha' preview/index.html
           grep -F 'WORKER_STARTED' preview/index.html
           grep -F 'heartbeat' preview/index.html
-          if grep -E '/(Users|private|etc|var)/|[A-Za-z]:\\' preview/index.html; then
+          # Onafhankelijke publicatiepoort voor alle expliciete Unix-, tilde-, drive- en UNC-vormen
+          # uit Dashboard-review B-1. Houd deze naast de canonieke sanitizer en zijn unittests.
+          if grep -E '/(Users|home|root|workspace|github/workspace|private|etc|var|tmp|opt|usr|Library|Volumes|Applications|mnt|srv)/|~/|[A-Za-z]:\\|\\\\' preview/index.html; then
             echo '::error::preview bevat een lokaal pad'
             exit 1
           fi
