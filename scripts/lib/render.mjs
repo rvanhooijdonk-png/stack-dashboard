@@ -4,6 +4,12 @@
  * via <meta http-equiv="refresh">; er draait geen JavaScript dat iets ophaalt.
  */
 
+// esc/num verhuisd naar format.mjs (puur, dependency-free) zodat browsercode ze kan hergebruiken
+// zonder de rest van dit bestand (STYLE-string, page-opbouw) mee te laden. Hier terug ge-re-exporteerd
+// zodat elke bestaande import van esc/num uit render.mjs ongewijzigd blijft werken.
+export { esc, num } from './format.mjs';
+import { esc, num } from './format.mjs';
+
 const AMBER = {
   GROEN: { dot: 'ok', label: 'groen' },
   ROOD: { dot: 'bad', label: 'rood' },
@@ -19,22 +25,6 @@ export const TRUST_LABEL = {
   SOURCE_UNAVAILABLE: 'bron onbereikbaar',
   CONFLICTING_EVIDENCE: 'tegenstrijdig',
 };
-
-/** HTML-escape. Alles wat uit een bron komt gaat hier doorheen, zonder uitzondering. */
-export function esc(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
-/**
- * Getallen worden als getal geïnterpoleerd, niet als string. Een "aantal" dat stiekem een
- * string met HTML erin is, werd anders rauw in de pagina gezet — review Codex, bewezen probe.
- */
-export function num(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? String(Math.trunc(n)) : '—';
-}
 
 export const dt = (iso) => {
   if (!iso) return '—';

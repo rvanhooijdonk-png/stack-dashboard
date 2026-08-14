@@ -14,11 +14,11 @@ import { mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { assertPublishable, loadDenyTerms } from './lib/sanitize.mjs';
+import { assertPublishable, loadDenyTerms, getDenyTerms } from './lib/sanitize.mjs';
 import { renderHtml } from './lib/render.mjs';
 import { renderCockpit, renderProducts, renderTicker } from './lib/render-cockpit.mjs';
 import { buildProductModel, lifecycleEvents } from './lib/product-model.mjs';
-import { PUBLISH_ALLOWLIST, assertPublishFiles, outputDirectory } from './lib/publish-files.mjs';
+import { PUBLISH_ALLOWLIST, CLIENT_POLL_FILES, assertPublishFiles, outputDirectory } from './lib/publish-files.mjs';
 import { validate } from './lib/validate.mjs';
 import { toPublicPlanning } from './lib/planning.mjs';
 import { vertaalBouwlijst } from './lib/planning-bron.mjs';
@@ -107,6 +107,32 @@ const NAV_NAAR_COCKPIT = '<nav class="pagenav"><a href="./">← terug naar de co
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
   return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
+}
+
+/**
+ * Route C (owner-geautoriseerd, stack-control#838) — client-side polling van de "Nu actief"-sectie
+ * tegen een lokale read-only bridge. Alleen actief achter deze opt-in vlag; zonder --client-poll-
+ * origin blijft de build byte-identiek aan vandaag (geen extra bestanden, geen CSP-wijziging).
+ *
+ * Bewust een KALE origin: geen pad, query, fragment of credentials. De waarde belandt ongewijzigd
+ * in een publieke <meta>-tag en de CSP-header van index.html — een pad/token/query zou daar
+ * rechtstreeks lekken. Het feedpad zelf staat hardcoded in runtime-poll.mjs, nooit hier
+ * configureerbaar.
+ */
+export function parseClientPollOrigin(raw) {
+  if (!raw) return null;
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`--client-poll-origin is geen geldige URL: ${raw}`);
+  }
+  const kaleOrigin = (url.pathname === '/' || url.pathname === '') && !url.search && !url.hash
+    && !url.username && !url.password;
+  if (!['http:', 'https:'].includes(url.protocol) || !kaleOrigin) {
+    throw new Error('--client-poll-origin moet een kale http(s)-origin zijn: geen pad, query, fragment of credentials (het feedpad staat hardcoded in runtime-poll.mjs)');
+  }
+  return url.origin;
 }
 
 const readJson = async (p, fallback) => {
@@ -413,6 +439,7 @@ async function main() {
   const outName = arg('out', 'public');
   const outDir = outputDirectory(ROOT, outName);
   const strict = !process.argv.includes('--no-strict');
+  const clientPollOrigin = parseClientPollOrigin(arg('client-poll-origin'));
 
   // Strikt: een ontbrekend of kapot policybestand stopt de bouw. Zonder dat draaide de publieke
   // build stilzwijgend verder met een lege lijst — één ontbrekende komma in de JSON en elke naam
@@ -462,9 +489,15 @@ async function main() {
   });
   const runtimeFeed = assertPublishable(runtimeResult, { strict }).snapshot;
 
+  // Risico A (Gemini-review, Route C-ontwerp): met JS-polling actief zou de bestaande 10s
+  // meta-refresh de pollingstate elke 10s wegwissen (volle paginareload). Bij --client-poll-origin
+  // gaat de cockpit daarom op dezelfde 900s-vloer als de overige pagina's; de "Nu actief"-sectie
+  // blijft daarna alleen nog door runtime-poll.mjs ververst, niet meer door de meta-refresh.
   const cockpitHtml = renderCockpit(snapshot, {
-    products, ticker, runtimeFeed, refreshSeconds: COCKPIT_REFRESH_SECONDS,
+    products, ticker, runtimeFeed,
+    refreshSeconds: clientPollOrigin ? REFRESH_SECONDS : COCKPIT_REFRESH_SECONDS,
     preview: process.argv.includes('--preview'),
+    clientPollOrigin,
   });
   const productsHtml = renderProducts(snapshot, products, { refreshSeconds: REFRESH_SECONDS });
   const tickerHtml = renderTicker(snapshot, ticker, { refreshSeconds: REFRESH_SECONDS });
@@ -481,7 +514,19 @@ async function main() {
   await writeFile(join(outDir, 'contentstroom.html'), contentstroomHtml, 'utf8');
   await writeFile(join(outDir, 'status.json'), `${JSON.stringify(status, null, 2)}\n`, 'utf8');
   await writeFile(join(outDir, '.nojekyll'), '', 'utf8');
-  await assertPublishFiles(outDir);
+  if (clientPollOrigin) {
+    for (const file of CLIENT_POLL_FILES) {
+      let source = await readFile(join(ROOT, 'scripts/lib', file), 'utf8');
+      // sanitize.mjs kan in de browser geen deny-terms.json lezen (geen node:fs) — bak daarom
+      // exact de lijst die de Node-publicatie hierboven al laadde als letterlijke waarden mee,
+      // zodat client-side sanitize dezelfde deny-termen redigeert als de statische build.
+      if (file === 'sanitize.mjs') {
+        source += `\nseedDenyTerms(${JSON.stringify(getDenyTerms())});\n`;
+      }
+      await writeFile(join(outDir, file), source, 'utf8');
+    }
+  }
+  await assertPublishFiles(outDir, { extra: clientPollOrigin ? CLIENT_POLL_FILES : [] });
 
   // De volledige interne snapshot blijft lokaal — buiten de publicatiemap, buiten git.
   await mkdir(join(ROOT, '.local'), { recursive: true });
