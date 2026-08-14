@@ -74,12 +74,86 @@ export const CODES = {
   GEEN_HEARTBEAT: 'taak heeft een worker_started maar nog geen last_heartbeat',
   HEARTBEAT_VOOR_START: 'last_heartbeat ligt niet aantoonbaar ná worker_started — geen bewijs van voortgang',
   STATUS_VERSUS_LAST_SEEN: 'zelfgerapporteerde status spreekt de gemeten versheid van last_seen tegen',
+  GEEN_PICKUP: 'geen bewezen pickup — order/start alleen is geen bewijs van actief werk',
+  ONGELDIGE_PICKUP_EVIDENCE: 'pickup claimt bewezen maar mist een geldige evidence_ref',
+  ORDERED_PICKUP_UNPROVEN: 'taak is besteld/gestart maar de pickup is niet bewezen',
+  PICKUP_ZONDER_START: 'pickup is bewezen maar er is geen geldige worker_started — geen bewijs van actief werk',
+  PICKUP_TIJD_ONGELDIG: 'pickup is bewezen maar het claimtijdstip ontbreekt, is onleesbaar of ligt in de toekomst',
+  PICKUP_VOOR_START: 'pickup-tijdstip ligt vóór worker_started — geen bewijs van deze taak',
+  PICKUP_NA_HEARTBEAT: 'pickup-tijdstip ligt ná de laatste heartbeat — geen bewijs van huidige voortgang',
+  ONGELDIGE_TERMINAL_ORDERING: 'afgeronde taak heeft een tijdsvolgorde die niet klopt (afgesloten vóór start) — status is niet te vertrouwen',
+  GEEN_TERMINAL_RECEIPT: 'afgeronde taak claimt succes maar mist een geldig, onveranderlijk bewijskenmerk',
 };
+
+/** Gesloten vocabulaire voor het soort onveranderlijke bewijsverwijzing achter een claim. */
+export const EVIDENCE_KINDS = ['RECEIPT_ID', 'ISSUE_COMMENT_ID', 'COMMIT_SHA', 'PR_NUMBER', 'EVENT_ID'];
+
+/**
+ * Per `kind` een eigen, onveranderlijke-referentievorm — B7: een gesloten `kind`-vocabulaire alleen
+ * bewijst niets als élke niet-lege string als `ref` wordt geaccepteerd. Een branchnaam als "main" is
+ * geen commit-SHA; een willekeurig woord is geen PR- of commentaar-ID. RECEIPT_ID/EVENT_ID hebben
+ * geen extern canoniek formaat, dus krijgen ze een opaque-maar-ID-achtige vorm (geen spaties, geen
+ * los woord) — en, zoals alle vijf soorten, mogen ze nooit een bekende MUTABLE gitref-naam zijn.
+ */
+const EVIDENCE_REF_SHAPE = {
+  // PR69 B7 (Codex-correctie, herzien) — Codex signaleerde terecht dat een AFGEKORTE hex-SHA
+  // (7-40 tekens) niet te onderscheiden is van een toevallig hex-achtige, muteerbare branch-/
+  // tagnaam. De volle 40-teken SHA-1 zou dat sluiten (git weigert refs die ambigu zijn met een
+  // volledige SHA), maar bleek onverenigbaar met bestaande, eerder gereviewde architectuur: élke
+  // `ref`-waarde loopt via `sanitizeString` (zie modulekop) en die redigeert sinds de Gemini-
+  // review van 23-07-2026 bewust élke losstaande 40+ tekens hoge-entropiestring naar
+  // `[REDACTED]` (`sanitize.mjs` HIGH_ENTROPY, met expliciete toelichting dat de publieke DTO
+  // geen volle SHA's meer draagt). Een eis van precies 40 hex-tekens maakt dus élk geldig
+  // COMMIT_SHA-bewijs onherroepelijk `[REDACTED]` in de publieke cockpit — dat is een
+  // architectuurwijziging aan de sanitize-gate, buiten de scope van deze correctie (alleen
+  // B5/B6/B7). In plaats daarvan een proportionele verscherping binnen het bestaande bereik:
+  // uitsluitend kleine letters (echte git-SHA-output is altijd lowercase; hoofdletters in een
+  // hexreeks zijn een sterke aanwijzing voor een toevallige branch-/tagnaam, geen commit).
+  COMMIT_SHA: /^[0-9a-f]{7,40}$/,
+  ISSUE_COMMENT_ID: /^[1-9][0-9]{0,18}$/,
+  PR_NUMBER: /^[1-9][0-9]{0,9}$/,
+  RECEIPT_ID: /^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$/,
+  EVENT_ID: /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/,
+};
+
+/** Bekende mutabele gitref-namen — nooit geldig als "onveranderlijke" bewijsverwijzing, ongeacht kind. */
+const MUTABLE_REF_DENYLIST = new Set(['main', 'master', 'head', 'latest', 'trunk', 'develop', 'release', 'stable']);
+
+/** Keurt zowel de vorm (gesloten `kind` + niet-lege `ref`) als de kind-specifieke, onveranderlijke referentievorm. */
+function evidenceRefGeldig(ev) {
+  if (!isObject(ev)) return false;
+  if (typeof ev.kind !== 'string' || !EVIDENCE_KINDS.includes(ev.kind)) return false;
+  if (typeof ev.ref !== 'string') return false;
+  const ref = ev.ref.trim();
+  if (ref.length === 0) return false;
+  if (MUTABLE_REF_DENYLIST.has(ref.toLowerCase())) return false;
+  const vorm = EVIDENCE_REF_SHAPE[ev.kind];
+  return vorm ? vorm.test(ref) : false;
+}
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 /** ISO-8601 met verplichte, expliciete zone (Z of ±HH:MM) — "timestamps timezone-aware". */
 const TZ_AWARE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+const ISO_KALENDERDEEL = /^(\d{4})-(\d{2})-(\d{2})T/;
+
+/**
+ * PR69 B5 (Codex-correctie) — V8's `Date.parse` normaliseert een onmogelijke kalenderdatum in
+ * plaats van hem te weigeren: "2026-02-30" rolt stilzwijgend door naar 2 maart. Zonder deze
+ * check zou een pickup/heartbeat/worker_started-claim met een onbestaande datum alsnog een
+ * geldig (verschoven) tijdstip opleveren — precies het soort claim dat deze module juist als
+ * onleesbaar/ongeldig hoort te weigeren, niet stilzwijgend hoort te herstellen.
+ */
+function kalenderGeldig(value) {
+  const m = ISO_KALENDERDEEL.exec(value);
+  if (!m) return false;
+  const jaar = Number(m[1]);
+  const maand = Number(m[2]);
+  const dag = Number(m[3]);
+  const proef = new Date(Date.UTC(jaar, maand - 1, dag));
+  return proef.getUTCFullYear() === jaar && proef.getUTCMonth() === maand - 1 && proef.getUTCDate() === dag;
+}
 
 /**
  * Ontleedt één tijdstempel-string. Geeft `null` terug bij ontbreken/onleesbaarheid — de caller zet
@@ -90,6 +164,7 @@ const TZ_AWARE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\
  */
 function parseTijdstempel(value) {
   if (typeof value !== 'string' || !TZ_AWARE.test(value)) return null;
+  if (!kalenderGeldig(value)) return null;
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? ms : null;
 }
@@ -167,27 +242,96 @@ function vertaalQueueCounts(raw, findings) {
 }
 
 /**
- * Actief werk vereist BEIDE: een worker_started ÉN een aantoonbaar latere last_heartbeat DIE ZELF
- * OOK VERS IS. Een heartbeat die wel ná worker_started ligt maar inmiddels VEROUDERD of TOEKOMST
- * is, bewijst geen huidige activiteit — alleen dat er ooit een heartbeat was. Ontbreekt één van
- * beide signalen of is de heartbeat niet vers, dan is er geen bewijs van actief werk: bij twijfel
- * `active: false`. `hbFresh` komt van de caller (al berekend voor het `last_heartbeat`-veld) zodat
- * hier niet twee keer dezelfde freshness wordt bepaald.
+ * Beoordeelt de pickup-claim op een taak, los van worker_started/heartbeat. Een pickup is alleen
+ * bewezen (`proven:true`) wanneer `proven===true` ÉN er een structureel geldige `evidence_ref` bij
+ * zit (gesloten `kind`-vocabulaire + niet-lege `ref`) — een kale `proven:true` zonder bewijs is
+ * evenveel waard als geen pickup. Ontbreekt het hele `pickup`-object (bv. oudere producer, feed die
+ * dit veld nog niet vult), dan is dat GEEN_PICKUP, geen schemafout — het veld is bewust optioneel.
  */
-function beoordeelActiefWerk(task, hbFresh) {
-  if (task.worker_started === null || task.worker_started === undefined) {
-    return { active: false, code: 'GEEN_WORKERSTART' };
+function beoordeelPickup(raw) {
+  if (!isObject(raw)) return { proven: false, code: 'GEEN_PICKUP', at: null, evidence_ref: null };
+  if (raw.proven !== true) return { proven: false, code: 'GEEN_PICKUP', at: raw.at ?? null, evidence_ref: null };
+  const ev = raw.evidence_ref;
+  if (!evidenceRefGeldig(ev)) return { proven: false, code: 'ONGELDIGE_PICKUP_EVIDENCE', at: raw.at ?? null, evidence_ref: null };
+  return { proven: true, code: null, at: raw.at ?? null, evidence_ref: ev };
+}
+
+/**
+ * Actief werk vereist ALLEMAAL tegelijk: een geldige WORKER_STARTED, een expliciet bewezen pickup
+ * (`pickup.proven===true` mét geldige evidence_ref), een verse heartbeat die aantoonbaar ná
+ * worker_started ligt, en geen enkel van de tijdstempels onleesbaar/toekomstig. Order/start zonder
+ * bewezen pickup is nooit actief werk — hoogstens "besteld, pickup onbewezen"
+ * (`ORDERED_PICKUP_UNPROVEN`). Een bewezen pickup zonder geldige worker_started wordt evenmin actief
+ * (`PICKUP_ZONDER_START`) — pickup-bewijs alleen bewijst geen huidige uitvoering.
+ *
+ * B5 — pickup.at is ZELF onderdeel van de bewijsketen, niet een kaal meegegeven veld: een bewezen
+ * pickup met een ontbrekend/onleesbaar/toekomstig claimtijdstip (`PICKUP_TIJD_ONGELDIG`), een
+ * claimtijdstip vóór worker_started (`PICKUP_VOOR_START`) of ná de laatste heartbeat
+ * (`PICKUP_NA_HEARTBEAT`) is nooit bewijs van huidige actieve uitvoering — een expliciet
+ * pickup-object bewijst dan wel dat er ÉÉN gebeurtenis geclaimd is, maar niet dat die gebeurtenis
+ * ook werkelijk, op een aantoonbaar juist moment, bij DEZE taak hoorde.
+ *
+ * `hbFresh` komt van de caller (al berekend voor het `last_heartbeat`-veld) zodat hier niet twee keer
+ * dezelfde freshness wordt bepaald. `ctx` (nowMs/futureSkewMs) is nodig om `pickup.at` met dezelfde
+ * klok en dezelfde toekomst-speling te keuren als elk ander tijdstempel in dit contract.
+ */
+function beoordeelActiefWerk(task, hbFresh, ctx) {
+  const pickup = beoordeelPickup(task.pickup);
+  const startAanwezig = task.worker_started !== null && task.worker_started !== undefined;
+  const start = startAanwezig ? parseTijdstempel(task.worker_started) : null;
+  const startGeldig = start !== null;
+
+  if (pickup.proven && !startGeldig) return { active: false, code: 'PICKUP_ZONDER_START', pickup };
+  if (!pickup.proven) {
+    if (startGeldig) return { active: false, code: 'ORDERED_PICKUP_UNPROVEN', pickup };
+    return { active: false, code: startAanwezig ? 'ONLEESBAAR' : 'GEEN_WORKERSTART', pickup };
   }
-  const start = parseTijdstempel(task.worker_started);
-  if (start === null) return { active: false, code: 'ONLEESBAAR' };
+
+  const pickupFresh = freshnessVan(pickup.at, ctx);
+  if (pickupFresh.state === 'UNKNOWN') return { active: false, code: 'PICKUP_TIJD_ONGELDIG', pickup };
+  if (pickupFresh.ms < start) return { active: false, code: 'PICKUP_VOOR_START', pickup };
+
   if (task.last_heartbeat === null || task.last_heartbeat === undefined) {
-    return { active: false, code: 'GEEN_HEARTBEAT' };
+    return { active: false, code: 'GEEN_HEARTBEAT', pickup };
   }
   const hb = parseTijdstempel(task.last_heartbeat);
-  if (hb === null) return { active: false, code: 'ONLEESBAAR' };
-  if (hb <= start) return { active: false, code: 'HEARTBEAT_VOOR_START' };
-  if (hbFresh.state !== 'CURRENT') return { active: false, code: hbFresh.code ?? 'VEROUDERD' };
-  return { active: true, code: null };
+  if (hb === null) return { active: false, code: 'ONLEESBAAR', pickup };
+  if (hb <= start) return { active: false, code: 'HEARTBEAT_VOOR_START', pickup };
+  if (pickupFresh.ms > hb) return { active: false, code: 'PICKUP_NA_HEARTBEAT', pickup };
+  if (hbFresh.state !== 'CURRENT') return { active: false, code: hbFresh.code ?? 'VEROUDERD', pickup };
+  return { active: true, code: null, pickup };
+}
+
+/**
+ * Beoordeelt één afgeronde taak (`closed[]`-regel). "AFGEROND OK" mag alleen verschijnen wanneer
+ * ALLES tegelijk klopt: resultaat is OK, closed_at is een geldige (niet-toekomstige, leesbare)
+ * tijdstempel, de volgorde na worker_started klopt (indien meegegeven — ontbreekt worker_started,
+ * dan kan de volgorde niet bewezen worden en blijft OK dus onbewijsbaar), én er is een structureel
+ * geldige, onveranderlijke `evidence_ref`. Ontbreekt één daarvan bij result:OK, dan is de weergave
+ * "BEWIJS ONVOLLEDIG" — nooit stilzwijgend toch OK. FAILED/TIMEOUT/UNKNOWN claimen geen succes en
+ * worden dus niet door dezelfde bewijs-eis tegengehouden. Een ongeldige tijdsvolgorde (afgesloten
+ * vóór start, of een onleesbare/toekomstige closed_at) maakt ELK resultaat UNKNOWN — dat is een
+ * signaal dat de regel zelf niet te vertrouwen is, los van welk resultaat hij claimt.
+ */
+function beoordeelAfgerondeTaak(raw, closedFresh) {
+  const timeKnown = closedFresh.state === 'CURRENT' || closedFresh.state === 'STALE';
+  if (!timeKnown) return { display: 'UNKNOWN', code: closedFresh.code };
+
+  const closedMs = closedFresh.ms;
+  let orderingKnown = false;
+  let orderingOk = true;
+  if (raw.worker_started !== null && raw.worker_started !== undefined) {
+    const startMs = parseTijdstempel(raw.worker_started);
+    orderingKnown = true;
+    orderingOk = startMs !== null && closedMs > startMs;
+  }
+  if (orderingKnown && !orderingOk) return { display: 'UNKNOWN', code: 'ONGELDIGE_TERMINAL_ORDERING' };
+
+  if (raw.result !== 'OK') return { display: raw.result, code: null };
+
+  const evGeldig = evidenceRefGeldig(raw.evidence_ref);
+  if (evGeldig && orderingKnown && orderingOk) return { display: 'OK', code: null };
+  return { display: 'BEWIJS_ONVOLLEDIG', code: !evGeldig ? 'GEEN_TERMINAL_RECEIPT' : 'ONGELDIGE_TERMINAL_ORDERING' };
 }
 
 function vertaalActor(raw, ctx, findings, dubbeleActorIds, taskIdOccurrences) {
@@ -201,7 +345,7 @@ function vertaalActor(raw, ctx, findings, dubbeleActorIds, taskIdOccurrences) {
     const t = raw.current_task;
     const wsFresh = freshnessVan(t.worker_started, ctx);
     const hbFresh = freshnessVan(t.last_heartbeat, ctx);
-    const oordeel = beoordeelActiefWerk(t, hbFresh);
+    const oordeel = beoordeelActiefWerk(t, hbFresh, ctx);
     if (oordeel.code) findings.push({ code: oordeel.code, path: `actors[${actorPad}].current_task` });
 
     // task_id-conflict over de HELE feed: elk voorkomen van deze task_id — als lopende taak van
@@ -218,6 +362,17 @@ function vertaalActor(raw, ctx, findings, dubbeleActorIds, taskIdOccurrences) {
       active: oordeel.active,
       active_reason: oordeel.code,
       identity: taskConflict ? 'CONFLICT' : 'OK',
+      pickup: {
+        proven: oordeel.pickup.proven,
+        at: oordeel.pickup.at,
+        evidence_ref: oordeel.pickup.evidence_ref
+          ? {
+              kind: oordeel.pickup.evidence_ref.kind,
+              ref: weergave(oordeel.pickup.evidence_ref.ref, `actors[${actorPad}].current_task.pickup.evidence_ref.ref`, findings),
+              url: weergave(oordeel.pickup.evidence_ref.url ?? null, `actors[${actorPad}].current_task.pickup.evidence_ref.url`, findings),
+            }
+          : null,
+      },
     };
   }
 
@@ -234,10 +389,23 @@ function vertaalActor(raw, ctx, findings, dubbeleActorIds, taskIdOccurrences) {
     }
     const closedFresh = freshnessVan(c.closed_at, ctx);
     if (closedFresh.code) findings.push({ code: closedFresh.code, path: `actors[${actorPad}].closed[${i}].closed_at` });
+    const oordeel = beoordeelAfgerondeTaak(c, closedFresh);
+    if (oordeel.code) findings.push({ code: oordeel.code, path: `actors[${actorPad}].closed[${i}]` });
+    const ev = c.evidence_ref;
     closed.push({
       task_id: weergave(c.task_id, `actors[${actorPad}].closed[${i}].task_id`, findings),
       closed_at: { value: c.closed_at ?? null, freshness: closedFresh.state },
       result: c.result,
+      display_result: oordeel.display,
+      display_reason: oordeel.code,
+      worker_started: c.worker_started ?? null,
+      evidence_ref: isObject(ev)
+        ? {
+            kind: ev.kind,
+            ref: weergave(ev.ref, `actors[${actorPad}].closed[${i}].evidence_ref.ref`, findings),
+            url: weergave(ev.url ?? null, `actors[${actorPad}].closed[${i}].evidence_ref.url`, findings),
+          }
+        : null,
     });
   }
 
@@ -443,6 +611,7 @@ export const RUNTIME_FEED_SCHEMA = {
         task_id: { type: 'string' },
         worker_started: { type: ['string', 'null'] },
         last_heartbeat: { type: ['string', 'null'] },
+        pickup: { $ref: '#/$defs/Pickup' },
       },
     },
     ClosedResult: {
@@ -452,7 +621,29 @@ export const RUNTIME_FEED_SCHEMA = {
       properties: {
         task_id: { type: 'string' },
         closed_at: { type: ['string', 'null'] },
-        result: { type: 'string', enum: ['OK', 'FAILED', 'UNKNOWN'] },
+        result: { type: 'string', enum: ['OK', 'FAILED', 'UNKNOWN', 'TIMEOUT'] },
+        worker_started: { type: ['string', 'null'] },
+        evidence_ref: { $ref: '#/$defs/EvidenceRef' },
+      },
+    },
+    EvidenceRef: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['kind', 'ref'],
+      properties: {
+        kind: { type: 'string', enum: ['RECEIPT_ID', 'ISSUE_COMMENT_ID', 'COMMIT_SHA', 'PR_NUMBER', 'EVENT_ID'] },
+        ref: { type: 'string' },
+        url: { type: ['string', 'null'] },
+      },
+    },
+    Pickup: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['proven', 'at', 'evidence_ref'],
+      properties: {
+        proven: { type: 'boolean' },
+        at: { type: ['string', 'null'] },
+        evidence_ref: { $ref: '#/$defs/EvidenceRef' },
       },
     },
     Incident: {

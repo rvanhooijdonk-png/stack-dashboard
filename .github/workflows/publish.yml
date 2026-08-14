@@ -129,6 +129,35 @@ jobs:
           echo "zelftest ok: gitleaks faalt op een geplant nepsecret"
           rm -rf /tmp/gate-selftest
 
+      # PR69 B6 — de last-known-good-terugval in runtime-feed-input.mjs (leesLastKnownGood/
+      # schrijfLastKnownGood) is functioneel getest, maar op een verse GitHub Actions-runner is
+      # `.local/` per definitie leeg: elke run start op een nieuwe VM zonder toegang tot het
+      # bestandssysteem van een vorige run. Zonder deze twee stappen is de terugval dus structureel
+      # dood in productie, ook al slaagt hij in de teststuite. `restore-keys` (prefix, zonder
+      # run_id) pakt de meest recente eerdere cache; de exacte run_id-sleutel hieronder bij Opslaan
+      # zorgt dat elke run zijn eigen momentopname wegschrijft zodat de daaropvolgende run die als
+      # `restore-keys`-hit vindt. Puur CI-caching van het reeds-bestaande, reeds-geteste
+      # `.local/runtime-feed-last-known-good.json`-pad — geen nieuwe producer, geen nieuwe hosting.
+      #
+      # Codex-review (deze correctie): het gecachete bestand bevat de RUWE, nog niet gesaneerde
+      # feedtekst — dat is bewuste, reeds-bestaande, reeds-geteste B2-architectuur (zie het
+      # dossier-commentaar bovenaan runtime-feed-input.mjs) en valt buiten de scope van déze
+      # correctie (alleen B5/B6/B7). Wat déze correctie wél doet: de sleutel scopen op
+      # `github.ref_name` zodat de cache nooit over refs heen leesbaar is, en vaststellen dat
+      # `publish.yml` geen enkele `pull_request`-trigger heeft — dus geen fork-workflow kan ooit
+      # om deze cache vragen. Restrisico (een operator plakt per ongeluk een token-achtige string
+      # in een incident-notitie, en die belandt ongesaneerd in de cache totdat een geslaagde live
+      # lezing hem overschrijft) is bekend, benoemd, en hoort bij een eventuele toekomstige
+      # B2-herziening — niet bij deze B5/B6/B7-correctie.
+      - name: Runtime-feed last-known-good cache herstellen
+        id: runtime_cache_restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .local/runtime-feed-last-known-good.json
+          key: runtime-feed-lkg-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            runtime-feed-lkg-${{ github.ref_name }}-
+
       - name: Genereren (read-only aggregatie)
         id: genereren
         env:
@@ -136,6 +165,23 @@ jobs:
           # De pagina toont dat zichtbaar; er wordt nooit een oude groene stand hergebruikt.
           GH_TOKEN: ${{ secrets.ORG_PR_READ_TOKEN || github.token }}
         run: node scripts/build.mjs
+
+      # `if: always()` zodat een falende Genereren-stap de cache-opslag niet blokkeert — een
+      # geslaagde live lezing ín deze stap heeft het bestand al bijgewerkt vóórdat de stap zelf
+      # eventueel later faalt (bv. bij een latere check), en die verse stand mag niet verloren gaan.
+      # Ontbreekt het bestand nog (nooit een producer aangesloten), dan slaat actions/cache/save dit
+      # zelf over — geen foutmelding, geen lege cache-entry.
+      #
+      # Codex-review (deze correctie): caches zijn onveranderlijk (immutable) — `run_attempt` in de
+      # sleutel zodat een hernieuwde poging op dezelfde `run_id` zijn eigen verse momentopname kan
+      # wegschrijven in plaats van stil te falen op een reeds bestaande sleutel.
+      - name: Runtime-feed last-known-good cache opslaan
+        id: runtime_cache_save
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .local/runtime-feed-last-known-good.json
+          key: runtime-feed-lkg-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Alleen toegestane bestanden in de publicatiemap
         id: allowed_files

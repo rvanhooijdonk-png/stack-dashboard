@@ -54,6 +54,7 @@ jobs:
             for (const process of Object.values(raw.processes)) if (process) process.heartbeat = iso(-45_000);
             raw.actors[0].current_task.worker_started = iso(-300_000);
             raw.actors[0].current_task.last_heartbeat = iso(-30_000);
+            raw.actors[0].current_task.pickup.at = iso(-290_000);
             for (const actor of raw.actors) for (const item of actor.closed) item.closed_at = iso(-60_000);
             for (const account of raw.accounts) account.last_seen = iso(-30_000);
             fs.writeFileSync(process.env.PREVIEW_FEED, JSON.stringify(raw));
