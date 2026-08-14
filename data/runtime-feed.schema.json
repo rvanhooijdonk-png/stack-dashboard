@@ -66,7 +66,8 @@
       "properties": {
         "task_id": { "type": "string" },
         "worker_started": { "type": ["string", "null"] },
-        "last_heartbeat": { "type": ["string", "null"] }
+        "last_heartbeat": { "type": ["string", "null"] },
+        "pickup": { "$ref": "#/$defs/Pickup" }
       }
     },
     "ClosedResult": {
@@ -76,7 +77,29 @@
       "properties": {
         "task_id": { "type": "string" },
         "closed_at": { "type": ["string", "null"] },
-        "result": { "type": "string", "enum": ["OK", "FAILED", "UNKNOWN"] }
+        "result": { "type": "string", "enum": ["OK", "FAILED", "UNKNOWN", "TIMEOUT"] },
+        "worker_started": { "type": ["string", "null"] },
+        "evidence_ref": { "$ref": "#/$defs/EvidenceRef" }
+      }
+    },
+    "EvidenceRef": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["RECEIPT_ID", "ISSUE_COMMENT_ID", "COMMIT_SHA", "PR_NUMBER", "EVENT_ID"] },
+        "ref": { "type": "string" },
+        "url": { "type": ["string", "null"] }
+      }
+    },
+    "Pickup": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["proven", "at", "evidence_ref"],
+      "properties": {
+        "proven": { "type": "boolean" },
+        "at": { "type": ["string", "null"] },
+        "evidence_ref": { "$ref": "#/$defs/EvidenceRef" }
       }
     },
     "Incident": {

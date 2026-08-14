@@ -13,14 +13,19 @@
   "actors": [
     {
       "actor_id": "actor-alpha",
-      "current_task": { "task_id": "task-100", "worker_started": "2026-08-12T11:50:00Z", "last_heartbeat": "2026-08-12T11:58:00Z" },
-      "closed": [{ "task_id": "task-099", "closed_at": "2026-08-12T11:55:00Z", "result": "OK" }],
+      "current_task": {
+        "task_id": "task-100",
+        "worker_started": "2026-08-12T11:50:00Z",
+        "last_heartbeat": "2026-08-12T11:58:00Z",
+        "pickup": { "proven": true, "at": "2026-08-12T11:49:30Z", "evidence_ref": { "kind": "RECEIPT_ID", "ref": "receipt-task-100", "url": null } }
+      },
+      "closed": [{ "task_id": "task-099", "closed_at": "2026-08-12T11:55:00Z", "result": "OK", "worker_started": "2026-08-12T11:40:00Z", "evidence_ref": { "kind": "COMMIT_SHA", "ref": "a1b2c3d", "url": "https://github.com/rvanhooijdonk-png/stack-dashboard/commit/a1b2c3d" } }],
       "incidents": []
     },
     {
       "actor_id": "actor-bravo",
       "current_task": null,
-      "closed": [{ "task_id": "task-098", "closed_at": "2026-08-12T11:56:00Z", "result": "OK" }],
+      "closed": [{ "task_id": "task-098", "closed_at": "2026-08-12T11:56:00Z", "result": "OK", "worker_started": "2026-08-12T11:45:00Z", "evidence_ref": { "kind": "COMMIT_SHA", "ref": "f6e5d4c", "url": "https://github.com/rvanhooijdonk-png/stack-dashboard/commit/f6e5d4c" } }],
       "incidents": []
     }
   ],

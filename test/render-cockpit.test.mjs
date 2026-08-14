@@ -169,7 +169,9 @@ test('Nu actief wordt niet groen zonder task-id, actor, WORKER_STARTED en latere
   assert.doesNotMatch(section, /IN UITVOERING/);
   assert.match(section, /task-id, actor, WORKER_STARTED of latere verse heartbeat ontbreekt/);
   assert.match(section, /ONBEKEND · task-100/);
-  assert.match(section, /taak heeft geen worker_started/);
+  // De fixture heeft inmiddels een bewezen pickup (PR69 B1) — zonder worker_started is de precieze
+  // reden dus PICKUP_ZONDER_START, niet het oudere GEEN_WORKERSTART (dat gold zonder pickup-veld).
+  assert.match(section, /pickup is bewezen maar er is geen geldige worker_started/);
 });
 
 test('Nu actief wordt pas groen met geordend en vers volledig bewijs', () => {
@@ -320,6 +322,46 @@ test('afgeronde taken (OK, FAILED, UNKNOWN) verschijnen als terminale bewijsrege
   assert.match(section, /AFGEROND FAILED · task-097/);
   assert.match(section, /AFGEROND UNKNOWN · task-096/);
   assert.match(section, /bewijs: meting 2026-08-12T11:59:00Z op control-host-01/);
+});
+
+test('AFGEROND OK toont een klikbaar claimbewijs naar de github.com/rvanhooijdonk-png-bron', () => {
+  const runtimeFeed = parseRuntimeFeed(runtimeRaw, { now: new Date('2026-08-12T12:00:00Z') });
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
+  assert.match(section, /claimbewijs: <a href="https:\/\/github\.com\/rvanhooijdonk-png\/stack-dashboard\/commit\/a1b2c3d" rel="noopener">COMMIT_SHA:a1b2c3d<\/a>/);
+});
+
+test('een geclaimd OK-resultaat zonder geldig terminaal bewijskenmerk toont BEWIJS ONVOLLEDIG, nooit stilzwijgend OK', () => {
+  const raw = structuredClone(runtimeRaw);
+  delete raw.actors[0].closed[0].evidence_ref;
+  raw.actors[0].closed[0].evidence_ref = null;
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
+  assert.match(section, /AFGEROND — BEWIJS ONVOLLEDIG · task-099/);
+  assert.match(section, /mist een geldig, onveranderlijk bewijskenmerk/);
+  assert.doesNotMatch(section, /AFGEROND OK · task-099/);
+  const task099Row = section.slice(section.indexOf('task-099'), section.indexOf('</li>', section.indexOf('task-099')));
+  assert.doesNotMatch(task099Row, /claimbewijs:/);
+});
+
+test('een afgeronde taak vóór zijn eigen worker_started wordt op de pagina UNKNOWN, ongeacht het geclaimde resultaat', () => {
+  const raw = structuredClone(runtimeRaw);
+  raw.actors[0].closed[0].worker_started = '2026-08-12T12:00:00Z';
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  const section = html.slice(html.indexOf('id="nu-actief"'), html.indexOf('id="vandaag-geleverd"'));
+  assert.match(section, /AFGEROND UNKNOWN · task-099/);
+  assert.match(section, /tijdsvolgorde die niet klopt/);
+});
+
+test('een niet-github claimbewijs-URL wordt nooit klikbaar gemaakt, alleen het opaque kenmerk wordt getoond', () => {
+  const raw = structuredClone(runtimeRaw);
+  raw.actors[0].closed[0].evidence_ref.url = 'https://evil.example/x';
+  const runtimeFeed = parseRuntimeFeed(raw, { now: new Date('2026-08-12T12:00:00Z') });
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed });
+  assert.doesNotMatch(html, /evil\.example/);
+  assert.match(html, /claimbewijs: COMMIT_SHA:a1b2c3d/);
 });
 
 test('bewezen actief werk krijgt ook een evidence-pointer en een leeftijdsaanduiding op de heartbeat', () => {

@@ -453,7 +453,13 @@ async function main() {
   // De parser gebruikt exact het bouwmoment als klok, zodat renderer en contract hetzelfde
   // freshness-oordeel hanteren. Het bronpad wordt nergens gelogd of gepubliceerd.
   const runtimePath = arg('runtime-feed');
-  const runtimeResult = await loadRuntimeFeed(runtimePath, { now: new Date(snapshot.generatedAt) });
+  // PR69 B2: last-known-good-terugval bij een levende leesfout op de live feed. De cache leeft
+  // uitsluitend onder `.local/` (zelfde grens als `.local/snapshot.json` hierboven) — nooit
+  // gepubliceerd, nooit in git.
+  const runtimeCachePath = join(ROOT, '.local/runtime-feed-last-known-good.json');
+  const runtimeResult = await loadRuntimeFeed(runtimePath, {
+    now: new Date(snapshot.generatedAt), cachePath: runtimeCachePath,
+  });
   const runtimeFeed = assertPublishable(runtimeResult, { strict }).snapshot;
 
   const cockpitHtml = renderCockpit(snapshot, {
