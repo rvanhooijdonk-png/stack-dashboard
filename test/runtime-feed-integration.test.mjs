@@ -150,6 +150,57 @@ test('een corrupte of verkeerd-versie cache telt als "geen cache", nooit blind v
   assert.equal(result.fallback, undefined);
 });
 
+// PR69 B6 — een terugval mag nooit CURRENT ogen, ook niet vlak (binnen de STALE_DREMPEL_MS) ná
+// een geslaagde live meting. Vóór de fix rekende de terugval alleen measured_at vs. nu uit, dus
+// een mislukking één minuut na een gezonde build las nog steeds als CURRENT/ACTIEF — een vals
+// gevoel van versheid over data die het live-kanaal op dit moment aantoonbaar niet kan bevestigen.
+test('een terugval direct ná een geslaagde meting oogt nooit als CURRENT, ook al ligt measured_at ruim binnen de stale-drempel', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'runtimefeed-b6-'));
+  const feedPath = join(dir, 'feed.json');
+  const cachePath = join(dir, 'cache.json');
+  await writeFile(feedPath, fixture);
+
+  const t0 = new Date('2026-08-12T12:00:00Z');
+  const gezond = await loadRuntimeFeed(feedPath, { now: t0, cachePath });
+  assert.equal(gezond.available, true);
+  assert.equal(gezond.freshness, 'CURRENT');
+
+  // Eén minuut later mislukt de live lezing — ruim binnen elke redelijke stale-drempel.
+  await rm(feedPath);
+  const t1 = new Date('2026-08-12T12:01:00Z');
+  const terugval = await loadRuntimeFeed(feedPath, { now: t1, cachePath });
+
+  assert.equal(terugval.available, true);
+  assert.equal(terugval.fallback?.used, true);
+  assert.equal(terugval.freshness, 'STALE');
+});
+
+// PR69 B6 (Codex-oordeel op deze correctie zelf) — een terugval mag CURRENT nooit ophogen naar
+// STALE zonder onderscheid, want een cache die zelf al UNKNOWN was (bijv. measured_at ontbreekt)
+// is een ANDER, slechter signaal dan "gewoon oud" en mag niet stilzwijgend als STALE ogen — dat
+// verzwijgt juist dat er geen bruikbaar tijdstip is. Alleen CURRENT→STALE is een verlaging;
+// UNKNOWN blijft UNKNOWN.
+test('een terugval op een cache die zelf al UNKNOWN was, blijft UNKNOWN — nooit opgehoogd naar STALE', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'runtimefeed-b6-unknown-'));
+  const feedPath = join(dir, 'feed.json');
+  const cachePath = join(dir, 'cache.json');
+  const onbekendFixture = await readFile(join(ROOT, 'test/fixtures/runtime-feed/alles-onbekend.json'), 'utf8');
+  await writeFile(feedPath, onbekendFixture);
+
+  const t0 = new Date('2026-08-12T12:00:00Z');
+  const gezond = await loadRuntimeFeed(feedPath, { now: t0, cachePath });
+  assert.equal(gezond.available, true);
+  assert.equal(gezond.freshness, 'UNKNOWN');
+
+  await rm(feedPath);
+  const t1 = new Date('2026-08-12T12:01:00Z');
+  const terugval = await loadRuntimeFeed(feedPath, { now: t1, cachePath });
+
+  assert.equal(terugval.available, true);
+  assert.equal(terugval.fallback?.used, true);
+  assert.equal(terugval.freshness, 'UNKNOWN');
+});
+
 test('zonder cachePath is loadRuntimeFeed functioneel ongewijzigd — geen bestandsschrijving, geen fallback', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'runtimefeed-b2-'));
   const feedPath = join(dir, 'feed.json');

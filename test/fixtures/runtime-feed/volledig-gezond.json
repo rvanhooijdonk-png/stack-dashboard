@@ -17,7 +17,7 @@
         "task_id": "task-100",
         "worker_started": "2026-08-12T11:50:00Z",
         "last_heartbeat": "2026-08-12T11:58:00Z",
-        "pickup": { "proven": true, "at": "2026-08-12T11:49:30Z", "evidence_ref": { "kind": "RECEIPT_ID", "ref": "receipt-task-100", "url": null } }
+        "pickup": { "proven": true, "at": "2026-08-12T11:50:30Z", "evidence_ref": { "kind": "RECEIPT_ID", "ref": "receipt-task-100", "url": null } }
       },
       "closed": [{ "task_id": "task-099", "closed_at": "2026-08-12T11:55:00Z", "result": "OK", "worker_started": "2026-08-12T11:40:00Z", "evidence_ref": { "kind": "COMMIT_SHA", "ref": "a1b2c3d", "url": "https://github.com/rvanhooijdonk-png/stack-dashboard/commit/a1b2c3d" } }],
       "incidents": []

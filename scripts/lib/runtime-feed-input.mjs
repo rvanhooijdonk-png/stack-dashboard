@@ -88,6 +88,17 @@ export async function loadRuntimeFeed(path, options = {}) {
   }
 
   const fallback = await leesLastKnownGood(cachePath, parseOptions);
-  if (fallback) return { ...fallback, fallback: { used: true, reason: result.reason } };
+  // PR69 B6 (Codex-correctie) — een terugval bewijst per definitie dat de LIVE bron nu niet
+  // leesbaar is, dus CURRENT mag nooit blijven staan. Maar UNKNOWN is een ANDER, slechter signaal
+  // dan STALE (onleesbaar/toekomstig vs. "wel leesbaar, gewoon oud") — het onvoorwaardelijk
+  // overschrijven met STALE verzweeg dus juist een ergere waarheid. Alleen CURRENT→STALE is een
+  // correcte verlaging; een reeds STALE of UNKNOWN cacheresultaat blijft exact wat het al was.
+  if (fallback) {
+    return {
+      ...fallback,
+      freshness: fallback.freshness === 'CURRENT' ? 'STALE' : fallback.freshness,
+      fallback: { used: true, reason: result.reason },
+    };
+  }
   return result;
 }

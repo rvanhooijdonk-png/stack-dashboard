@@ -21,7 +21,7 @@ import {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const FIXDIR = join(ROOT, 'test/fixtures/runtime-feed');
 const NU = new Date('2026-08-12T12:00:00.000Z');
-const PICKUP_OK = { proven: true, at: '2026-08-12T11:39:00Z', evidence_ref: { kind: 'RECEIPT_ID', ref: 'evidence-1', url: null } };
+const PICKUP_OK = { proven: true, at: '2026-08-12T11:41:00Z', evidence_ref: { kind: 'RECEIPT_ID', ref: 'evidence-1', url: null } };
 
 async function laad(naam) {
   return JSON.parse(await readFile(join(FIXDIR, `${naam}.json`), 'utf8'));
@@ -226,7 +226,10 @@ test('geen actief werk zonder latere heartbeat (worker_started zonder last_heart
     processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
     actors: [{
       actor_id: 'a1',
-      current_task: { task_id: 't1', worker_started: '2026-08-12T11:40:00Z', last_heartbeat: null, pickup: PICKUP_OK },
+      current_task: {
+        task_id: 't1', worker_started: '2026-08-12T11:40:00Z', last_heartbeat: null,
+        pickup: { proven: true, at: '2026-08-12T11:41:00Z', evidence_ref: PICKUP_OK.evidence_ref },
+      },
       closed: [], incidents: [],
     }],
     accounts: [],
@@ -242,7 +245,10 @@ test('heartbeat vóór worker_started is tegenstrijdig, geen actief werk', () =>
     processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
     actors: [{
       actor_id: 'a1',
-      current_task: { task_id: 't1', worker_started: '2026-08-12T11:50:00Z', last_heartbeat: '2026-08-12T11:40:00Z', pickup: PICKUP_OK },
+      current_task: {
+        task_id: 't1', worker_started: '2026-08-12T11:50:00Z', last_heartbeat: '2026-08-12T11:40:00Z',
+        pickup: { proven: true, at: '2026-08-12T11:50:00Z', evidence_ref: PICKUP_OK.evidence_ref },
+      },
       closed: [], incidents: [],
     }],
     accounts: [],
@@ -288,7 +294,7 @@ test('AFGEROND OK vereist tegelijk een geldige evidence_ref EN een geordende wor
       closed: [{
         task_id: 'c1', closed_at: '2026-08-12T11:00:00Z', result: 'OK',
         worker_started: '2026-08-12T10:30:00Z',
-        evidence_ref: { kind: 'ISSUE_COMMENT_ID', ref: 'ic-1', url: null },
+        evidence_ref: { kind: 'ISSUE_COMMENT_ID', ref: '918273645', url: null },
       }], incidents: [] }],
   }, { now: NU });
   assert.equal(metBewijs.actors[0].closed[0].display_result, 'OK');
@@ -476,7 +482,10 @@ test('een verouderde heartbeat ná worker_started bewijst geen actief werk', () 
     processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
     actors: [{
       actor_id: 'a1',
-      current_task: { task_id: 't1', worker_started: '2026-08-12T11:00:00Z', last_heartbeat: '2026-08-12T11:10:00Z', pickup: PICKUP_OK },
+      current_task: {
+        task_id: 't1', worker_started: '2026-08-12T11:00:00Z', last_heartbeat: '2026-08-12T11:10:00Z',
+        pickup: { proven: true, at: '2026-08-12T11:05:00Z', evidence_ref: PICKUP_OK.evidence_ref },
+      },
       closed: [], incidents: [],
     }],
     accounts: [],
@@ -509,7 +518,10 @@ test('een heartbeat gelijk aan worker_started is geen bewijs van voortgang', () 
     processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
     actors: [{
       actor_id: 'a1',
-      current_task: { task_id: 't1', worker_started: '2026-08-12T11:58:00Z', last_heartbeat: '2026-08-12T11:58:00Z', pickup: PICKUP_OK },
+      current_task: {
+        task_id: 't1', worker_started: '2026-08-12T11:58:00Z', last_heartbeat: '2026-08-12T11:58:00Z',
+        pickup: { proven: true, at: '2026-08-12T11:58:00Z', evidence_ref: PICKUP_OK.evidence_ref },
+      },
       closed: [], incidents: [],
     }],
     accounts: [],
@@ -523,4 +535,236 @@ test('RUNTIME_FEED_SCHEMA is bevroren — in-process mutatie kan de fail-closed 
   assert.throws(() => { RUNTIME_FEED_SCHEMA.additionalProperties = true; }, TypeError);
   assert.equal(RUNTIME_FEED_SCHEMA.additionalProperties, false);
   assert.throws(() => { RUNTIME_FEED_SCHEMA.$defs.Actor.additionalProperties = true; }, TypeError);
+});
+
+// PR69-correctie B5 — pickup.at is zelf een claim en moet dezelfde waarheidsketen doorlopen als
+// worker_started/last_heartbeat: onleesbaar/toekomstig/vóór start/ná heartbeat mag nooit stil
+// ACTIEF worden. Dit zijn de exacte vier vijandige controles uit reviewcomment 5290091023.
+for (const [naam, pickupAt] of [
+  ['ontbreekt (null)', null],
+  ['is geen leesbaar tijdstip', 'niet-een-tijdstip'],
+  ['ligt in de toekomst', '2099-01-01T00:00:00Z'],
+]) {
+  test(`B5: pickup.at die ${naam} geeft PICKUP_TIJD_ONGELDIG, geen actief werk`, () => {
+    const raw = {
+      measured_at: '2026-08-12T11:59:00Z', control_host: null,
+      processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
+      actors: [{
+        actor_id: 'a1',
+        current_task: {
+          task_id: 't1', worker_started: '2026-08-12T11:40:00Z', last_heartbeat: '2026-08-12T11:58:00Z',
+          pickup: { proven: true, at: pickupAt, evidence_ref: PICKUP_OK.evidence_ref },
+        },
+        closed: [], incidents: [],
+      }],
+      accounts: [],
+    };
+    const r = parseRuntimeFeed(raw, { now: NU });
+    assert.equal(r.actors[0].current_task.active, false);
+    assert.equal(r.actors[0].current_task.active_reason, 'PICKUP_TIJD_ONGELDIG');
+  });
+}
+
+test('B5: pickup.at ná last_heartbeat geeft PICKUP_NA_HEARTBEAT, geen actief werk', () => {
+  const raw = {
+    measured_at: '2026-08-12T11:59:00Z', control_host: null,
+    processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
+    actors: [{
+      actor_id: 'a1',
+      current_task: {
+        task_id: 't1', worker_started: '2026-08-12T11:40:00Z', last_heartbeat: '2026-08-12T11:50:00Z',
+        pickup: { proven: true, at: '2026-08-12T11:55:00Z', evidence_ref: PICKUP_OK.evidence_ref },
+      },
+      closed: [], incidents: [],
+    }],
+    accounts: [],
+  };
+  const r = parseRuntimeFeed(raw, { now: NU });
+  assert.equal(r.actors[0].current_task.active, false);
+  assert.equal(r.actors[0].current_task.active_reason, 'PICKUP_NA_HEARTBEAT');
+});
+
+test('B5: pickup.at vóór worker_started geeft PICKUP_VOOR_START, geen actief werk', () => {
+  const raw = {
+    measured_at: '2026-08-12T11:59:00Z', control_host: null,
+    processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
+    actors: [{
+      actor_id: 'a1',
+      current_task: {
+        task_id: 't1', worker_started: '2026-08-12T11:40:00Z', last_heartbeat: '2026-08-12T11:58:00Z',
+        pickup: { proven: true, at: '2026-08-12T11:35:00Z', evidence_ref: PICKUP_OK.evidence_ref },
+      },
+      closed: [], incidents: [],
+    }],
+    accounts: [],
+  };
+  const r = parseRuntimeFeed(raw, { now: NU });
+  assert.equal(r.actors[0].current_task.active, false);
+  assert.equal(r.actors[0].current_task.active_reason, 'PICKUP_VOOR_START');
+});
+
+// PR69-correctie B7 — een gesloten kind-vocabulaire alleen bewijst niet dat een ref onveranderlijk
+// is: `{kind:'COMMIT_SHA', ref:'main'}` is exact het geval uit reviewcomment 5290091023 (een
+// geldig kind met een muteerbare branchnaam als ref). Elke kind heeft nu ook een vormregel, en een
+// muteerbare naam wordt geweigerd ongeacht welk kind erbij geclaimd wordt.
+for (const kind of ['COMMIT_SHA', 'RECEIPT_ID', 'EVENT_ID']) {
+  test(`B7: {kind:'${kind}', ref:'main'} is geen bewijs — muteerbare ref geweigerd ongeacht kind`, () => {
+    const raw = {
+      measured_at: '2026-08-12T11:59:00Z', control_host: null,
+      processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
+      actors: [{
+        actor_id: 'a1',
+        current_task: {
+          task_id: 't1', worker_started: '2026-08-12T11:40:00Z', last_heartbeat: '2026-08-12T11:58:00Z',
+          pickup: { proven: true, at: '2026-08-12T11:41:00Z', evidence_ref: { kind, ref: 'main', url: null } },
+        },
+        closed: [], incidents: [],
+      }],
+      accounts: [],
+    };
+    const r = parseRuntimeFeed(raw, { now: NU });
+    assert.equal(r.actors[0].current_task.active, false);
+    assert.equal(r.actors[0].current_task.active_reason, 'ORDERED_PICKUP_UNPROVEN');
+  });
+}
+
+test('B7: evidence_ref.ref die niet bij de vorm van zijn kind past wordt geweigerd (ISSUE_COMMENT_ID moet numeriek zijn)', () => {
+  const raw = {
+    measured_at: '2026-08-12T11:59:00Z', control_host: null,
+    processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
+    actors: [{
+      actor_id: 'a1',
+      current_task: {
+        task_id: 't1', worker_started: '2026-08-12T11:40:00Z', last_heartbeat: '2026-08-12T11:58:00Z',
+        pickup: { proven: true, at: '2026-08-12T11:41:00Z', evidence_ref: { kind: 'ISSUE_COMMENT_ID', ref: 'ic-1', url: null } },
+      },
+      closed: [], incidents: [],
+    }],
+    accounts: [],
+  };
+  const r = parseRuntimeFeed(raw, { now: NU });
+  assert.equal(r.actors[0].current_task.active, false);
+  assert.equal(r.actors[0].current_task.active_reason, 'ORDERED_PICKUP_UNPROVEN');
+});
+
+test('B7: een echte numerieke ISSUE_COMMENT_ID en een echte hex COMMIT_SHA blijven wel geldig bewijs', () => {
+  for (const ev of [
+    { kind: 'ISSUE_COMMENT_ID', ref: '5290091023', url: null },
+    { kind: 'COMMIT_SHA', ref: '47cac37df085f01d3f537fbc8a65735249139c54', url: null },
+  ]) {
+    const raw = {
+      measured_at: '2026-08-12T11:59:00Z', control_host: null,
+      processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
+      actors: [{
+        actor_id: 'a1',
+        current_task: {
+          task_id: 't1', worker_started: '2026-08-12T11:40:00Z', last_heartbeat: '2026-08-12T11:58:00Z',
+          pickup: { proven: true, at: '2026-08-12T11:41:00Z', evidence_ref: ev },
+        },
+        closed: [], incidents: [],
+      }],
+      accounts: [],
+    };
+    const r = parseRuntimeFeed(raw, { now: NU });
+    assert.equal(r.actors[0].current_task.active, true, ev.kind);
+  }
+});
+
+// PR69-correctie B7 (Codex-oordeel op deze correctie zelf, herzien) — Codex signaleerde terecht
+// dat een afgekorte hex-SHA niet te onderscheiden is van een toevallig hex-achtige, muteerbare
+// branchnaam. De volle 40-teken SHA-1 zou dat sluiten, maar botst met de bestaande sanitize-gate
+// (`sanitize.mjs` HIGH_ENTROPY): élke losstaande 40+ tekens hoge-entropiestring wordt daar altijd
+// naar `[REDACTED]` geredigeerd (Gemini-review 23-07-2026), dus een eis van precies 40 tekens zou
+// élk geldig COMMIT_SHA-bewijs juist onleesbaar maken in de publieke cockpit. Zie de toelichting
+// bij `EVIDENCE_REF_SHAPE.COMMIT_SHA` in runtime-feed.mjs. In plaats daarvan blijft de vorm
+// {7,40} tekens, maar uitsluitend kleine letters — echte git-SHA-output is altijd lowercase, dus
+// dit vangt in elk geval het geval uit reviewcomment 5290091023 (`main`, al gedekt door de
+// MUTABLE_REF_DENYLIST) én elke hoofdletter-bevattende hex-lookalike zonder de sanitize-gate te
+// breken.
+for (const nietGeldig of ['ABC1234', 'DeadBeef', '123456', '']) {
+  test(`B7: ongeldige hex-SHA-vorm '${nietGeldig}' is geen bewijs`, () => {
+    const raw = {
+      measured_at: '2026-08-12T11:59:00Z', control_host: null,
+      processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
+      actors: [{
+        actor_id: 'a1',
+        current_task: {
+          task_id: 't1', worker_started: '2026-08-12T11:40:00Z', last_heartbeat: '2026-08-12T11:58:00Z',
+          pickup: { proven: true, at: '2026-08-12T11:41:00Z', evidence_ref: { kind: 'COMMIT_SHA', ref: nietGeldig, url: null } },
+        },
+        closed: [], incidents: [],
+      }],
+      accounts: [],
+    };
+    const r = parseRuntimeFeed(raw, { now: NU });
+    assert.equal(r.actors[0].current_task.active, false);
+    assert.equal(r.actors[0].current_task.active_reason, 'ORDERED_PICKUP_UNPROVEN');
+  });
+}
+
+test("B7: een geldige AFGEKORTE lowercase hex-SHA ('a1b2c3d') blijft geldig bewijs — nodig omdat de sanitize-gate volle 40-teken SHA's redigeert", () => {
+  const raw = {
+    measured_at: '2026-08-12T11:59:00Z', control_host: null,
+    processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
+    actors: [{
+      actor_id: 'a1',
+      current_task: {
+        task_id: 't1', worker_started: '2026-08-12T11:40:00Z', last_heartbeat: '2026-08-12T11:58:00Z',
+        pickup: { proven: true, at: '2026-08-12T11:41:00Z', evidence_ref: { kind: 'COMMIT_SHA', ref: 'a1b2c3d', url: null } },
+      },
+      closed: [], incidents: [],
+    }],
+    accounts: [],
+  };
+  const r = parseRuntimeFeed(raw, { now: NU });
+  assert.equal(r.actors[0].current_task.active, true);
+});
+
+// PR69-correctie B5 (Codex-oordeel op deze correctie zelf) — V8's Date.parse normaliseert een
+// onmogelijke kalenderdatum (30 februari bestaat niet) in plaats van hem te weigeren; zonder de
+// kalendercheck in parseTijdstempel zou dit stilzwijgend als een geldig, verschoven tijdstip
+// doorgaan en ACTIEF kunnen worden — precies de vijandige claim die PICKUP_TIJD_ONGELDIG moet
+// vangen.
+for (const [naam, onmogelijk] of [
+  ['30 februari', '2026-02-30T11:41:00Z'],
+  ['32 januari', '2026-01-32T11:41:00Z'],
+  ['maand 13', '2026-13-01T11:41:00Z'],
+  ['29 februari in een niet-schrikkeljaar', '2026-02-29T11:41:00Z'],
+]) {
+  test(`B5: pickup.at op een onmogelijke kalenderdatum (${naam}) geeft PICKUP_TIJD_ONGELDIG, geen actief werk`, () => {
+    const raw = {
+      measured_at: '2026-08-12T11:59:00Z', control_host: null,
+      processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
+      actors: [{
+        actor_id: 'a1',
+        current_task: {
+          task_id: 't1', worker_started: '2026-08-12T11:40:00Z', last_heartbeat: '2026-08-12T11:58:00Z',
+          pickup: { proven: true, at: onmogelijk, evidence_ref: PICKUP_OK.evidence_ref },
+        },
+        closed: [], incidents: [],
+      }],
+      accounts: [],
+    };
+    const r = parseRuntimeFeed(raw, { now: NU });
+    assert.equal(r.actors[0].current_task.active, false);
+    assert.equal(r.actors[0].current_task.active_reason, 'PICKUP_TIJD_ONGELDIG');
+  });
+}
+
+test('B5: een geldige schrikkeldag (29 februari 2024) blijft wel een leesbaar tijdstip', () => {
+  const raw = {
+    measured_at: '2024-02-29T11:59:00Z', control_host: null,
+    processes: { planner: null, watcher: null, supervisor: null }, queue_counts: [],
+    actors: [{
+      actor_id: 'a1',
+      current_task: {
+        task_id: 't1', worker_started: '2024-02-29T11:40:00Z', last_heartbeat: '2024-02-29T11:58:00Z',
+        pickup: { proven: true, at: '2024-02-29T11:41:00Z', evidence_ref: PICKUP_OK.evidence_ref },
+      },
+      closed: [], incidents: [],
+    }],
+    accounts: [],
+  };
+  const r = parseRuntimeFeed(raw, { now: new Date('2024-02-29T12:00:00Z') });
+  assert.equal(r.actors[0].current_task.active, true);
 });
