@@ -10,6 +10,18 @@ export const PUBLISH_ALLOWLIST = Object.freeze([
   'status.json',
 ]);
 
+/**
+ * Vlak gekopieerd naar de publicatiemap wanneer build.mjs met --client-poll-origin draait —
+ * relatieve imports (`./format.mjs` e.d.) blijven zo kloppen zonder herschrijven. Zelfde
+ * brontekst als de Node-build gebruikt, geen tweede parser. Eén bron hier zodat build.mjs en
+ * check-public.mjs dezelfde lijst hanteren — anders keurt de publicatiepoort een geldige
+ * opt-in build af.
+ */
+export const CLIENT_POLL_FILES = Object.freeze([
+  'format.mjs', 'validate.mjs', 'sanitize.mjs', 'runtime-feed.mjs',
+  'runtime-feed-input.mjs', 'runtime-feed-view.mjs', 'runtime-poll.mjs',
+]);
+
 /** Een buildoutput blijft altijd onder de repositoryroot; de build verwijdert deze map eerst. */
 export function outputDirectory(root, requested = 'public') {
   if (typeof requested !== 'string' || requested.length === 0) throw new Error('ongeldige publicatiemap');
@@ -21,12 +33,18 @@ export function outputDirectory(root, requested = 'public') {
   return directory;
 }
 
-/** Exact zes gewone bestanden, geen submappen, symlinks of extra artefacten. */
-export async function assertPublishFiles(directory) {
+/**
+ * Exact de allowlist, geen submappen, symlinks of extra artefacten. `extra` is uitsluitend bedoeld
+ * voor de opt-in --client-poll-origin buildvlag (build.mjs): de standaard-/productie-/CI-aanroep
+ * (geen tweede argument) blijft strikt op de zes vaste bestanden — deze optie verruimt niets
+ * stilzwijgend, hij moet expliciet worden meegegeven.
+ */
+export async function assertPublishFiles(directory, { extra = [] } = {}) {
   const entries = await readdir(directory, { withFileTypes: true });
   if (entries.some((entry) => !entry.isFile())) throw new Error('publicatiemap bevat geen gewoon bestand');
   const actual = entries.map((entry) => entry.name).sort();
-  if (actual.join('\n') !== PUBLISH_ALLOWLIST.join('\n')) {
+  const expected = [...PUBLISH_ALLOWLIST, ...extra].sort();
+  if (actual.join('\n') !== expected.join('\n')) {
     throw new Error(`publicatiemap wijkt af van allowlist: ${actual.join(', ')}`);
   }
   return actual;

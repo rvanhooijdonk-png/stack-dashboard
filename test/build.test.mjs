@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { toPublicSnapshot, readTextPolicy, planningFromBouwlijst } from '../scripts/build.mjs';
+import { toPublicSnapshot, readTextPolicy, planningFromBouwlijst, parseClientPollOrigin } from '../scripts/build.mjs';
 
 /**
  * Een collectorresultaat met velden die nooit gepubliceerd mogen worden (interne notitie,
@@ -266,4 +266,26 @@ test('een track met een telling die niet strookt met zijn datum breekt de build 
   const vies2 = structuredClone(raw);
   vies2.tracks.tracks[0] = { track: 'X', lastReportAt: null, reportCount: 3, trust: 'UNVERIFIED' };
   assert.throws(() => toPublicSnapshot(vies2), /strookt niet|niet strookt/);
+});
+
+// --- --client-poll-origin (Route C, dashboard-client-polling-c) ---
+
+test('parseClientPollOrigin: geen waarde ⇒ null (standaardpad ongewijzigd)', () => {
+  assert.equal(parseClientPollOrigin(undefined), null);
+  assert.equal(parseClientPollOrigin(''), null);
+});
+
+test('parseClientPollOrigin: accepteert een kale http(s)-origin en normaliseert hem', () => {
+  assert.equal(parseClientPollOrigin('http://127.0.0.1:8787'), 'http://127.0.0.1:8787');
+  assert.equal(parseClientPollOrigin('https://feed.example.com'), 'https://feed.example.com');
+  assert.equal(parseClientPollOrigin('https://feed.example.com/'), 'https://feed.example.com');
+});
+
+test('parseClientPollOrigin: weigert alles behalve een kale origin (fail-closed)', () => {
+  assert.throws(() => parseClientPollOrigin('http://127.0.0.1:8787/runtime-feed.json'), /kale http\(s\)-origin/);
+  assert.throws(() => parseClientPollOrigin('http://127.0.0.1:8787?x=1'), /kale http\(s\)-origin/);
+  assert.throws(() => parseClientPollOrigin('http://127.0.0.1:8787#frag'), /kale http\(s\)-origin/);
+  assert.throws(() => parseClientPollOrigin('http://user:pass@127.0.0.1:8787'), /kale http\(s\)-origin/);
+  assert.throws(() => parseClientPollOrigin('ftp://127.0.0.1:8787'), /kale http\(s\)-origin/);
+  assert.throws(() => parseClientPollOrigin('niet-een-url'), /geen geldige URL/);
 });

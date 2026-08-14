@@ -12,7 +12,12 @@
  * niet de muur zelf. Voor eigennamen die weg moeten: `data/deny-terms.json`.
  */
 
-import { readFileSync } from 'node:fs';
+// `readFileSync` is alleen nodig in `loadDenyTerms()` (Node-only, publicatiepijplijn). Top-level
+// await i.p.v. een dynamische import binnen de functie: zo blijft `loadDenyTerms` synchroon (zijn
+// bestaande aanroep in build.mjs is dat ook) en kan de rest van dit bestand (sanitizeString/-Tree,
+// puur) toch door de browser geladen worden — die kent geen `node:fs`.
+const isNode = typeof process !== 'undefined' && process.versions?.node;
+const fsMod = isNode ? await import('node:fs') : null;
 
 /** Langere strings worden vóór regexverwerking afgekapt — ReDoS-plafond én lekplafond. */
 const MAX_STRING = 2000;
@@ -84,7 +89,7 @@ const MAX_TERM = 150;
 export function loadDenyTerms(path, { strict = false } = {}) {
   let raw;
   try {
-    raw = JSON.parse(readFileSync(path, 'utf8'));
+    raw = JSON.parse(fsMod.readFileSync(path, 'utf8'));
   } catch (err) {
     if (strict) throw new Error(`DENY-LIJST onleesbaar: ${path} (${err.code ?? 'parsefout'})`);
     denyTerms = [];
@@ -116,6 +121,23 @@ export function denyTermsMaxLen() {
   // Reduce in plaats van spread: een lijst van duizenden termen zou als argumentenlijst de stack
   // overlopen.
   return denyTerms?.length ? denyTerms.reduce((max, t) => (t.length > max ? t.length : max), 0) : 0;
+}
+
+/**
+ * Puur, geen fs — zet de deny-lijst direct vanuit een array. Bedoeld voor de browserkopie van dit
+ * bestand: `loadDenyTerms()` kan daar niet draaien (geen `node:fs`), dus bakt build.mjs de exact
+ * dezelfde lijst die de Node-publicatie al laadde, als letterlijke waarden in de gekopieerde
+ * `sanitize.mjs` in de uitvoermap — géén tweede bronbestand, géén extra fetch (review Codex,
+ * dashboard-client-polling-c: zonder dit bleef client-side sanitize altijd op een lege deny-lijst
+ * draaien, ook als de publicatie-lijst zelf gevuld was).
+ */
+export function seedDenyTerms(list) {
+  denyTerms = Array.isArray(list) ? list.filter((t) => typeof t === 'string') : [];
+}
+
+/** Kopie van de huidige deny-lijst — nodig om `seedDenyTerms` bij het bouwen te voeden. */
+export function getDenyTerms() {
+  return denyTerms ? [...denyTerms] : [];
 }
 
 /**

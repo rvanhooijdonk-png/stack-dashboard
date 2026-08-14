@@ -17,8 +17,14 @@
  * feed-tekst die al één keer schema-geldig was — geen afgeleide of samengevatte waarden.
  */
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+// `node:fs/promises`/`node:path` zijn alleen nodig voor de Node-only bestandsfuncties hieronder
+// (loadRuntimeFeed/schrijfLastKnownGood/leesLastKnownGood). `runtimeFeedFromText` zelf raakt geen
+// bestand aan en is de client-side ingang (runtime-poll.mjs) — top-level await i.p.v. een
+// dynamische import binnen elke functie houdt hun bestaande async-signatuur ongewijzigd en maakt
+// dit bestand toch door de browser laadbaar, die geen `node:fs` kent.
+const isNode = typeof process !== 'undefined' && process.versions?.node;
+const fsMod = isNode ? await import('node:fs/promises') : null;
+const pathMod = isNode ? await import('node:path') : null;
 
 import { parseRuntimeFeed } from './runtime-feed.mjs';
 
@@ -37,9 +43,9 @@ export function runtimeFeedFromText(text, options = {}) {
 async function schrijfLastKnownGood(cachePath, raw) {
   if (typeof cachePath !== 'string' || cachePath.trim() === '' || raw === null || raw === undefined) return;
   try {
-    await mkdir(dirname(cachePath), { recursive: true });
+    await fsMod.mkdir(pathMod.dirname(cachePath), { recursive: true });
     const inhoud = JSON.stringify({ cacheVersion: CACHE_VERSION, raw }, null, 2);
-    await writeFile(cachePath, `${inhoud}\n`, 'utf8');
+    await fsMod.writeFile(cachePath, `${inhoud}\n`, 'utf8');
   } catch {
     // stil: de live feed zelf is al geslaagd, een cacheschrijffout mag dat resultaat niet raken.
   }
@@ -54,7 +60,7 @@ async function schrijfLastKnownGood(cachePath, raw) {
 async function leesLastKnownGood(cachePath, parseOptions) {
   if (typeof cachePath !== 'string' || cachePath.trim() === '') return null;
   try {
-    const parsed = JSON.parse(await readFile(cachePath, 'utf8'));
+    const parsed = JSON.parse(await fsMod.readFile(cachePath, 'utf8'));
     if (!parsed || typeof parsed !== 'object' || parsed.cacheVersion !== CACHE_VERSION) return null;
     const opnieuw = parseRuntimeFeed(parsed.raw, parseOptions);
     return opnieuw.available === true ? opnieuw : null;
@@ -74,7 +80,7 @@ export async function loadRuntimeFeed(path, options = {}) {
   let rawParsed = null;
   if (typeof path === 'string' && path.trim() !== '') {
     try {
-      const text = await readFile(path, 'utf8');
+      const text = await fsMod.readFile(path, 'utf8');
       if (text.trim() !== '') rawParsed = JSON.parse(text);
     } catch {
       rawParsed = null;
