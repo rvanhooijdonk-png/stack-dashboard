@@ -32,7 +32,7 @@ import { LANES } from './lib/kijk.mjs';
 import {
   collectPullRequests, collectMergedRecent, collectTracker,
   collectDecisions, collectTracks, collectLogbook, collectCi, collectBouwlijst,
-  collectAfspraken,
+  collectAfspraken, collectTransactieFeedRaw, collectCodeTickerFeedRaw,
   setPublicRepos, setPublicTracks,
   CATEGORIEEN,
 } from './lib/collect.mjs';
@@ -493,16 +493,18 @@ async function main() {
   const runtimeFeed = assertPublishable(runtimeResult, { strict }).snapshot;
 
   // TRANSACTIE-TICKER (pagina 1) + CODE-TICKER (pagina 2, structuur-only — Richard-akkoord
-  // 18-08-2026). Beide feeds komen uit een gecommitte, lokaal gegenereerde `data/*.json`: één
-  // schrijver, geen `--flag`-inname zoals de runtime-feed. Ontbreekt het bestand, dan geeft
-  // readJson `null` terug en valt de parser fail-closed op `available: false` — dezelfde
+  // 18-08-2026, condition 1 pivot 18-08-2026). Beide feeds komen NIET uit een lokaal `data/*.json`
+  // in deze repo — zelfde patroon als `collectAfspraken()`: één externe schrijver (de lokale
+  // generator op Stack-Director) publiceert op de `dashboard-feeds`-branch van stack-control, deze
+  // build leest via de contents-API. Ontbreekt of mislukt die lezing, dan geeft
+  // collect*FeedRaw() `null` terug en valt de parser fail-closed op `available: false` — dezelfde
   // "geen bron is geen stand"-regel als de rest van deze build.
-  const transactieFeedRuw = await readJson('data/transactie-feed.json', null);
+  const transactieFeedRuw = await collectTransactieFeedRaw();
   const transactieFeedSchema = await readJson('data/transactie-feed.schema.json', {});
   const transactieFeed = parseTransactieFeed(transactieFeedRuw, transactieFeedSchema, {
     now: new Date(snapshot.generatedAt),
   });
-  const codeTickerFeedRuw = await readJson('data/code-ticker-feed.json', null);
+  const codeTickerFeedRuw = await collectCodeTickerFeedRaw();
   const codeTickerFeedSchema = await readJson('data/code-ticker-feed.schema.json', {});
   const codeTickerFeed = parseCodeTickerFeed(codeTickerFeedRuw, codeTickerFeedSchema, {
     now: new Date(snapshot.generatedAt),
@@ -523,10 +525,11 @@ async function main() {
   const contentstroomHtml = renderHtml(snapshot, {
     refreshSeconds: REFRESH_SECONDS, nav: NAV_NAAR_COCKPIT, pagePath: './contentstroom.html',
   });
-  // Zelfde 60s-ritme als de generator die deze twee feeds vult (besloten ticker-ritme, zie
-  // governance/com.rvh.stack-director-watchdog.plist StartInterval=60).
-  const transactiesHtml = renderTransactieTicker(transactieFeed, { refreshSeconds: 60 });
-  const codeTickerHtml = renderCodeTicker(codeTickerFeed, { refreshSeconds: 60 });
+  // Zelfde bouwcadans als de rest van de site (REFRESH_SECONDS) — niet het lokale generator-ritme.
+  // De generator commit't naar stack-control zo vaak als hij wil; wat de kijker ziet, herbouwt
+  // toch nooit vaker dan deze site zelf publiceert (~15 min, dashboard-heartbeat.sh + publish.yml).
+  const transactiesHtml = renderTransactieTicker(transactieFeed, { refreshSeconds: REFRESH_SECONDS });
+  const codeTickerHtml = renderCodeTicker(codeTickerFeed, { refreshSeconds: REFRESH_SECONDS });
 
   // Verse directory: nooit een oud of per ongeluk meegekomen bestand mee-uploaden.
   await rm(outDir, { recursive: true, force: true });

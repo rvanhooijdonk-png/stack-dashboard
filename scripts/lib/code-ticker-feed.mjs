@@ -11,13 +11,20 @@
  * tot een apart mensenreview-traject, niet stilzwijgend meegebouwd.
  *
  * Zelfde patroon als `transactie-feed.mjs`: één schrijver, geen identiteitsbotsingen, schema +
- * gesloten FRESHNESS + hergebruikte sanitize-gate.
+ * gesloten FRESHNESS + hergebruikte sanitize-gate — publicatie op de `dashboard-feeds`-branch van
+ * stack-control (`CONTROL/FEEDS/code-ticker-feed.json`, nooit main), gelezen via
+ * `collectCodeTickerFeedRaw()` in collect.mjs.
+ *
+ * Bron van de entries: alleen het vaste key=value-kopblok van `outbox/*_RECEIPT.md`
+ * (actor/started_at/ended_at/exit_code, zoals `bin/dispatch-actor` dat zelf al schrijft) — nooit
+ * de vrije "## Actoruitvoer"-body onder dat kopblok.
  */
 
 import { validate } from './validate.mjs';
 
 export const FRESHNESS = ['CURRENT', 'STALE', 'UNKNOWN'];
-export const STALE_DREMPEL_MS = 3 * 60 * 1000;
+/** Zelfde bottleneck-redenering als transactie-feed.mjs: 3× de ~15 min publicatiecadans. */
+export const STALE_DREMPEL_MS = 45 * 60 * 1000;
 export const FUTURE_SKEW_MS = 5 * 60 * 1000;
 
 export const CODES = {

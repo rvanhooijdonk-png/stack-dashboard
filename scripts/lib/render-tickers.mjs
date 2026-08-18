@@ -13,7 +13,11 @@
 import { esc, num } from './format.mjs';
 import { STYLE, klokTijden } from './render.mjs';
 
-/** Zelfde ritme-regel als de order: de klok telt als ROOD zodra ze ouder is dan 3× het generator-interval. */
+/**
+ * Zelfde ritme-regel als de order: de klok telt als ROOD zodra ze ouder is dan 3× de bottleneck-
+ * cadans. Die bottleneck is niet het lokale generator-ritme maar de publicatiecadans van de site
+ * zelf (~15 min, `REFRESH_SECONDS`) — vandaar `STALE_DREMPEL_MS = 45 min` in de feed-adapters.
+ */
 export const KLOK_ROOD_FACTOR = 3;
 
 const klokTijdMetSeconden = (iso) => {
@@ -82,8 +86,9 @@ ${robotsMeta ? '<meta name="robots" content="noindex,nofollow">' : ''}
 </header>
 ${body}
 <footer>
-  Gegenereerd door de lokale 60s-generator op Stack-Director. Read-only weergave — deze pagina
-  bestuurt niets. Bij een verouderde klok (&gt;${num(KLOK_ROOD_FACTOR)}× het generator-interval)
+  Gegenereerd door een lokale generator op Stack-Director, gepubliceerd via stack-control en
+  hierin opgenomen bij de eigen bouwcadans van deze site (~15 min). Read-only weergave — deze
+  pagina bestuurt niets. Bij een verouderde klok (&gt;${num(KLOK_ROOD_FACTOR)}× die cadans, 45 min)
   staat de klokbadge op rood.
 </footer>
 </div>
@@ -108,7 +113,7 @@ const TRANSACTIE_KIND_LABEL = {
   GIT_PR_MERGED: 'PR gemerged',
 };
 
-export function renderTransactieTicker(feed, { refreshSeconds = 60 } = {}) {
+export function renderTransactieTicker(feed, { refreshSeconds = 900 } = {}) {
   if (!feed?.available) {
     return paginaSchil({
       title: 'Transactie-ticker',
@@ -155,7 +160,7 @@ const CODE_RESULT_LABEL = {
 };
 const CODE_RESULT_CLASS = { STARTED: '', OK: 'ok', FAIL: 'bad', STALE: 'warn', UNKNOWN: 'warn' };
 
-export function renderCodeTicker(feed, { refreshSeconds = 60 } = {}) {
+export function renderCodeTicker(feed, { refreshSeconds = 900 } = {}) {
   if (!feed?.available) {
     return paginaSchil({
       title: 'Code-ticker',

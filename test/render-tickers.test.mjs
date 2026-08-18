@@ -13,14 +13,14 @@ import { renderTransactieTicker, renderCodeTicker } from '../scripts/lib/render-
 test('transactie-ticker zonder feed: fail-closed pagina, refresh wijst naar zichzelf met v=0', () => {
   const html = renderTransactieTicker({ available: false });
   assert.match(html, /Geen feed beschikbaar/);
-  assert.match(html, /<meta http-equiv="refresh" content="60; url=\.\/transacties\.html\?v=0">/);
+  assert.match(html, /<meta http-equiv="refresh" content="900; url=\.\/transacties\.html\?v=0">/);
   assert.doesNotMatch(html, /url=\.\/\?v=/);
 });
 
 test('code-ticker zonder feed: fail-closed pagina, refresh wijst naar zichzelf met v=0', () => {
   const html = renderCodeTicker({ available: false });
   assert.match(html, /Geen feed beschikbaar/);
-  assert.match(html, /<meta http-equiv="refresh" content="60; url=\.\/code-ticker\.html\?v=0">/);
+  assert.match(html, /<meta http-equiv="refresh" content="900; url=\.\/code-ticker\.html\?v=0">/);
   assert.doesNotMatch(html, /url=\.\/\?v=/);
 });
 

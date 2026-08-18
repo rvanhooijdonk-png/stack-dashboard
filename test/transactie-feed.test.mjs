@@ -90,9 +90,9 @@ test('stale: generatedAt ouder dan de drempel geeft STALE/VEROUDERD', async () =
 
 test('grens-exact op de staleMs-drempel is nog niet stale, één ms erover wel', async () => {
   const s = await schema();
-  const netAan = parseTransactieFeed({ generatedAt: '2026-08-18T11:57:00Z', events: [] }, s, { now: NU, staleMs: STALE_DREMPEL_MS });
+  const netAan = parseTransactieFeed({ generatedAt: '2026-08-18T11:15:00Z', events: [] }, s, { now: NU, staleMs: STALE_DREMPEL_MS });
   assert.equal(netAan.freshness, 'CURRENT');
-  const netOver = parseTransactieFeed({ generatedAt: '2026-08-18T11:56:59.999Z', events: [] }, s, { now: NU, staleMs: STALE_DREMPEL_MS });
+  const netOver = parseTransactieFeed({ generatedAt: '2026-08-18T11:14:59.999Z', events: [] }, s, { now: NU, staleMs: STALE_DREMPEL_MS });
   assert.equal(netOver.freshness, 'STALE');
 });
 

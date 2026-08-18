@@ -567,6 +567,46 @@ export async function collectAfspraken() {
 }
 
 /**
+ * TRANSACTIE-TICKER/CODE-TICKER (Richard-akkoord 18-08-2026): een lokale generator op
+ * Stack-Director meet dispatcher-runs, taak-transities, health en git-events (read-only) en
+ * publiceert de twee gesaneerde feeds op een DEDICATED branch van stack-control — zelfde
+ * redenering als AFSPRAKEN.md/rapporten hierboven: een bron die vaak herschreven wordt, hoort niet
+ * op `main` en niet op een branch die al een andere schrijver (REGIE, `rapporten`) heeft. Vandaar
+ * een eigen branch, exclusief voor deze generator.
+ */
+const FEEDS_REF = 'dashboard-feeds';
+const FEEDS_PATH = {
+  transactie: 'CONTROL/FEEDS/transactie-feed.json',
+  codeTicker: 'CONTROL/FEEDS/code-ticker-feed.json',
+};
+
+/**
+ * Ruwe (nog niet geschema-valideerde) inhoud van de transactie-feed, of `null` als de bron niet
+ * leesbaar of niet parsebaar is. De consument (`parseTransactieFeed()`) is zelf al fail-closed op
+ * `null` — deze functie gokt dus nergens, ze geeft door wat er is.
+ */
+export async function collectTransactieFeedRaw() {
+  const { text, tooLarge } = await fileFromRepo(CONTROL_REPO, FEEDS_PATH.transactie, FEEDS_REF);
+  if (!text || tooLarge) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/** Zelfde contract als `collectTransactieFeedRaw()`, voor de structuur-only code-ticker-feed. */
+export async function collectCodeTickerFeedRaw() {
+  const { text, tooLarge } = await fileFromRepo(CONTROL_REPO, FEEDS_PATH.codeTicker, FEEDS_REF);
+  if (!text || tooLarge) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * `YYYY-MM-DD` is pas een echte datum als hij een UTC-round-trip overleeft. `2026-02-30` past op de
  * regex maar rolt via `Date` door naar 2 maart; die stille verschuiving mag geen leeftijd voeden.
  */

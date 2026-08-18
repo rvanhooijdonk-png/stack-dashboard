@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "transactie-feed.schema.json",
   "title": "Transactie-feed",
-  "description": "Gesaneerde, tijdgesorteerde event-feed van dispatcher-runs, taak-transities, health-metingen en git-events. Gegenereerd door een lokale 60s-generator, gepubliceerd als data/transactie-feed.json op main.",
+  "description": "Gesaneerde, tijdgesorteerde event-feed van dispatcher-runs, taak-transities, health-metingen en git-events. Gegenereerd door een lokale generator op Stack-Director, gepubliceerd als CONTROL/FEEDS/transactie-feed.json op de dashboard-feeds-branch van stack-control (nooit main — zelfde reden als AFSPRAKEN.md/rapporten: een dedicated branch voor een bron die vaak herschreven wordt). Deze repo leest hem via de contents-API op buildtijd, zelfde patroon als collectAfspraken().",
   "type": "object",
   "additionalProperties": false,
   "required": ["generatedAt", "events"],
