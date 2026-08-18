@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "transactie-feed.schema.json",
+  "title": "Transactie-feed",
+  "description": "Gesaneerde, tijdgesorteerde event-feed van dispatcher-runs, taak-transities, health-metingen en git-events. Gegenereerd door een lokale 60s-generator, gepubliceerd als data/transactie-feed.json op main.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generatedAt", "events"],
+  "properties": {
+    "generatedAt": { "type": "string", "description": "ISO-8601 — het moment waarop de generator dit bestand samenstelde." },
+    "events": { "type": "array", "items": { "$ref": "#/$defs/event" } }
+  },
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "source", "kind", "detail"],
+      "properties": {
+        "at": { "type": "string", "description": "ISO-8601 — tijdstip van het event zelf, niet van de generatorrun." },
+        "source": { "type": "string", "enum": ["dispatcher", "queue", "health", "git"] },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "DISPATCHER_RUN",
+            "TASK_ALREADY_INGESTED",
+            "TASK_INGESTED_READY",
+            "TASK_INGRESS_BLOCKED",
+            "HEALTH_OK",
+            "HEALTH_STALE",
+            "GIT_PR_OPENED",
+            "GIT_PR_MERGED"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "description": "Eén regel, machinaal opgebouwd uit gesloten velden — nooit gekopieerde brontekst.",
+          "pattern": "^.{0,200}$"
+        }
+      }
+    }
+  }
+}

@@ -17,6 +17,9 @@ import { fileURLToPath } from 'node:url';
 import { assertPublishable, loadDenyTerms, getDenyTerms } from './lib/sanitize.mjs';
 import { renderHtml } from './lib/render.mjs';
 import { renderCockpit, renderProducts, renderTicker } from './lib/render-cockpit.mjs';
+import { renderTransactieTicker, renderCodeTicker } from './lib/render-tickers.mjs';
+import { parseTransactieFeed } from './lib/transactie-feed.mjs';
+import { parseCodeTickerFeed } from './lib/code-ticker-feed.mjs';
 import { buildProductModel, lifecycleEvents } from './lib/product-model.mjs';
 import { PUBLISH_ALLOWLIST, CLIENT_POLL_FILES, assertPublishFiles, outputDirectory } from './lib/publish-files.mjs';
 import { validate } from './lib/validate.mjs';
@@ -489,6 +492,22 @@ async function main() {
   });
   const runtimeFeed = assertPublishable(runtimeResult, { strict }).snapshot;
 
+  // TRANSACTIE-TICKER (pagina 1) + CODE-TICKER (pagina 2, structuur-only — Richard-akkoord
+  // 18-08-2026). Beide feeds komen uit een gecommitte, lokaal gegenereerde `data/*.json`: één
+  // schrijver, geen `--flag`-inname zoals de runtime-feed. Ontbreekt het bestand, dan geeft
+  // readJson `null` terug en valt de parser fail-closed op `available: false` — dezelfde
+  // "geen bron is geen stand"-regel als de rest van deze build.
+  const transactieFeedRuw = await readJson('data/transactie-feed.json', null);
+  const transactieFeedSchema = await readJson('data/transactie-feed.schema.json', {});
+  const transactieFeed = parseTransactieFeed(transactieFeedRuw, transactieFeedSchema, {
+    now: new Date(snapshot.generatedAt),
+  });
+  const codeTickerFeedRuw = await readJson('data/code-ticker-feed.json', null);
+  const codeTickerFeedSchema = await readJson('data/code-ticker-feed.schema.json', {});
+  const codeTickerFeed = parseCodeTickerFeed(codeTickerFeedRuw, codeTickerFeedSchema, {
+    now: new Date(snapshot.generatedAt),
+  });
+
   // Risico A (Gemini-review, Route C-ontwerp): met JS-polling actief zou de bestaande 10s
   // meta-refresh de pollingstate elke 10s wegwissen (volle paginareload). Bij --client-poll-origin
   // gaat de cockpit daarom op dezelfde 900s-vloer als de overige pagina's; de "Nu actief"-sectie
@@ -504,6 +523,10 @@ async function main() {
   const contentstroomHtml = renderHtml(snapshot, {
     refreshSeconds: REFRESH_SECONDS, nav: NAV_NAAR_COCKPIT, pagePath: './contentstroom.html',
   });
+  // Zelfde 60s-ritme als de generator die deze twee feeds vult (besloten ticker-ritme, zie
+  // governance/com.rvh.stack-director-watchdog.plist StartInterval=60).
+  const transactiesHtml = renderTransactieTicker(transactieFeed, { refreshSeconds: 60 });
+  const codeTickerHtml = renderCodeTicker(codeTickerFeed, { refreshSeconds: 60 });
 
   // Verse directory: nooit een oud of per ongeluk meegekomen bestand mee-uploaden.
   await rm(outDir, { recursive: true, force: true });
@@ -512,6 +535,8 @@ async function main() {
   await writeFile(join(outDir, 'producten.html'), productsHtml, 'utf8');
   await writeFile(join(outDir, 'stack-ticker.html'), tickerHtml, 'utf8');
   await writeFile(join(outDir, 'contentstroom.html'), contentstroomHtml, 'utf8');
+  await writeFile(join(outDir, 'transacties.html'), transactiesHtml, 'utf8');
+  await writeFile(join(outDir, 'code-ticker.html'), codeTickerHtml, 'utf8');
   await writeFile(join(outDir, 'status.json'), `${JSON.stringify(status, null, 2)}\n`, 'utf8');
   await writeFile(join(outDir, '.nojekyll'), '', 'utf8');
   if (clientPollOrigin) {
