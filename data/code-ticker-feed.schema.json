@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "code-ticker-feed.schema.json",
+  "title": "Code-ticker-feed",
+  "description": "Structuur-only feed van lane-handelingen (dispatch-start/-einde, health-metingen). BEWUST géén ruwe commando's, promptregels of output — de kandidaatbron (dispatch-runlogs) bevat volledige taakopdrachten en paden die een patroon-sanitizer niet betrouwbaar kan redigeren; publicatie van vrije regels daaruit wacht op een apart mensenreview-traject (zelfde default-uit-principe als data/publish-text.json). Gegenereerd door dezelfde lokale generator als transactie-feed.schema.json, uit alleen het vaste key=value-kopblok van outbox/*_RECEIPT.md (nooit de vrije 'Actoruitvoer'-body), gepubliceerd op dezelfde dashboard-feeds-branch van stack-control.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generatedAt", "entries"],
+  "properties": {
+    "generatedAt": { "type": "string", "description": "ISO-8601 — het moment waarop de generator dit bestand samenstelde." },
+    "entries": { "type": "array", "items": { "$ref": "#/$defs/entry" } }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "lane", "action", "result"],
+      "properties": {
+        "at": { "type": "string", "description": "ISO-8601 — tijdstip van de handeling zelf." },
+        "lane": { "type": "string", "enum": ["claude1", "claude2", "claude3", "claude4", "codex1", "codex2"] },
+        "action": { "type": "string", "enum": ["DISPATCH_START", "DISPATCH_END", "HEALTH_CHECK"] },
+        "result": { "type": "string", "enum": ["STARTED", "OK", "FAIL", "STALE", "UNKNOWN"] },
+        "exitCode": { "type": ["integer", "null"] },
+        "orderId": {
+          "type": ["string", "null"],
+          "description": "Taak-ID uit de orderbestandsnaam, streng gevormd — nooit vrije tekst.",
+          "pattern": "^([A-Z0-9][A-Z0-9_-]{0,79})?$"
+        }
+      }
+    }
+  }
+}

@@ -3,11 +3,13 @@ import { resolve, sep } from 'node:path';
 
 export const PUBLISH_ALLOWLIST = Object.freeze([
   '.nojekyll',
+  'code-ticker.html',
   'contentstroom.html',
   'index.html',
   'producten.html',
   'stack-ticker.html',
   'status.json',
+  'transacties.html',
 ]);
 
 /**

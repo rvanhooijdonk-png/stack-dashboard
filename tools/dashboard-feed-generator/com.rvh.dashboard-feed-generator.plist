@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rvh.dashboard-feed-generator</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/node</string>
+        <string>/Users/richardvanhooijdonk/Stack-Director/bin/dashboard-feed-generator.mjs</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/richardvanhooijdonk</string>
+        <key>PATH</key>
+        <string>/Users/richardvanhooijdonk/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/richardvanhooijdonk/Stack-Director/state/dashboard-feed-generator.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/richardvanhooijdonk/Stack-Director/state/dashboard-feed-generator.err</string>
+</dict>
+</plist>
