@@ -21,9 +21,18 @@
  * Cadans: de generator mag zo vaak draaien als hij wil, maar publiceren heeft toch geen zin
  * vaker dan de site zelf herbouwt (~15 min: com.rvh.dashboard-heartbeat StartInterval=900 +
  * publish.yml). Het meegeleverde launchd-plist gebruikt daarom ook StartInterval=900.
+ *
+ * Bekende, bewust geaccepteerde restpunten na Codex/Gemini-review op PR#71 (2026-08-18):
+ *  - De twee publicaties (transactie/code-ticker) zijn twee losse PUTs, niet één atomaire
+ *    transactie. Slaagt de eerste en faalt de tweede, dan staat er tijdelijk een half
+ *    bijgewerkte set — zichtbaar via de non-zero exit + FOUT-logregel, en zelfherstellend op de
+ *    volgende cyclus (~15 min) omdat elke run idempotent opnieuw alle bronnen leest.
+ *  - `orderIdFromFilename()` haalt verboden tekens weg i.p.v. af te wijzen: twee verschillende
+ *    receipt-bestandsnamen kunnen zo in theorie tot hetzelfde orderId leiden. Alleen een
+ *    weergave-kwestie (geen datalek, geen route naar de queue) — niet opgelost, wel benoemd.
  */
 
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, lstat } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { join, basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,8 +79,13 @@ function ghApiSend(method, path, body) {
   return JSON.parse(r.stdout);
 }
 
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+
 function isoFromEpochSeconds(sec) {
-  return new Date(sec * 1000).toISOString();
+  const d = new Date(sec * 1000);
+  const iso = d.toISOString();
+  if (!ISO_RE.test(iso)) throw new Error(`onbruikbaar epoch: ${sec}`);
+  return iso;
 }
 
 function clampDetail(s) {
@@ -98,31 +112,34 @@ async function dispatcherEvents() {
   }
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
-    let rec;
+    // Elke regel volledig geïsoleerd: een kapotte/onverwachte regel (verkeerd type, extreem
+    // epoch, non-array package_outcomes) mag nooit de rest van het bestand meeslepen — alleen
+    // die regel wordt overgeslagen, nooit gegokt.
     try {
-      rec = JSON.parse(line);
-    } catch {
-      continue; // nooit gokken op een kapotte regel
-    }
-    if (typeof rec.at !== 'number') continue;
-    const at = isoFromEpochSeconds(rec.at);
-    events.push({
-      at,
-      source: 'dispatcher',
-      kind: 'DISPATCHER_RUN',
-      detail: clampDetail(
-        `${rec.orders_seen ?? 0} orders gezien, ${rec.tasks_geseed ?? 0} geseed, ${rec.runs_gestart ?? 0} runs gestart`,
-      ),
-    });
-    for (const outcome of rec.package_outcomes ?? []) {
-      const kind = PACKAGE_OUTCOME_KIND[outcome?.action];
-      if (!kind || !outcome?.file) continue; // onbekende action: nooit gokken
+      const rec = JSON.parse(line);
+      if (typeof rec.at !== 'number' || !Number.isFinite(rec.at)) continue;
+      const at = isoFromEpochSeconds(rec.at);
       events.push({
         at,
-        source: 'queue',
-        kind,
-        detail: clampDetail(`${outcome.file} (${outcome.action})`),
+        source: 'dispatcher',
+        kind: 'DISPATCHER_RUN',
+        detail: clampDetail(
+          `${rec.orders_seen ?? 0} orders gezien, ${rec.tasks_geseed ?? 0} geseed, ${rec.runs_gestart ?? 0} runs gestart`,
+        ),
       });
+      const outcomes = Array.isArray(rec.package_outcomes) ? rec.package_outcomes : [];
+      for (const outcome of outcomes) {
+        const kind = PACKAGE_OUTCOME_KIND[outcome?.action];
+        if (!kind || typeof outcome?.file !== 'string' || !outcome.file) continue; // onbekend: nooit gokken
+        events.push({
+          at,
+          source: 'queue',
+          kind,
+          detail: clampDetail(`${outcome.file} (${outcome.action})`),
+        });
+      }
+    } catch {
+      continue;
     }
   }
   return events;
@@ -148,12 +165,16 @@ async function healthEvents() {
   const ageMs = Date.now() - Date.parse(hb.heartbeat);
   if (!Number.isFinite(ageMs)) return [];
   const kind = ageMs <= HEARTBEAT_STALE_MS ? 'HEALTH_OK' : 'HEALTH_STALE';
+  // Detail is bewust STATISCH (geen live "Xs oud"): zo'n waarde verandert bij elke generatorrun
+  // onafhankelijk van of er echt iets nieuws is, en ondermijnt daardoor de anti-commit-
+  // vervuilingsbeveiliging net als de generatedAt-bug hierboven (zelfde grondoorzaak, een laag
+  // dieper — Codex/Gemini-review PR#71). De echte tijd staat al in `at`.
   return [
     {
       at: hb.heartbeat,
       source: 'health',
       kind,
-      detail: clampDetail(`watchdog-heartbeat, ${Math.round(ageMs / 1000)}s oud`),
+      detail: 'watchdog-heartbeat',
     },
   ];
 }
@@ -197,15 +218,26 @@ function orderIdFromFilename(filename) {
   return /^[A-Z0-9]/.test(cleaned) ? cleaned : null;
 }
 
+const EXIT_CODE_RE = /^-?\d+$/;
+
+/**
+ * Zoekt het vaste key=value-kopblok van bin/dispatch-actor — en NERGENS anders. De vrije
+ * '## Actoruitvoer'-body wordt eerst hard afgeknipt vóór er ook maar naar een fenced block
+ * gezocht wordt, zodat een kapot/ontbrekend kopblok een ```text-fragment ín de body nooit per
+ * ongeluk als kopblok kan laten doorgaan (Codex-bevinding PR#71).
+ */
 function parseReceiptHeader(text) {
-  const m = text.match(/```text\n([\s\S]*?)\n```/);
+  const bodyIdx = text.indexOf('\n## Actoruitvoer');
+  const headerZone = bodyIdx === -1 ? text : text.slice(0, bodyIdx);
+  const m = headerZone.match(/^# RECEIPT[^\n]*\n+```text\n([\s\S]*?)\n```\s*$/);
   if (!m) return null;
   const kv = {};
   for (const line of m[1].split('\n')) {
     const kvm = line.match(/^([A-Za-z_]+)=(.*)$/);
     if (kvm) kv[kvm[1]] = kvm[2];
   }
-  if (!kv.actor || !kv.started_at || !kv.ended_at || kv.exit_code === undefined) return null;
+  if (!kv.actor || !ISO_RE.test(kv.started_at) || !ISO_RE.test(kv.ended_at)) return null;
+  if (!EXIT_CODE_RE.test(kv.exit_code ?? '')) return null;
   return kv;
 }
 
@@ -218,27 +250,31 @@ async function receiptEntries() {
     return entries;
   }
   for (const f of files) {
-    let text;
+    const full = join(ROOT, 'outbox', f);
     try {
-      text = await readFile(join(ROOT, 'outbox', f), 'utf8');
+      // Symlinks nooit volgen: een *_RECEIPT.md-symlink zou anders buiten outbox/ kunnen lezen
+      // (Codex-bevinding PR#71) — precies het soort ongewenst zij-effect dat condition 3 verbiedt.
+      const st = await lstat(full);
+      if (!st.isFile()) continue;
+      const text = await readFile(full, 'utf8');
+      const kv = parseReceiptHeader(text);
+      if (!kv) continue; // geen exacte match op het vaste kopblok: overslaan, nooit gokken
+      if (!LANES.includes(kv.actor)) continue;
+      const exitCode = Number.parseInt(kv.exit_code, 10);
+      if (!Number.isInteger(exitCode)) continue;
+      const orderId = orderIdFromFilename(f);
+      entries.push({ at: kv.started_at, lane: kv.actor, action: 'DISPATCH_START', result: 'STARTED', orderId });
+      entries.push({
+        at: kv.ended_at,
+        lane: kv.actor,
+        action: 'DISPATCH_END',
+        result: exitCode === 0 ? 'OK' : 'FAIL',
+        exitCode,
+        orderId,
+      });
     } catch {
-      continue;
+      continue; // één kapotte receipt mag de rest nooit meeslepen
     }
-    const kv = parseReceiptHeader(text);
-    if (!kv) continue; // geen exacte match op het vaste kopblok: overslaan, nooit gokken
-    if (!LANES.includes(kv.actor)) continue;
-    const exitCode = Number.parseInt(kv.exit_code, 10);
-    if (!Number.isInteger(exitCode)) continue;
-    const orderId = orderIdFromFilename(f);
-    entries.push({ at: kv.started_at, lane: kv.actor, action: 'DISPATCH_START', result: 'STARTED', orderId });
-    entries.push({
-      at: kv.ended_at,
-      lane: kv.actor,
-      action: 'DISPATCH_END',
-      result: exitCode === 0 ? 'OK' : 'FAIL',
-      exitCode,
-      orderId,
-    });
   }
   return entries;
 }
@@ -308,6 +344,17 @@ function ensureFeedsBranch() {
   log(`branch ${FEEDS_REF} aangemaakt vanaf ${BASE_REF}@${base.json.object.sha}`);
 }
 
+/**
+ * Payload zonder `generatedAt` — die verandert bij elke run, dus een vergelijking die hem
+ * meeneemt zou NOOIT gelijk zijn en publiceert dan bij elke run een loze commit (Gemini- én
+ * Codex-bevinding PR#71). Commit-vervuiling wordt beoordeeld op de functionele inhoud, niet op
+ * het generatiemoment.
+ */
+function functioneleInhoud(obj) {
+  const { generatedAt, ...rest } = obj;
+  return JSON.stringify(rest);
+}
+
 function publishFile(path, obj, label) {
   const contentText = `${JSON.stringify(obj, null, 2)}\n`;
   const contentB64 = Buffer.from(contentText, 'utf8').toString('base64');
@@ -316,8 +363,14 @@ function publishFile(path, obj, label) {
   );
   if (existing.status === 200) {
     const currentText = Buffer.from(existing.json.content, 'base64').toString('utf8');
-    if (currentText === contentText) {
-      log(`${label}: inhoud ongewijzigd, geen commit (geen commit-vervuiling).`);
+    let currentObj = null;
+    try {
+      currentObj = JSON.parse(currentText);
+    } catch {
+      currentObj = null; // onleesbare remote-inhoud: behandel als "anders", forceer een verse publicatie
+    }
+    if (currentObj && functioneleInhoud(currentObj) === functioneleInhoud(obj)) {
+      log(`${label}: inhoud functioneel ongewijzigd, geen commit (geen commit-vervuiling).`);
       return { published: false };
     }
   }
