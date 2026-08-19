@@ -16,10 +16,29 @@ const ticker = lifecycleEvents(snapshot);
 const runtimeRaw = JSON.parse(await readFile(join(ROOT, 'test/fixtures/runtime-feed/volledig-gezond.json'), 'utf8'));
 const runtimeHealthy = parseRuntimeFeed(runtimeRaw, { now: new Date('2026-08-12T12:00:00Z') });
 
-test('hoofdpagina bevat uitsluitend de zeven rustige hoofdsecties', () => {
+test('hoofdpagina bevat uitsluitend de tien rustige hoofdsecties inclusief de drie vaste paneelslots', () => {
   const html = renderCockpit(snapshot, { products, ticker });
   const ids = [...html.matchAll(/<section id="([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(ids, ['wacht-op-richard', 'nu-actief', 'vandaag-geleverd', 'producten', 'incidenten', 'accountcapaciteit', 'laatste-ticker-events']);
+  assert.deepEqual(ids, [
+    'wacht-op-richard', 'nu-actief',
+    'paneel-richard-queue', 'paneel-nu-bezig', 'paneel-statusgen',
+    'vandaag-geleverd', 'producten', 'incidenten', 'accountcapaciteit', 'laatste-ticker-events',
+  ]);
+});
+
+test('de drie vaste paneelslots (b/RICHARD-QUEUE, k/NU-BEZIG, STATUSGEN) renderen altijd, met UNKNOWN zolang hun bron ontbreekt', () => {
+  const html = renderCockpit(snapshot, { products, ticker });
+  for (const id of ['paneel-richard-queue', 'paneel-nu-bezig', 'paneel-statusgen']) {
+    const section = html.match(new RegExp(`<section id="${id}"[\\s\\S]*?</section>`));
+    assert.ok(section, `paneelslot ${id} ontbreekt`);
+    assert.match(section[0], /UNKNOWN — bron nog niet gekoppeld\./, `paneelslot ${id} mist de UNKNOWN-regel`);
+    assert.match(section[0], /Contract: /, `paneelslot ${id} mist de contractregel`);
+    assert.match(section[0], /Noemer: /, `paneelslot ${id} mist de noemerregel`);
+    assert.match(section[0], /Gemeten om: <span class="unknown">UNKNOWN<\/span>\./, `paneelslot ${id} mist de gemeten-om-stempel`);
+  }
+  assert.match(html, /<h2>RICHARD-QUEUE /);
+  assert.match(html, /<h2>NU-BEZIG /);
+  assert.match(html, /<h2>STATUSGEN /);
 });
 
 test('cockpit is semantische, mobiele, scriptloze HTML', () => {

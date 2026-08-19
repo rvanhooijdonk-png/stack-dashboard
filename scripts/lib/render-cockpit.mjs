@@ -7,6 +7,7 @@ import { ALARM_KOP } from './waarnemer.mjs';
 // (o.a. test/render-cockpit.test.mjs, test/runtime-feed-integration.test.mjs) ongewijzigd blijven.
 export { activeWork, renderActive } from './runtime-feed-view.mjs';
 import { renderActive } from './runtime-feed-view.mjs';
+import { renderPanelSlots } from './panel-contracts.mjs';
 
 const PAGE_PATHS = new Set(['./', './producten.html', './stack-ticker.html']);
 const SOURCE_NAMES = {
@@ -179,6 +180,7 @@ export function renderCockpit(snapshot, {
     : '';
   const body = `${previewBanner}${renderOwnerGates(snapshot)}
 ${renderActive(runtimeFeed, nowMs)}
+${renderPanelSlots()}
 <section id="vandaag-geleverd" class="card"><h2>Vandaag geleverd</h2>${snapshot.planning?.available ? list(delivered.map((f) => `<li>${featureName(f)}</li>`), 'Niets met een gevalideerde opleverdatum van vandaag.') : '<p class="unknown">UNKNOWN — planningbron niet beschikbaar.</p>'}</section>
 <section id="producten" class="card wide"><h2>Producten</h2><div class="product-grid">${productCards.join('')}</div></section>
 <section id="incidenten" class="card"><h2>Incidenten</h2>${incidents.length ? `<ul class="lights incident-list">${incidents.map((x) => `<li><span class="repo">${esc(x.label)}</span> <span class="unknown">${esc(x.detail)}</span></li>`).join('')}</ul>` : '<p class="empty">Geen gevalideerde bron-, vloot- of CI-incidenten.</p>'}</section>
