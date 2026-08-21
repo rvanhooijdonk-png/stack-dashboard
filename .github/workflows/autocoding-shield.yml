@@ -1,0 +1,104 @@
+name: autocoding-shield
+
+on:
+  pull_request:
+    branches: [main]
+  issue_comment:
+    types: [created, edited, deleted]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions: {}
+
+concurrency:
+  group: autocoding-shield-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  autocoding-shield:
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - name: Bepaal PR en vertrouwde checkout
+        id: pr
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_FROM_PULL: ${{ github.event.pull_request.number }}
+          PR_FROM_ISSUE: ${{ github.event.issue.number }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          number="${PR_FROM_PULL:-${PR_FROM_ISSUE:-}}"
+          test -n "$number"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = pull_request ]; then
+            test "${#PR_HEAD}" -eq 40
+            echo "checkout_ref=$PR_HEAD" >> "$GITHUB_OUTPUT"
+          else
+            echo "checkout_ref=${{ github.event.repository.default_branch }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.pr.outputs.checkout_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validator-tests
+        run: node --test test/autocoding-review-gate.test.mjs
+
+      - name: Branchdiff op secrets toetsen
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git diff --check "$BASE_SHA"...HEAD
+          if git diff --unified=0 "$BASE_SHA"...HEAD | grep -E '^\+[^+].*(gh[pousr]_[A-Za-z0-9]{20,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16})'; then
+            echo '::error::SECRET_PATTERN_DETECTED'
+            exit 1
+          fi
+
+      - name: Live receiptpoort
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          enabled="$(node -p "JSON.parse(require('fs').readFileSync('CONTROL/AUTOCODING/policy.v1.json')).live_receipt_gate_enabled")"
+          if [ "$enabled" != true ]; then
+            echo 'BOOTSTRAP_RECEIPT_GATE_DISABLED'
+            exit 0
+          fi
+          gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
+          gh api --paginate --slurp "repos/$REPOSITORY/issues/$PR_NUMBER/comments" > "$RUNNER_TEMP/comment-pages.json"
+          gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PR_NUMBER/reviews" > "$RUNNER_TEMP/review-pages.json"
+          gh api "repos/$REPOSITORY/git/commits/$(node -p "JSON.parse(require('fs').readFileSync('$RUNNER_TEMP/pr.json')).head.sha")" > "$RUNNER_TEMP/commit.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { extractReceiptFromCommentBody } from './scripts/autocoding/verify-review-gate.mjs';
+          const read = (name) => JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/${name}.json`));
+          const pr = read('pr');
+          const task = pr.body?.match(/^task_id=([^\s]+)$/m)?.[1] ?? '';
+          const items = [...read('comment-pages').flat(), ...read('review-pages').flat()];
+          const receipts = items.flatMap((item) => {
+            const receipt = extractReceiptFromCommentBody(item.body);
+            return receipt ? [{ receipt, transport_actor: item.user?.login ?? '' }] : [];
+          });
+          writeFileSync(`${process.env.RUNNER_TEMP}/receipts.json`, JSON.stringify(receipts));
+          writeFileSync(`${process.env.RUNNER_TEMP}/context.json`, JSON.stringify({
+            pr_head_sha: pr.head.sha,
+            pr_tree_sha: read('commit').tree.sha,
+            builder_actor: pr.user.login,
+            task_id: task,
+          }));
+          NODE
+          node scripts/autocoding/verify-review-gate.mjs \
+            --receipts "$RUNNER_TEMP/receipts.json" \
+            --context "$RUNNER_TEMP/context.json" \
+            --policy CONTROL/AUTOCODING/policy.v1.json

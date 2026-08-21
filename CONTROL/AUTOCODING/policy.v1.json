@@ -1,0 +1,9 @@
+{
+  "schema": "AUTOCODING_SHIELD_POLICY_V1",
+  "live_receipt_gate_enabled": false,
+  "required_distinct_vendors": 2,
+  "allowed_reviewer_actors": {
+    "codex": [],
+    "gemini": []
+  }
+}
