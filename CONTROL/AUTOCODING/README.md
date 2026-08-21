@@ -15,7 +15,12 @@ Een receipt staat als JSON in een fenced blok met infostring
 
 De poort meet head, tree en bouwer via GitHub. Hij bindt `reviewer_actor` bovendien aan de door
 GitHub geleverde auteur van het comment of de review. Twee actuele GO-receipts van verschillende,
-vooraf gepinde leveranciers en actors zijn nodig. Stale of afgekorte objecten, zelfreview, dubbele
+vooraf gepinde leveranciers en actors zijn nodig. De selectie vertrouwt eerst uitsluitend de exact
+toegestane GitHub-transportactor, negeert daarna receipts voor een oudere head en valideert pas dan
+de actuele set. Daardoor kan publieke ruis geen fouten of duplicaten injecteren, tellen oude reviews
+nooit voor een nieuwe head en blijft een malformed of NO_GO-receipt van een toegestane actor rood.
+Met uitsluitend stale receipts ontbreken dus actuele vereiste receipts en blijft de uitslag NO_GO.
+Afgekorte objecten, zelfreview, dubbele
 actor/vendor/UUID, lege of overgeslagen checks, lege rc0-output, NO_GO, onbekende velden, parserfouten,
 narratief zonder machineblok en wildcard/onbekende transportidentiteiten blijven rood. De uitvoer
 bevat uitsluitend redencodes; receiptinhoud wordt niet gelogd.
@@ -41,4 +46,11 @@ naar PR's ombouwen. Deze repositorywijziging past geen protection of ruleset toe
 
 De workflow gebruikt minimale read-permissions, geen secrets/environment/artifacts en nooit
 `pull_request_target`. Comment/review-events lezen alleen GitHub-data; code uit een PR-head wordt
-alleen in de read-only `pull_request`-context uitgevoerd.
+alleen in de read-only `pull_request`-context uitgevoerd. Zolang de trusted gatebestanden nog niet op
+de default branch bestaan, melden comment/review-events expliciet een bootstrap-no-op; validator- en
+branchtests draaien op het `pull_request`-pad.
+
+Een toekomstige required live gate moet vanuit een afzonderlijk trusted workflowpad op de default
+branch worden geactiveerd en geëvalueerd. PR-headcode, PR-headpolicy en deze bootstrapworkflow mogen
+die gate niet kunnen uitschakelen en mogen niet onder dezelfde required checknaam een successtatus
+kunnen produceren. Die activeringsgrens wordt niet met `pull_request_target` overbrugd.

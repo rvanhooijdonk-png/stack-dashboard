@@ -12,6 +12,8 @@
  * interne notities) niet.
  */
 
+import { pathToFileURL } from 'node:url';
+
 const SHA_RE = /^[0-9a-f]{40}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -77,7 +79,9 @@ function checkItemValid(item) {
  * Retourneert altijd `{ valid, reasons, vendor, actor, uuid, verdict }` — de laatste vier velden
  * zijn alleen betrouwbaar als het basisschema klopte (anders `undefined`).
  */
-export function evaluateReceipt(envelope, context, policy) {
+export function evaluateReceipt(envelope, rawContext, rawPolicy) {
+  const context = rawContext ?? {};
+  const policy = rawPolicy ?? {};
   const reasons = [];
   const add = (r) => { if (!reasons.includes(r)) reasons.push(r); };
 
@@ -155,22 +159,49 @@ export function evaluateReceipt(envelope, context, policy) {
  * dubbele actor/vendor/uuid, geen zelfreview — anders rood. Geeft nooit "GO" terug op basis van een
  * lege of onvolledige set.
  */
-export function evaluateReceipts(receipts, context, policy) {
+export function evaluateReceipts(receipts, rawContext, rawPolicy) {
+  const context = rawContext ?? {};
+  const policy = rawPolicy ?? {};
   if (!Array.isArray(receipts) || receipts.length === 0) {
     return { decision: 'NO_GO', reasons: [REASON.NO_RECEIPTS] };
   }
 
   const reasons = new Set();
 
-  // Dubbele actor/vendor/uuid is zelf al de aanval — dat geldt ook als de rest van zo'n receipt
-  // verder correct is, dus dit wordt op de RUWE set getoetst, niet pas na validatie.
+  const actorMap = policy.allowed_reviewer_actors;
+  if (!actorMap || typeof actorMap !== 'object' || Array.isArray(actorMap)) {
+    reasons.add(REASON.UNSAFE_POLICY);
+  }
+  const allowedTransportActors = new Set(
+    Object.values(actorMap ?? {}).flatMap((actors) => Array.isArray(actors) ? actors : []),
+  );
+
+  // Selectievolgorde is securitykritisch: vertrouw eerst uitsluitend de door GitHub gemeten
+  // transportactor. Een publieke commenter buiten de exacte allowlist is ruis en kan dus geen
+  // foutreden of duplicaat injecteren. Daarna horen alleen receipts voor de actuele PR-head bij
+  // deze beslissing; geldige historische reviews blijven auditdata, maar gelden nooit opnieuw.
+  // Een kapot receipt van een toegestane transportactor blijft geselecteerd en faalt gesloten.
+  const trusted = receipts.filter((envelope) => allowedTransportActors.has(envelope?.transport_actor));
+  const selected = trusted.filter((envelope) => {
+    const head = envelope?.receipt?.head_sha;
+    return !(SHA_RE.test(head) && SHA_RE.test(context.pr_head_sha) && head !== context.pr_head_sha);
+  });
+
+  if (selected.length === 0) {
+    reasons.add(REASON.NO_RECEIPTS);
+    if (trusted.length > 0) reasons.add(REASON.STALE_HEAD);
+    return { decision: 'NO_GO', reasons: Array.from(reasons) };
+  }
+
+  // Duplicaten worden alleen binnen de trusted, actuele selectie gemeten. Daardoor blijven echte
+  // conflicten fail-closed zonder dat een onbekende commenter een geldige set kan blokkeren.
   const seenUuid = new Set();
   const seenActor = new Set();
   const seenVendor = new Set();
   let sawDupUuid = false;
   let sawDupActor = false;
   let sawDupVendor = false;
-  for (const envelope of receipts) {
+  for (const envelope of selected) {
     const r = envelope?.receipt;
     if (!r || typeof r !== 'object') continue;
     if (isNonEmptyString(r.receipt_uuid)) {
@@ -190,13 +221,13 @@ export function evaluateReceipts(receipts, context, policy) {
   if (sawDupActor) reasons.add(REASON.DUPLICATE_ACTOR);
   if (sawDupVendor) reasons.add(REASON.DUPLICATE_VENDOR);
 
-  const evaluated = receipts.map((r) => evaluateReceipt(r, context, policy));
+  const evaluated = selected.map((r) => evaluateReceipt(r, context, policy));
   for (const e of evaluated) for (const r of e.reasons) reasons.add(r);
 
   const validGoVendors = new Set(
     evaluated.filter((e) => e.valid && e.verdict === 'GO').map((e) => e.vendor),
   );
-  const required = policy.required_distinct_vendors ?? 2;
+  const required = policy?.required_distinct_vendors ?? 2;
   if (validGoVendors.size < required) reasons.add(REASON.INSUFFICIENT_GO);
 
   return { decision: reasons.size === 0 ? 'GO' : 'NO_GO', reasons: Array.from(reasons) };
@@ -241,7 +272,7 @@ async function runCli() {
   const contextPath = args.get('--context');
   const policyPath = args.get('--policy');
   if (!receiptsPath || !contextPath || !policyPath) {
-    console.error(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.PARSE_ERROR] }));
+    console.log(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.PARSE_ERROR] }));
     process.exitCode = 1;
     return;
   }
@@ -265,6 +296,6 @@ async function runCli() {
   process.exitCode = result.decision === 'GO' ? 0 : 1;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   await runCli();
 }

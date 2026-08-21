@@ -5,6 +5,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 import {
   evaluateReceipts, evaluateReceipt, extractReceiptFromCommentBody, assertPolicyIsSafe,
@@ -93,7 +97,7 @@ test('4. twee actors van dezelfde leverancier => NO_GO (DUPLICATE_VENDOR)', () =
 
 test('5. bouwer keurt zichzelf goed => NO_GO (SELF_REVIEW)', () => {
   const r = evaluateReceipts([
-    signed(goCodex({ reviewer_actor: 'claude1-cloud', builder_actor: 'claude1-cloud' })),
+    signed(goCodex({ reviewer_actor: 'claude1-cloud', builder_actor: 'claude1-cloud' }), 'codex-bot-alpha'),
     signed(goGemini()),
   ], CONTEXT, POLICY);
   assert.equal(r.decision, 'NO_GO');
@@ -150,13 +154,13 @@ test('11. lege rc0-output => NO_GO (EMPTY_CHECK_OUTPUT)', () => {
 });
 
 test('12a. wildcard transportidentiteit => NO_GO (WILDCARD_IDENTITY)', () => {
-  const r = evaluateReceipts([signed(goCodex({ reviewer_actor: '*' })), signed(goGemini())], CONTEXT, POLICY);
+  const r = evaluateReceipts([signed(goCodex({ reviewer_actor: '*' }), 'codex-bot-alpha'), signed(goGemini())], CONTEXT, POLICY);
   assert.equal(r.decision, 'NO_GO');
   assert.ok(r.reasons.includes(REASON.WILDCARD_IDENTITY));
 });
 
 test('12b. onbekende (onbewezen) actor => NO_GO (UNKNOWN_ACTOR)', () => {
-  const r = evaluateReceipts([signed(goCodex({ reviewer_actor: 'onbewezen-account' })), signed(goGemini())], CONTEXT, POLICY);
+  const r = evaluateReceipts([signed(goCodex({ reviewer_actor: 'onbewezen-account' }), 'codex-bot-alpha'), signed(goGemini())], CONTEXT, POLICY);
   assert.equal(r.decision, 'NO_GO');
   assert.ok(r.reasons.includes(REASON.UNKNOWN_ACTOR));
 });
@@ -203,10 +207,101 @@ test('lege allowlist is een toegestane fail-closed default', () => {
   assert.doesNotThrow(() => assertPolicyIsSafe({ allowed_reviewer_actors: { codex: [], gemini: [] } }));
 });
 
-test('zelfverklaarde reviewer zonder overeenkomende GitHub-auteur wordt geweigerd', () => {
+test('zelfverklaarde reviewer van onbekende GitHub-auteur wordt als ruis genegeerd', () => {
   const r = evaluateReceipts([
     signed(goCodex(), 'aanvaller'), signed(goGemini()),
   ], CONTEXT, POLICY);
   assert.equal(r.decision, 'NO_GO');
-  assert.ok(r.reasons.includes(REASON.TRANSPORT_ACTOR_MISMATCH));
+  assert.ok(r.reasons.includes(REASON.INSUFFICIENT_GO));
+  assert.ok(!r.reasons.includes(REASON.TRANSPORT_ACTOR_MISMATCH));
+});
+
+// --- regressies: trusted selectie, actuele-headselectie, defensieve API en workflowbootstrap ------
+
+test('twee actuele trusted receipts plus forged duplicate van onbekende auteur => GO', () => {
+  const forged = signed(goCodex({ receipt_uuid: uuid(1) }), 'publieke-aanvaller');
+  const r = evaluateReceipts([signed(goCodex()), signed(goGemini()), forged], CONTEXT, POLICY);
+  assert.deepEqual(r, { decision: 'GO', reasons: [] });
+});
+
+test('uitsluitend forged/untrusted receipts => NO_GO zonder geldige receipts', () => {
+  const r = evaluateReceipts([
+    signed(goCodex(), 'aanvaller-1'), signed(goGemini(), 'aanvaller-2'),
+  ], CONTEXT, POLICY);
+  assert.equal(r.decision, 'NO_GO');
+  assert.ok(r.reasons.includes(REASON.NO_RECEIPTS));
+});
+
+test('malformed receipt van allowlisted transportactor => NO_GO', () => {
+  const r = evaluateReceipts([
+    { receipt: null, transport_actor: 'codex-bot-alpha' }, signed(goGemini()),
+  ], CONTEXT, POLICY);
+  assert.equal(r.decision, 'NO_GO');
+  assert.ok(r.reasons.includes(REASON.PARSE_ERROR));
+});
+
+test('twee actuele geldige trusted receipts plus stale oud receipt => GO', () => {
+  const stale = signed(goCodex({ head_sha: OLD_HEAD, tree_sha: OLD_TREE, receipt_uuid: uuid(9) }));
+  const r = evaluateReceipts([stale, signed(goCodex()), signed(goGemini())], CONTEXT, POLICY);
+  assert.deepEqual(r, { decision: 'GO', reasons: [] });
+});
+
+test('stale-only receipts leveren nooit GO voor een nieuwe head', () => {
+  const r = evaluateReceipts([
+    signed(goCodex({ head_sha: OLD_HEAD })), signed(goGemini({ head_sha: OLD_HEAD })),
+  ], CONTEXT, POLICY);
+  assert.equal(r.decision, 'NO_GO');
+  assert.ok(r.reasons.includes(REASON.NO_RECEIPTS));
+});
+
+test('evaluateReceipt geeft bij null/undefined context en policy deterministisch NO_GO-data', () => {
+  for (const [context, policy] of [[null, null], [undefined, undefined]]) {
+    const r = evaluateReceipt(signed(goCodex()), context, policy);
+    assert.equal(r.valid, false);
+    assert.ok(r.reasons.includes(REASON.STALE_HEAD));
+    assert.ok(r.reasons.includes(REASON.UNKNOWN_VENDOR));
+  }
+});
+
+test('evaluateReceipts geeft bij null/undefined context en policy deterministisch NO_GO', () => {
+  for (const [context, policy] of [[null, null], [undefined, undefined]]) {
+    const r = evaluateReceipts([signed(goCodex()), signed(goGemini())], context, policy);
+    assert.equal(r.decision, 'NO_GO');
+    assert.ok(r.reasons.includes(REASON.UNSAFE_POLICY));
+    assert.ok(r.reasons.includes(REASON.NO_RECEIPTS));
+  }
+});
+
+test('CLI schrijft beslis-JSON bij ontbrekende argumenten naar stdout en eindigt met rc 1', () => {
+  const cli = spawnSync(process.execPath, ['scripts/autocoding/verify-review-gate.mjs'], { encoding: 'utf8' });
+  assert.equal(cli.status, 1);
+  assert.equal(cli.stderr, '');
+  assert.deepEqual(JSON.parse(cli.stdout), { decision: 'NO_GO', reasons: [REASON.PARSE_ERROR] });
+});
+
+test('CLI schrijft geëvalueerde NO_GO als JSON naar stdout en eindigt met rc 1', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'autocoding-shield-'));
+  const paths = ['receipts.json', 'context.json', 'policy.json'].map((name) => join(dir, name));
+  writeFileSync(paths[0], '[]');
+  writeFileSync(paths[1], JSON.stringify(CONTEXT));
+  writeFileSync(paths[2], JSON.stringify(POLICY));
+  const cli = spawnSync(process.execPath, [
+    'scripts/autocoding/verify-review-gate.mjs', '--receipts', paths[0], '--context', paths[1],
+    '--policy', paths[2],
+  ], { encoding: 'utf8' });
+  assert.equal(cli.status, 1);
+  assert.equal(cli.stderr, '');
+  assert.equal(JSON.parse(cli.stdout).decision, 'NO_GO');
+});
+
+test('workflow-eventmatrix houdt bootstrap-events groen en live gate uit', () => {
+  const workflow = readFileSync('.github/workflows/autocoding-shield.yml', 'utf8');
+  const policy = JSON.parse(readFileSync('CONTROL/AUTOCODING/policy.v1.json', 'utf8'));
+  for (const event of ['pull_request:', 'issue_comment:', 'pull_request_review:']) {
+    assert.ok(workflow.includes(event), `event ontbreekt: ${event}`);
+  }
+  assert.match(workflow, /BOOTSTRAP_TRUSTED_GATE_FILES_NOT_ON_DEFAULT_BRANCH/);
+  assert.match(workflow, /if: github\.event_name == 'pull_request' && steps\.bootstrap\.outputs\.trusted_gate_files == 'true'/);
+  assert.match(workflow, /Live receiptpoort\n\s+if: steps\.bootstrap\.outputs\.trusted_gate_files == 'true'/);
+  assert.equal(policy.live_receipt_gate_enabled, false);
 });

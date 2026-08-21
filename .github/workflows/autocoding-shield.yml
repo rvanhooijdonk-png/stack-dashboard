@@ -48,7 +48,21 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Bepaal bootstrapbeschikbaarheid
+        id: bootstrap
+        run: |
+          set -euo pipefail
+          if [ -f scripts/autocoding/verify-review-gate.mjs ] && \
+             [ -f test/autocoding-review-gate.test.mjs ] && \
+             [ -f CONTROL/AUTOCODING/policy.v1.json ]; then
+            echo 'trusted_gate_files=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'trusted_gate_files=false' >> "$GITHUB_OUTPUT"
+            echo 'BOOTSTRAP_TRUSTED_GATE_FILES_NOT_ON_DEFAULT_BRANCH'
+          fi
+
       - name: Validator-tests
+        if: github.event_name == 'pull_request' && steps.bootstrap.outputs.trusted_gate_files == 'true'
         run: node --test test/autocoding-review-gate.test.mjs
 
       - name: Branchdiff op secrets toetsen
@@ -64,6 +78,7 @@ jobs:
           fi
 
       - name: Live receiptpoort
+        if: steps.bootstrap.outputs.trusted_gate_files == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
