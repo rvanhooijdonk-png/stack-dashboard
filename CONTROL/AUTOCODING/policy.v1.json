@@ -1,9 +1,24 @@
 {
   "schema": "AUTOCODING_SHIELD_POLICY_V1",
   "live_receipt_gate_enabled": false,
-  "required_distinct_vendors": 2,
-  "allowed_reviewer_actors": {
-    "codex": [],
-    "gemini": []
+  "native_review": {
+    "required_vendors": ["codex", "gemini"],
+    "codex": {
+      "actor": "chatgpt-codex-connector[bot]",
+      "app_id": 1144995,
+      "success_marker": "Codex Review: Didn't find any major issues. :tada:"
+    },
+    "gemini": {
+      "actor": "gemini-code-assist[bot]",
+      "allowed_states": ["COMMENTED", "APPROVED"],
+      "terminal_marker": "## Code Review"
+    }
+  },
+  "owner_gate": {
+    "sensitive_path_globs": [".github/workflows/", "CONTROL/AUTOCODING/"],
+    "required_distinct_vendors": 1,
+    "allowed_reviewer_actors": {
+      "owner": ["rvanhooijdonk-png"]
+    }
   }
 }

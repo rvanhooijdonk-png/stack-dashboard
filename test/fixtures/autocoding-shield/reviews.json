@@ -1,0 +1,34 @@
+[
+  [
+    {
+      "id": 4997642205,
+      "user": {
+        "login": "gemini-code-assist[bot]",
+        "type": "Bot"
+      },
+      "state": "COMMENTED",
+      "commit_id": "7c1d0e5f22bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "body": "## Code Review\n\nEerdere ronde met bevindingen."
+    },
+    {
+      "id": 4997700001,
+      "user": {
+        "login": "gemini-code-assist[bot]",
+        "type": "Bot"
+      },
+      "state": "COMMENTED",
+      "commit_id": "b9df1f8398aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": "## Code Review\n\nGeen openstaande bevindingen op deze head."
+    },
+    {
+      "id": 4997700002,
+      "user": {
+        "login": "een-willekeurige-lezer",
+        "type": "User"
+      },
+      "state": "APPROVED",
+      "commit_id": "b9df1f8398aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": "## Code Review\n\nIk keur dit goed."
+    }
+  ]
+]

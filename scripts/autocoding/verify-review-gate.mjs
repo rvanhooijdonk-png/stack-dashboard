@@ -50,6 +50,13 @@ export const REASON = Object.freeze({
   DUPLICATE_UUID: 'DUPLICATE_UUID',
   INSUFFICIENT_GO: 'INSUFFICIENT_GO',
   UNSAFE_POLICY: 'UNSAFE_POLICY',
+  // Native reviewbewijs (chatgpt-codex-connector[bot] / gemini-code-assist[bot]) — geen zelfgeschreven
+  // JSON-receipt, dus geen receipt_uuid/checks_executed. Deze redenen zijn eigen aan die route.
+  NATIVE_IDENTITY_UNVERIFIED: 'NATIVE_IDENTITY_UNVERIFIED',
+  NATIVE_TERMINAL_MARKER_MISSING: 'NATIVE_TERMINAL_MARKER_MISSING',
+  NATIVE_FINDINGS_PRESENT: 'NATIVE_FINDINGS_PRESENT',
+  NATIVE_STATE_NOT_ALLOWED: 'NATIVE_STATE_NOT_ALLOWED',
+  OWNER_GATE_REQUIRED: 'OWNER_GATE_REQUIRED',
 });
 
 function isNonEmptyString(v) {
@@ -264,43 +271,282 @@ export function assertPolicyIsSafe(policy) {
   }
 }
 
+// --- Native reviewbewijs -------------------------------------------------------------------------
+//
+// De twee vendors kunnen geen `autocoding-review-receipt-v1`-blok schrijven — ze kennen dat schema
+// niet. Bewijs is daarom hun eigen, ongewijzigde GitHub-uitvoer: een issue-comment (Codex) of een
+// pull-request-review (Gemini). Geen van beide draagt een task_id, tree_sha of receipt_uuid; die
+// concepten bestaan hier niet. Wat wél mechanisch te meten is — GitHub-gerapporteerde transportactor,
+// het commit-object waarnaar het bewijs verwijst (door de caller al opgezocht via de GitHub-API, nooit
+// uit tekst geloofd), en of de PR zelf een task_id draagt — wordt daarom door ÉÉN vendor-onafhankelijke
+// functie getoetst: `bindNativeEvidence`. Alleen de vendor-eigen extractievorm (het exacte succesbericht
+// van Codex, de statustekst en bevindingsbadges van Gemini) leeft in de twee `extract*`-functies
+// eronder. Een aanvaller kan `user.login` en `performed_via_github_app` niet zelf zetten — dat zijn
+// GitHub-velden, geen tekst uit het comment/review-lichaam — dus is er geen zelfclaim meer te
+// wantrouwen zoals bij het generieke receipt-schema hierboven.
+
+const CODEX_COMMIT_RE = /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/;
+
+/**
+ * Leest de door Codex genoemde (meestal afgekorte) commit-referentie uit een commentlichaam.
+ * Dit is een tekstclaim, geen bewijs: de caller moet hem mechanisch tegen de werkelijke PR-commits
+ * resolveren. Geeft `null` als de comment geen zo'n regel draagt.
+ */
+export function codexReviewedCommitRef(body) {
+  if (typeof body !== 'string') return null;
+  return body.match(CODEX_COMMIT_RE)?.[1] ?? null;
+}
+
+/**
+ * Zet één ruwe `chatgpt-codex-connector[bot]`-issuecomment om naar genormaliseerd native bewijs.
+ * `resolved` is het resultaat van het door de caller (workflow) mechanisch opgezocht commit-object
+ * voor de in de comment genoemde korte SHA — deze functie vertrouwt geen zelfgerapporteerde SHA.
+ * Geeft `null` als het comment niet van de gepinde vendoractor komt (geen bewijs, geen ruis).
+ */
+export function extractCodexNativeEvidence(comment, resolved, policy) {
+  const cfg = policy?.native_review?.codex;
+  if (!cfg || !isNonEmptyString(cfg.actor)) return null;
+  const login = comment?.user?.login;
+  if (login !== cfg.actor) return null;
+  const body = comment?.body;
+  const identity_verified = comment?.performed_via_github_app?.id === cfg.app_id;
+  const extra_reasons = [];
+  let verdict = 'NO_GO';
+  if (typeof body === 'string' && isNonEmptyString(cfg.success_marker) && body.startsWith(cfg.success_marker)) {
+    if (codexReviewedCommitRef(body)) verdict = 'GO';
+  }
+  if (verdict !== 'GO') extra_reasons.push(REASON.NO_GO_VERDICT_PRESENT);
+  return {
+    vendor: 'codex',
+    claimed_actor: login,
+    transport_actor: login,
+    identity_verified,
+    verdict,
+    extra_reasons,
+    resolved_head_sha: resolved?.head_sha ?? '',
+    resolved_tree_sha: resolved?.tree_sha ?? '',
+  };
+}
+
+/**
+ * Zet één ruwe `gemini-code-assist[bot]`-pull-request-review om naar genormaliseerd native bewijs.
+ * `inlineComments` zijn de review-comments die bij DEZE review horen (door de caller al op
+ * `pull_request_review_id` gegroepeerd) — hun aantal komt van GitHub, niet uit een zelfgerapporteerd
+ * veld in het reviewlichaam. `resolved` is het door de caller opgezochte commit-object voor
+ * `review.commit_id`.
+ */
+export function extractGeminiNativeEvidence(review, inlineComments, resolved, policy) {
+  const cfg = policy?.native_review?.gemini;
+  if (!cfg || !isNonEmptyString(cfg.actor)) return null;
+  const login = review?.user?.login;
+  if (login !== cfg.actor) return null;
+  const identity_verified = review?.user?.type === 'Bot';
+  const body = review?.body;
+  const extra_reasons = [];
+  const stateAllowed = Array.isArray(cfg.allowed_states) && cfg.allowed_states.includes(review?.state);
+  if (!stateAllowed) extra_reasons.push(REASON.NATIVE_STATE_NOT_ALLOWED);
+  const hasTerminalMarker = typeof body === 'string' && isNonEmptyString(cfg.terminal_marker)
+    && body.startsWith(cfg.terminal_marker);
+  if (!hasTerminalMarker) extra_reasons.push(REASON.NATIVE_TERMINAL_MARKER_MISSING);
+  // Gemini's ernstvocabulaire is hier niet volledig gemeten, dus wordt het niet geïnterpreteerd:
+  // elke inline reviewcomment telt als bevinding, ongeacht badge of tekst. "Schoon" is uitsluitend
+  // nul reviewcomments op deze review — dat is de fail-closed lezing.
+  const comments = Array.isArray(inlineComments) ? inlineComments : [];
+  if (comments.length > 0) extra_reasons.push(REASON.NATIVE_FINDINGS_PRESENT);
+  const verdict = extra_reasons.length === 0 ? 'GO' : 'NO_GO';
+  return {
+    vendor: 'gemini',
+    claimed_actor: login,
+    transport_actor: login,
+    identity_verified,
+    verdict,
+    extra_reasons,
+    resolved_head_sha: resolved?.head_sha ?? '',
+    resolved_tree_sha: resolved?.tree_sha ?? '',
+  };
+}
+
+/**
+ * De ene provider-onafhankelijke adapter: bindt genormaliseerd native bewijs (van welke extractor dan
+ * ook) aan de gemeten waarheid. Kent geen vendorkennis meer — alleen transportactor-gelijkheid,
+ * actuele head/tree, een gedeclareerd task_id op de PR, zelfreview en het al-berekende verdict.
+ */
+export function bindNativeEvidence(evidence, rawContext) {
+  const e = evidence ?? {};
+  const ctx = rawContext ?? {};
+  const reasons = [];
+  const add = (r) => { if (!reasons.includes(r)) reasons.push(r); };
+
+  if (!isNonEmptyString(e.transport_actor) || e.transport_actor !== e.claimed_actor) {
+    add(REASON.TRANSPORT_ACTOR_MISMATCH);
+  }
+  if (!e.identity_verified) add(REASON.NATIVE_IDENTITY_UNVERIFIED);
+  if (!isNonEmptyString(ctx.task_id)) add(REASON.TASK_MISMATCH);
+  if (!SHA_RE.test(e.resolved_head_sha) || e.resolved_head_sha !== ctx.pr_head_sha) add(REASON.STALE_HEAD);
+  if (!SHA_RE.test(e.resolved_tree_sha) || e.resolved_tree_sha !== ctx.pr_tree_sha) add(REASON.TREE_MISMATCH);
+  if (isNonEmptyString(e.claimed_actor) && e.claimed_actor === ctx.builder_actor) add(REASON.SELF_REVIEW);
+  if (e.verdict !== 'GO') {
+    const extra = Array.isArray(e.extra_reasons) ? e.extra_reasons : [];
+    if (extra.length === 0) add(REASON.NO_GO_VERDICT_PRESENT);
+    else for (const r of extra) add(r);
+  }
+
+  return { valid: reasons.length === 0, reasons, vendor: e.vendor, actor: e.claimed_actor };
+}
+
+/**
+ * Weigert een policy waarvan de gepinde native-vendoractor wildcard of leeg is — nooit fail-open.
+ * Weigert bovendien elke policy waarin de ownergate en de reviewvendors elkaar kunnen vervangen:
+ * een owner-vendornaam of owner-actor die ook als vereiste reviewvendor of vendoractor voorkomt,
+ * zou één identiteit twee onafhankelijke poorten laten passeren.
+ */
+export function assertNativeVendorsSafe(policy) {
+  const nr = policy?.native_review;
+  if (!nr || typeof nr !== 'object' || Array.isArray(nr)) throw new Error(REASON.UNSAFE_POLICY);
+  if (!Array.isArray(nr.required_vendors) || nr.required_vendors.length === 0) {
+    throw new Error(REASON.UNSAFE_POLICY);
+  }
+
+  const ownerMap = policy?.owner_gate?.allowed_reviewer_actors;
+  const ownerVendors = new Set(ownerMap && typeof ownerMap === 'object' && !Array.isArray(ownerMap)
+    ? Object.keys(ownerMap) : []);
+  const ownerActors = new Set(Object.values(ownerMap ?? {})
+    .flatMap((actors) => Array.isArray(actors) ? actors : []));
+
+  const seenVendors = new Set();
+  for (const vendor of nr.required_vendors) {
+    if (!isNonEmptyString(vendor) || vendor === '*') throw new Error(REASON.UNSAFE_POLICY);
+    if (seenVendors.has(vendor)) throw new Error(REASON.UNSAFE_POLICY);
+    seenVendors.add(vendor);
+    if (ownerVendors.has(vendor)) throw new Error(REASON.UNSAFE_POLICY);
+    const cfg = nr[vendor];
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(REASON.UNSAFE_POLICY);
+    if (!isNonEmptyString(cfg.actor) || cfg.actor === '*') throw new Error(REASON.UNSAFE_POLICY);
+    if (ownerActors.has(cfg.actor)) throw new Error(REASON.UNSAFE_POLICY);
+  }
+}
+
+/**
+ * Evalueert de volledige set native bewijsstukken voor één PR-head. Elk vereist vendor uit
+ * `policy.native_review.required_vendors` moet minstens één geldig GO-bewijs leveren; anders NO_GO.
+ *
+ * De selectievolgorde spiegelt `evaluateReceipts`: bewijs dat mechanisch naar een ANDERE bekende head
+ * resolveert is een afgeronde reviewronde van een vorige push — auditdata, nooit opnieuw geldig, en
+ * evenmin een blokkade voor de actuele head. Bewijs dat helemaal niet resolveert blijft wél staan en
+ * faalt gesloten: een gepinde bot die naar een onbekende commit wijst is een anomalie, geen ruis.
+ */
+export function evaluateNativeReview(evidenceItems, rawContext, rawPolicy) {
+  const context = rawContext ?? {};
+  const policy = rawPolicy ?? {};
+  try {
+    assertNativeVendorsSafe(policy);
+  } catch {
+    return { decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] };
+  }
+  const items = (Array.isArray(evidenceItems) ? evidenceItems : []).filter((e) => e != null);
+  const selected = items.filter((e) => !(
+    SHA_RE.test(e?.resolved_head_sha) && SHA_RE.test(context.pr_head_sha)
+    && e.resolved_head_sha !== context.pr_head_sha
+  ));
+
+  const reasons = new Set();
+  const validGoVendors = new Set();
+  for (const item of selected) {
+    const bound = bindNativeEvidence(item, context);
+    for (const r of bound.reasons) reasons.add(r);
+    if (bound.valid) validGoVendors.add(bound.vendor);
+  }
+  if (selected.length === 0) {
+    reasons.add(REASON.NO_RECEIPTS);
+    if (items.length > 0) reasons.add(REASON.STALE_HEAD);
+  }
+  for (const vendor of policy.native_review.required_vendors) {
+    if (!validGoVendors.has(vendor)) reasons.add(REASON.INSUFFICIENT_GO);
+  }
+  return { decision: reasons.size === 0 ? 'GO' : 'NO_GO', reasons: Array.from(reasons) };
+}
+
+/**
+ * De volledige Shield-uitspraak: native tweevendorbewijs, plus — alléén als de diff gevoelige paden
+ * raakt (`.github/workflows/**`, `CONTROL/AUTOCODING/**`) — een apart OWNER_GATE-receipt (hergebruikt
+ * het generieke receiptschema hierboven, met `policy.owner_gate` als zijn eigen kleine policy). De
+ * owneractor telt nooit mee als een van de twee vereiste vendors — dat receipt heeft vendor `"owner"`,
+ * nooit `"codex"`/`"gemini"`, dus `evaluateNativeReview` en dit receipt kunnen elkaar niet vervangen.
+ */
+export function evaluateShield({ nativeEvidence, ownerReceipts, sensitivePathsTouched, context, policy }) {
+  const nativeResult = evaluateNativeReview(nativeEvidence, context, policy);
+  const reasons = new Set(nativeResult.reasons);
+  if (sensitivePathsTouched) {
+    const ownerResult = evaluateReceipts(ownerReceipts, context, policy?.owner_gate);
+    if (ownerResult.decision !== 'GO') {
+      reasons.add(REASON.OWNER_GATE_REQUIRED);
+      for (const r of ownerResult.reasons) reasons.add(r);
+    }
+  }
+  return { decision: reasons.size === 0 ? 'GO' : 'NO_GO', reasons: Array.from(reasons) };
+}
+
 async function runCli() {
   const { readFileSync } = await import('node:fs');
   const args = new Map();
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i += 2) args.set(argv[i], argv[i + 1]);
 
-  const receiptsPath = args.get('--receipts');
   const contextPath = args.get('--context');
   const policyPath = args.get('--policy');
-  if (!receiptsPath || !contextPath || !policyPath) {
+  const receiptsPath = args.get('--receipts');
+  const shieldInputPath = args.get('--shield-input');
+
+  if (!contextPath || !policyPath || !(receiptsPath || shieldInputPath)) {
     console.log(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.PARSE_ERROR] }));
     process.exitCode = 1;
     return;
   }
 
-  let receipts;
   let context;
   let policy;
+  let receipts;
+  let shieldInput;
   try {
-    receipts = JSON.parse(readFileSync(receiptsPath, 'utf8'));
     context = JSON.parse(readFileSync(contextPath, 'utf8'));
     policy = JSON.parse(readFileSync(policyPath, 'utf8'));
+    if (shieldInputPath) shieldInput = JSON.parse(readFileSync(shieldInputPath, 'utf8'));
+    else receipts = JSON.parse(readFileSync(receiptsPath, 'utf8'));
   } catch {
     console.log(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.PARSE_ERROR] }));
     process.exitCode = 1;
     return;
   }
 
-  try {
-    assertPolicyIsSafe(policy);
-  } catch {
-    console.log(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] }));
-    process.exitCode = 1;
-    return;
+  // De shield-route (native reviewbewijs + optioneel ownergate) heeft zijn eigen policyveiligheid
+  // (`assertNativeVendorsSafe`); de oudere generieke-receiptroute blijft op `assertPolicyIsSafe` staan.
+  // Beide falen gesloten op UNSAFE_POLICY, nooit fail-open.
+  let result;
+  if (shieldInputPath) {
+    try {
+      assertNativeVendorsSafe(policy);
+    } catch {
+      console.log(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] }));
+      process.exitCode = 1;
+      return;
+    }
+    result = evaluateShield({
+      nativeEvidence: shieldInput?.nativeEvidence,
+      ownerReceipts: shieldInput?.ownerReceipts,
+      sensitivePathsTouched: Boolean(shieldInput?.sensitivePathsTouched),
+      context,
+      policy,
+    });
+  } else {
+    try {
+      assertPolicyIsSafe(policy);
+    } catch {
+      console.log(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] }));
+      process.exitCode = 1;
+      return;
+    }
+    result = evaluateReceipts(receipts, context, policy);
   }
-
-  const result = evaluateReceipts(receipts, context, policy);
   console.log(JSON.stringify(result));
   process.exitCode = result.decision === 'GO' ? 0 : 1;
 }
