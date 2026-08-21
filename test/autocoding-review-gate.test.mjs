@@ -203,6 +203,36 @@ test('policy met wildcard-actor wordt geweigerd', () => {
   assert.throws(() => assertPolicyIsSafe({ allowed_reviewer_actors: { codex: ['*'] } }));
 });
 
+const UNSAFE_ACTOR_POLICIES = [
+  ['string-actorlijst met matchende substring', { allowed_reviewer_actors: { codex: 'codex-bot-alpha-extra' } }],
+  ['null-actorlijst', { allowed_reviewer_actors: { codex: null } }],
+  ['primitieve actorlijst', { allowed_reviewer_actors: { codex: 42 } }],
+  ['object-actorlijst', { allowed_reviewer_actors: { codex: { 0: 'codex-bot-alpha' } } }],
+  ['wildcard-actor', { allowed_reviewer_actors: { codex: ['*'] } }],
+  ['lege actornaam', { allowed_reviewer_actors: { codex: [''] } }],
+  ['wildcard-vendor', { allowed_reviewer_actors: { '*': ['codex-bot-alpha'] } }],
+  ['lege vendornaam', { allowed_reviewer_actors: { '': ['codex-bot-alpha'] } }],
+];
+
+test('evaluateReceipt laat actor nooit toe via een niet-array allowlist', () => {
+  for (const [, policy] of UNSAFE_ACTOR_POLICIES.slice(0, 4)) {
+    const r = evaluateReceipt(signed(goCodex()), CONTEXT, policy);
+    assert.equal(r.valid, false);
+    assert.ok(r.reasons.includes(REASON.UNKNOWN_ACTOR));
+  }
+});
+
+test('evaluateReceipts weigert iedere onveilige policy vóór vertrouwensselectie zonder throw', () => {
+  for (const [name, policy] of UNSAFE_ACTOR_POLICIES) {
+    assert.doesNotThrow(() => evaluateReceipts([signed(goCodex()), signed(goGemini())], CONTEXT, policy), name);
+    assert.deepEqual(
+      evaluateReceipts([signed(goCodex()), signed(goGemini())], CONTEXT, policy),
+      { decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] },
+      name,
+    );
+  }
+});
+
 test('lege allowlist is een toegestane fail-closed default', () => {
   assert.doesNotThrow(() => assertPolicyIsSafe({ allowed_reviewer_actors: { codex: [], gemini: [] } }));
 });
@@ -267,8 +297,7 @@ test('evaluateReceipts geeft bij null/undefined context en policy deterministisc
   for (const [context, policy] of [[null, null], [undefined, undefined]]) {
     const r = evaluateReceipts([signed(goCodex()), signed(goGemini())], context, policy);
     assert.equal(r.decision, 'NO_GO');
-    assert.ok(r.reasons.includes(REASON.UNSAFE_POLICY));
-    assert.ok(r.reasons.includes(REASON.NO_RECEIPTS));
+    assert.deepEqual(r.reasons, [REASON.UNSAFE_POLICY]);
   }
 });
 
@@ -292,6 +321,36 @@ test('CLI schrijft geëvalueerde NO_GO als JSON naar stdout en eindigt met rc 1'
   assert.equal(cli.status, 1);
   assert.equal(cli.stderr, '');
   assert.equal(JSON.parse(cli.stdout).decision, 'NO_GO');
+});
+
+test('CLI behoudt UNSAFE_POLICY voor een parseerbare onveilige policy', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'autocoding-shield-'));
+  const paths = ['receipts.json', 'context.json', 'policy.json'].map((name) => join(dir, name));
+  writeFileSync(paths[0], JSON.stringify([signed(goCodex())]));
+  writeFileSync(paths[1], JSON.stringify(CONTEXT));
+  writeFileSync(paths[2], JSON.stringify({ allowed_reviewer_actors: { codex: 'codex-bot-alpha-extra' } }));
+  const cli = spawnSync(process.execPath, [
+    'scripts/autocoding/verify-review-gate.mjs', '--receipts', paths[0], '--context', paths[1],
+    '--policy', paths[2],
+  ], { encoding: 'utf8' });
+  assert.equal(cli.status, 1);
+  assert.equal(cli.stderr, '');
+  assert.deepEqual(JSON.parse(cli.stdout), { decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] });
+});
+
+test('CLI behoudt PARSE_ERROR voor syntactisch kapotte JSON', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'autocoding-shield-'));
+  const paths = ['receipts.json', 'context.json', 'policy.json'].map((name) => join(dir, name));
+  writeFileSync(paths[0], '[]');
+  writeFileSync(paths[1], JSON.stringify(CONTEXT));
+  writeFileSync(paths[2], '{kapotte json');
+  const cli = spawnSync(process.execPath, [
+    'scripts/autocoding/verify-review-gate.mjs', '--receipts', paths[0], '--context', paths[1],
+    '--policy', paths[2],
+  ], { encoding: 'utf8' });
+  assert.equal(cli.status, 1);
+  assert.equal(cli.stderr, '');
+  assert.deepEqual(JSON.parse(cli.stdout), { decision: 'NO_GO', reasons: [REASON.PARSE_ERROR] });
 });
 
 test('workflow-eventmatrix houdt bootstrap-events groen en live gate uit', () => {

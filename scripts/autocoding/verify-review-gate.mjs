@@ -138,7 +138,8 @@ export function evaluateReceipt(envelope, rawContext, rawPolicy) {
     add(REASON.WILDCARD_IDENTITY);
   } else if (!Object.prototype.hasOwnProperty.call(policy.allowed_reviewer_actors ?? {}, receipt.reviewer_vendor)) {
     add(REASON.UNKNOWN_VENDOR);
-  } else if (!(policy.allowed_reviewer_actors[receipt.reviewer_vendor] ?? []).includes(receipt.reviewer_actor)) {
+  } else if (!Array.isArray(policy.allowed_reviewer_actors[receipt.reviewer_vendor])
+    || !policy.allowed_reviewer_actors[receipt.reviewer_vendor].includes(receipt.reviewer_actor)) {
     add(REASON.UNKNOWN_ACTOR);
   }
 
@@ -162,16 +163,17 @@ export function evaluateReceipt(envelope, rawContext, rawPolicy) {
 export function evaluateReceipts(receipts, rawContext, rawPolicy) {
   const context = rawContext ?? {};
   const policy = rawPolicy ?? {};
+  try {
+    assertPolicyIsSafe(policy);
+  } catch {
+    return { decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] };
+  }
   if (!Array.isArray(receipts) || receipts.length === 0) {
     return { decision: 'NO_GO', reasons: [REASON.NO_RECEIPTS] };
   }
 
   const reasons = new Set();
-
   const actorMap = policy.allowed_reviewer_actors;
-  if (!actorMap || typeof actorMap !== 'object' || Array.isArray(actorMap)) {
-    reasons.add(REASON.UNSAFE_POLICY);
-  }
   const allowedTransportActors = new Set(
     Object.values(actorMap ?? {}).flatMap((actors) => Array.isArray(actors) ? actors : []),
   );
@@ -252,7 +254,7 @@ export function extractReceiptFromCommentBody(body) {
 /** Weigert een policy met een wildcard of lege identiteit in een allowlist — nooit fail-open. */
 export function assertPolicyIsSafe(policy) {
   const map = policy?.allowed_reviewer_actors;
-  if (!map || typeof map !== 'object') throw new Error(REASON.UNSAFE_POLICY);
+  if (!map || typeof map !== 'object' || Array.isArray(map)) throw new Error(REASON.UNSAFE_POLICY);
   for (const [vendor, actors] of Object.entries(map)) {
     if (!isNonEmptyString(vendor) || vendor === '*') throw new Error(REASON.UNSAFE_POLICY);
     if (!Array.isArray(actors)) throw new Error(REASON.UNSAFE_POLICY);
@@ -284,9 +286,16 @@ async function runCli() {
     receipts = JSON.parse(readFileSync(receiptsPath, 'utf8'));
     context = JSON.parse(readFileSync(contextPath, 'utf8'));
     policy = JSON.parse(readFileSync(policyPath, 'utf8'));
-    assertPolicyIsSafe(policy);
   } catch {
     console.log(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.PARSE_ERROR] }));
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    assertPolicyIsSafe(policy);
+  } catch {
+    console.log(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] }));
     process.exitCode = 1;
     return;
   }
