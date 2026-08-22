@@ -35,17 +35,34 @@ import { pathToFileURL } from 'node:url';
 import {
   selectTargets, isTrustedWorkflowRunSource, issueCommentTarget, workflowRunTargets,
   normaliseOpenPullRequests, scheduleSlotOf, selectScheduleBucket, affordablePullRequests,
-  parseTargetArgs, parseCounter, runSelect,
+  parseTargetArgs, parseCounter, parseCompleteness, runSelect,
   EXPECTED_SOURCE, EVENT_TARGET_LIMIT, SCHEDULE_BUCKET_LIMIT, SCHEDULE_SLOT_SECONDS,
+  LIST_PAGE_BUDGET, SELECTION_PAGE_BUDGET,
   PER_PULL_REQUEST_REQUEST_BUDGET, SELECTION_REQUEST_BUDGET, EVENT_REQUEST_BUDGET,
   SCHEDULE_REQUEST_BUDGET, SHARED_HOURLY_REQUEST_QUOTA, QUOTA_RESERVE,
   TARGET_OUTCOME, TARGET_REASON, TARGET_SELECTION,
 } from '../scripts/autocoding/select-live-gate-targets.mjs';
 import { analyzeWorkflow } from '../scripts/autocoding/workflow-trust.mjs';
+import { resolvePublication } from '../scripts/autocoding/publish-live-status.mjs';
 
 const SELECTOR = 'scripts/autocoding/select-live-gate-targets.mjs';
+const BOUNDED_PAGES = 'scripts/autocoding/gh-bounded-pages.sh';
+const BOUNDED_TEKST = readFileSync(BOUNDED_PAGES, 'utf8');
 const TRUSTED_WRITER = '.github/workflows/autocoding-shield-live-gate.yml';
 const WRITER_TEKST = readFileSync(TRUSTED_WRITER, 'utf8');
+
+/**
+ * Een getalconstante uit de gedeelde shell-lib, letterlijk uit het BESTAND gelezen.
+ *
+ * De paginagrens leeft in bash (daar worden de verzoeken gedaan) en in JavaScript (daar wordt het
+ * budget uitgerekend). Zolang die twee alleen naast elkaar bestaan, kan er één veranderen zonder de
+ * ander — en dan is het budgetgetal weer een schatting. Deze lezer bindt ze aan elkaar.
+ */
+function shellConstante(naam, tekst = BOUNDED_TEKST) {
+  const treffer = tekst.match(new RegExp(`^${naam}=([0-9]+)$`, 'm'));
+  assert.ok(treffer, `constante ontbreekt in ${BOUNDED_PAGES}: ${naam}`);
+  return Number(treffer[1]);
+}
 
 const SELECTIE_STAP = "Bepaal de doel-PR's read-only";
 const SCHRIJF_STAP = 'Meet, beslis en publiceer deze pull request';
@@ -449,10 +466,33 @@ test('S7. de API-bovengrenzen liggen vast en blijven onder het gedeelde uurquotu
   assert.equal(enkelvoudig, 1);
   assert.equal(
     PER_PULL_REQUEST_REQUEST_BUDGET,
-    hermetingPogingen + publicaties + enkelvoudig + (gepagineerd * 4),
+    hermetingPogingen + publicaties + enkelvoudig + (gepagineerd * LIST_PAGE_BUDGET),
     'het budget per PR volgt uit de stap zelf',
   );
   assert.equal(PER_PULL_REQUEST_REQUEST_BUDGET, 26);
+
+  // En de paginagrens is een GRENS, niet een schatting. Zij komt uit de gedeelde shell-lib die de
+  // verzoeken werkelijk doet; `--paginate` volgde de `Link`-header tot de laatste pagina en maakte
+  // het getal hierboven onwaar. Loopt bash of JavaScript weg van de ander, dan is dit rood.
+  assert.equal(shellConstante('GH_BOUNDED_EVIDENCE_PAGES'), LIST_PAGE_BUDGET);
+  assert.equal(shellConstante('GH_BOUNDED_SELECTION_PAGES'), SELECTION_PAGE_BUDGET);
+  assert.equal(shellConstante('GH_BOUNDED_PAGE_SIZE'), 100, 'GitHub levert nooit meer per pagina');
+  assert.equal(SELECTION_REQUEST_BUDGET, SELECTION_PAGE_BUDGET);
+  assert.equal(LIST_PAGE_BUDGET, 4);
+  assert.equal(SELECTION_PAGE_BUDGET, 4);
+
+  // MUTATIE: één van de twee getallen verzetten. De ene kant meet dan meer pagina's dan de andere
+  // begroot, en precies dat mag niet stil kunnen gebeuren.
+  assert.throws(
+    () => assert.equal(shellConstante('GH_BOUNDED_EVIDENCE_PAGES',
+      BOUNDED_TEKST.replace('GH_BOUNDED_EVIDENCE_PAGES=4', 'GH_BOUNDED_EVIDENCE_PAGES=5')), LIST_PAGE_BUDGET),
+    'een vijfde pagina in bash zonder budgetverhoging moet rood zijn',
+  );
+  assert.throws(
+    () => assert.equal(shellConstante('GH_BOUNDED_EVIDENCE_PAGES',
+      BOUNDED_TEKST.replace('GH_BOUNDED_EVIDENCE_PAGES=4', 'GH_BOUNDED_EVIDENCE_PAGES=3')), LIST_PAGE_BUDGET),
+    'een te laag budgetgetal moet evengoed rood zijn',
+  );
 
   assert.equal(EVENT_REQUEST_BUDGET, SELECTION_REQUEST_BUDGET + PER_PULL_REQUEST_REQUEST_BUDGET);
   assert.equal(EVENT_REQUEST_BUDGET, 30);
@@ -515,9 +555,20 @@ test('S7b. de ronde krimpt mechanisch mee met wat er van het GEDEELDE quotum ove
 test('S8. de CLI leest zijn argumenten fail-closed', () => {
   const volledig = [
     '--event-name', 'schedule', '--event', 'e.json', '--open-pulls', 'o.json',
-    '--now-epoch', '1000', '--remaining-quota', '900', '--out', 't.json',
+    '--open-pulls-complete', 'true', '--now-epoch', '1000', '--remaining-quota', '900',
+    '--out', 't.json',
   ];
   assert.equal(parseTargetArgs(volledig).ok, true);
+
+  // De volledigheidsvlag is VERPLICHT. Zou hij mogen ontbreken, dan zou een aanroeper die vergeet
+  // hem door te geven stilzwijgend "volledig" krijgen — en dat is precies de aanname die een
+  // afgekapte open-PR-lijst weer als volledige rotatie zou laten doorgaan.
+  assert.equal(
+    parseTargetArgs(volledig.filter((v, i) => v !== '--open-pulls-complete'
+      && volledig[i - 1] !== '--open-pulls-complete')).ok,
+    false,
+    'zonder volledigheidsvlag',
+  );
 
   // Ontbrekend, dubbel, onbekend, waardeloos of een optie als waarde: alles wordt geweigerd in
   // plaats van stilzwijgend geherinterpreteerd.
@@ -537,6 +588,14 @@ test('S8. de CLI leest zijn argumenten fail-closed', () => {
   for (const stuk of ['-', '', ' 900', '9e2', '-1', '1.5', '0x10', null, 900]) {
     assert.equal(parseCounter(stuk), null, String(stuk));
   }
+
+  // De volledigheidsvlag kent precies twee waarden. Alles daarbuiten is een argumentfout en geen
+  // stilzwijgend "volledig": een tikfout hoort in de aanroeper zichtbaar te worden.
+  assert.equal(parseCompleteness('true'), true);
+  assert.equal(parseCompleteness('false'), false);
+  for (const stuk of ['True', 'FALSE', '1', '0', 'ja', '', ' true', '-', null, true]) {
+    assert.equal(parseCompleteness(stuk), null, String(stuk));
+  }
 });
 
 test('S9. de CLI vertaalt uitkomsten naar exitcodes en schrijft ALTIJD een geldige matrix', () => {
@@ -548,9 +607,10 @@ test('S9. de CLI vertaalt uitkomsten naar exitcodes en schrijft ALTIJD een geldi
   };
   const geschreven = new Map();
   const writeFile = (pad, data) => geschreven.set(pad, data);
-  const argv = (eventName) => [
+  const argv = (eventName, compleet = 'true') => [
     '--event-name', eventName, '--event', 'e.json', '--open-pulls', 'o.json',
-    '--now-epoch', '1696118400', '--remaining-quota', '900', '--out', join(dir, 'targets.json'),
+    '--open-pulls-complete', compleet, '--now-epoch', '1696118400', '--remaining-quota', '900',
+    '--out', join(dir, 'targets.json'),
   ];
   const uit = () => JSON.parse(geschreven.get(join(dir, 'targets.json')));
 
@@ -586,6 +646,24 @@ test('S9. de CLI vertaalt uitkomsten naar exitcodes en schrijft ALTIJD een geldi
   const bucket = uit();
   assert.ok(Array.isArray(bucket) && bucket.length === SCHEDULE_BUCKET_LIMIT);
   assert.ok(bucket.every((n) => Number.isInteger(n) && n > 0));
+
+  // Een AFGEKAPTE open-PR-lijst is rood en meet niets. Dezelfde lijst die zojuist een bucket
+  // opleverde, mag dat niet meer zodra zij als onvolledig is gemeten: over een halve lijst
+  // roteren zou alles voorbij de paginagrens voor altijd op een oude status laten staan.
+  const afgekapt = [];
+  const logAf = (regel) => afgekapt.push(regel);
+  const echteLog = console.log;
+  console.log = logAf;
+  const rc = runSelect(argv('schedule', 'false'), { readFile, writeFile });
+  console.log = echteLog;
+  assert.equal(rc, 1);
+  assert.deepEqual(uit(), []);
+  assert.ok(afgekapt.includes(`LIVE_GATE_TARGETS_${TARGET_REASON.OPEN_PULL_REQUESTS_TRUNCATED}`),
+    afgekapt.join(','));
+
+  // En een onleesbare vlag is een argumentfout, met dezelfde lege matrix.
+  assert.equal(runSelect(argv('schedule', 'misschien'), { readFile, writeFile }), 1);
+  assert.deepEqual(uit(), []);
 });
 
 // --- De selectiestap van de workflow zelf --------------------------------------------------------
@@ -596,14 +674,28 @@ test('S10. de selectiestap haalt de open-PR-lijst alleen op bij een SCHEDULE', (
   // veroorzaken. `node` blijft hier ECHT — de selector is de code die gemeten wordt.
   const script = stapScript(WRITER_TEKST, SELECTIE_STAP);
 
-  const draai = (eventName, event, ghExtra = '') => {
+  // `gh` is per PAGINA gestubd, niet per eindpunt. Dat is geen detail: de begrensde paginering
+  // vraagt `page=1`, `page=2`, … en stopt bij de eerste niet-volle pagina, dus een stub die elke
+  // aanroep hetzelfde antwoord geeft zou de grens niet kunnen meten.
+  const draai = (eventName, event, { paginas = null, faaltOpPagina = null } = {}) => {
     const { dir, bin, runnerTemp } = werkmap('live-gate-selectie-');
     const ghLog = join(dir, 'gh.txt');
+    const pagesDir = join(dir, 'pages');
+    mkdirSync(pagesDir);
+    (paginas ?? []).forEach((items, i) => {
+      writeFileSync(join(pagesDir, `${i + 1}.json`), JSON.stringify(items));
+    });
     stub(bin, 'gh', [
       'echo "$*" >> "$GH_LOG"',
       'case "$*" in',
-      "  *rate_limit*) echo 900 ;;",
-      ghExtra,
+      '  *rate_limit*) echo 900 ;;',
+      '  *state=open*)',
+      // `${*##...}` snijdt PER positioneel argument en levert dus "api 1"; het laatste argument is
+      // het volledige pad, en daar staat de paginaparameter in.
+      '    for a in "$@"; do laatste="$a"; done',
+      '    p="${laatste##*page=}"',
+      faaltOpPagina === null ? '' : `    if [ "$p" = "${faaltOpPagina}" ]; then exit 1; fi`,
+      '    if [ -f "$PAGES/$p.json" ]; then cat "$PAGES/$p.json"; else echo "[]"; fi ;;',
       '  *) echo "[]" ;;',
       'esac',
     ].join('\n'));
@@ -617,6 +709,7 @@ test('S10. de selectiestap haalt de open-PR-lijst alleen op bij een SCHEDULE', (
       bin,
       env: {
         GH_LOG: ghLog,
+        PAGES: pagesDir,
         GH_TOKEN: 'x',
         REPOSITORY: 'owner/repo',
         EVENT_NAME: eventName,
@@ -648,19 +741,90 @@ test('S10. de selectiestap haalt de open-PR-lijst alleen op bij een SCHEDULE', (
   assert.match(geenPr.output, /pull_requests=\[\]/);
   assert.match(geenPr.output, /measure=false/);
 
-  // De schedule haalt de lijst wél op, en meet er hoogstens 25.
-  const lijst = JSON.stringify(Array.from({ length: 126 }, (_, i) => openPr(i + 1))).replace(/'/g, '');
-  const schedule = draai('schedule', {}, `  *state=open*) echo '${lijst}' ;;`);
+  // De schedule haalt de lijst wél op, en meet er hoogstens 25. 126 open PR's is één VOLLE pagina
+  // van honderd plus een halve tweede; de tweede is niet vol, dus is de lijst daar volledig en
+  // wordt er geen derde pagina opgevraagd.
+  const nummers = Array.from({ length: 126 }, (_, i) => openPr(i + 1));
+  const schedule = draai('schedule', {}, { paginas: [nummers.slice(0, 100), nummers.slice(100)] });
   assert.equal(schedule.status, 0);
   assert.match(schedule.output, /measure=true/);
   const doelen = JSON.parse(schedule.output.match(/pull_requests=(\[.*\])/)[1]);
   assert.equal(doelen.length, SCHEDULE_BUCKET_LIMIT);
-  assert.ok(schedule.ghAanroepen.some((regel) => regel.includes('state=open')));
+  const lijstAanroepen = schedule.ghAanroepen.filter((regel) => regel.includes('state=open'));
+  assert.equal(lijstAanroepen.length, 2, 'precies twee pagina\'s, en geen derde');
+  assert.ok(lijstAanroepen.every((regel) => regel.includes('per_page=100')));
+  assert.deepEqual(lijstAanroepen.map((r) => r.match(/[&?]page=([0-9]+)/)[1]), ['1', '2']);
 
   // Een onbereikbare lijst is rood en meet niets: stil doorgaan zou nul statussen publiceren.
-  const kapot = draai('schedule', {}, '  *state=open*) exit 1 ;;');
+  const kapot = draai('schedule', {}, { paginas: [nummers.slice(0, 100)], faaltOpPagina: 1 });
   assert.equal(kapot.status, 1);
   assert.match(kapot.stdout, /OPEN_PULL_REQUEST_LIST_UNAVAILABLE/);
+
+  // Ook een fout HALVERWEGE de paginering is rood. Een half opgehaalde lijst is geen lijst.
+  const halfKapot = draai('schedule', {}, {
+    paginas: [nummers.slice(0, 100), nummers.slice(100)], faaltOpPagina: 2,
+  });
+  assert.equal(halfKapot.status, 1);
+  assert.match(halfKapot.stdout, /OPEN_PULL_REQUEST_LIST_UNAVAILABLE/);
+});
+
+test('S10b. een open-PR-lijst die niet binnen de paginagrens past, roteert NIET half', () => {
+  // Vier volle pagina's: er kunnen meer open PR's bestaan dan deze lijst draagt. De rotatie
+  // verdeelt de VOLLEDIGE lijst in blokken, dus zou alles voorbij de grens nooit aan de beurt
+  // komen en voor altijd op een oude status blijven staan — terwijl de ronde er groen uitziet.
+  const vol = (start) => Array.from({ length: 100 }, (_, i) => openPr(start + i));
+  const { dir, bin, runnerTemp } = werkmap('live-gate-truncatie-');
+  const ghLog = join(dir, 'gh.txt');
+  const pagesDir = join(dir, 'pages');
+  mkdirSync(pagesDir);
+  for (let i = 1; i <= 6; i += 1) {
+    writeFileSync(join(pagesDir, `${i}.json`), JSON.stringify(vol(((i - 1) * 100) + 1)));
+  }
+  stub(bin, 'gh', [
+    'echo "$*" >> "$GH_LOG"',
+    'case "$*" in',
+    '  *rate_limit*) echo 900 ;;',
+    '  *state=open*) for a in "$@"; do laatste="$a"; done; p="${laatste##*page=}"; cat "$PAGES/$p.json" ;;',
+    '  *) echo "[]" ;;',
+    'esac',
+  ].join('\n'));
+  stub(bin, 'date', 'echo 1696118400');
+  const eventPad = join(dir, 'event.json');
+  writeFileSync(eventPad, '{}');
+  const outputPad = join(dir, 'output.txt');
+  writeFileSync(outputPad, '');
+  const uitkomst = draaiStap(stapScript(WRITER_TEKST, SELECTIE_STAP), {
+    dir,
+    bin,
+    env: {
+      GH_LOG: ghLog,
+      PAGES: pagesDir,
+      GH_TOKEN: 'x',
+      REPOSITORY: 'owner/repo',
+      EVENT_NAME: 'schedule',
+      RUNNER_TEMP: runnerTemp,
+      GITHUB_EVENT_PATH: eventPad,
+      GITHUB_OUTPUT: outputPad,
+    },
+  });
+  const output = readFileSync(outputPad, 'utf8');
+  const aanroepen = readFileSync(ghLog, 'utf8').trim().split('\n')
+    .filter((regel) => regel.includes('state=open'));
+
+  // Precies de toegestane pagina's, en geen enkele daarbuiten.
+  assert.equal(aanroepen.length, SELECTION_PAGE_BUDGET, aanroepen.join(' | '));
+  assert.deepEqual(
+    aanroepen.map((r) => Number(r.match(/[&?]page=([0-9]+)/)[1])),
+    Array.from({ length: SELECTION_PAGE_BUDGET }, (_, i) => i + 1),
+  );
+  assert.ok(!aanroepen.some((r) => r.includes(`&page=${SELECTION_PAGE_BUDGET + 1}`)),
+    'nooit een pagina voorbij de grens');
+
+  // En de uitkomst is rood en leeg, niet een halve rotatie.
+  assert.equal(uitkomst.status, 1);
+  assert.match(uitkomst.stdout, new RegExp(`LIVE_GATE_TARGETS_${TARGET_REASON.OPEN_PULL_REQUESTS_TRUNCATED}`));
+  assert.match(output, /pull_requests=\[\]/);
+  assert.match(output, /measure=false/);
 });
 
 // --- De per-PR schrijfrij -------------------------------------------------------------------------
@@ -785,10 +949,28 @@ test('S12. er wordt pas NA de per-PR-lock gemeten, en elke afwijking daarvan is 
  * VOLGORDE en de bijbehorende argumenten worden in één gedeeld logboek vastgelegd, zodat "eerst
  * pending, dan bewijs, dan de eindstatus op dezelfde head" meetbaar is in plaats van beloofd.
  */
-function draaiSchrijfstap({ pr, prJson, ghFaalt = [], publishFaalt = [], beslissing = 'GO' }) {
+function draaiSchrijfstap({
+  pr, prJson, ghFaalt = [], publishFaalt = [], beslissing = 'GO', lijstPaginas = {},
+}) {
   const { dir, bin } = werkmap('live-gate-schrijf-');
   const runnerTemp = join(dir, 'runner');
   const log = join(dir, 'log.txt');
+
+  // De bewijslijsten worden PER PAGINA gestubd. Een stub die elke aanroep hetzelfde antwoord geeft
+  // kan het verschil tussen "de lijst is op" en "er is mogelijk meer" niet dragen, en juist dat
+  // verschil is hier de hele eigenschap.
+  const pagesDir = join(dir, 'pages');
+  mkdirSync(pagesDir);
+  const sleutelVan = (padDeel) => `repos/owner/repo/${padDeel}`.replace(/\//g, '-');
+  for (const [padDeel, paginas] of Object.entries(lijstPaginas)) {
+    paginas.forEach((items, i) => {
+      if (items === 'FOUT') return;
+      writeFileSync(join(pagesDir, `${sleutelVan(padDeel)}-${i + 1}.json`), JSON.stringify(items));
+    });
+  }
+  const foutPaginas = Object.entries(lijstPaginas).flatMap(([padDeel, paginas]) => paginas
+    .map((items, i) => (items === 'FOUT' ? `${sleutelVan(padDeel)}-${i + 1}` : null))
+    .filter(Boolean));
 
   stub(bin, 'gh', [
     'for arg in "$@"; do path="$arg"; done',
@@ -796,7 +978,12 @@ function draaiSchrijfstap({ pr, prJson, ghFaalt = [], publishFaalt = [], besliss
     'case "$path" in',
     ...ghFaalt.map((patroon) => `  *${patroon}*) exit 1 ;;`),
     `  */pulls/${pr}) cat "$PR_JSON" ;;`,
-    '  *) echo "[]" ;;',
+    '  *)',
+    '    p="${path##*page=}"',
+    '    zonderQuery="${path%%\\?*}"',
+    '    sleutel="${zonderQuery//\\//-}-$p"',
+    ...foutPaginas.map((sleutel) => `    if [ "$sleutel" = "${sleutel}" ]; then exit 1; fi`),
+    '    if [ -f "$PAGES/$sleutel.json" ]; then cat "$PAGES/$sleutel.json"; else echo "[]"; fi ;;',
     'esac',
   ].join('\n'));
   stub(bin, 'sleep', 'exit 0');
@@ -827,6 +1014,7 @@ function draaiSchrijfstap({ pr, prJson, ghFaalt = [], publishFaalt = [], besliss
     bin,
     env: {
       REAL_NODE: process.execPath,
+      PAGES: pagesDir,
       RUNNER_TEMP: runnerTemp,
       REPOSITORY: 'owner/repo',
       STATUS_CONTEXT: 'autocoding-shield-live-receipts',
@@ -963,4 +1151,274 @@ test('S17. een gequeueëde OUDERE beurt herleest al haar bewijs en publiceert de
   assert.ok(tweede.regels.filter((r) => r.startsWith('GET ')).length >= 6, 'al het bewijs opnieuw');
   const stap = stapScript(WRITER_TEKST, SCHRIJF_STAP);
   assert.doesNotMatch(stap, /GITHUB_EVENT_PATH/, 'geen enkel veld uit de eventpayload');
+});
+
+
+// --- De gedeelde begrensde paginering ------------------------------------------------------------
+
+/**
+ * Draait `gh_bounded_pages` uit de gedeelde shell-lib in echte bash, met een paginabewuste `gh`.
+ *
+ * Dit is de functie waar de hele bovengrens op rust: zolang de vijf bewijslijsten met `--paginate`
+ * werden opgehaald, was `PER_PULL_REQUEST_REQUEST_BUDGET` een schatting. Hier wordt geteld wat er
+ * werkelijk aan verzoeken uitgaat.
+ */
+function draaiBoundedFetch({
+  paginas, maxPages = LIST_PAGE_BUDGET, pad = 'repos/owner/repo/pulls/74/commits', strikt = false,
+}) {
+  const { dir, bin } = werkmap('gh-bounded-');
+  const pagesDir = join(dir, 'pages');
+  mkdirSync(pagesDir);
+  const fouten = [];
+  paginas.forEach((items, i) => {
+    if (items === 'FOUT') { fouten.push(i + 1); return; }
+    writeFileSync(join(pagesDir, `${i + 1}.json`), JSON.stringify(items));
+  });
+
+  stub(bin, 'gh', [
+    'for arg in "$@"; do laatste="$arg"; done',
+    'echo "$laatste" >> "$LOG"',
+    'p="${laatste##*page=}"',
+    ...fouten.map((nr) => `if [ "$p" = "${nr}" ]; then exit 1; fi`),
+    'if [ -f "$PAGES/$p.json" ]; then cat "$PAGES/$p.json"; else echo "geen-lijst" ; fi',
+  ].join('\n'));
+
+  const log = join(dir, 'gh.txt');
+  const out = join(dir, 'out.json');
+  const script = [
+    // `strikt` draait de functie onder `set -e`. Dat is geen theorie: een `[ ... ] && break` in de
+    // paginalus levert een non-zero status zodra hij NIET breekt, en zou onder een aanroeper met
+    // `set -e` de hele stap na de eerste volle pagina laten stoppen — met een halve oogst.
+    strikt ? 'set -euo pipefail' : 'set -uo pipefail',
+    '. scripts/autocoding/gh-bounded-pages.sh',
+    'rc=0',
+    `gh_bounded_pages "${pad}" "$OUT" "${maxPages}" "$SCRATCH" || rc=$?`,
+    'echo "RC=$rc"',
+  ].join('\n');
+
+  const uitkomst = draaiStap(script, {
+    dir, bin, env: { LOG: log, PAGES: pagesDir, OUT: out, SCRATCH: join(dir, 'scratch') },
+  });
+  return {
+    rc: Number(uitkomst.stdout.match(/RC=([0-9]+)/)[1]),
+    aanroepen: existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : [],
+    inhoud: existsSync(out) ? readFileSync(out, 'utf8') : null,
+  };
+}
+
+const volleP = (start) => Array.from({ length: 100 }, (_, i) => ({ number: start + i }));
+
+test('S18. de gedeelde paginering stopt bij de eerste NIET-volle pagina', () => {
+  // Eén halve pagina: de lijst is op, dus er wordt geen tweede opgevraagd.
+  const kort = draaiBoundedFetch({ paginas: [[{ number: 1 }, { number: 2 }]] });
+  assert.equal(kort.rc, 0);
+  assert.equal(kort.aanroepen.length, 1);
+  assert.match(kort.aanroepen[0], /per_page=100&page=1$/);
+  // De uitvoer is de `--slurp`-vorm: een array VAN PAGINA's. `flattenPages` leest die ongewijzigd.
+  assert.deepEqual(JSON.parse(kort.inhoud), [[{ number: 1 }, { number: 2 }]]);
+
+  // Een volle pagina gevolgd door een halve: precies twee verzoeken, en beide pagina's in de oogst.
+  const twee = draaiBoundedFetch({ paginas: [volleP(1), [{ number: 101 }]] });
+  assert.equal(twee.rc, 0);
+  assert.equal(twee.aanroepen.length, 2);
+  const geoogst = JSON.parse(twee.inhoud);
+  assert.equal(geoogst.length, 2);
+  assert.equal(geoogst.flat().length, 101);
+
+  // Een LEGE eerste pagina is ook een einde, geen fout.
+  const leeg = draaiBoundedFetch({ paginas: [[]] });
+  assert.equal(leeg.rc, 0);
+  assert.equal(leeg.aanroepen.length, 1);
+  assert.deepEqual(JSON.parse(leeg.inhoud), [[]]);
+
+  // Drie volle pagina's en een vierde die niet vol is: vier verzoeken, volledige oogst, rc 0.
+  const vier = draaiBoundedFetch({ paginas: [volleP(1), volleP(101), volleP(201), [{ number: 301 }]] });
+  assert.equal(vier.rc, 0);
+  assert.equal(vier.aanroepen.length, LIST_PAGE_BUDGET);
+  assert.equal(JSON.parse(vier.inhoud).flat().length, 301);
+
+  // En dat geldt óók onder `set -e`. De aanroepende stappen draaien nu met `set -uo pipefail`, maar
+  // een functie die alleen buiten `set -e` correct doorloopt is een valstrik voor de volgende
+  // aanroeper: die zou na de eerste volle pagina stilvallen met een halve oogst.
+  const streng = draaiBoundedFetch({
+    paginas: [volleP(1), volleP(101), [{ number: 201 }]], strikt: true,
+  });
+  assert.equal(streng.rc, 0);
+  assert.equal(streng.aanroepen.length, 3);
+  assert.equal(JSON.parse(streng.inhoud).flat().length, 201);
+});
+
+test('S18b. een VOLLE laatste toegestane pagina is truncatie, en er komt nooit een vijfde', () => {
+  // Vier volle pagina's: er kan een vijfde bestaan. Die wordt NIET opgevraagd — het budget is een
+  // grens en geen richtlijn — en de aanroeper krijgt rc 2 in plaats van een halve oogst als
+  // volledig bewijs.
+  const paginas = [volleP(1), volleP(101), volleP(201), volleP(301), volleP(401)];
+  const truncatie = draaiBoundedFetch({ paginas, strikt: true });
+  assert.equal(truncatie.rc, 2);
+  assert.equal(truncatie.aanroepen.length, LIST_PAGE_BUDGET, truncatie.aanroepen.join(' | '));
+  assert.ok(!truncatie.aanroepen.some((r) => r.endsWith(`page=${LIST_PAGE_BUDGET + 1}`)),
+    'nooit een pagina voorbij de grens');
+  assert.equal(JSON.parse(truncatie.inhoud).flat().length, 400, 'wat er is opgehaald blijft leesbaar');
+
+  // De grens is het MEEGEGEVEN getal en niet iets vasts: met één toegestane pagina is één volle
+  // pagina al truncatie. Zo kan een aanroeper zijn eigen budget niet stil overschrijden.
+  const eenPagina = draaiBoundedFetch({ paginas, maxPages: 1 });
+  assert.equal(eenPagina.rc, 2);
+  assert.equal(eenPagina.aanroepen.length, 1);
+
+  // Een onbruikbare grens haalt niets op in plaats van ongelimiteerd door te lopen.
+  for (const grens of ['0', '-1', 'veel', '']) {
+    const kapot = draaiBoundedFetch({ paginas, maxPages: grens });
+    assert.equal(kapot.rc, 1, grens);
+    assert.deepEqual(kapot.aanroepen, [], grens);
+  }
+});
+
+test('S18c. een fout HALVERWEGE de paginering levert geen halve oogst op', () => {
+  // Pagina 1 goed, pagina 2 stuk: de oogst is niet compleet en mag dus niet als lijst gelden.
+  const halverwege = draaiBoundedFetch({ paginas: [volleP(1), 'FOUT'] });
+  assert.equal(halverwege.rc, 1);
+  assert.equal(halverwege.aanroepen.length, 2, 'er wordt gestopt, niet doorgelopen');
+  assert.equal(halverwege.inhoud, null, 'geen uitvoerbestand om per ongeluk te lezen');
+
+  // Een antwoord dat geen JSON-lijst is, is evenmin een lege lijst.
+  const geenLijst = draaiBoundedFetch({ paginas: [], pad: 'repos/owner/repo/pulls/74/files' });
+  assert.equal(geenLijst.rc, 1);
+  assert.equal(geenLijst.inhoud, null);
+});
+
+// --- De bewijsoogst van de schrijfstap ------------------------------------------------------------
+
+/** Elke plek waar de trusted writer nog onbegrensd zou kunnen pagineren. */
+function pagineringsBevindingen(text) {
+  const bevindingen = [];
+  for (const [naam, stapNaam] of [['SELECTIE', SELECTIE_STAP], ['SCHRIJF', SCHRIJF_STAP]]) {
+    const stap = stapScript(text, stapNaam);
+    // Alleen UITVOERBARE regels tellen. De stap legt in commentaar uit waarom `--paginate` weg is,
+    // en die uitleg mag de meting niet zelf rood maken.
+    const code = stap.split('\n').filter((regel) => !/^\s*#/.test(regel)).join('\n');
+    if (/--paginate/.test(code)) bevindingen.push(`ONBEGRENSDE_PAGINERING_${naam}`);
+    if (!stap.includes('. scripts/autocoding/gh-bounded-pages.sh')) {
+      bevindingen.push(`GEDEELDE_GRENS_NIET_GELADEN_${naam}`);
+    }
+  }
+  // De gedeelde lib hoort bij de bestanden die op de default branch moeten staan; zonder die check
+  // zou de stap op een oudere default branch stilvallen op een ontbrekend bestand.
+  const bootstraps = text.split('[ -f scripts/autocoding/gh-bounded-pages.sh ]').length - 1;
+  if (bootstraps !== 2) bevindingen.push(`BOOTSTRAPCHECK_ONVOLLEDIG_${bootstraps}`);
+  return bevindingen;
+}
+
+test('S19. de writer pagineert nergens meer onbegrensd, en dat is mechanisch afgedwongen', () => {
+  assert.deepEqual(pagineringsBevindingen(WRITER_TEKST), []);
+
+  // MUTATIE: `--paginate` terugzetten op de bewijslijsten. Dat is exact de V11-vorm waarin het
+  // budget een schatting was, en die moet aantoonbaar rood worden.
+  const terugNaarPaginate = WRITER_TEKST.replace(
+    'gh_bounded_pages "repos/$REPOSITORY/$path"',
+    'gh api --paginate --slurp "repos/$REPOSITORY/$path"',
+  );
+  assert.notEqual(terugNaarPaginate, WRITER_TEKST, 'het mutatieanker moet bestaan');
+  assert.ok(pagineringsBevindingen(terugNaarPaginate).includes('ONBEGRENSDE_PAGINERING_SCHRIJF'));
+
+  // MUTATIE: `--paginate` terugzetten op de open-PR-lijst van de selectiejob.
+  const selectiePaginate = WRITER_TEKST.replace(
+    'gh_bounded_pages "repos/$REPOSITORY/pulls?state=open"',
+    'gh api --paginate --slurp "repos/$REPOSITORY/pulls?state=open"',
+  );
+  assert.ok(pagineringsBevindingen(selectiePaginate).includes('ONBEGRENSDE_PAGINERING_SELECTIE'));
+});
+
+test('S20. een AFGEKAPTE bewijsoogst wordt failure op de gemeten head, nooit success', () => {
+  const head = sha(7);
+  const afgekapt = draaiSchrijfstap({
+    pr: 74,
+    prJson: { state: 'open', merged: false, head: { sha: head } },
+    lijstPaginas: {
+      'pulls/74/files': [volleP(1), volleP(101), volleP(201), volleP(301), volleP(401)],
+    },
+  });
+
+  // Precies de toegestane pagina's voor die lijst, en geen enkele daarbuiten.
+  const bestandsGets = afgekapt.regels.filter((r) => r.includes('/pulls/74/files'));
+  assert.equal(bestandsGets.length, LIST_PAGE_BUDGET, bestandsGets.join(' | '));
+  assert.ok(!bestandsGets.some((r) => r.endsWith(`page=${LIST_PAGE_BUDGET + 1}`)));
+
+  // De uitspraak wordt niet eens berekend: een onvolledige oogst lijkt precies op een schone PR —
+  // geen tegenstem gevonden — en dat is exact de vergissing die hier niet gemaakt mag worden.
+  assert.deepEqual(afgekapt.regels.filter((r) => r === 'VERIFY'), []);
+
+  const finaal = afgekapt.regels.filter((r) => r.startsWith('FINAL '));
+  assert.equal(finaal.length, 1, 'precies één eindstatus');
+  assert.match(finaal[0], /--execution-error GATE_EXECUTION_ERROR/);
+  assert.match(finaal[0], new RegExp(`--head-sha ${head}`), 'op de al gemeten head');
+  assert.match(afgekapt.stdout, /PR_74_EVIDENCE_TRUNCATED_files/, 'de categorie haalt het joblog');
+
+  // En die uitvoeringsfout KAN geen `success` opleveren. Dat is geen aanname over de publisher maar
+  // dezelfde pure functie die de publisher gebruikt, met exact de vlag die de stap doorgeeft.
+  const publicatie = resolvePublication({
+    headSha: head,
+    statusContext: 'autocoding-shield-live-receipts',
+    gateResult: { decision: 'GO', reasons: [] },
+    executionError: 'GATE_EXECUTION_ERROR',
+  });
+  assert.equal(publicatie.state, 'failure');
+
+  // Het totaal blijft binnen de bovengrens per PR, ook nu de zwaarste lijst vier pagina's kostte.
+  assert.ok(afgekapt.regels.filter((r) => r.startsWith('GET ')).length
+    + afgekapt.regels.filter((r) => /^(PENDING|FINAL) /.test(r)).length
+    <= PER_PULL_REQUEST_REQUEST_BUDGET,
+  afgekapt.regels.join(' | '));
+});
+
+test('S20b. een API-fout halverwege een bewijslijst is dezelfde fail-closed uitkomst', () => {
+  const head = sha(5);
+  const stuk = draaiSchrijfstap({
+    pr: 74,
+    prJson: { state: 'open', merged: false, head: { sha: head } },
+    lijstPaginas: { 'issues/74/comments': [volleP(1), 'FOUT'] },
+  });
+
+  const commentGets = stuk.regels.filter((r) => r.includes('/issues/74/comments'));
+  assert.equal(commentGets.length, 2, 'er wordt gestopt, niet doorgelopen');
+  assert.deepEqual(stuk.regels.filter((r) => r === 'VERIFY'), []);
+  const finaal = stuk.regels.filter((r) => r.startsWith('FINAL '));
+  assert.equal(finaal.length, 1);
+  assert.match(finaal[0], /--execution-error GATE_EXECUTION_ERROR/);
+  assert.match(finaal[0], new RegExp(`--head-sha ${head}`));
+
+  // En de volledig gelezen buurlijsten veranderen daar niets aan: één onvolledige lijst is genoeg.
+  assert.ok(stuk.regels.some((r) => r.includes('/pulls/74/reviews')), 'de ronde loopt wel af');
+});
+
+test('S21. het quotum vlak boven en vlak onder de grens beslist voorspelbaar', () => {
+  const open = Array.from({ length: 126 }, (_, i) => openPr(i + 1));
+  const schedule = (remainingQuota) => selectTargets({
+    eventName: 'schedule', event: {}, openPullRequests: open, nowEpochSeconds: 0, remainingQuota,
+  });
+
+  // De exacte grens waarop precies ÉÉN pull request nog past.
+  const eenPr = QUOTA_RESERVE + SELECTION_REQUEST_BUDGET + PER_PULL_REQUEST_REQUEST_BUDGET;
+  assert.equal(affordablePullRequests(eenPr), 1);
+  assert.equal(schedule(eenPr).targets.length, 1);
+  assert.equal(schedule(eenPr).outcome, TARGET_OUTCOME.MEASURE);
+
+  // Eén verzoek minder en er past er geen enkele meer. Dan wordt er NIETS gepubliceerd; halverwege
+  // leegraken zou heads op `pending` laten staan.
+  assert.equal(affordablePullRequests(eenPr - 1), 0);
+  assert.equal(schedule(eenPr - 1).outcome, TARGET_OUTCOME.NO_OP);
+  assert.equal(schedule(eenPr - 1).reason, TARGET_REASON.API_BUDGET_RESERVED);
+
+  // En de grens waarop de volle bucket past.
+  const volleBucket = QUOTA_RESERVE + SCHEDULE_REQUEST_BUDGET;
+  assert.equal(schedule(volleBucket).targets.length, SCHEDULE_BUCKET_LIMIT);
+  assert.equal(schedule(volleBucket - PER_PULL_REQUEST_REQUEST_BUDGET).targets.length,
+    SCHEDULE_BUCKET_LIMIT - 1);
+
+  // ONBEKEND quotum opent geen onbegrensde uitvoering: de vaste bovengrenzen gelden dan, en die
+  // passen met de reserve sowieso binnen het gedeelde uurquotum.
+  const onbekend = schedule(null);
+  assert.equal(onbekend.targets.length, SCHEDULE_BUCKET_LIMIT);
+  assert.ok(SELECTION_REQUEST_BUDGET + (onbekend.targets.length * PER_PULL_REQUEST_REQUEST_BUDGET)
+    + QUOTA_RESERVE <= SHARED_HOURLY_REQUEST_QUOTA);
 });

@@ -44,6 +44,14 @@
  * PR; dat is onschadelijk, want elke beurt leest ná de lock alle bewijs opnieuw en publiceert dus
  * dezelfde uitspraak.
  *
+ * WAT V12 DAARAAN TOEVOEGT. De budgetgetallen hieronder waren in V11 nog een SCHATTING: de writer
+ * haalde zijn bewijslijsten en zijn open-PR-lijst op met `gh api --paginate`, dat de `Link`-header
+ * tot de laatste pagina volgt. Beide plekken lopen nu via `scripts/autocoding/gh-bounded-pages.sh`,
+ * met een harde grens van `LIST_PAGE_BUDGET` respectievelijk `SELECTION_PAGE_BUDGET` pagina's.
+ * Daarmee zijn de getallen hieronder werkelijke bovengrenzen. Een lijst die op die grens afgekapt
+ * kan zijn eindigt fail-closed: bewijs wordt `failure` op de gemeten head, en een afgekapte
+ * open-PR-lijst levert `OPEN_PULL_REQUESTS_TRUNCATED` op in plaats van een halve rotatie.
+ *
  * Van de payload wordt NIETS anders gebruikt dan de PR-ASSOCIATIE. Geen `head_sha`, geen
  * `head_branch`, geen outputs, geen artifacts, geen cache. De head wordt door de writerjob zelf
  * opnieuw via de API gemeten, ná het verkrijgen van de per-PR-lock.
@@ -85,22 +93,48 @@ export const SCHEDULE_BUCKET_LIMIT = 25;
 export const SCHEDULE_SLOT_SECONDS = 3600;
 
 /**
+ * Het aantal pagina's dat één BEWIJSLIJST van één pull request hoogstens kost.
+ *
+ * Dit getal was er in V11 al, maar het stond nergens tegenover een werkelijke grens: de writer haalde
+ * de vijf lijsten op met `gh api --paginate --slurp`, en `--paginate` volgt de `Link`-header tot de
+ * LAATSTE pagina. Het budget hieronder was daarmee een schatting en geen bovengrens — een PR met veel
+ * commits, comments, reviews of bestanden kon het gedeelde uurquotum alsnog leegtrekken, nadat
+ * `pending` al gepubliceerd was. `scripts/autocoding/gh-bounded-pages.sh` vervangt `--paginate` door
+ * een harde grens van precies dit aantal verzoeken per lijst; `GH_BOUNDED_EVIDENCE_PAGES` daar is
+ * hetzelfde getal, en `test/autocoding-live-gate-targets.test.mjs` bindt de twee aan elkaar.
+ */
+export const LIST_PAGE_BUDGET = 4;
+
+/**
  * Het maximale aantal API-verzoeken dat één writerjob aan ÉÉN pull request besteedt, exact geteld
  * naar de stappen in `.github/workflows/autocoding-shield-live-gate.yml`:
  *
  *   3  hermeting van het PR-object (`repos/{r}/pulls/{n}`, hoogstens drie pogingen)
  *   1  onmiddellijke `pending`-POST op de opnieuw gemeten head
  *   1  `git/commits/{sha}`
- *  20  vijf gepagineerde bewijslijsten maal `LIST_PAGE_BUDGET` pagina's
+ *  20  vijf bewijslijsten maal `LIST_PAGE_BUDGET` pagina's — nu een HARDE grens
  *   1  de afsluitende status-POST op diezelfde head
  *  --
  *  26
+ *
+ * Truncatiedetectie staat bewust niet in deze som en hoort daar ook niet: of de laatst toegestane
+ * pagina vol was, wordt afgelezen aan de pagina die al is opgehaald. Er gaat geen verzoek naartoe.
+ * Er zijn verder geen herhaalpogingen: alleen de hermeting herhaalt, en die drie staan hierboven.
  */
-export const LIST_PAGE_BUDGET = 4;
 export const PER_PULL_REQUEST_REQUEST_BUDGET = 3 + 1 + 1 + (5 * LIST_PAGE_BUDGET) + 1;
 
-/** De paginering van de open-PR-lijst in de selectiejob: 126 open PR's is twee pagina's van 100. */
-export const SELECTION_REQUEST_BUDGET = 4;
+/**
+ * De paginering van de open-PR-lijst in de selectiejob. Vier pagina's van honderd is 400 open PR's;
+ * de gemeten stand was er 126. Ook hier is `--paginate` weg: zonder grens was de selectiekost een
+ * functie van het aantal open PR's, en dus geen bovengrens. Is de vierde pagina VOL, dan is de lijst
+ * mogelijk onvolledig en wordt er niets gemeten — zie `OPEN_PULL_REQUESTS_TRUNCATED`.
+ *
+ * `SELECTION_REQUEST_BUDGET` is gelijk aan het paginagetal: de `rate_limit`-meting die ernaast staat
+ * telt niet mee voor het core-quotum. Voor een EVENTaanleiding wordt de lijst helemaal niet
+ * opgehaald (nul verzoeken); dat de eventbegroting hem toch meerekent is bewuste conservatie.
+ */
+export const SELECTION_PAGE_BUDGET = 4;
+export const SELECTION_REQUEST_BUDGET = SELECTION_PAGE_BUDGET;
 
 /**
  * Het gedeelde uurlijkse `GITHUB_TOKEN`-quotum per repository, en de reserve die daar altijd van af
@@ -123,6 +157,7 @@ export const TARGET_REASON = Object.freeze({
   EVENT_ASSOCIATION_EMPTY: 'EVENT_ASSOCIATION_EMPTY',
   EVENT_ASSOCIATION_AMBIGUOUS: 'EVENT_ASSOCIATION_AMBIGUOUS',
   OPEN_PULL_REQUESTS_UNREADABLE: 'OPEN_PULL_REQUESTS_UNREADABLE',
+  OPEN_PULL_REQUESTS_TRUNCATED: 'OPEN_PULL_REQUESTS_TRUNCATED',
   SCHEDULE_SLOT_UNUSABLE: 'SCHEDULE_SLOT_UNUSABLE',
   NO_OPEN_PULL_REQUESTS: 'NO_OPEN_PULL_REQUESTS',
   API_BUDGET_RESERVED: 'API_BUDGET_RESERVED',
@@ -285,7 +320,8 @@ export function affordablePullRequests(remainingQuota, {
  * `SCHEDULE_BUCKET_LIMIT` bij de schedule, en nooit de hele open lijst.
  */
 export function selectTargets({
-  eventName, event, openPullRequests, nowEpochSeconds = null, remainingQuota = null,
+  eventName, event, openPullRequests, openPullRequestsComplete = true,
+  nowEpochSeconds = null, remainingQuota = null,
   expected = EXPECTED_SOURCE, scheduleBucketLimit = SCHEDULE_BUCKET_LIMIT,
   slotSeconds = SCHEDULE_SLOT_SECONDS,
 }) {
@@ -333,6 +369,13 @@ export function selectTargets({
     return fail(TARGET_REASON.EVENT_NOT_SUPPORTED);
   }
 
+  // De rotatie verdeelt de VOLLEDIGE lijst in blokken en bezoekt er per slot één. Is de lijst zelf
+  // afgekapt op de paginagrens, dan is er geen volledige lijst om over te roteren: alles voorbij
+  // `SELECTION_PAGE_BUDGET * 100` zou dan nooit aan de beurt komen en voor altijd op een oude status
+  // blijven staan, terwijl de ronde er gezond uitziet. Een onvolledige lijst is daarom geen
+  // gedeeltelijke rotatie maar een meetfout: er wordt niets gepubliceerd en de run wordt rood.
+  if (openPullRequestsComplete !== true) return fail(TARGET_REASON.OPEN_PULL_REQUESTS_TRUNCATED);
+
   const open = normaliseOpenPullRequests(openPullRequests);
   if (open === null) return fail(TARGET_REASON.OPEN_PULL_REQUESTS_UNREADABLE);
   if (open.length === 0) return noOp(TARGET_REASON.NO_OPEN_PULL_REQUESTS);
@@ -361,7 +404,8 @@ export function selectTargets({
 }
 
 export const TARGET_VALUE_OPTIONS = Object.freeze([
-  '--event-name', '--event', '--open-pulls', '--now-epoch', '--remaining-quota', '--out',
+  '--event-name', '--event', '--open-pulls', '--open-pulls-complete', '--now-epoch',
+  '--remaining-quota', '--out',
 ]);
 
 /** Zelfde fail-closed argumentlezing als de publisher: geen stilzwijgende herinterpretatie. */
@@ -394,6 +438,21 @@ export function parseCounter(value) {
   if (typeof value !== 'string' || !/^[0-9]+$/.test(value)) return null;
   const parsed = Number.parseInt(value, 10);
   return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+/**
+ * Leest de volledigheidsvlag van de open-PR-lijst. Alleen de twee letterlijke waarden tellen;
+ * `null` betekent onleesbaar en is een argumentfout, geen stilzwijgend "volledig".
+ *
+ * Dit is met opzet geen `value === 'true'`-test: die zou elke tikfout, elke lege waarde en elke
+ * onbedoeld weggevallen vlag als ONVOLLEDIG lezen, en dat is weliswaar fail-closed maar onzichtbaar.
+ * Een onleesbare waarde hoort een argumentfout te zijn, zodat het defect in de aanroeper zit en niet
+ * als een eeuwige truncatiemelding rondzwerft.
+ */
+export function parseCompleteness(value) {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return null;
 }
 
 /**
@@ -431,10 +490,18 @@ export function runSelect(argv, { readFile, writeFile } = {}) {
   const remainingQuota = parseCounter(args.get('--remaining-quota'));
   if (remainingQuota === null) console.log('LIVE_GATE_QUOTA_UNKNOWN');
 
+  const openPullRequestsComplete = parseCompleteness(args.get('--open-pulls-complete'));
+  if (openPullRequestsComplete === null) {
+    try { emit([]); } catch { /* de uitkomst is toch al rood */ }
+    console.log(`LIVE_GATE_TARGETS_${TARGET_REASON.ARGUMENTS_INVALID}`);
+    return 1;
+  }
+
   const result = selectTargets({
     eventName: args.get('--event-name'),
     event,
     openPullRequests,
+    openPullRequestsComplete,
     nowEpochSeconds: parseCounter(args.get('--now-epoch')),
     remainingQuota,
   });

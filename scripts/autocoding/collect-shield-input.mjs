@@ -41,14 +41,20 @@ const REF_RE = /^[0-9a-f]{7,40}$/;
 
 /**
  * Harde bovengrens van `GET /repos/{o}/{r}/pulls/{n}/files`: GitHub levert nooit meer dan 3000
- * bestanden, ook niet met `--paginate`. Een PR die eroverheen gaat is per definitie niet volledig
- * gemeten en kan dus nooit "raakt geen gevoelig pad" opleveren.
+ * bestanden, hoeveel pagina's er ook worden opgehaald. Een PR die eroverheen gaat is per definitie
+ * niet volledig gemeten en kan dus nooit "raakt geen gevoelig pad" opleveren.
+ *
+ * De writer haalt overigens veel eerder zijn eigen grens: `gh-bounded-pages.sh` staat hoogstens
+ * `LIST_PAGE_BUDGET` pagina's toe en meldt een mogelijk afgekapte oogst fail-closed, zodat een halve
+ * bestandslijst niet als schone PR kan eindigen.
  */
 export const FILES_API_LIMIT = 3000;
 
 /**
- * `gh api --paginate --slurp` levert een array van pagina's; een enkele call levert één array.
- * Beide vormen worden hier tot één vlakke lijst genormaliseerd, onbekende vormen tot een lege lijst.
+ * De bewijslijsten komen binnen als een array VAN PAGINA's (`[[...],[...]]`) — de vorm die
+ * `scripts/autocoding/gh-bounded-pages.sh` schrijft, en daarvóór `gh api --paginate --slurp`. Een
+ * enkele call levert één vlakke array. Beide vormen worden hier tot één vlakke lijst genormaliseerd,
+ * onbekende vormen tot een lege lijst.
  */
 export function flattenPages(payload) {
   if (!Array.isArray(payload)) return [];

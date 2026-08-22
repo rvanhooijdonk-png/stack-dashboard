@@ -33,7 +33,7 @@ function raw(name) {
   return JSON.parse(readFileSync(join(FIXTURES, `${name}.json`), 'utf8'));
 }
 
-/** Eén pagina met exact de meegegeven items — de vorm die `gh api --paginate --slurp` oplevert. */
+/** Eén pagina met exact de meegegeven items — de vorm die `gh-bounded-pages.sh` oplevert. */
 function page(items) {
   return [items];
 }

@@ -59,6 +59,24 @@ name: autocoding-shield-live-gate
 # hele runs — inclusief hun writerjobs — en zou de per-PR-rijen weer samenvoegen. Die afwezigheid is
 # geen omissie maar een grens, en `test/autocoding-workflow-trust.test.mjs` dwingt hem statisch af.
 #
+# WAT ER IN V12 VERANDERDE. V11 rekende met een vaste bovengrens van 26 verzoeken per pull request,
+# maar haalde de vijf bewijslijsten op met `gh api --paginate --slurp`. `--paginate` volgt de
+# `Link`-header tot de LAATSTE pagina en kent geen bovengrens; 26 was dus een schatting en geen
+# grens. Een PR met veel commits, comments, reviews of bestanden kon het gedeelde uurquotum alsnog
+# leegtrekken — en wel NA de `pending`-publicatie, dus met een head die op `pending` bleef staan.
+# Datzelfde gold voor de open-PR-lijst van de selectiejob.
+#
+# Beide plekken lopen nu via `scripts/autocoding/gh-bounded-pages.sh`: hoogstens vier pagina's van
+# honderd per lijst, en daarna stopt het. Wat de grens raakt is geen kostenpost maar een MEETRESULTAAT
+# — een volle laatste toegestane pagina betekent dat de oogst onvolledig kan zijn:
+#
+#   - een afgekapte BEWIJSLIJST publiceert `failure` met `GATE_EXECUTION_ERROR` op de al gemeten
+#     head. Nooit `success`: een onvolledige oogst lijkt precies op een schone PR, want er is geen
+#     tegenstem gevonden.
+#   - een afgekapte OPEN-PR-LIJST meet niets en maakt de run rood. De rotatie verdeelt de volledige
+#     lijst in blokken, dus zou alles voorbij de grens nooit aan de beurt komen terwijl de ronde er
+#     gezond uitziet.
+#
 # BOOTSTRAP, eerlijk benoemd: een `workflow_run`- en `issue_comment`-workflow bestaat pas ná merge op
 # de default branch. PR #74 kan deze keten dus niet zelf live bewijzen. De poort staat bovendien nog
 # uit (`live_receipt_gate_enabled: false`) en deze PR zet geen ruleset of required check aan.
@@ -105,6 +123,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f scripts/autocoding/select-live-gate-targets.mjs ] && \
+             [ -f scripts/autocoding/gh-bounded-pages.sh ] && \
              [ -f CONTROL/AUTOCODING/policy.v1.json ]; then
             echo 'trusted_gate_files=true' >> "$GITHUB_OUTPUT"
           else
@@ -143,12 +162,27 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -uo pipefail
+          # De gedeelde begrensde paginering. Zij vervangt `--paginate`, dat de `Link`-header tot de
+          # laatste pagina volgt en dus geen bovengrens kent.
+          . scripts/autocoding/gh-bounded-pages.sh
+
+          complete=true
           if [ "$EVENT_NAME" = 'schedule' ]; then
-            if ! gh api --paginate --slurp "repos/$REPOSITORY/pulls?state=open&per_page=100" \
-              > "$RUNNER_TEMP/open-pulls.json"; then
-              echo '::error::OPEN_PULL_REQUEST_LIST_UNAVAILABLE'
-              exit 1
-            fi
+            gh_bounded_pages "repos/$REPOSITORY/pulls?state=open" \
+              "$RUNNER_TEMP/open-pulls.json" \
+              "$GH_BOUNDED_SELECTION_PAGES" \
+              "$RUNNER_TEMP/open-pulls-pages"
+            lijst_rc=$?
+            case "$lijst_rc" in
+              0) ;;
+              # De laatst toegestane pagina was VOL: er kunnen meer open PR's bestaan dan deze lijst
+              # draagt. De selector maakt daar een rode, meetbare uitkomst van in plaats van een
+              # halve lijst als volledige rotatie te behandelen.
+              2) complete=false ;;
+              *)
+                echo '::error::OPEN_PULL_REQUEST_LIST_UNAVAILABLE'
+                exit 1 ;;
+            esac
           else
             # Een eventaanleiding raakt de open-PR-lijst niet aan. Dat is geen zuinigheid maar de
             # budgetgrens: een event mag nooit een repositorybrede ronde kunnen veroorzaken.
@@ -165,6 +199,7 @@ jobs:
             --event-name "$EVENT_NAME" \
             --event "$GITHUB_EVENT_PATH" \
             --open-pulls "$RUNNER_TEMP/open-pulls.json" \
+            --open-pulls-complete "$complete" \
             --now-epoch "$(date -u +%s)" \
             --remaining-quota "$remaining" \
             --out "$RUNNER_TEMP/targets.json" || rc=$?
@@ -232,6 +267,7 @@ jobs:
              [ -f scripts/autocoding/collect-shield-input.mjs ] && \
              [ -f scripts/autocoding/publish-live-status.mjs ] && \
              [ -f scripts/autocoding/select-live-gate-targets.mjs ] && \
+             [ -f scripts/autocoding/gh-bounded-pages.sh ] && \
              [ -f CONTROL/AUTOCODING/policy.v1.json ]; then
             echo 'trusted_gate_files=true' >> "$GITHUB_OUTPUT"
           else
@@ -285,6 +321,7 @@ jobs:
           PULL_REQUEST: ${{ matrix.pr }}
         run: |
           set -uo pipefail
+          . scripts/autocoding/gh-bounded-pages.sh
           number="$PULL_REQUEST"
           case "$number" in
             ''|*[!0-9]*)
@@ -335,6 +372,15 @@ jobs:
           fi
 
           # 3. Uitsluitend read-only GET's. Geen enkel veld hieruit wordt gelogd.
+          #
+          #    Elke LIJST loopt via `gh_bounded_pages` en kost dus hoogstens `$GH_BOUNDED_EVIDENCE_PAGES`
+          #    verzoeken. Dat is de hele reparatie van V11: met `--paginate` was er geen bovengrens en
+          #    was `PER_PULL_REQUEST_REQUEST_BUDGET` een schatting in plaats van een grens.
+          #
+          #    Een VOLLE laatste toegestane pagina (rc 2) betekent dat het bewijs onvolledig kan zijn.
+          #    Dat is fail-closed: er wordt geen vijfde pagina gehaald en er volgt geen `success`,
+          #    maar `failure` met `GATE_EXECUTION_ERROR` op de al gemeten head. Een onvolledige oogst
+          #    lijkt namelijk precies op een schone PR — geen tegenstem gevonden.
           for endpoint in \
             "git/commits/$head_sha:head-commit" \
             "pulls/$number/commits:pr-commits" \
@@ -347,8 +393,15 @@ jobs:
             if [ "$name" = 'head-commit' ]; then
               gh api "repos/$REPOSITORY/$path" > "$raw/$name.json" || execution_error='GATE_EXECUTION_ERROR'
             else
-              gh api --paginate --slurp "repos/$REPOSITORY/$path" > "$raw/$name.json" \
-                || execution_error='GATE_EXECUTION_ERROR'
+              gh_bounded_pages "repos/$REPOSITORY/$path" "$raw/$name.json" \
+                "$GH_BOUNDED_EVIDENCE_PAGES" "$raw/pages-$name"
+              lijst_rc=$?
+              if [ "$lijst_rc" -eq 2 ]; then
+                echo "::error::PR_${number}_EVIDENCE_TRUNCATED_${name}"
+              fi
+              if [ "$lijst_rc" -ne 0 ]; then
+                execution_error='GATE_EXECUTION_ERROR'
+              fi
             fi
           done
 

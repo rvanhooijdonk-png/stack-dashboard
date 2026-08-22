@@ -2,7 +2,7 @@
  * AUTOCODING_SHIELD — adaptertests.
  *
  * De fixtures in `test/fixtures/autocoding-shield/` zijn deterministische kopieën van de vorm die
- * `gh api` in de workflow oplevert (pagina-arrays van `--paginate --slurp`). Ze bevatten bewust
+ * `gh api` in de workflow oplevert (pagina-arrays uit `gh-bounded-pages.sh`). Ze bevatten bewust
  * tegelijk: geldig actueel vendorbewijs, bewijs van een VORIGE head, een gespoofd comment met exact
  * dezelfde succestekst, menselijk proza, een ownerreceipt en een gewijzigd gevoelig pad. Zo toetst
  * één set fixtures de hele adapter tegen alle ordergevallen.
