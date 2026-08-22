@@ -97,6 +97,41 @@ export function resolveCommitRef(ref, commitIndex) {
 }
 
 /**
+ * Bindt een REVIEW aan een commit, en doet dat in drie onderscheiden toestanden.
+ *
+ * `review.commit_id` is het gezaghebbende API-veld: GitHub zet er de commit in waarop de review
+ * werkelijk is geschreven. Het reviewLICHAAM is daarentegen tekst van de vendor zelf, en dus een
+ * claim. De eerdere vorm (`api ?? body`) hield die twee niet uit elkaar: viel de resolutie van een
+ * AANWEZIG `commit_id` weg — bijvoorbeeld na een force-push, waardoor de gereviewde commit niet
+ * meer in de PR-commitindex zit — dan schoof de binding stilzwijgend door naar de tekstclaim. Een
+ * review die aantoonbaar op een verdwenen commit is geschreven, kon zo alsnog aan de ACTUELE head
+ * gebonden worden zodra zijn lichaam die head noemde. Precies andersom dus: hoe minder betrouwbaar
+ * de API-binding, hoe zwaarder de zelfgerapporteerde regel ging wegen.
+ *
+ * De drie toestanden:
+ *
+ *   1. `commit_id` ONTBREEKT werkelijk (`null`/`undefined`) — GitHub levert dan geen binding, en de
+ *      "Reviewed commit"-regel uit het lichaam is het enige wat er is. Die wordt niet geloofd maar
+ *      mechanisch tegen de PR-commitindex geresolveerd, dus een verzonnen SHA levert nog steeds
+ *      niets op.
+ *   2. `commit_id` is AANWEZIG en resolveert — de API wint, altijd, ook als het lichaam iets anders
+ *      beweert.
+ *   3. `commit_id` is AANWEZIG maar resolveert NIET (leeg, ongeldig van vorm of type, onbekend in
+ *      deze PR, of dubbelzinnig) — dan is de binding onopgelost en blijft zij dat. Geen terugval op
+ *      het lichaam. Het bewijsstuk houdt een lege `resolved_head_sha` en kan de headvergelijking
+ *      dus nooit halen: onopgelost bewijs is geen bewijs.
+ */
+export function resolveReviewCommit(review, commitIndex) {
+  const apiRef = review?.commit_id;
+  // BEWUST `== null` en niet falsy: de lege string is AANWEZIG. Een `commit_id: ""` is een kapotte
+  // of leeggemaakte API-binding, geen ontbrekende — die valt onder toestand 3.
+  if (apiRef === undefined || apiRef === null) {
+    return resolveCommitRef(codexReviewedCommitRef(review?.body), commitIndex);
+  }
+  return resolveCommitRef(apiRef, commitIndex);
+}
+
+/**
  * Leest de gedeclareerde task-id uit het PR-lichaam. Ontbreekt hij, dan blijft hij leeg.
  * GitHub levert PR-lichamen met CRLF-regeleindes; `$` in JS-multiline matcht alleen vóór `\n`, dus
  * de trailing `\r` wordt hier expliciet toegestaan. Zonder dat faalde elke CRLF-PR stil op
@@ -227,11 +262,10 @@ export function buildShieldInput({
   }
   for (const review of reviewList) {
     const inline = commentsByReview.get(review?.id) ?? [];
-    // `commit_id` is een API-veld en gaat vóór elke tekstclaim in het reviewlichaam; ontbreekt het,
-    // dan valt de Codex-review terug op zijn eigen "Reviewed commit"-regel, die alsnog mechanisch
-    // tegen de PR-commits geresolveerd wordt.
-    const resolved = resolveCommitRef(review?.commit_id, commitIndex)
-      ?? resolveCommitRef(codexReviewedCommitRef(review?.body), commitIndex);
+    // Drie toestanden, geen `??`-terugval: zie `resolveReviewCommit`. Een aanwezig maar onoplosbaar
+    // `commit_id` blijft onopgelost en mag NOOIT door een tekstclaim uit het lichaam worden
+    // vervangen.
+    const resolved = resolveReviewCommit(review, commitIndex);
     for (const evidence of [
       extractCodexReviewEvidence(review, inline, resolved, policy),
       extractGeminiNativeEvidence(review, inline, resolved, policy),

@@ -39,7 +39,8 @@ GH_BOUNDED_SELECTION_PAGES=4
 # `gh_bounded_pages <api-pad> <uitvoerbestand> <max-pagina's> <werkmap>`
 #
 #   rc 0 — de lijst is VOLLEDIG opgehaald en staat in het uitvoerbestand.
-#   rc 1 — een verzoek, een antwoord of een schrijfactie mislukte; het uitvoerbestand is onbruikbaar.
+#   rc 1 — een parameter was onbruikbaar (geen geldig paginamaximum, lege werkmap), of een verzoek,
+#          een antwoord of een schrijfactie mislukte; het uitvoerbestand is onbruikbaar.
 #   rc 2 — de laatst toegestane pagina was vol: de oogst is MOGELIJK ONVOLLEDIG. Het uitvoerbestand
 #          bevat wat er wél is opgehaald, maar mag niet als volledig bewijs gelden.
 gh_bounded_pages() {
@@ -52,6 +53,13 @@ gh_bounded_pages() {
   # paginaparameters aan de vorige waarde plakken en de begrenzing stil laten vervallen.
   case "$api_path" in *'?'*) separator='&' ;; *) separator='?' ;; esac
 
+  # DE WERKMAP WORDT GEWIST, DUS MOET ZIJ BESTAAN. Een lege vierde parameter — een niet-gezette
+  # variabele bij een aanroeper zonder `set -u`, of een tikfout in de env-naam — zou `rm -rf ""`
+  # opleveren. Dat is geen theoretische smet: het pad wordt hier ONVOORWAARDELIJK verwijderd, dus
+  # elke betekenis die de shell aan de lege string geeft is er één te veel. De weigering staat vóór
+  # `rm`, vóór `mkdir` en vóór het eerste `gh`-verzoek, zodat een aanroep met lege werkmap niets
+  # muteert, niets van het quotum kost en geen uitvoerbestand achterlaat om per ongeluk te lezen.
+  [ -n "$scratch" ] || return 1
   rm -rf "$scratch" || return 1
   mkdir -p "$scratch" || return 1
 

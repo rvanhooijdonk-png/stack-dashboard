@@ -18,9 +18,9 @@ import { spawnSync } from 'node:child_process';
 import {
   buildShieldInput, buildCommitIndex, resolveCommitRef, extractTaskId, touchesSensitivePaths,
   groupReviewComments, flattenPages, measureFilesCompleteness, FILES_API_LIMIT,
-  parseCollectArgs, COLLECT_VALUE_OPTIONS,
+  parseCollectArgs, COLLECT_VALUE_OPTIONS, resolveReviewCommit,
 } from '../scripts/autocoding/collect-shield-input.mjs';
-import { evaluateShield, REASON } from '../scripts/autocoding/verify-review-gate.mjs';
+import { evaluateShield, bindNativeEvidence, REASON } from '../scripts/autocoding/verify-review-gate.mjs';
 
 const FIXTURES = 'test/fixtures/autocoding-shield';
 const HEAD = 'b9df1f8398aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -595,4 +595,95 @@ test('A27. parseCollectArgs weigert per vorm en scheidt vormfout van ontbrekende
   for (const argv of [[], goed.slice(0, 6), null]) {
     assert.deepEqual(parseCollectArgs(argv), { ok: false, error: 'COLLECT_ARGS_MISSING' }, String(argv));
   }
+});
+
+
+// --- De reviewbinding: API-veld, lichaam, of niets ------------------------------------------------
+
+const CODEX_SUCCES = "Codex Review: Didn't find any major issues. :tada:";
+
+/**
+ * Vervangt de Codex-review in de fixtureset door één review met een gekozen `commit_id` en lichaam,
+ * en levert het bewijsstuk dat de adapter eruit haalt. `commit_id: undefined` betekent hier het
+ * werkelijk ONTBREKENDE veld: de sleutel wordt dan uit het object weggelaten, niet op undefined
+ * gezet, zodat de vorm gelijk is aan wat GitHub levert als er geen binding is.
+ */
+function codexReviewBewijs({ commit_id, bodyRef, inline = false }) {
+  const review = {
+    id: 999000001,
+    user: { login: 'chatgpt-codex-connector[bot]', id: 199175422, type: 'Bot' },
+    state: 'COMMENTED',
+    body: `${inline ? '### 💡 Codex Review' : CODEX_SUCCES}\n\n**Reviewed commit:** \`${bodyRef}\``,
+  };
+  if (commit_id !== undefined) review.commit_id = commit_id;
+  const { context, shieldInput } = buildShieldInput(fixtureInput({ reviews: [[review]] }));
+  const bewijs = shieldInput.nativeEvidence.filter((e) => e.vendor === 'codex' && e.claimed_actor === review.user.login);
+  return { context, bewijs: bewijs[bewijs.length - 1] };
+}
+
+test('A28. de reviewbinding is drieledig: aanwezig-maar-onoplosbaar valt NOOIT terug op het lichaam', () => {
+  // Codex-review 3835094262 op deze PR: met `api ?? body` verving een MISLUKTE resolutie van een
+  // aanwezig `commit_id` de gezaghebbende API-binding door de "Reviewed commit"-regel uit het
+  // lichaam. Na een force-push verdwijnt de gereviewde commit uit de PR-index, dus resolveerde het
+  // API-veld niet meer — en precies dan ging de zelfgerapporteerde regel wegen. Een review die
+  // aantoonbaar op een verdwenen commit was geschreven, kon zo aan de ACTUELE head binden.
+
+  // 1. `commit_id` ONTBREEKT werkelijk => het mechanisch geresolveerde lichaam is de enige binding.
+  const zonderApi = codexReviewBewijs({ commit_id: undefined, bodyRef: HEAD.slice(0, 10) });
+  assert.equal(zonderApi.bewijs.resolved_head_sha, HEAD, 'zonder API-veld telt de geresolveerde regel');
+  assert.equal(zonderApi.bewijs.verdict, 'GO');
+  assert.deepEqual(bindNativeEvidence(zonderApi.bewijs, zonderApi.context).reasons, [],
+    'en dan is het een geldige actuele ronde');
+
+  // 2. `commit_id` AANWEZIG maar onbekend in deze PR (de force-pushvorm), lichaam claimt de actuele
+  //    head => onopgelost blijft onopgelost. Dit is de kern van de bevinding.
+  const stale = codexReviewBewijs({ commit_id: 'a'.repeat(40), bodyRef: HEAD.slice(0, 10) });
+  assert.equal(stale.bewijs.resolved_head_sha, '', 'geen terugval op de tekstclaim');
+  assert.equal(stale.bewijs.resolved_tree_sha, '');
+  assert.ok(bindNativeEvidence(stale.bewijs, stale.context).reasons.includes(REASON.STALE_HEAD),
+    'en onopgelost bewijs haalt de headvergelijking nooit');
+
+  // 3. Dezelfde regel voor elke andere vorm van AANWEZIG-maar-onbruikbaar: een leeg veld, een
+  //    verkeerd type, en een dubbelzinnige prefix die op twee PR-commits past.
+  for (const kapot of ['', 42, {}, [], true, 'geen-sha', HEAD.slice(0, 3)]) {
+    const b = codexReviewBewijs({ commit_id: kapot, bodyRef: HEAD.slice(0, 10) });
+    assert.equal(b.bewijs.resolved_head_sha, '', `commit_id=${JSON.stringify(kapot)}`);
+  }
+
+  // 4. `commit_id` AANWEZIG en oplosbaar => de API wint, ook als het lichaam iets anders beweert.
+  const apiWint = codexReviewBewijs({ commit_id: HEAD, bodyRef: PREV_HEAD.slice(0, 10) });
+  assert.equal(apiWint.bewijs.resolved_head_sha, HEAD, 'het API-veld gaat vóór de tekstclaim');
+  assert.deepEqual(bindNativeEvidence(apiWint.bewijs, apiWint.context).reasons, []);
+
+  // En andersom: een API-veld op de VORIGE head bindt daar, hoe actueel het lichaam ook klinkt.
+  const apiStale = codexReviewBewijs({ commit_id: PREV_HEAD, bodyRef: HEAD.slice(0, 10) });
+  assert.equal(apiStale.bewijs.resolved_head_sha, PREV_HEAD);
+  assert.ok(bindNativeEvidence(apiStale.bewijs, apiStale.context).reasons.includes(REASON.STALE_HEAD));
+});
+
+test('A28b. resolveReviewCommit onderscheidt ontbrekend van leeg, en kent geen enkele andere bron', () => {
+  const index = buildCommitIndex({
+    prCommits: raw('pr-commits'), headSha: HEAD, headCommit: raw('head-commit'),
+  });
+  const lichaam = `**Reviewed commit:** \`${HEAD.slice(0, 10)}\``;
+
+  // Alleen deze twee vormen zijn ONTBREKEND. Alles anders is aanwezig.
+  assert.equal(resolveReviewCommit({ body: lichaam }, index).head_sha, HEAD);
+  assert.equal(resolveReviewCommit({ commit_id: null, body: lichaam }, index).head_sha, HEAD);
+  assert.equal(resolveReviewCommit({ commit_id: undefined, body: lichaam }, index).head_sha, HEAD);
+
+  // Aanwezig en onbruikbaar => null, ongeacht wat het lichaam zegt.
+  for (const aanwezig of ['', '   ', 0, false, NaN, 'zzzzzzz', 'b'.repeat(40)]) {
+    assert.equal(resolveReviewCommit({ commit_id: aanwezig, body: lichaam }, index), null,
+      JSON.stringify(String(aanwezig)));
+  }
+
+  // Aanwezig en oplosbaar => de API, nooit het lichaam.
+  assert.equal(resolveReviewCommit({ commit_id: PREV_HEAD, body: lichaam }, index).head_sha, PREV_HEAD);
+
+  // Zonder bruikbaar lichaam levert de ontbrekende vorm evengoed niets op — de terugval is een
+  // MECHANISCHE resolutie, geen vrijbrief.
+  assert.equal(resolveReviewCommit({ body: '**Reviewed commit:** `c9c9c9c9c9`' }, index), null);
+  assert.equal(resolveReviewCommit({ body: 'geen regel' }, index), null);
+  assert.equal(resolveReviewCommit(null, index), null);
 });

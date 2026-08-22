@@ -1303,6 +1303,73 @@ test('S18c. een fout HALVERWEGE de paginering levert geen halve oogst op', () =>
   assert.equal(geenLijst.inhoud, null);
 });
 
+/**
+ * Draait `gh_bounded_pages` met een gekozen WERKMAP-parameter, tegen stubs voor `gh`, `rm` én
+ * `mkdir` die alleen loggen en falen. Zo is meetbaar wát de functie zou muteren of opvragen — niet
+ * alleen welke exitcode zij oplevert. `bronMutatie` draait één regel uit de gedeelde lib terug en
+ * laadt de MUTANT, zodat de weigering zelf een negatieve controle heeft.
+ */
+function draaiMetWerkmap(scratch, bronMutatie = null) {
+  const { dir, bin } = werkmap('gh-bounded-scratch-');
+  const log = join(dir, 'aanroepen.txt');
+  const out = join(dir, 'out.json');
+  for (const naam of ['gh', 'rm', 'mkdir']) {
+    // Falen na het loggen: de functie stopt dan bij de eerste mutatie, dus is de log het volledige
+    // beeld van wat zij aanraakte en schrijft geen enkele stub iets naar de echte schijf.
+    // `argc` staat erbij omdat een LEGE parameter in `$*` onzichtbaar is: `rm -rf ""` en een `rm`
+    // zonder werkmap leveren dezelfde tekst op, en juist dat verschil wordt hier gemeten.
+    stub(bin, naam, [`echo "${naam} argc=$# $*" >> "$LOG"`, 'exit 1'].join('\n'));
+  }
+
+  let lib = 'scripts/autocoding/gh-bounded-pages.sh';
+  if (bronMutatie) {
+    const bron = readFileSync(lib, 'utf8');
+    assert.equal(bron.split(bronMutatie).length - 1, 1, 'het mutatieanker moet precies één keer voorkomen');
+    lib = join(dir, 'gh-bounded-pages.mutant.sh');
+    writeFileSync(lib, bron.replace(bronMutatie, ''));
+  }
+
+  const uitkomst = draaiStap([
+    'set -uo pipefail',
+    `. ${JSON.stringify(lib)}`,
+    'rc=0',
+    // De werkmap komt hier als LETTERLIJKE parameter binnen, niet via een variabele: dit is exact de
+    // vorm waarin een aanroeper met een niet-gezette of leeg geraakte variabele hem doorgeeft.
+    `gh_bounded_pages "repos/owner/repo/pulls/74/commits" "$OUT" 4 ${JSON.stringify(scratch)} || rc=$?`,
+    'echo "RC=$rc"',
+  ].join('\n'), { dir, bin, env: { LOG: log, OUT: out } });
+
+  return {
+    rc: Number(uitkomst.stdout.match(/RC=([0-9]+)/)[1]),
+    aanroepen: existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : [],
+    uitvoerBestaat: existsSync(out),
+  };
+}
+
+test('S18d. een LEGE werkmap wordt geweigerd vóór `rm`, vóór `mkdir` en vóór het eerste verzoek', () => {
+  // Gemini-bevinding 3835091134: de werkmap wordt hier ONVOORWAARDELIJK gewist. Is de vierde
+  // parameter leeg — een niet-gezette variabele bij een aanroeper zonder `set -u`, of een tikfout in
+  // de env-naam — dan is `rm -rf ""` het eerste wat er gebeurt. De weigering moet dus vóór die
+  // regel staan, niet erna.
+  const leeg = draaiMetWerkmap('');
+  assert.equal(leeg.rc, 1, 'een lege werkmap is een onbruikbare parameter, geen bruikbare oogst');
+  assert.deepEqual(leeg.aanroepen, [], 'geen rm, geen mkdir, en geen enkel verzoek van het quotum');
+  assert.equal(leeg.uitvoerBestaat, false, 'geen uitvoerbestand om per ongeluk als lijst te lezen');
+
+  // MUTATIE (negatieve controle): de weigering weghalen. Dan is `rm -rf ""` aantoonbaar het eerste
+  // wat de functie doet — dezelfde exitcode, maar een heel andere voetafdruk. Zonder deze controle
+  // zou de test ook groen zijn op een functie die om een andere reden vroeg faalt.
+  const zonderWeigering = draaiMetWerkmap('', '  [ -n "$scratch" ] || return 1\n');
+  assert.equal(zonderWeigering.rc, 1);
+  assert.deepEqual(zonderWeigering.aanroepen, ['rm argc=2 -rf'],
+    'ongewapend gaat de lege string als werkelijk argument naar `rm -rf`');
+
+  // De weigering raakt alleen de LEGE vorm: een gewone werkmap loopt ongewijzigd door tot de eerste
+  // mutatie, dus is er geen pad stilgezet dat wel hoorde te werken.
+  const gevuld = draaiMetWerkmap('/tmp/wel-een-werkmap');
+  assert.deepEqual(gevuld.aanroepen, ['rm argc=2 -rf /tmp/wel-een-werkmap']);
+});
+
 // --- De bewijsoogst van de schrijfstap ------------------------------------------------------------
 
 /** Elke plek waar de trusted writer nog onbegrensd zou kunnen pagineren. */

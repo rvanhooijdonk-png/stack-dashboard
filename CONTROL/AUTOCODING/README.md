@@ -103,8 +103,12 @@ vrijbrief.
 Statisch afgedwongen is verder de vorm van de writer zelf: precies één job met een schrijfscope, en
 juist die job moet een `concurrency`-groep dragen die op een **matrixwaarde** van dezelfde job
 sleutelt, met `cancel-in-progress: false` en `queue: max`. Een groep die op `github.run_id`,
-`github.run_number`, een eventveld of een constante sleutelt telt niet, en een `concurrency` op
-workflowniveau is verboden — die zou hele runs coalesceren en de per-PR-rijen weer samenvoegen.
+`github.run_number`, een eventveld of een constante sleutelt telt niet. Dáárnaast is sinds V13 een
+`concurrency` op **workflowniveau** juist VERPLICHT, en wel in precies één vorm: de vaste groep
+`autocoding-shield-live-gate-repository`, zonder enige `${{ ... }}`-expressie, met
+`cancel-in-progress: false` en `queue: max`. Die tweede rij serialiseert het gedeelde uurquotum
+(zie hieronder); de per-PR-rij serialiseert het schrijven per pull request. Ze staan naast elkaar,
+niet in plaats van elkaar.
 
 Twee dingen zijn daarbij ruimer dan ze op het eerste gezicht hoeven te zijn. De PR-code-referentie
 matcht niet alleen de puntvormen uit een `pull_request`-payload maar ook de **onderstreepvarianten**
@@ -197,8 +201,9 @@ uit de bronrun; de schrijfstap kent zelfs geen `GITHUB_EVENT_PATH`.
 gestubde `gh`/`node` en toetst dat gedrag, in plaats van het te beweren: dat een event voor PR 74
 alleen PR 74 aanraakt, dat de `pending` en de uitspraak op dezelfde hermeten head staan, en dat een
 wachtende oudere aanleiding de nieuwste head publiceert. Vijf mutaties op de workflowtekst — de
-hermeting weghalen, de publicatie ervóór zetten, de rij van de schrijfjob verwijderen, een rij op
-workflowniveau toevoegen, of de momentopname via een job-output doorgeven — maken die toets rood.
+hermeting weghalen, de publicatie ervóór zetten, de rij van de schrijfjob verwijderen, de
+repositorybrede rij weghalen of dynamisch maken, of de momentopname via een job-output doorgeven —
+maken die toets rood.
 
 ### Eén schrijfrij per pull request
 
@@ -212,9 +217,12 @@ concurrency:
   queue: max
 ```
 
-Er is **geen** `concurrency` op workflowniveau. Die zou hele runs samenvoegen en daarmee de per-PR-rijen
-weer op één hoop gooien: een schedule-ronde voor 25 PR's zou een eventronde voor PR 74 verdringen, of
-omgekeerd.
+Daarnaast draagt het bestand sinds V13 een tweede, repositorybrede rij op workflowniveau — zie
+"De repositorybrede quotumrij" hieronder. In V11 en V12 was die er bewust NIET: een globale rij zou
+hele runs samenvoegen en de per-PR-rijen weer op één hoop gooien, zodat een schedule-ronde voor 25
+PR's een eventronde voor PR 74 kon verdringen. Wat dat bezwaar wegneemt is niet de rij maar
+`queue: max`: wachtende runs blijven staan in plaats van geannuleerd te worden, dus wordt er
+uitgesteld en niets weggegooid.
 
 Drie eigenschappen doen hier het werk. `cancel-in-progress: false` zorgt dat een lopende meting niet
 halverwege wordt afgebroken — een afgebroken job laat een `pending` staan, geen uitspraak.
@@ -231,10 +239,46 @@ klok en niet op runnummers.
 
 `test/autocoding-live-gate-targets.test.mjs` en `test/autocoding-workflow-trust.test.mjs` meten deze
 eigenschappen mét negatieve mutatie: `queue: single`, `cancel-in-progress: true`, een groep op
-`github.run_id` of op een constante, een groep zonder matrixsleutel, een `concurrency` op
-workflowniveau en een selectie die terugvalt op een volledige ronde maken de toetsen aantoonbaar rood.
+`github.run_id` of op een constante, een groep zonder matrixsleutel, een ontbrekende of dynamisch
+gesleutelde repositorybrede rij en een selectie die terugvalt op een volledige ronde maken de
+toetsen aantoonbaar rood.
 De groepen worden niet beweerd maar berekend: `groep(74) != groep(75)`, `groep(74) == groep(74)`, en
 drie PR's leveren drie verschillende groepen op.
+
+### De repositorybrede quotumrij
+
+De per-PR-rij begrenst het schrijven, maar niet het METEN. Twee eventruns voor verschillende pull
+requests vallen in verschillende per-PR-groepen, draaien dus gelijktijdig, lezen allebei hetzelfde
+`GET /rate_limit`-restant en reserveren allebei datzelfde restant. Elke run blijft dan binnen zijn
+eigen begroting terwijl ze samen over het **gedeelde** uurquotum van duizend verzoeken per
+repository heen gaan — veertig geburste events (40 × 30 = 1200) volstaat al, en een schedule plus
+twaalf events (654 + 12 × 30 = 1014) evengoed.
+
+Daarom draagt het bestand sinds V13 één rij om de héle run:
+
+```yaml
+concurrency:
+  group: autocoding-shield-live-gate-repository
+  cancel-in-progress: false
+  queue: max
+```
+
+De groep is een **constante**: geen `run_id`, geen `run_number`, geen eventveld, geen PR-nummer, geen
+enkele expressie. Omdat hij op workflowniveau staat, is hij verworven vóór de eerste job — dus vóór
+de selectie en vóór de `rate_limit`-meting — en komt hij pas vrij als alle matrixwriters klaar zijn.
+Run N+1 meet daardoor pas nadat run N zijn verzoeken werkelijk heeft uitgegeven, en is de
+reservering een opeenvolging in plaats van een gok.
+
+`queue: max` is wat deze vorm bruikbaar maakt en is een ondersteunde sleutel, op workflow- én
+jobniveau, tot honderd wachtende runs per groep; alleen de combinatie met `cancel-in-progress: true`
+is verboden. De canonieke bron bij twijfel is
+[workflow-syntax#concurrency](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
+Onder de standaard `queue: single` zou een derde aanleiding de tweede opeten, en juist dát was in
+V11 de reden om een globale rij te weigeren.
+
+`test/autocoding-workflow-trust.test.mjs` dwingt beide rijen statisch af: geen rij, een dynamische of
+afwijkende groep, `queue: single`, een ontbrekende `queue` en `cancel-in-progress: true` worden elk
+fail-closed afgekeurd.
 
 ### Bootstrap: wat dit PR zelf niet kan bewijzen
 
@@ -294,8 +338,14 @@ alle drie worden ondersteund:
 - **Codex als pull-request-review** — dezelfde bot levert op deze PR een `pull_request_review` mét
   inline comments. Een reviewobject draagt géén `performed_via_github_app`-veld, dus daar is de
   App-id niet af te dwingen; de identiteit hangt op deze route aan `user.login`, `user.type` en het
-  gemeten numerieke `user.id` `199175422`. De head komt uit `review.commit_id` en pas bij ontbreken
-  daarvan uit de `**Reviewed commit:**`-regel.
+  gemeten numerieke `user.id` `199175422`. De head komt uit `review.commit_id`. Dat veld wordt in
+  drie toestanden gelezen (`resolveReviewCommit`): ONTBREEKT het werkelijk (`null`/`undefined`), dan
+  — en alleen dan — telt de `**Reviewed commit:**`-regel, die alsnog mechanisch tegen de
+  PR-commitindex wordt geresolveerd; is het aanwezig en oplosbaar, dan wint de API altijd; is het
+  aanwezig maar onbruikbaar (leeg, verkeerd van type of vorm, onbekend in deze PR na een
+  force-push, of een dubbelzinnige prefix), dan blijft de binding ONOPGELOST. Er is in dat laatste
+  geval géén terugval op het lichaam: onopgelost bewijs houdt een lege `resolved_head_sha`, haalt de
+  headvergelijking dus nooit, en telt daarmee niet als bewijs op de actuele head.
 - **Gemini als pull-request-review** — van `gemini-code-assist[bot]` (`user.id` `176961590`) in een
   toegestane state, met de terminale `## Code Review`-marker.
 
@@ -514,7 +564,7 @@ geen `actions: write`, geen `pull-requests: write`, geen `id-token: write`, geen
 environment, geen artifacts of cache, geen PR-headcheckout, en nooit `pull_request_target`. Dat wordt
 statisch afgedwongen: `findTrustBoundaryViolations` weigert elke andere trigger op het writerbestand,
 een ongepinde of verkeerd gepinde `workflow_run`-bron, een tweede job met een schrijfscope, een
-schrijfjob zonder eigen per-PR-rij, een `concurrency` op workflowniveau, `issue_comment` met een
+schrijfjob zonder eigen per-PR-rij, een ontbrekende of afwijkende repositorybrede rij, `issue_comment` met een
 schrijfscope buiten dit ene bestand, een niet te ontleden `on:`-mapping, en een uitcheckende shieldjob
 die niet tot `pull_request` beperkt is.
 

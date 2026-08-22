@@ -126,6 +126,12 @@ permissions: {}
 # nooit door twee runs tegelijk tegen dezelfde resterende teller besloten. `cancel-in-progress: false`
 # kapt een lopende schrijfbeurt nooit af; `queue: max` bewaart wachtende runs in plaats van de vorige
 # te annuleren.
+#
+# `queue` IS EEN ONDERSTEUNDE SLEUTEL, op workflow- én jobniveau, met tot honderd wachtende runs per
+# groep; verboden is alleen de combinatie met `cancel-in-progress: true`. Bron, en de enige die hier
+# telt bij twijfel:
+#   https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency
+# Een review die deze rijen "niet-ondersteund" noemt, leest een oudere pagina — niet verwijderen.
 concurrency:
   group: autocoding-shield-live-gate-repository
   cancel-in-progress: false
@@ -282,7 +288,9 @@ jobs:
     # `cancel-in-progress: false` kapt een lopende beurt nooit af — dat zou een head op `pending`
     # laten staan. `queue: max` bewaart wachtende beurten in plaats van de vorige te annuleren; met
     # de standaard `single` zou een derde aanleiding de tweede opeten en kon een invalidatie stil
-    # verdwijnen, en juist dát was de reden dat de vorige versie alles moest doorlopen.
+    # verdwijnen, en juist dát was de reden dat de vorige versie alles moest doorlopen. `queue` is
+    # ook op JOBniveau ondersteund — zie de bron bij de workflowbrede rij hierboven:
+    #   https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency
     concurrency:
       group: autocoding-shield-live-gate-pr-${{ matrix.pr }}
       cancel-in-progress: false
