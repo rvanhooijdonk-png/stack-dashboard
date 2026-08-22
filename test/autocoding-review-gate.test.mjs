@@ -365,18 +365,38 @@ function yamlOnly(path) {
   return readFileSync(path, 'utf8').split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
 }
 
+/** De jobnamen van een workflowbestand; `on:`-sleutels hebben dezelfde inspringing en tellen niet. */
+function jobNames(path) {
+  const lines = yamlOnly(path).split('\n');
+  const start = lines.findIndex((l) => l === 'jobs:');
+  assert.ok(start !== -1, `geen jobs-blok: ${path}`);
+  return lines.slice(start + 1)
+    .filter((l) => /^ {2}[a-z][a-z0-9-]*:$/.test(l))
+    .map((l) => l.trim());
+}
+
 test('workflow-eventmatrix houdt bootstrap-events groen en live gate uit', () => {
   const shield = yamlOnly(PR_SHIELD_PATH);
   const liveGate = yamlOnly(LIVE_GATE_PATH);
   const policy = JSON.parse(readFileSync('CONTROL/AUTOCODING/policy.v1.json', 'utf8'));
 
-  // De read-only shield kent uitsluitend het pull_request-event; de trusted writer kent het juist
-  // NOOIT, want op dat event draait GitHub de door de PR VOORGESTELDE workflowdefinitie.
+  // De onprivileged shield ontvangt PR-, comment- en reviewevents; PR-code draait alleen op
+  // `pull_request`, de rest is een signaaljob zonder inhoud.
   assert.match(shield, /^on:\n {2}pull_request:$/m);
-  assert.ok(!shield.includes('issue_comment'), 'de PR-shield reageert niet op comments');
-  assert.ok(!shield.includes('pull_request_review'), 'de PR-shield reageert niet op reviews');
   for (const event of ['issue_comment:', 'pull_request_review:']) {
+    assert.ok(shield.includes(event), `signaalevent ontbreekt op de shield: ${event}`);
+  }
+  assert.match(shield, /if: github\.event_name == 'pull_request'/);
+
+  // De trusted writer kent GEEN van die events. Dat is de gemeten grens: Actions-run 32542688290
+  // draaide op `pull_request_review` een writerbestand dat op `main` 404 gaf — de definitie kwam
+  // dus van de PR-head. Alleen `workflow_run` en `schedule` laden gegarandeerd de default branch.
+  for (const event of ['workflow_run:', 'schedule:']) {
     assert.ok(liveGate.includes(event), `trusted event ontbreekt: ${event}`);
+  }
+  assert.match(liveGate, /^ {2}workflow_run:\n {4}workflows: \[autocoding-shield\]$/m);
+  for (const verboden of ['issue_comment', 'pull_request_review', 'pull_request_target']) {
+    assert.ok(!liveGate.includes(verboden), `de trusted writer mag niet op ${verboden} draaien`);
   }
   assert.ok(!/^ {2}pull_request(_target)?:$/m.test(liveGate), 'de trusted writer heeft geen PR-event');
 
@@ -392,8 +412,13 @@ test('workflow-eventmatrix houdt bootstrap-events groen en live gate uit', () =>
 
 test('W1. de stabiele checknaam draait alleen op pull_request en heeft geen API-rechten', () => {
   const shield = yamlOnly(PR_SHIELD_PATH);
-  // Er is precies één job in dit bestand, en dat is de stabiele checknaam.
-  assert.deepEqual(shield.match(/^ {2}[a-z][a-z0-9-]*:$/gm), ['  autocoding-shield:']);
+  // Twee jobs: de stabiele checknaam en het onprivileged signaal dat de trusted keten aanstoot.
+  assert.deepEqual(jobNames(PR_SHIELD_PATH), ['autocoding-shield:', 'autocoding-shield-signal:']);
+  // De signaaljob voert geen repositorycode uit: geen checkout, geen tests, geen scripts.
+  const signaal = shield.slice(shield.indexOf('  autocoding-shield-signal:'));
+  assert.ok(!signaal.includes('actions/checkout'), 'het signaal checkt niets uit');
+  assert.ok(!signaal.includes('node '), 'het signaal voert geen code uit');
+  assert.match(signaal, /permissions: \{\}/);
   // De job die PR-headcode uitvoert leest zelf niets uit de GitHub-API en krijgt daar ook geen
   // rechten voor: alleen `contents: read` om de head te kunnen uitchecken.
   assert.ok(!shield.includes('gh api'), 'de PR-head-job mag de API niet bevragen');
@@ -412,7 +437,7 @@ test('W1b. de statuswriter staat in een APART bestand; PR-voorgestelde YAML krij
   assert.match(shield, /^permissions: \{\}$/m);
 
   const liveGate = yamlOnly(LIVE_GATE_PATH);
-  assert.deepEqual(liveGate.match(/^ {2}[a-z][a-z0-9-]*:$/gm), ['  autocoding-shield-live-gate:']);
+  assert.deepEqual(jobNames(LIVE_GATE_PATH), ['autocoding-shield-live-gate:']);
   assert.deepEqual(
     liveGate.split('\n').filter((line) => /^\s+[a-z-]+:\s*write\b/.test(line)).map((l) => l.trim()),
     ['statuses: write'],

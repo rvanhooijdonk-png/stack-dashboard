@@ -1,56 +1,57 @@
 name: autocoding-shield-live-gate
 
 # DIT BESTAND IS DE TRUSTED STATUSWRITER. Het is met opzet fysiek gescheiden van
-# `.github/workflows/autocoding-shield.yml`.
+# `.github/workflows/autocoding-shield.yml`, en het wordt door GEEN ENKEL direct PR-, comment- of
+# reviewevent gestart.
 #
-# Waarom die scheiding moest bestaan. Op een `pull_request`-run gebruikt GitHub de workflowdefinitie
-# ZOALS DIE IN DE PR STAAT. Zolang de statuswriter in datzelfde bestand woonde, kon een same-repo
-# branch de stappen van de `statuses: write`-job vervangen en de receiptstatus zelf groen schrijven.
-# Het uitchecken van de default branch beschermt de SCRIPTS, maar niet de YAML die de job en zijn
-# tokenpermissies definieert. De enige echte grens is dus: het bestand met de schrijfscope mag door
-# geen enkele PR-gecontroleerde event gestart worden.
+# Waarom de vorige scheiding niet volstond — GEMETEN, niet beredeneerd. De eerdere versie luisterde
+# naar `issue_comment` en `pull_request_review`, in de veronderstelling dat allebei die events altijd
+# de default-branch-definitie draaien. Actions-run `32542688290` weerlegt dat: event
+# `pull_request_review`, head `a2e7a64…`, bestand `.github/workflows/autocoding-shield-live-gate.yml`
+# — terwijl de Contents API op `?ref=main` voor dat pad 404 gaf. Het bestand bestond dus NIET op de
+# default branch en werd tóch uitgevoerd. De definitie kwam van de PR-head, inclusief de job met
+# `statuses: write`. Dat de statusstappen daar toevallig oversloegen (poort uit) was geen grens.
 #
-# Daarom staan hier uitsluitend de twee trusted events. Voor allebei geldt de officiële GitHub-
-# eventgrens: `issue_comment` en `pull_request_review` draaien altijd op de DEFAULT BRANCH en
-# vereisen dat het workflowbestand DAAR bestaat. De versie in een PR-branch start deze workflow niet
-# en kan hem ook niet wijzigen; wijzigen kan alleen via een merge naar de default branch, en die
-# merge valt onder de ownergate. Er is geen `pull_request` en nooit `pull_request_target`, dus er
-# bestaat geen event waarop PR-voorgestelde YAML deze schrijfscope krijgt.
+# De grens die WEL bestaat is de officiële `workflow_run`-grens: zo'n workflow triggert alleen als
+# zijn bestand op de default branch staat, en het event is er expliciet voor bedoeld om ná een
+# onprivileged workflow een privileged workflow te starten. `schedule` heeft dezelfde eigenschap en
+# vangt bovendien alles op wat geen signaal opleverde: edits, deletes, dismissals, gemiste runs.
 #
-# Wat deze job WEL doet: de default branch uitchecken, de PR read-only via de GitHub-API lezen, en de
-# uitspraak als commitstatus publiceren op de GEMETEN PR-head, onder de context
-# `autocoding-shield-live-receipts` uit `policy.live_status_context`. Waarom een commitstatus en geen
-# checknaam: een run die door deze twee events wordt getriggerd hangt aan de default-branch-SHA, dus
-# zijn checknaam verschijnt NOOIT op de PR-head; een eerder groene check daar zou blijven staan ook
-# nadat het bewijs verwijderd, bewerkt of dismissed is.
+# Wat deze job WEL doet: de default branch uitchecken, de doel-PR's OPNIEUW bepalen via read-only
+# GitHub-API's, elke doel-PR read-only meten, en de uitspraak als commitstatus publiceren op de
+# GEMETEN head, onder de context `autocoding-shield-live-receipts` uit `policy.live_status_context`.
 #
-# Wat deze job NOOIT doet: PR-headcode uitvoeren, PR-headpolicy lezen, PR-artifacts of -cache
-# gebruiken, secrets lezen, mergen, deployen, of iets anders schrijven dan één commitstatus.
-# `statuses: write` is de enige schrijfscope in dit bestand en er is precies één job.
+# Wat deze job NOOIT doet: PR-headcode uitvoeren, PR-headpolicy lezen, artifacts, cache of outputs
+# van de bronrun lezen, de event-PR-head geloven, secrets lezen, mergen, deployen, of iets anders
+# schrijven dan commitstatussen. `statuses: write` is de enige schrijfscope in dit bestand en er is
+# precies één job. De `workflow_run`-payload is hooguit een HINT die de doellijst mag versmallen.
 #
-# BOOTSTRAP, eerlijk benoemd: `issue_comment` en `pull_request_review` starten alleen een workflow
-# die al op de default branch staat. Dit bestand bestaat daar pas NA de merge van PR #74. PR #74 zelf
-# levert dus geen native live-statusbewijs op en wordt handmatig via de bestaande ownermergegate
-# afgehandeld; het eerste echte statusbewijs komt van een latere pilot-PR. De poort staat bovendien
-# nog uit (`live_receipt_gate_enabled: false`) en deze PR zet geen ruleset of required check aan.
+# BOOTSTRAP, eerlijk benoemd: een `workflow_run`-workflow bestaat pas ná merge op de default branch.
+# PR #74 kan deze keten dus niet zelf live bewijzen. De empirische run `32542688290` is juist het
+# bewijs dat de vorige, direct getriggerde vorm verboden moest worden. De poort staat bovendien nog
+# uit (`live_receipt_gate_enabled: false`) en deze PR zet geen ruleset of required check aan.
 
 on:
-  issue_comment:
-    types: [created, edited, deleted]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
+  # Uitsluitend de voltooiing van de onprivileged shield. De naam is hier gepind; het PAD en het
+  # bronevent worden verderop nog eens in de trusted checkout getoetst.
+  workflow_run:
+    workflows: [autocoding-shield]
+    types: [completed]
+  # Convergentiefallback: edits, deletes en dismissals leveren niet altijd een shieldrun op, en een
+  # gemiste of geannuleerde signaalrun mag geen status voor altijd stale laten staan.
+  schedule:
+    - cron: '23 * * * *'
 
 permissions: {}
 
-# Per-PR serialisatie blijft behouden: comment- en review-events op dezelfde PR verdringen elkaar
-# niet, zodat de laatst gepubliceerde status ook de laatst gelezen momentopname is.
+# Serialisatie per bronbranch, niet globaal: een lange ronde over één PR mag de volgende niet
+# verdringen, en een geplande ronde (geen `workflow_run`) krijgt altijd zijn eigen groep.
 concurrency:
-  group: autocoding-shield-live-gate-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  group: autocoding-shield-live-gate-${{ github.event.workflow_run.head_branch || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   autocoding-shield-live-gate:
-    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -60,19 +61,8 @@ jobs:
       # geen `actions: write`, geen `pull-requests: write`, geen `id-token: write`, geen secrets.
       statuses: write
     steps:
-      - name: Bepaal PR-nummer
-        id: pr
-        env:
-          PR_FROM_PULL: ${{ github.event.pull_request.number }}
-          PR_FROM_ISSUE: ${{ github.event.issue.number }}
-        run: |
-          set -euo pipefail
-          number="${PR_FROM_PULL:-${PR_FROM_ISSUE:-}}"
-          test -n "$number"
-          echo "number=$number" >> "$GITHUB_OUTPUT"
-
       # Altijd de default branch. De poort mag nooit door PR-headcode of PR-headpolicy worden
-      # bestuurd.
+      # bestuurd, en van de bronrun wordt niets overgenomen.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -85,6 +75,7 @@ jobs:
           if [ -f scripts/autocoding/verify-review-gate.mjs ] && \
              [ -f scripts/autocoding/collect-shield-input.mjs ] && \
              [ -f scripts/autocoding/publish-live-status.mjs ] && \
+             [ -f scripts/autocoding/select-live-gate-targets.mjs ] && \
              [ -f CONTROL/AUTOCODING/policy.v1.json ]; then
             echo 'trusted_gate_files=true' >> "$GITHUB_OUTPUT"
           else
@@ -108,79 +99,129 @@ jobs:
           echo 'enabled=true' >> "$GITHUB_OUTPUT"
           echo "status_context=$context" >> "$GITHUB_OUTPUT"
 
-      # De momentopname. `pr.json` wordt met herhaalpogingen opgehaald omdat de gemeten head de drager
-      # is van de hele publicatie: zonder head is er geen commit om de uitspraak op te schrijven.
-      # Uitsluitend read-only GET's. Geen enkel veld hieruit wordt gelogd.
-      - name: Meet de PR-head en verzamel de momentopname
-        id: snapshot
+      # De doel-PR's worden hier OPNIEUW bepaald uit een read-only lijst van open pull requests. De
+      # eventpayload gaat als hint naar binnen en kan de lijst hooguit versmallen tot één eenduidige
+      # treffer; hij kan er nooit een PR aan toevoegen. Een onverwachte bron levert rc 2 op: niets
+      # publiceren, en dat is geen fout van deze poort. Een te grote of onleesbare lijst is rc 1:
+      # dan wordt er niets gepubliceerd en is de run rood.
+      - name: Bepaal de doel-PR's opnieuw via read-only API
+        id: targets
         if: steps.enabled.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          set -euo pipefail
-          raw="$RUNNER_TEMP/raw"
-          mkdir -p "$raw"
+          set -uo pipefail
+          if ! gh api --paginate --slurp "repos/$REPOSITORY/pulls?state=open&per_page=100" \
+            > "$RUNNER_TEMP/open-pulls.json"; then
+            echo '::error::OPEN_PULL_REQUEST_LIST_UNAVAILABLE'
+            exit 1
+          fi
+          rc=0
+          node scripts/autocoding/select-live-gate-targets.mjs \
+            --event-name "$EVENT_NAME" \
+            --event "$GITHUB_EVENT_PATH" \
+            --open-pulls "$RUNNER_TEMP/open-pulls.json" \
+            --out "$RUNNER_TEMP/targets.txt" || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo 'targets_ready=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo 'targets_ready=false' >> "$GITHUB_OUTPUT"
+          if [ "$rc" -eq 2 ]; then
+            exit 0
+          fi
+          exit 1
 
-          for attempt in 1 2 3; do
-            if gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" > "$raw/pr.json"; then break; fi
-            if [ "$attempt" = 3 ]; then
-              echo '::error::PR_SNAPSHOT_UNAVAILABLE'
-              exit 1
-            fi
-            sleep 5
-          done
-
-          head_sha="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const s=(p.head||{}).sha;if(!/^[0-9a-f]{40}$/.test(s||""))process.exit(1);process.stdout.write(s)' "$raw/pr.json")"
-          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
-
-          gh api "repos/$REPOSITORY/git/commits/$head_sha" > "$raw/head-commit.json"
-          gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PR_NUMBER/commits" > "$raw/pr-commits.json"
-          gh api --paginate --slurp "repos/$REPOSITORY/issues/$PR_NUMBER/comments" > "$raw/issue-comments.json"
-          gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PR_NUMBER/reviews" > "$raw/reviews.json"
-          gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PR_NUMBER/comments" > "$raw/review-comments.json"
-          gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PR_NUMBER/files" > "$raw/files.json"
-
-      # De uitspraak zelf. `continue-on-error` is bewust: een NO_GO mag deze stap niet laten
-      # ontploffen vóór de publicatie, want de publicatie IS de poort. Rood worden gebeurt hierna.
-      - name: Beslis over de gemeten head
-        id: gate
-        if: steps.snapshot.outputs.head_sha != ''
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          node scripts/autocoding/collect-shield-input.mjs \
-            --raw "$RUNNER_TEMP/raw" \
-            --policy CONTROL/AUTOCODING/policy.v1.json \
-            --out-context "$RUNNER_TEMP/context.json" \
-            --out-shield-input "$RUNNER_TEMP/shield-input.json"
-
-          node scripts/autocoding/verify-review-gate.mjs \
-            --shield-input "$RUNNER_TEMP/shield-input.json" \
-            --context "$RUNNER_TEMP/context.json" \
-            --policy CONTROL/AUTOCODING/policy.v1.json > "$RUNNER_TEMP/gate-result.json"
-
-      # Publiceert ALTIJD, op de gemeten head, onder de vaste context. `success` uitsluitend bij een
-      # bewezen GO; elke NO_GO, parsefout, truncatie, ontbrekend bewijs of uitvoeringsfout wordt
-      # `failure` op diezelfde head. De stap eindigt non-zero bij `failure`, zodat de run ook rood is.
-      - name: Publiceer de uitspraak als commitstatus op de gemeten PR-head
-        if: always() && steps.snapshot.outputs.head_sha != ''
+      # Per doel-PR: meten, beslissen, publiceren. Elke PR is een eigen record. Een fout bij één PR
+      # maakt de job rood maar stopt de ronde niet — anders zou de eerste kapotte PR alle andere
+      # statussen stale laten staan. De doellijst wordt via een eigen bestandsdescriptor gelezen,
+      # zodat `gh` de standaardinvoer van de lus niet kan opslokken.
+      - name: Meet, beslis en publiceer per doel-PR
+        if: steps.targets.outputs.targets_ready == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
           STATUS_CONTEXT: ${{ steps.enabled.outputs.status_context }}
-          GATE_OUTCOME: ${{ steps.gate.outcome }}
         run: |
-          set -euo pipefail
-          execution_error=''
-          if [ "$GATE_OUTCOME" != 'success' ] && [ "$GATE_OUTCOME" != 'failure' ]; then
-            execution_error='GATE_EXECUTION_ERROR'
-          fi
-          node scripts/autocoding/publish-live-status.mjs \
-            --repository "$REPOSITORY" \
-            --head-sha "$HEAD_SHA" \
-            --status-context "$STATUS_CONTEXT" \
-            --gate-result "$RUNNER_TEMP/gate-result.json" \
-            --execution-error "$execution_error"
+          set -uo pipefail
+          overall=0
+
+          while IFS= read -r number <&3; do
+            case "$number" in
+              ''|*[!0-9]*) continue ;;
+            esac
+
+            raw="$RUNNER_TEMP/raw/$number"
+            rm -rf "$raw"
+            mkdir -p "$raw"
+            execution_error=''
+
+            # De gemeten head is de drager van de hele publicatie: zonder head is er geen commit om
+            # de uitspraak op te schrijven. Daarom herhaalpogingen, en daarom is dit het enige geval
+            # waarin een PR zonder status blijft — expliciet gelogd en record-lokaal rood.
+            head_sha=''
+            for attempt in 1 2 3; do
+              if gh api "repos/$REPOSITORY/pulls/$number" > "$raw/pr.json"; then
+                head_sha="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const s=(p.head||{}).sha;if(!/^[0-9a-f]{40}$/.test(s||""))process.exit(1);process.stdout.write(s)' "$raw/pr.json" || true)"
+                if [ -n "$head_sha" ]; then break; fi
+              fi
+              if [ "$attempt" -lt 3 ]; then sleep 5; fi
+            done
+            if [ -z "$head_sha" ]; then
+              echo "::error::PR_${number}_HEAD_UNMEASURED"
+              overall=1
+              continue
+            fi
+
+            # Uitsluitend read-only GET's. Geen enkel veld hieruit wordt gelogd.
+            for endpoint in \
+              "git/commits/$head_sha:head-commit" \
+              "pulls/$number/commits:pr-commits" \
+              "issues/$number/comments:issue-comments" \
+              "pulls/$number/reviews:reviews" \
+              "pulls/$number/comments:review-comments" \
+              "pulls/$number/files:files"; do
+              path="${endpoint%%:*}"
+              name="${endpoint##*:}"
+              if [ "$name" = 'head-commit' ]; then
+                gh api "repos/$REPOSITORY/$path" > "$raw/$name.json" || execution_error='GATE_EXECUTION_ERROR'
+              else
+                gh api --paginate --slurp "repos/$REPOSITORY/$path" > "$raw/$name.json" \
+                  || execution_error='GATE_EXECUTION_ERROR'
+              fi
+            done
+
+            # De uitspraak. Een NO_GO eindigt hier non-zero; dat is geen uitvoeringsfout maar de
+            # uitkomst zelf, en de publicatie hieronder is de poort. Een echte crash laat
+            # `gate-result.json` onleesbaar achter en wordt door de publisher als zodanig gemeld.
+            rm -f "$raw/gate-result.json"
+            if [ -z "$execution_error" ]; then
+              if node scripts/autocoding/collect-shield-input.mjs \
+                --raw "$raw" \
+                --policy CONTROL/AUTOCODING/policy.v1.json \
+                --out-context "$raw/context.json" \
+                --out-shield-input "$raw/shield-input.json"; then
+                node scripts/autocoding/verify-review-gate.mjs \
+                  --shield-input "$raw/shield-input.json" \
+                  --context "$raw/context.json" \
+                  --policy CONTROL/AUTOCODING/policy.v1.json > "$raw/gate-result.json" || true
+              fi
+            fi
+
+            # Publiceert ALTIJD op de gemeten head, onder de vaste context. `success` uitsluitend bij
+            # een bewezen GO; elke NO_GO, parsefout, truncatie, ontbrekend bewijs of uitvoeringsfout
+            # wordt `failure` op diezelfde head.
+            if ! node scripts/autocoding/publish-live-status.mjs \
+              --repository "$REPOSITORY" \
+              --head-sha "$head_sha" \
+              --status-context "$STATUS_CONTEXT" \
+              --gate-result "$raw/gate-result.json" \
+              --execution-error "$execution_error"; then
+              overall=1
+            fi
+          done 3< "$RUNNER_TEMP/targets.txt"
+
+          exit "$overall"

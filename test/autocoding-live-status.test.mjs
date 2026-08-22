@@ -407,17 +407,31 @@ test('L12. de workflow publiceert altijd, op de gemeten head, met de enige schri
   assert.ok(!/^ {2}pull_request(_target)?:$/m.test(liveGate), 'de trusted writer kent geen PR-event');
   assert.equal(liveGate.split('\n').filter((l) => /^\s+[a-z-]+:\s*write\b/.test(l)).length, 1);
 
-  // De publicatie draait ook als de poortstap zelf ontplofte, en uitsluitend op de GEMETEN head.
-  assert.match(liveGate, /if: always\(\) && steps\.snapshot\.outputs\.head_sha != ''/);
-  assert.match(liveGate, /--head-sha "\$HEAD_SHA"/);
-  assert.match(liveGate, /HEAD_SHA: \$\{\{ steps\.snapshot\.outputs\.head_sha \}\}/);
+  // De publicatie draait ook als de poortstap zelf ontplofte, en uitsluitend op de GEMETEN head:
+  // `$head_sha` komt uit een eigen read-only API-lezing binnen de lus, nooit uit het eventpayload.
+  assert.match(liveGate, /node scripts\/autocoding\/publish-live-status\.mjs/);
+  assert.match(liveGate, /--head-sha "\$head_sha"/);
   assert.ok(
     !/--head-sha "\$\{\{ github\.event/.test(liveGate),
     'de head mag nooit uit het eventpayload komen',
   );
-  assert.match(liveGate, /continue-on-error: true/);
-  assert.match(liveGate, /node scripts\/autocoding\/publish-live-status\.mjs/);
+  // Een crash van de poortstap wordt opgevangen (`|| true`) en als uitvoeringsfout doorgegeven,
+  // zodat de publicatie eronder hoe dan ook draait.
+  assert.match(liveGate, /verify-review-gate\.mjs[\s\S]*?\|\| true/);
+  assert.match(liveGate, /--execution-error "\$execution_error"/);
+
+  // Record-lokale foutafhandeling: één kapotte PR maakt de run rood maar stopt de ronde niet.
+  assert.ok(!/^\s*set -euo pipefail$/m.test(publishLoop(liveGate)), 'de lus mag niet vroegtijdig stoppen');
+  assert.match(liveGate, /overall=1\n\s+continue$/m);
+  assert.match(liveGate, /exit "\$overall"/);
 });
+
+/** Het `run:`-blok van de publicatiestap; daarbinnen mag geen `set -e` staan. */
+function publishLoop(liveGate) {
+  const start = liveGate.indexOf('      - name: Meet, beslis en publiceer per doel-PR');
+  assert.ok(start !== -1, 'publicatiestap ontbreekt');
+  return liveGate.slice(start);
+}
 
 
 // --- Argumentparser -------------------------------------------------------------------------------

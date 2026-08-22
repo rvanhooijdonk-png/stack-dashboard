@@ -2,7 +2,8 @@
 
 De Shield levert één stabiele GitHub-check, `autocoding-shield`, voor pull requests naar `main`.
 Hij toetst de validator en scant de branchdiff op secretachtige waarden. De statuswriter staat in een
-fysiek apart workflowbestand dat door geen enkele PR-gecontroleerde event startbaar is. De live receiptpoort staat in
+fysiek apart workflowbestand dat uitsluitend via `workflow_run` en `schedule` start — en dus alleen in
+de versie die op de default branch staat. De live receiptpoort staat in
 `policy.v1.json` bewust uit tijdens bootstrap. Dat is geen PR-specifieke bypass: inschakelen vereist
 een afzonderlijke wijziging van het beleid nadat een fixture-PR de negatieve en positieve route heeft
 bewezen.
@@ -11,8 +12,9 @@ bewezen.
 
 | naam | soort | bestand | events | checkout | doet |
 | --- | --- | --- | --- | --- | --- |
-| `autocoding-shield` | job | `.github/workflows/autocoding-shield.yml` | uitsluitend `pull_request` | PR-head | validator-, adapter-, publisher- en vertrouwensgrenstests, secretscan op de branchdiff |
-| `autocoding-shield-live-gate` | job | `.github/workflows/autocoding-shield-live-gate.yml` | `issue_comment`, `pull_request_review` | default branch | leest de PR read-only via de GitHub-API, evalueert de poort en publiceert de uitspraak |
+| `autocoding-shield` | job | `.github/workflows/autocoding-shield.yml` | uitsluitend `pull_request` | PR-head | validator-, adapter-, publisher-, doelselectie- en vertrouwensgrenstests, secretscan op de branchdiff |
+| `autocoding-shield-signal` | job | `.github/workflows/autocoding-shield.yml` | `issue_comment`, `pull_request_review` | geen | niets — een `echo` met `permissions: {}`, zodat de voltooiing van deze run de trusted writer aanstoot |
+| `autocoding-shield-live-gate` | job | `.github/workflows/autocoding-shield-live-gate.yml` | `workflow_run` (na `autocoding-shield`), `schedule` | default branch | bepaalt de doel-PR's opnieuw via read-only API, meet elke PR en publiceert de uitspraak |
 | `autocoding-shield-live-receipts` | commitstatus-context | — | — | — | draagt de uitspraak op de gemeten PR-head; dit is de naam die later required wordt |
 
 ### Waarom dit twee bestanden zijn en geen twee jobs in één bestand
@@ -29,19 +31,41 @@ P1 (review `4998406843`, inline `3834611207`), en hij was terecht.
 De enige sluiting is daarom: het bestand met de schrijfscope mag door geen enkele PR-gecontroleerde
 event startbaar zijn.
 
-- `autocoding-shield.yml` kent uitsluitend `pull_request` en draagt **nul** schrijfscopes — noch op
-  bestandsniveau, noch op een job. Er is dus geen event waarop PR-voorgestelde YAML een schrijfscope
-  krijgt.
-- `autocoding-shield-live-gate.yml` kent uitsluitend `issue_comment` en `pull_request_review`, en
-  bevat precies één job met precies één schrijfscope: `statuses: write`. Nooit `pull_request`, nooit
+### De eerste poging klopte niet, en dat is gemeten
+
+De vorige versie liet de writer op `issue_comment` en `pull_request_review` draaien, in de aanname dat
+die twee events altijd de default-branch-definitie uitvoeren. **Die aanname is onjuist gebleken, live
+op deze PR.** Actions-run `32542688290` draaide op event `pull_request_review`, op head `a2e7a64…`,
+het bestand `.github/workflows/autocoding-shield-live-gate.yml` — terwijl de Contents API voor dat pad
+op `?ref=main` een 404 gaf. Het bestand bestond dus helemaal niet op de default branch en werd tóch
+uitgevoerd, inclusief de job met `statuses: write`. Dat de statusstappen daar oversloegen (poort uit)
+was toeval, geen grens. `pull_request_review` is een `pull_request*`-event en draait de door de PR
+voorgestelde definitie.
+
+De grens die **wel** bestaat is `workflow_run`: zo'n workflow triggert uitsluitend als zijn bestand op
+de default branch staat, en het event is er door GitHub expliciet voor bedoeld om ná een onprivileged
+workflow een privileged workflow te starten. `schedule` heeft dezelfde eigenschap.
+
+- `autocoding-shield.yml` draagt **nul** schrijfscopes — noch op bestandsniveau, noch op een job. Het
+  kent drie events, maar voert alleen op `pull_request` repositorycode uit; `issue_comment` en
+  `pull_request_review` bereiken uitsluitend `autocoding-shield-signal`, een job zonder checkout,
+  zonder code en met `permissions: {}`. Er is dus geen event waarop PR-voorgestelde YAML een
+  schrijfscope krijgt, en geen event waarop PR-code buiten `pull_request` draait.
+- `autocoding-shield-live-gate.yml` kent uitsluitend `workflow_run` (gepind op de workflownaam
+  `autocoding-shield`) en `schedule`, en bevat precies één job met precies één schrijfscope:
+  `statuses: write`. Nooit `pull_request`, nooit `pull_request_review`, nooit `issue_comment`, nooit
   `pull_request_target`.
 
-Dat leunt op de officiële GitHub-eventgrens: `issue_comment` en `pull_request_review` draaien altijd
-op de **default branch** en starten alleen een workflow die **daar** bestaat. De versie van dit
-bestand in een PR-branch start de workflow niet en kan hem ook niet wijzigen; wijzigen kan alleen via
-een merge naar de default branch, en die merge valt onder de ownergate. De writer voert dus nooit
-untrusted PR-code uit — niet omdat hij die zorgvuldig vermijdt, maar omdat er geen event bestaat
-waarop hij hem zou krijgen.
+De writer voert dus nooit untrusted PR-code uit — niet omdat hij die zorgvuldig vermijdt, maar omdat
+er geen event bestaat waarop hij hem zou krijgen. Wijzigen kan alleen via een merge naar de default
+branch, en die merge valt onder de ownergate.
+
+### Van de bronrun wordt niets geloofd
+
+De aanleiding is onprivileged, dus is de payload ervan hooguit een **hint**. De writer leest géén
+artifacts, géén cache, géén job-outputs en géén `head_sha` van de bronrun als feit. Hij checkt alleen
+de default branch uit (`persist-credentials: false`) en bepaalt de doel-PR's opnieuw via read-only
+API-lezingen. Zie "Welke PR's een ronde meet" hieronder.
 
 De grens wordt niet in proza bewaakt maar statisch gemeten door
 `scripts/autocoding/workflow-trust.mjs` en `test/autocoding-workflow-trust.test.mjs`. Die tests falen
@@ -51,19 +75,57 @@ en zodra de writer een tweede job, een andere schrijfscope dan `statuses`, secre
 PR-headcheckout of PR-cache/artifacts zou aannemen. De meter is bewust over-benaderend: een vals
 alarm kost een commit, een gemiste schrijfscope kost de poort.
 
+### Welke PR's een ronde meet
+
+`scripts/autocoding/select-live-gate-targets.mjs` bepaalt de doellijst, en doet dat zonder de
+aanleiding te geloven:
+
+1. Bij `workflow_run` moet de bron de **verwachte** workflow zijn: naam `autocoding-shield`, pad
+   `.github/workflows/autocoding-shield.yml`, en een bronevent uit `pull_request`, `issue_comment` of
+   `pull_request_review`. Alles daarbuiten — een andere workflow, een gelijknamige workflow op een
+   ander pad, een `workflow_dispatch`, een `push` — schrijft **geen enkele status** en is geen rode
+   run: het is simpelweg geen aanleiding.
+2. De lijst zelf komt uit `GET /repos/{repo}/pulls?state=open`. De hint mag die lijst alleen
+   **versmallen**, nooit uitbreiden, en alleen bij een eenduidige treffer: precies één open PR met die
+   `head_sha`, anders precies één met die `head_ref`. Twee PR's met dezelfde branchnaam (bij forks
+   gewoon) leveren dus geen keuze op.
+3. Lukt dat niet — en bij `schedule` en `issue_comment` bestaat er sowieso geen bruikbare hint, want
+   dan draait de shield op de default branch — dan worden **alle open PR's** gemeten. Extra meten is
+   onschadelijk (de uitspraak is een pure functie van de momentopname), een verkeerde PR meten laat een
+   stale status staan. De asymmetrie bepaalt de keuze.
+4. Die volledige ronde is expliciet begrensd: meer dan `OPEN_PULL_REQUEST_LIMIT` (25) open PR's is een
+   **weigering** — niets publiceren en rood worden — in plaats van een stilzwijgend halve ronde. Ook
+   een onleesbare of onbruikbare PR-lijst faalt zo gesloten.
+
+Elke doel-PR is een eigen record. De lus draait zonder `set -e`: een PR waarvan de head niet te meten
+is, of waarvan de publicatie faalt, zet `overall=1` en gaat door naar de volgende. De job wordt aan
+het eind rood (`exit "$overall"`), maar één kapotte PR laat nooit de statussen van de andere PR's
+stale staan. `test/autocoding-live-gate-targets.test.mjs` voert dat `run:`-blok werkelijk uit onder
+`bash` met gestubde `gh`/`node` en toetst dat gedrag, in plaats van het te beweren.
+
+Serialisatie loopt per bronbranch (`concurrency`-groep op `workflow_run.head_branch`), niet globaal:
+een lange ronde over één PR verdringt de volgende niet, en een geplande ronde krijgt zijn eigen groep.
+Per PR staan er zes read-only GET's; het uurlijkse `schedule` is de convergentiefallback voor edits,
+deletes, dismissals en gemiste of geannuleerde signaalruns.
+
 ### Bootstrap: wat dit PR zelf niet kan bewijzen
 
-`issue_comment` en `pull_request_review` starten alleen workflows die al op de default branch staan.
-`autocoding-shield-live-gate.yml` bestaat daar pas **na** de merge van PR #74. PR #74 levert dus zelf
-geen native live-statusbewijs op en wordt handmatig via de bestaande ownermergegate afgehandeld; het
-eerste echte statusbewijs komt van een latere pilot-PR. De poort staat bovendien nog uit
-(`live_receipt_gate_enabled: false`) en dit PR zet geen ruleset of required check aan.
+Een `workflow_run`-workflow bestaat pas **na** merge op de default branch. PR #74 kan de nieuwe
+trusted writer dus niet zelf live bewijzen — dat is geen tekortkoming van het ontwerp maar de grens
+zelf. Wat PR #74 wél levert is het negatieve bewijs: run `32542688290` toont dat de vorige, direct
+getriggerde vorm PR-YAML uitvoerde, en na deze reparatie kan een nieuwe review of comment op PR #74
+**geen** run van `autocoding-shield-live-gate.yml` meer starten — die workflow kent die events niet
+meer. De read-only signaalworkflow mag wel draaien.
+
+Het eerste positieve writerbewijs komt daarom uit een aparte post-merge-pilot, met de poort nog steeds
+uit (`live_receipt_gate_enabled: false`) en zonder branch protection. PR #74 wordt handmatig via de
+bestaande ownermergegate afgehandeld en zet geen ruleset of required check aan.
 
 ## Waarom de uitspraak een commitstatus is, geen checknaam
 
-Gemeten, niet bedacht: een Actions-run die door `issue_comment` of `pull_request_review` wordt
-getriggerd hangt aan de **default-branch-SHA**, niet aan de PR-head. De checknaam van zo'n run
-verschijnt daarom nooit op de PR-head. Een eerder groene check op die head blijft dus staan, ook
+Gemeten, niet bedacht: een Actions-run die door `workflow_run`, `issue_comment` of
+`pull_request_review` wordt getriggerd hangt aan de **default-branch-SHA**, niet aan de PR-head. De
+checknaam van zo'n run verschijnt daarom nooit op de PR-head. Een eerder groene check op die head blijft dus staan, ook
 nadat het bewijs waarop hij groen werd is verwijderd, bewerkt of dismissed — precies de stale-green
 die Codex-reviewcomment `3834428052` reproduceerde.
 
@@ -77,8 +139,11 @@ dat convergent:
    daarvan publiceren byte-identiek dezelfde status op dezelfde commit.
 2. Er is geen zwijgend pad. `success` bestaat uitsluitend bij een bewezen `GO`; elke `NO_GO`,
    parsefout, API-truncatie, ontbrekend bewijs of uitvoeringsfout schrijft `failure` op diezelfde
-   head. De publicatiestap draait daarom onder `always()` en de poortstap onder
-   `continue-on-error: true` — rood worden gebeurt ná de publicatie, niet ervoor.
+   head. Een crash van de poortstap wordt binnen de lus opgevangen (`|| true`) en als
+   `--execution-error` doorgegeven, zodat de publicatie hoe dan ook draait — rood worden gebeurt ná de
+   publicatie, niet ervoor. Alleen een PR waarvan de head zelf na drie pogingen niet meetbaar is
+   blijft zonder status: zonder commit is er geen drager. Dat wordt expliciet gelogd
+   (`PR_<n>_HEAD_UNMEASURED`) en maakt de run rood.
 
 De omschrijving van de status bevat uitsluitend gesorteerde redencodes uit een gesloten allowlist,
 met een `+N`-teller als er niet meer in de 140 tekens van GitHub passen. Nooit ruwe stderr, een URL,
@@ -279,7 +344,7 @@ Activering is een **afzonderlijke latere PR** die precies drie dingen doet, in d
 2. De gemeten vendoridentiteiten herbevestigen tegen de dan actuele GitHub-App-id's.
 3. `autocoding-shield-live-receipts` als required status check instellen. Niet `autocoding-shield`,
    want die job draait PR-headcode; en niet `autocoding-shield-live-gate`, want die Actions-checknaam
-   hangt bij comment- en review-events aan de default-branch-SHA en verschijnt helemaal niet op de
+   hangt bij `workflow_run` en `schedule` aan de default-branch-SHA en verschijnt helemaal niet op de
    PR-head. Alleen de commitstatus staat gegarandeerd op de gemeten head.
 
 Een generieke regel "alle wijzigingen moeten via een PR" mag niet stilzwijgend worden geactiveerd.
@@ -310,9 +375,15 @@ door zodra er geen uitvoeringsfout is, en ontbreken is iets anders dan leeg zijn
 ## Permissions
 
 Beide workflowbestanden gebruiken minimale permissions. `autocoding-shield.yml` heeft **geen enkele**
-schrijfscope; `autocoding-shield-live-gate.yml` heeft er precies één, `statuses: write`, op zijn enige
-job. Geen `contents: write`, geen `actions: write`, geen `pull-requests: write`, geen `id-token:
-write`, geen secrets, geen environment, geen artifacts of cache, en nooit `pull_request_target`.
+schrijfscope — bestandsniveau `permissions: {}`, de PR-job `contents: read`, de signaaljob
+`permissions: {}`. `autocoding-shield-live-gate.yml` heeft er precies één, `statuses: write`, naast
+`contents: read`, `pull-requests: read` en `issues: read`, op zijn enige job. Geen `contents: write`,
+geen `actions: write`, geen `pull-requests: write`, geen `id-token: write`, geen secrets, geen
+environment, geen artifacts of cache, geen PR-headcheckout, en nooit `pull_request_target`. Dat wordt
+statisch afgedwongen: `findTrustBoundaryViolations` weigert elke andere trigger op het writerbestand,
+een ongepinde of verkeerd gepinde `workflow_run`-bron, en een uitcheckende shieldjob die niet tot
+`pull_request` beperkt is.
+
 Zolang de trusted gatebestanden nog niet op de default branch bestaan, meldt de live-gate-job
-expliciet een bootstrap-no-op; validator-, adapter-, vertrouwensgrens- en branchtests draaien op het
-`pull_request`-pad.
+expliciet een bootstrap-no-op; validator-, adapter-, doelselectie-, vertrouwensgrens- en branchtests
+draaien op het `pull_request`-pad.

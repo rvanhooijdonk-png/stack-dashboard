@@ -1,36 +1,52 @@
 name: autocoding-shield
 
-# DIT BESTAND IS DE READ-ONLY PR-SHIELD. Verder niets.
+# DIT BESTAND IS DE ONPRIVILEGED HELFT. Het draagt GEEN ENKELE schrijfscope — niet op
+# bestandsniveau, niet op een job — en dat is geen zuinigheid maar de vertrouwensgrens zelf.
 #
-# Het draait uitsluitend op `pull_request`, checkt de PR-head uit en voert dus PR-headcode uit
-# (validator-, adapter- en publishertests, secretscan op de branchdiff). Precies daarom staat hier
-# GEEN ENKELE schrijfscope: noch op bestandsniveau, noch op een job. Een PR mag zijn eigen workflow-
-# definitie voorstellen, en op de `pull_request`-run draait GitHub die VOORGESTELDE definitie — niet
-# de versie op de default branch. Een job met `statuses: write` in dit bestand zou een same-repo
-# branch dus in staat stellen de stappen te vervangen en de poortstatus zelf groen te schrijven.
-# Default-branch-checkout beschermt de scripts, maar niet de YAML die job en tokenpermissies
-# definieert. De statuswriter staat daarom in een fysiek apart bestand dat door geen enkele
-# PR-gecontroleerde event wordt gestart:
+# Op elk `pull_request*`-event draait GitHub de workflowdefinitie ZOALS DIE IN DE PR STAAT. Dat is
+# hier gemeten, niet aangenomen: Actions-run `32542688290` draaide op event `pull_request_review` een
+# workflowbestand dat op `main` 404 gaf. Een schrijfscope in dit bestand zou een same-repo branch dus
+# in staat stellen de stappen te vervangen en de poortstatus zelf groen te schrijven.
+#
+# Dit bestand doet daarom precies twee dingen:
+#
+#   1. Op `pull_request`: de echte shieldcheck. Die checkt de PR-head uit en voert PR-headcode uit
+#      (validator-, adapter-, publisher- en vertrouwensgrenstests, secretscan op de branchdiff).
+#   2. Op `issue_comment` en `pull_request_review`: een SIGNAAL zonder inhoud. Geen checkout, geen
+#      PR-code, `permissions: {}`. Het enige nut van die job is dat deze workflowrun voltooit,
+#      waarna de trusted writer via `workflow_run` vanaf de DEFAULT BRANCH start.
+#
+# De statuswriter staat in een fysiek apart bestand dat door geen enkel direct PR-, comment- of
+# reviewevent startbaar is:
 #
 #   .github/workflows/autocoding-shield-live-gate.yml
 #
-# Die scheiding is geen stijlkeuze maar de vertrouwensgrens zelf, en wordt statisch afgedwongen door
-# `test/autocoding-workflow-trust.test.mjs`.
+# Die scheiding wordt statisch afgedwongen door `test/autocoding-workflow-trust.test.mjs`, inclusief
+# de regel dat een uitcheckende job hier tot `pull_request` beperkt moet blijven.
 #
 # Nooit `pull_request_target`.
 
 on:
   pull_request:
     branches: [main]
+  # Alleen als onprivileged signaal. Zie de job `autocoding-shield-signal` hieronder.
+  issue_comment:
+    types: [created, edited, deleted]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
 
 permissions: {}
 
+# Het event zit in de groepsleutel, zodat een signaalrun nooit een lopende of wachtende echte
+# shieldcheck op dezelfde PR kan verdringen.
 concurrency:
-  group: autocoding-shield-${{ github.event.pull_request.number }}
+  group: autocoding-shield-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   autocoding-shield:
+    # PR-code wordt uitsluitend op `pull_request` uitgevoerd, nooit op een comment of review.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -49,10 +65,12 @@ jobs:
              [ -f scripts/autocoding/collect-shield-input.mjs ] && \
              [ -f scripts/autocoding/publish-live-status.mjs ] && \
              [ -f scripts/autocoding/workflow-trust.mjs ] && \
+             [ -f scripts/autocoding/select-live-gate-targets.mjs ] && \
              [ -f test/autocoding-review-gate.test.mjs ] && \
              [ -f test/autocoding-shield-adapter.test.mjs ] && \
              [ -f test/autocoding-live-status.test.mjs ] && \
              [ -f test/autocoding-workflow-trust.test.mjs ] && \
+             [ -f test/autocoding-live-gate-targets.test.mjs ] && \
              [ -f CONTROL/AUTOCODING/policy.v1.json ]; then
             echo 'gate_files=true' >> "$GITHUB_OUTPUT"
           else
@@ -65,7 +83,7 @@ jobs:
         run: >-
           node --test test/autocoding-review-gate.test.mjs
           test/autocoding-shield-adapter.test.mjs test/autocoding-live-status.test.mjs
-          test/autocoding-workflow-trust.test.mjs
+          test/autocoding-workflow-trust.test.mjs test/autocoding-live-gate-targets.test.mjs
 
       - name: Branchdiff op secrets toetsen
         env:
@@ -77,3 +95,17 @@ jobs:
             echo '::error::SECRET_PATTERN_DETECTED'
             exit 1
           fi
+
+  # Het onprivileged signaal. Deze job leest niets, checkt niets uit en voert geen repositorycode
+  # uit; hij bestaat alleen zodat de voltooiing van deze run de trusted writer via `workflow_run`
+  # kan starten. Ook wanneer hij (op een issue zonder PR) wordt overgeslagen, voltooit de run en
+  # krijgt de writer zijn aanleiding — die meet de doel-PR's toch zelf opnieuw.
+  autocoding-shield-signal:
+    if: >-
+      github.event_name != 'pull_request'
+      && (github.event_name != 'issue_comment' || github.event.issue.pull_request)
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Signaal zonder inhoud
+        run: echo 'AUTOCODING_SHIELD_SIGNAL_ONLY'
