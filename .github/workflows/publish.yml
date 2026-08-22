@@ -149,9 +149,18 @@ jobs:
       # in een incident-notitie, en die belandt ongesaneerd in de cache totdat een geslaagde live
       # lezing hem overschrijft) is bekend, benoemd, en hoort bij een eventuele toekomstige
       # B2-herziening — niet bij deze B5/B6/B7-correctie.
+      #
+      # Issue #77, tweede gemeten waarschuwing: beide cachestappen draaiden op `v4.3.0`, en die
+      # release verklaart `using: 'node20'` — vandaar de Node 20-deprecatieannotatie op elke run.
+      # De pin gaat daarom naar de officiële `v5.1.0`, precies zoals eerder al gebeurde voor
+      # `upload-pages-artifact` en `deploy-pages` (zie test/publiekepaginas.test.mjs). Gemeten,
+      # niet aangenomen: `v5.1.0` verklaart `using: 'node24'` en heeft voor zowel `save` als
+      # `restore` exact dezelfde inputs en outputs als `v4.3.0` — geen enkele wijziging aan `path`,
+      # `key` of `restore-keys`, dus het cachecontract hierboven blijft ongewijzigd. `v6` blijft
+      # bewust ongebruikt: die lijn migreerde naar ESM en verandert dus meer dan de runtime.
       - name: Runtime-feed last-known-good cache herstellen
         id: runtime_cache_restore
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: .local/runtime-feed-last-known-good.json
           key: runtime-feed-lkg-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -169,16 +178,44 @@ jobs:
       # `if: always()` zodat een falende Genereren-stap de cache-opslag niet blokkeert — een
       # geslaagde live lezing ín deze stap heeft het bestand al bijgewerkt vóórdat de stap zelf
       # eventueel later faalt (bv. bij een latere check), en die verse stand mag niet verloren gaan.
-      # Ontbreekt het bestand nog (nooit een producer aangesloten), dan slaat actions/cache/save dit
-      # zelf over — geen foutmelding, geen lege cache-entry.
       #
       # Codex-review (deze correctie): caches zijn onveranderlijk (immutable) — `run_attempt` in de
       # sleutel zodat een hernieuwde poging op dezelfde `run_id` zijn eigen verse momentopname kan
       # wegschrijven in plaats van stil te falen op een reeds bestaande sleutel.
+      #
+      # Issue #77 — de eerdere versie van dit commentaar beloofde dat `actions/cache/save` een
+      # ontbrekend bestand "zelf overslaat, geen foutmelding". Dat is GEMETEN onjuist: run
+      # `32596205038` (main @`24db715`) meldde op deze stap `Path Validation Error: Path(s)
+      # specified in the action for caching do(es) not exist` en `Cache save failed`.
+      #
+      # De oorzaak zit niet in de actie maar hierboven: deze workflow start `scripts/build.mjs`
+      # ZONDER `--runtime-feed`, en `loadRuntimeFeed()` schrijft de cache uitsluitend ná een
+      # geslaagde LIVE lezing (`schrijfLastKnownGood` in scripts/lib/runtime-feed-input.mjs).
+      # Zolang er geen producer is aangesloten, bestaat het pad op de runner dus structureel niet en
+      # is elke save een save van niets.
+      #
+      # De poort wordt daarom een MEETSTAP in plaats van een aanname. Zelf `if: always()`, om
+      # exact dezelfde reden als de save eronder: een gefaalde Genereren-stap mag een wél
+      # weggeschreven verse momentopname niet laten vallen. Faalt de meting zelf, dan blijft de
+      # output leeg en slaat de stap eronder over — onmeetbaar telt hier als "niets te bewaren",
+      # nooit als "sla dan maar op". Dat is de fail-closed kant: hoogstens één ronde cache kwijt,
+      # nooit een waarschuwende of half geslaagde opslag.
+      - name: Meten of de runtime-feed-cache iets te bewaren heeft
+        id: runtime_cache_probe
+        if: always()
+        run: |
+          if [ -f .local/runtime-feed-last-known-good.json ]; then
+            echo "aanwezig=true" >> "$GITHUB_OUTPUT"
+            echo "cachebestand aanwezig — wordt opgeslagen onder de refgescope sleutel"
+          else
+            echo "aanwezig=false" >> "$GITHUB_OUTPUT"
+            echo "geen cachebestand — niets te bewaren, opslag wordt overgeslagen"
+          fi
+
       - name: Runtime-feed last-known-good cache opslaan
         id: runtime_cache_save
-        if: always()
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: always() && steps.runtime_cache_probe.outputs.aanwezig == 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: .local/runtime-feed-last-known-good.json
           key: runtime-feed-lkg-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
