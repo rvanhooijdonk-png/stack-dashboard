@@ -8,36 +8,39 @@
  */
 import { esc } from './format.mjs';
 
-export const PANEL_CONTRACTS = [
-  {
+export const PANEL_CONTRACTS = Object.freeze([
+  Object.freeze({
     slot: 'b',
     id: 'paneel-richard-queue',
     title: 'RICHARD-QUEUE',
     inputSource: 'openstaande Richard-acties (queue-achtige samenvatting van ownergates/kanaalpost — bron nog niet gekoppeld aan deze slot)',
     denominatorLabel: 'aantal openstaande queue-items',
-  },
-  {
+  }),
+  Object.freeze({
     slot: 'k',
     id: 'paneel-nu-bezig',
     title: 'NU-BEZIG',
     inputSource: 'runtimefeed van actief werkende actoren (bron nog niet gekoppeld aan deze slot)',
     denominatorLabel: 'aantal actief-bezig-regels',
-  },
-  {
+  }),
+  Object.freeze({
     slot: 'statusgen',
     id: 'paneel-statusgen',
     title: 'STATUSGEN',
     inputSource: 'generatie-/buildmetadata van de statuslaag (bron nog niet gekoppeld aan deze slot)',
     denominatorLabel: 'n.v.t. — dit paneel toont alleen een generatiestempel',
-  },
-];
+  }),
+]);
 
 /**
  * Eén paneelslot. `measuredAt` is vandaag altijd null (geen bron gekoppeld) — het argument
  * bestaat zodat een latere koppeling deze functie kan hergebruiken zonder de contractvorm te
  * wijzigen. Fragment is zelfstandig gesaneerd: alleen `esc()`-output, geen rauwe brontekst.
  */
-export function renderPanelSlot(contract, { measuredAt = null } = {}) {
+export function renderPanelSlot(contract, options) {
+  // `null` of een niet-object mag hier nooit klappen: een latere vuller die per ongeluk
+  // `renderPanelSlot(contract, null)` aanroept hoort UNKNOWN te krijgen, geen TypeError.
+  const { measuredAt = null } = (options && typeof options === 'object') ? options : {};
   const stamp = measuredAt ? esc(measuredAt) : '<span class="unknown">UNKNOWN</span>';
   return `<section id="${esc(contract.id)}" class="card" data-panel-slot="${esc(contract.slot)}">
   <h2>${esc(contract.title)} <span class="badge warn">UNKNOWN</span></h2>

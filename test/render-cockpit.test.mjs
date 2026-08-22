@@ -7,6 +7,7 @@ import { renderCockpit, renderProducts, renderTicker, ownerGates, activeWork } f
 import { buildProductModel, lifecycleEvents, validateProductCanon } from '../scripts/lib/product-model.mjs';
 import { renderHtml } from '../scripts/lib/render.mjs';
 import { parseRuntimeFeed } from '../scripts/lib/runtime-feed.mjs';
+import { PANEL_CONTRACTS, renderPanelSlot } from '../scripts/lib/panel-contracts.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const snapshot = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8'));
@@ -39,6 +40,56 @@ test('de drie vaste paneelslots (b/RICHARD-QUEUE, k/NU-BEZIG, STATUSGEN) rendere
   assert.match(html, /<h2>RICHARD-QUEUE /);
   assert.match(html, /<h2>NU-BEZIG /);
   assert.match(html, /<h2>STATUSGEN /);
+});
+
+test('het paneelcontract bindt de volledige tuple: slot-key, id en titel horen bij elkaar en liggen vast', () => {
+  assert.deepEqual(
+    PANEL_CONTRACTS.map(({ slot, id, title }) => [slot, id, title]),
+    [
+      ['b', 'paneel-richard-queue', 'RICHARD-QUEUE'],
+      ['k', 'paneel-nu-bezig', 'NU-BEZIG'],
+      ['statusgen', 'paneel-statusgen', 'STATUSGEN'],
+    ],
+  );
+  // elk contract draagt ook de twee velden waar een latere vuller op steunt
+  for (const contract of PANEL_CONTRACTS) {
+    assert.equal(typeof contract.inputSource, 'string');
+    assert.ok(contract.inputSource.length > 0, `${contract.slot} mist inputSource`);
+    assert.equal(typeof contract.denominatorLabel, 'string');
+    assert.ok(contract.denominatorLabel.length > 0, `${contract.slot} mist denominatorLabel`);
+  }
+});
+
+test('de slot-key staat als data-panel-slot in de plaat en kan niet stil worden verwisseld', () => {
+  const html = renderCockpit(snapshot, { products, ticker });
+  for (const { slot, id } of PANEL_CONTRACTS) {
+    const section = html.match(new RegExp(`<section id="${id}"[^>]*>`));
+    assert.ok(section, `paneelslot ${id} ontbreekt`);
+    assert.match(section[0], new RegExp(`data-panel-slot="${slot}"`), `${id} draagt niet slot-key ${slot}`);
+  }
+  const slots = [...html.matchAll(/data-panel-slot="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(slots, ['b', 'k', 'statusgen']);
+});
+
+test('het paneelcontract is bevroren: een latere vuller kan de vorm niet in-process omschrijven', () => {
+  assert.equal(Object.isFrozen(PANEL_CONTRACTS), true);
+  for (const contract of PANEL_CONTRACTS) assert.equal(Object.isFrozen(contract), true);
+});
+
+test('een gevulde meetstempel wordt getoond én ontsnapt; een kapot optieargument valt terug op UNKNOWN', () => {
+  const [contract] = PANEL_CONTRACTS;
+  const gevuld = renderPanelSlot(contract, { measuredAt: '<img src=x onerror=alert(1)>' });
+  assert.match(gevuld, /Gemeten om: &lt;img src=x onerror=alert\(1\)&gt;\./);
+  assert.equal(/<img src=x/.test(gevuld), false);
+  // de rest van het paneel blijft fail-closed zolang er geen bron is
+  assert.match(gevuld, /UNKNOWN — bron nog niet gekoppeld\./);
+  for (const kapot of [null, undefined, 'niet-een-object', 0]) {
+    assert.match(
+      renderPanelSlot(contract, kapot),
+      /Gemeten om: <span class="unknown">UNKNOWN<\/span>\./,
+      `optieargument ${JSON.stringify(kapot)} hoort UNKNOWN te geven, niet te klappen`,
+    );
+  }
 });
 
 test('cockpit is semantische, mobiele, scriptloze HTML', () => {
