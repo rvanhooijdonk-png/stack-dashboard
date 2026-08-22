@@ -16,6 +16,11 @@
  *   - `event.json`      → `{ head_ref, base_sha }` (uit de `merge_group`-eventpayload)
  *   - `commit.json`      → `GET /repos/{o}/{r}/git/commits/{merge_group.head_sha}`
  *     (levert `parents[].sha` en `tree.sha`)
+ *
+ * `--evidence-complete` (V21, Gemini1 V20-bevinding HIGH) is een VERPLICHTE derde ingang, letterlijk
+ * `true`/`false`: de aanroepende workflow bewijst daarmee of de vijf begrensd gepagineerde
+ * PR-bewijslijsten hun laatst toegestane pagina niet vol aantroffen. Staat hij niet op `true`, dan
+ * wordt er niets gelezen en niets beoordeeld — de meting stopt fail-closed vóór elke GO-check.
  */
 
 import { pathToFileURL } from 'node:url';
@@ -29,6 +34,12 @@ export const MERGE_GROUP_GATE_DECISION = Object.freeze({ GO: 'GO', NO_GO: 'NO_GO
 export const MERGE_GROUP_GATE_ERROR = Object.freeze({
   ARGUMENTS_INVALID: 'ARGUMENTS_INVALID',
   MEASUREMENT_UNREADABLE: 'MEASUREMENT_UNREADABLE',
+  // V21 (Gemini1 V20-bevinding, HIGH): een begrensde pagina-oogst die haar laatste toegestane
+  // pagina VOL aantrof, kan een blokkerende review of finding op een niet-opgehaalde volgende
+  // pagina dragen. Zo'n oogst mag nooit stilzwijgend als volledig bewijs gelden — vandaar dat de
+  // aanroeper VERPLICHT meldt of de vijf bewijslijsten compleet zijn, en deze meting hier fail-closed
+  // stopt vóórdat er ook maar één GO-check (binding of shield) wordt uitgevoerd.
+  EVIDENCE_INCOMPLETE: 'MERGE_GROUP_EVIDENCE_INCOMPLETE',
 });
 
 export const PR_MEASUREMENT_FILES = Object.freeze({
@@ -65,11 +76,18 @@ export function readMergeGroupMeasurement(mergeGroupDir, readFile) {
   };
 }
 
-export const MERGE_GROUP_GATE_VALUE_OPTIONS = Object.freeze(['--raw', '--merge-group', '--policy']);
+export const MERGE_GROUP_GATE_VALUE_OPTIONS = Object.freeze([
+  '--raw', '--merge-group', '--policy', '--evidence-complete',
+]);
+
+/** De enige twee letterlijke waarden die `--evidence-complete` mag dragen. Geen derde, geen gok. */
+const EVIDENCE_COMPLETE_VALUES = Object.freeze(['true', 'false']);
 
 /**
  * Dezelfde fail-closed argumentlezing als de rest van de AUTOCODING_SHIELD-CLI's: token voor token,
- * nooit in vaste paren, elke sleutel verplicht en precies één keer.
+ * nooit in vaste paren, elke sleutel verplicht en precies één keer. `--evidence-complete` draagt
+ * bovendien een gesloten waarde-allowlist (`true`/`false`, letterlijk) — elke andere tekst is
+ * ongeldig, precies zoals een ontbrekende sleutel dat is.
  */
 export function parseMergeGroupGateArgs(argv) {
   const list = Array.isArray(argv) ? argv : [];
@@ -91,6 +109,7 @@ export function parseMergeGroupGateArgs(argv) {
   for (const option of MERGE_GROUP_GATE_VALUE_OPTIONS) {
     if (!values.has(option)) return reject;
   }
+  if (!EVIDENCE_COMPLETE_VALUES.includes(values.get('--evidence-complete'))) return reject;
   return { ok: true, values };
 }
 
@@ -98,10 +117,22 @@ export function parseMergeGroupGateArgs(argv) {
  * De volledige beoordeling: lees beide metingen, bouw de PR-eigen shieldcontext via de bestaande
  * adapter, en roep de tweetraps merge-group-controle aan. Geen argument hier is optioneel — een
  * onvolledige aanroep is `MEASUREMENT_UNREADABLE`, nooit een gok.
+ *
+ * `evidenceComplete` is GEEN optioneel signaal: het is de expliciete uitspraak van de aanroeper of
+ * de vijf begrensd gepagineerde PR-bewijslijsten (`gh_bounded_pages`) hun laatst toegestane pagina
+ * NIET vol aantroffen. Is dat wél zo, dan kan er op een niet-opgehaalde volgende pagina een
+ * blokkerende review of finding staan die hier nooit gezien wordt — dat is precies de Gemini1
+ * V20-bevinding (HIGH). Deze controle staat daarom VÓÓR elke andere meting of beoordeling: geen
+ * enkel binding- of shieldoordeel wordt ooit uitgesproken over een fragment dat mogelijk onvolledig
+ * is.
  */
 export function runMergeGroupGate({
-  rawDir, mergeGroupDir, policy, readFile,
+  rawDir, mergeGroupDir, policy, readFile, evidenceComplete,
 }) {
+  if (evidenceComplete !== true) {
+    return { decision: MERGE_GROUP_GATE_DECISION.NO_GO, reasons: [MERGE_GROUP_GATE_ERROR.EVIDENCE_INCOMPLETE] };
+  }
+
   let prMeasurement;
   let mergeGroup;
   try {
@@ -163,6 +194,7 @@ export async function runVerifyMergeGroupGate(argv, { readFile } = {}) {
 
   const uitkomst = runMergeGroupGate({
     rawDir: args.get('--raw'), mergeGroupDir: args.get('--merge-group'), policy, readFile,
+    evidenceComplete: args.get('--evidence-complete') === 'true',
   });
   meld(uitkomst);
   return uitkomst.decision === MERGE_GROUP_GATE_DECISION.GO ? 0 : 1;

@@ -98,7 +98,7 @@ export const ALLOWED_MERGE_METHODS = Object.freeze(['merge', 'squash', 'rebase']
 /** De sleutels die het finalizerblok in de policy mag dragen. Alles daarbuiten is UNSAFE. */
 const MERGE_FINALIZER_FIELDS = new Set([
   'schema', 'merge_method', 'allowed_base_refs', 'allowed_builder_actors',
-  'required_checks', 'required_check_app_id', 'candidate_limit',
+  'required_checks', 'required_merge_queue_checks', 'required_check_app_id', 'candidate_limit',
 ]);
 
 /** De bovengrens op `candidate_limit`. Zie `finalizerRequestBudget` voor de rekensom erachter. */
@@ -270,6 +270,17 @@ function isNonEmptyString(v) {
  * request hij ook staat. De PR-binding komt hier van drie andere kanten: het reviewbewijs hangt aan
  * de reviewdraden van deze pull request, de mergeautorisatie noemt exact dit PR-nummer en deze
  * base, en de merge-aanroep zelf draagt het PR-nummer in het pad.
+ *
+ * `required_checks` EN `required_merge_queue_checks` zijn TWEE verschillende eisen op TWEE
+ * verschillende bewijzen (V21, Gemini1 V20-bevinding HIGH #2): `required_checks` toetst of de
+ * genoemde check-run daadwerkelijk op de EIGEN head-SHA van déze pull request staat
+ * (`resolveRequiredChecks`, hieronder) — en dat kan `autocoding-merge-group-gate` per ontwerp NOOIT
+ * zijn, want die run bestaat uitsluitend op een `merge_group`-commit. `required_merge_queue_checks`
+ * toetst iets anders: of de BASE-BRANCH-ruleset die check-naam draagt als vereiste,
+ * producent-app-gebonden `required_status_checks`-context (`evaluateEnqueuePrecondition`, hieronder)
+ * — bewijs- en policyvalidatie op het bestaande `rules/branches`-eindpunt, geen ruleset-wijziging.
+ * Eén lijst mag hier nooit de andere vervangen: dat zou óf de op-de-PR-head-groene-check-eis
+ * vervalsen, óf de toekomstige merge-queue-eis nooit kunnen dekken.
  */
 export function assertMergeFinalizerPolicySafe(policy) {
   const cfg = policy?.merge_finalizer;
@@ -296,21 +307,26 @@ export function assertMergeFinalizerPolicySafe(policy) {
   if (!Number.isInteger(cfg.candidate_limit) || cfg.candidate_limit <= 0
     || cfg.candidate_limit > CANDIDATE_LIMIT_MAX) fail();
 
-  const checks = cfg.required_checks;
-  if (!Array.isArray(checks) || checks.length === 0) fail();
   const diagnostic = policy?.diagnostic_status_context;
-  const seen = new Set();
-  for (const name of checks) {
-    if (!isNonEmptyString(name) || name === '*' || !CHECK_NAME_RE.test(name)) fail();
-    if (seen.has(name)) fail();
-    seen.add(name);
-    if (isNonEmptyString(diagnostic) && name === diagnostic) fail();
-  }
+  const assertCheckNameList = (names) => {
+    if (!Array.isArray(names) || names.length === 0) fail();
+    const seen = new Set();
+    for (const name of names) {
+      if (!isNonEmptyString(name) || name === '*' || !CHECK_NAME_RE.test(name)) fail();
+      if (seen.has(name)) fail();
+      seen.add(name);
+      if (isNonEmptyString(diagnostic) && name === diagnostic) fail();
+    }
+  };
+  assertCheckNameList(cfg.required_checks);
+  assertCheckNameList(cfg.required_merge_queue_checks);
 
   // V20 — scope-item 5 (CLAUDE4-review): een contextnaam ALLEEN is geen bewijs. Elke publiceerder die
   // een check run met deze naam kan aanmaken zou hem anders kunnen laten voldoen — een contextnaam is
   // geen namespace. `required_check_app_id` bindt elke vereiste check aan de PRODUCENT-app die de
-  // ruleset zelf ook noemt (`integration_id`), niet alleen aan de tekst van zijn naam.
+  // ruleset zelf ook noemt (`integration_id`), niet alleen aan de tekst van zijn naam. Dezelfde
+  // gepinde app geldt voor BEIDE lijsten: zowel `autocoding-shield` als `autocoding-merge-group-gate`
+  // worden door dezelfde GitHub Actions-app gepubliceerd.
   if (!Number.isInteger(cfg.required_check_app_id) || cfg.required_check_app_id <= 0) fail();
 }
 
@@ -428,18 +444,29 @@ function requiredStatusCheckContexts(rules) {
 }
 
 /**
- * DE ATOMAIRE INSCHRIJVINGSVOORWAARDE (V20, scope-item 3 + scope-item 5). Eén conjunctie, gemeten op
- * DEZELFDE regelset als `hasActiveMergeQueueRule`, nooit op een tweede of latere meting:
+ * DE ATOMAIRE INSCHRIJVINGSVOORWAARDE (V20, scope-item 3 + scope-item 5; V21, Gemini1 V20-bevinding
+ * HIGH #2). Eén conjunctie, gemeten op DEZELFDE regelset als `hasActiveMergeQueueRule`, nooit op een
+ * tweede of latere meting:
  *
  *   1. een actieve `merge_queue`-regel met de mergemethode van de policy (hoofdletterongevoelig);
- *   2. een actieve `required_status_checks`-regel die ELKE naam uit `cfg.required_checks` dekt;
+ *   2. een actieve `required_status_checks`-regel die ELKE naam uit `cfg.required_merge_queue_checks`
+ *      dekt;
  *   3. per gedekte context een `integration_id` die exact `cfg.required_check_app_id` is.
  *
  * Zonder deze drie extra eisen zou een repository die alleen de KALE `merge_queue`-regel draagt —
  * zonder required-status-checks-regel, of met een gedekte context van een WILLEKEURIGE andere
  * publiceerder — door de oude, smallere toets heen komen. Een contextnaam is geen namespace: elke
  * app die een check run met die naam kan aanmaken zou anders aan de vereiste kunnen voldoen zonder
- * ooit de echte `autocoding-shield`-workflow te hebben gedraaid.
+ * ooit de echte `autocoding-shield`- of `autocoding-merge-group-gate`-workflow te hebben gedraaid.
+ *
+ * `cfg.required_merge_queue_checks` (NIET `cfg.required_checks`, die blijft uitsluitend de op-de-
+ * PR-head-check-run-eis dienen — zie de kopnotitie bij `assertMergeFinalizerPolicySafe`) draagt sinds
+ * V21 ook `autocoding-merge-group-gate`: de finalizer maakt hiermee VÓÓR elke inschrijving expliciet
+ * bewijs- en policymatig vereist dat die poort ooit als vereiste, producent-app-gebonden check in de
+ * merge-queue-ruleset van de base-branch bestaat. Dat is bewijs- en policyvalidatie op een bestaand,
+ * uitsluitend lezend eindpunt (`rules/branches`) — geen GitHub-rulesetwijziging: zolang die regel
+ * elders nog niet is aangemaakt (de huidige, echte stand van deze repository) blijft deze conjunctie
+ * dus terecht NO_GO.
  *
  * Cumulatief zoals de rest van dit bestand: elke ontbrekende of foute deeleis krijgt zijn eigen
  * redencode, in plaats van te stoppen bij de eerste.
@@ -459,7 +486,7 @@ function evaluateEnqueuePrecondition(rules, cfg) {
   if (contexten.size === 0) {
     reasons.add(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_RULE_MISSING);
   } else {
-    for (const naam of cfg.required_checks) {
+    for (const naam of cfg.required_merge_queue_checks) {
       const item = contexten.get(naam);
       if (!item) {
         reasons.add(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_CONTEXT_MISSING);

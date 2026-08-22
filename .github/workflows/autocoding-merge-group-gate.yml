@@ -31,6 +31,11 @@ name: autocoding-merge-group-gate
 #     (verstaald bewijs, een basisverplaatsing, een mede-inzittende pull request in dezelfde
 #     wachtrij) is fail-closed: een falende check-run, ONMIDDELLIJK, zonder verder bewijs op te
 #     halen.
+#   - De vijf begrensd gepagineerde PR-bewijslijsten (`gh_bounded_pages`) melden zelf of hun laatst
+#     toegestane pagina VOL was — dus mogelijk onvolledig (V21, Gemini1 V20-bevinding HIGH). Die
+#     uitspraak reist LETTERLIJK mee als `--evidence-complete` naar de verifier, die fail-closed stopt
+#     vóórdat er ook maar één binding- of shieldoordeel wordt geveld zodra dat niet `true` is —
+#     ongeacht hoe schoon het al opgehaalde fragment eruitziet.
 #   - Bij een geslaagde binding meet de job de volledige PR-eigen shieldwaarheid (native
 #     Codex/Gemini-bewijs, bestandscompleetheid, gevoelige paden) via dezelfde adapters die de
 #     bestaande shield en finalizer al gebruiken (`buildShieldInput`, `evaluateShield`), ÉN eist
@@ -132,6 +137,12 @@ jobs:
           head_sha="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const s=((p||{}).head||{}).sha;if(!/^[0-9a-f]{40}$/.test(s||""))process.exit(1);process.stdout.write(s)' "$raw/pr.json")" || { echo '::error::PULL_REQUEST_HEAD_UNREADABLE'; exit 0; }
           gh api "repos/$REPOSITORY/git/commits/$head_sha" > "$raw/head-commit.json" || { echo '::error::HEAD_COMMIT_UNREADABLE'; exit 0; }
 
+          # V21 (Gemini1 V20-bevinding, HIGH): een afgekapte laatste pagina mag NOOIT stilzwijgend als
+          # compleet bewijs verder reizen — een blokkerende review of finding kan op een
+          # niet-opgehaalde volgende pagina staan. `compleet` wordt daarom hieronder mechanisch
+          # bewezen en LETTERLIJK als `--evidence-complete` aan de verifier doorgegeven; die stopt
+          # fail-closed vóór elke GO-check zodra dat niet `true` is, ongeacht hoe schoon het al
+          # opgehaalde fragment eruitziet.
           compleet=true
           for endpoint in \
             "pulls/$number/commits:pr-commits" \
@@ -150,15 +161,6 @@ jobs:
               exit 0
             fi
           done
-          # Onvolledig bewijs (afgekapte paginering) is géén reden om de meting stil te negeren: het
-          # laat het huidige bestand STAAN — leeg blijft veiliger dan gegokt vol — zodat
-          # `buildShieldInput` het als afwezig bewijs telt in plaats van als een verzonnen leeg
-          # antwoord dat toevallig ook een NO_GO oplevert.
-          if [ "$compleet" != true ]; then
-            for naam in pr-commits issue-comments reviews review-comments files; do
-              [ -s "$raw/$naam.json" ] || echo '[]' > "$raw/$naam.json"
-            done
-          fi
 
           mg="$RUNNER_TEMP/mg"
           mkdir -p "$mg"
@@ -174,7 +176,8 @@ jobs:
           node scripts/autocoding/verify-merge-group-gate.mjs \
             --raw "$raw" \
             --merge-group "$mg" \
-            --policy CONTROL/AUTOCODING/policy.v1.json > "$RUNNER_TEMP/uitkomst.json" || true
+            --policy CONTROL/AUTOCODING/policy.v1.json \
+            --evidence-complete "$compleet" > "$RUNNER_TEMP/uitkomst.json" || true
 
       # ALTIJD, ongeacht wat hierboven gebeurde: precies één check-run, gebonden aan de
       # merge-group-SHA. `if: always()` is hier geen gemak maar het hele punt — een pad zonder

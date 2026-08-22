@@ -53,6 +53,11 @@ const PR_A = 74;
 const PR_B = 75;
 const OWNER = 'rvanhooijdonk-png';
 const CHECK = 'autocoding-shield';
+// V21 (Gemini1 V20-bevinding, HIGH #2): de toekomstige merge-group-poort moet, ook al draait ze
+// alleen op een `merge_group`-commit en dus NOOIT als check-run op de PR-eigen head, wél als
+// vereiste, producent-app-gebonden check in de required_status_checks-regel van de merge-queue
+// bestaan — vandaar een aparte context-naam naast `CHECK`, uitsluitend in `mergeQueueRules`.
+const CHECK_MG = 'autocoding-merge-group-gate';
 // Slot 0: bij een bucket van één (elke lijst hieronder is korter dan `SCHEDULE_BUCKET_LIMIT`) is
 // `bezoek` 0 en begint het venster bij index 0 — dezelfde canonieke volgorde als vóór de rotatie.
 const NU = 0;
@@ -137,11 +142,18 @@ function meting(overrides = {}) {
     // V20 — scope-item 3/5: de atomaire inschrijvingsvoorwaarde eist niet meer alleen het TYPE
     // `merge_queue`, maar ook de mergemethode (hoofdletters, zoals GitHub die levert) en een
     // `required_status_checks`-regel die elke vereiste check dekt met de gepinde producent-app.
+    // V21 — Gemini1 V20-bevinding HIGH #2: die regel dekt nu ook `CHECK_MG`, want
+    // `cfg.required_merge_queue_checks` (uit het echte policybestand) draagt sinds V21 beide namen.
     mergeQueueRules: [
       { type: 'merge_queue', parameters: { merge_method: 'SQUASH' } },
       {
         type: 'required_status_checks',
-        parameters: { required_status_checks: [{ context: CHECK, integration_id: 15368 }] },
+        parameters: {
+          required_status_checks: [
+            { context: CHECK, integration_id: 15368 },
+            { context: CHECK_MG, integration_id: 15368 },
+          ],
+        },
       },
     ],
     evidenceComplete: true,
@@ -239,6 +251,13 @@ test('M3. een onexacte finalizerpolicy is UNSAFE en levert precies één reden o
     ['geen checks', policy({ merge_finalizer_enabled: true }, { required_checks: [] })],
     ['ster als check', policy({ merge_finalizer_enabled: true }, { required_checks: ['*'] })],
     ['dubbele check', policy({ merge_finalizer_enabled: true }, { required_checks: [CHECK, CHECK] })],
+    // V21 (Gemini1 V20-bevinding, HIGH #2): `required_merge_queue_checks` valideert via dezelfde
+    // `assertCheckNameList`-sluiting als `required_checks` — dus dezelfde vier defectvormen.
+    ['geen merge-queue-checks', policy({ merge_finalizer_enabled: true }, { required_merge_queue_checks: [] })],
+    ['ster als merge-queue-check', policy({ merge_finalizer_enabled: true }, { required_merge_queue_checks: ['*'] })],
+    ['dubbele merge-queue-check', policy(
+      { merge_finalizer_enabled: true }, { required_merge_queue_checks: [CHECK_MG, CHECK_MG] },
+    )],
   ];
   varianten[0][1].merge_finalizer = undefined;
 
@@ -276,6 +295,17 @@ test('M4. de DIAGNOSTISCHE statuscontext mag nooit een vereiste check zijn', () 
   // En een CHECK RUN met dezelfde naam als de diagnostische context is nog steeds geen doorgang:
   // de weigering hangt aan de naam, niet aan het soort artefact.
   assert.doesNotThrow(() => assertMergeFinalizerPolicySafe(policy({}, { required_checks: [CHECK] })));
+
+  // V21 (Gemini1 V20-bevinding, HIGH #2): dezelfde weigering geldt letterlijk voor
+  // `required_merge_queue_checks` — de diagnostische context mag ook daar nooit in staan.
+  assert.ok(!POLICY_BESTAND.merge_finalizer.required_merge_queue_checks.includes(naam));
+  assert.throws(
+    () => assertMergeFinalizerPolicySafe(policy({}, { required_merge_queue_checks: [CHECK_MG, naam] })),
+    /FINALIZER_POLICY_UNSAFE/,
+  );
+  assert.doesNotThrow(
+    () => assertMergeFinalizerPolicySafe(policy({}, { required_merge_queue_checks: [CHECK, CHECK_MG] })),
+  );
 });
 
 test('M5. een meting van een ANDER PR-nummer kan deze finalisatie niet dragen', () => {
@@ -1065,6 +1095,68 @@ test('M21e. de atomaire inschrijvingsvoorwaarde (V20, scope-item 3/5) eist merge
 
   // De volledige, correcte conjunctie blijft ongewijzigd GO — deze toets voegt gronden toe, ze
   // verzwaart de bestaande GO-baan niet.
+  assert.equal(beslis().decision, FINALIZE_DECISION.GO);
+});
+
+test('M21f. de merge-group-poort (V21, Gemini1 V20-bevinding HIGH #2) telt even zwaar mee in de '
+  + 'atomaire inschrijvingsvoorwaarde als de shield: AFWEZIG, VERKEERD GENAAMD en '
+  + 'VERKEERD-APPGEBONDEN falen elk met hun eigen gesloten reden, ondanks dat de shield-context zelf '
+  + 'volledig gedekt en correct app-gebonden blijft', () => {
+  // AFWEZIG: de `required_status_checks`-regel dekt alleen `CHECK`, `CHECK_MG` ontbreekt volledig —
+  // exact de situatie van vandaag op de echte repository (die check-run bestaat nog niet).
+  const afwezig = beslis({
+    mergeQueueRules: [
+      meting().mergeQueueRules[0],
+      {
+        type: 'required_status_checks',
+        parameters: { required_status_checks: [{ context: CHECK, integration_id: 15368 }] },
+      },
+    ],
+  });
+  assert.equal(afwezig.decision, FINALIZE_DECISION.NO_GO);
+  assert.ok(afwezig.reasons.includes(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_CONTEXT_MISSING));
+
+  // VERKEERD GENAAMD: de regel draagt een context die op de merge-group-poort lijkt maar er niet
+  // letterlijk mee overeenkomt — een contextnaam is geen namespace, dus dit telt als afwezig.
+  const verkeerdGenaamd = beslis({
+    mergeQueueRules: [
+      meting().mergeQueueRules[0],
+      {
+        type: 'required_status_checks',
+        parameters: {
+          required_status_checks: [
+            { context: CHECK, integration_id: 15368 },
+            { context: 'autocoding-merge-group-gate-oud', integration_id: 15368 },
+          ],
+        },
+      },
+    ],
+  });
+  assert.equal(verkeerdGenaamd.decision, FINALIZE_DECISION.NO_GO);
+  assert.ok(verkeerdGenaamd.reasons.includes(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_CONTEXT_MISSING));
+
+  // VERKEERD-APPGEBONDEN: de context heet precies goed, maar de `integration_id` wijst naar een
+  // niet-vertrouwde publiceerder — de shield-context blijft ondertussen correct gedekt.
+  const verkeerdeApp = beslis({
+    mergeQueueRules: [
+      meting().mergeQueueRules[0],
+      {
+        type: 'required_status_checks',
+        parameters: {
+          required_status_checks: [
+            { context: CHECK, integration_id: 15368 },
+            { context: CHECK_MG, integration_id: 999999 },
+          ],
+        },
+      },
+    ],
+  });
+  assert.equal(verkeerdeApp.decision, FINALIZE_DECISION.NO_GO);
+  assert.ok(verkeerdeApp.reasons.includes(FINALIZE_REASON.REQUIRED_CHECK_APP_ID_MISMATCH));
+  assert.ok(!verkeerdeApp.reasons.includes(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_CONTEXT_MISSING));
+
+  // De volledige, correcte conjunctie (beide contexten, beide op de gepinde app) blijft ongewijzigd
+  // GO — deze toets voegt een grond toe, ze verzwaart de bestaande GO-baan niet.
   assert.equal(beslis().decision, FINALIZE_DECISION.GO);
 });
 

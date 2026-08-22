@@ -359,15 +359,23 @@ test('N3-HEADGREEN. co-tenant-merge-group: ook wanneer alleen de EIGEN head van 
 // --- verify-merge-group-gate.mjs: de CLI-schakel ------------------------------------------------
 
 test('C1. parseMergeGroupGateArgs is dezelfde fail-closed tokenlezing als de rest van de CLI\'s', () => {
-  const goed = ['--raw', 'a', '--merge-group', 'b', '--policy', 'c'];
+  const goed = ['--raw', 'a', '--merge-group', 'b', '--policy', 'c', '--evidence-complete', 'true'];
   assert.deepEqual(parseMergeGroupGateArgs(goed).ok, true);
+  const goedFalse = ['--raw', 'a', '--merge-group', 'b', '--policy', 'c', '--evidence-complete', 'false'];
+  assert.deepEqual(parseMergeGroupGateArgs(goedFalse).ok, true);
   const slecht = [
     [],
     ['--raw', 'a', '--merge-group', 'b'],
-    ['--raw', 'a', '--merge-group', 'b', '--policy', 'c', '--onbekend', 'd'],
-    ['--raw', 'a', '--raw', 'x', '--merge-group', 'b', '--policy', 'c'],
-    ['--raw', '', '--merge-group', 'b', '--policy', 'c'],
-    ['--raw', '--merge-group', '--merge-group', 'b', '--policy', 'c'],
+    ['--raw', 'a', '--merge-group', 'b', '--policy', 'c'],
+    ['--raw', 'a', '--merge-group', 'b', '--policy', 'c', '--evidence-complete', 'true', '--onbekend', 'd'],
+    ['--raw', 'a', '--raw', 'x', '--merge-group', 'b', '--policy', 'c', '--evidence-complete', 'true'],
+    ['--raw', '', '--merge-group', 'b', '--policy', 'c', '--evidence-complete', 'true'],
+    ['--raw', '--merge-group', '--merge-group', 'b', '--policy', 'c', '--evidence-complete', 'true'],
+    // V21 (Gemini1 V20-bevinding, HIGH): --evidence-complete draagt een GESLOTEN allowlist —
+    // elke waarde buiten letterlijk 'true'/'false' is even ongeldig als een ontbrekende sleutel.
+    ['--raw', 'a', '--merge-group', 'b', '--policy', 'c', '--evidence-complete', 'TRUE'],
+    ['--raw', 'a', '--merge-group', 'b', '--policy', 'c', '--evidence-complete', 'yes'],
+    ['--raw', 'a', '--merge-group', 'b', '--policy', 'c', '--evidence-complete', ''],
     'string',
   ];
   for (const argv of slecht) assert.equal(parseMergeGroupGateArgs(argv).ok, false, JSON.stringify(argv));
@@ -437,17 +445,34 @@ const lees = (pad) => readFileSync(pad, 'utf8');
 test('C2. runMergeGroupGate: de volle weg van rauwe bewijsmappen naar GO, via buildShieldInput', () => {
   const raw = schrijfPrMeting({ ownerBlokTreeSha: MERGE_GROUP_TREE });
   const mergeGroup = schrijfMergeGroepMeting();
-  const uitkomst = runMergeGroupGate({ rawDir: raw, mergeGroupDir: mergeGroup, policy: POLICY, readFile: lees });
+  const uitkomst = runMergeGroupGate({
+    rawDir: raw, mergeGroupDir: mergeGroup, policy: POLICY, readFile: lees, evidenceComplete: true,
+  });
   assert.equal(uitkomst.decision, MERGE_GROUP_GATE_DECISION.GO);
   assert.deepEqual(uitkomst.reasons, []);
   assert.equal(uitkomst.pull_request, PR_NUMBER);
+});
+
+test('C2a. runMergeGroupGate: evidenceComplete false blokkeert fail-closed vóór elke GO-check, ook '
+  + 'met overigens volledig groen bewijs — de Gemini1 V20-bevinding (HIGH): een blokkerend '
+  + 'review-/evidence-item buiten de paginagrens mag nooit stilzwijgend als afwezig gelden', () => {
+  const raw = schrijfPrMeting({ ownerBlokTreeSha: MERGE_GROUP_TREE });
+  const mergeGroup = schrijfMergeGroepMeting();
+  const uitkomst = runMergeGroupGate({
+    rawDir: raw, mergeGroupDir: mergeGroup, policy: POLICY, readFile: lees, evidenceComplete: false,
+  });
+  assert.equal(uitkomst.decision, MERGE_GROUP_GATE_DECISION.NO_GO);
+  assert.deepEqual(uitkomst.reasons, [MERGE_GROUP_GATE_ERROR.EVIDENCE_INCOMPLETE]);
+  assert.equal(uitkomst.pull_request, undefined);
 });
 
 test('C3. runMergeGroupGate: een owner-autorisatie die alleen aan de EIGEN PR-tree bindt is '
   + 'onvoldoende voor de merge-group-poort, ook via de volle CLI-weg', () => {
   const raw = schrijfPrMeting({ ownerBlokTreeSha: PR_TREE });
   const mergeGroup = schrijfMergeGroepMeting();
-  const uitkomst = runMergeGroupGate({ rawDir: raw, mergeGroupDir: mergeGroup, policy: POLICY, readFile: lees });
+  const uitkomst = runMergeGroupGate({
+    rawDir: raw, mergeGroupDir: mergeGroup, policy: POLICY, readFile: lees, evidenceComplete: true,
+  });
   assert.equal(uitkomst.decision, MERGE_GROUP_GATE_DECISION.NO_GO);
   assert.ok(uitkomst.reasons.includes(MERGE_GROUP_REASON.MERGE_GROUP_TREE_AUTHORIZATION_MISSING));
 });
@@ -455,7 +480,9 @@ test('C3. runMergeGroupGate: een owner-autorisatie die alleen aan de EIGEN PR-tr
 test('C4. runMergeGroupGate: co-tenant-merge-group (drie ouders) blokkeert vóór enige bewijsherweging', () => {
   const raw = schrijfPrMeting({ ownerBlokTreeSha: MERGE_GROUP_TREE });
   const mergeGroup = schrijfMergeGroepMeting({ parents: [{ sha: BASE }, { sha: PR_HEAD }, { sha: OTHER_PR_HEAD }] });
-  const uitkomst = runMergeGroupGate({ rawDir: raw, mergeGroupDir: mergeGroup, policy: POLICY, readFile: lees });
+  const uitkomst = runMergeGroupGate({
+    rawDir: raw, mergeGroupDir: mergeGroup, policy: POLICY, readFile: lees, evidenceComplete: true,
+  });
   assert.equal(uitkomst.decision, MERGE_GROUP_GATE_DECISION.NO_GO);
   assert.deepEqual(uitkomst.reasons, [MERGE_GROUP_REASON.MERGE_GROUP_PARENTS_NOT_TWO]);
 });
@@ -463,7 +490,9 @@ test('C4. runMergeGroupGate: co-tenant-merge-group (drie ouders) blokkeert vóó
 test('C5. runMergeGroupGate: een DISMISSED eigenaarsreview via de volle CLI-weg blokkeert de poort', () => {
   const raw = schrijfPrMeting({ ownerBlokTreeSha: MERGE_GROUP_TREE, ownerBlokState: 'DISMISSED' });
   const mergeGroup = schrijfMergeGroepMeting();
-  const uitkomst = runMergeGroupGate({ rawDir: raw, mergeGroupDir: mergeGroup, policy: POLICY, readFile: lees });
+  const uitkomst = runMergeGroupGate({
+    rawDir: raw, mergeGroupDir: mergeGroup, policy: POLICY, readFile: lees, evidenceComplete: true,
+  });
   assert.equal(uitkomst.decision, MERGE_GROUP_GATE_DECISION.NO_GO);
   assert.ok(uitkomst.reasons.includes(REASON.OWNER_APPROVAL_CARRIER_NOT_ACTIVE));
 });
@@ -471,7 +500,10 @@ test('C5. runMergeGroupGate: een DISMISSED eigenaarsreview via de volle CLI-weg 
 test('C6. runVerifyMergeGroupGate: precies één uitvoerregel, rc 0 bij GO en rc 1 bij NO_GO', async () => {
   const raw = schrijfPrMeting({ ownerBlokTreeSha: MERGE_GROUP_TREE });
   const mergeGroup = schrijfMergeGroepMeting();
-  const argv = ['--raw', raw, '--merge-group', mergeGroup, '--policy', schrijfPolicyBestand()];
+  const argv = [
+    '--raw', raw, '--merge-group', mergeGroup, '--policy', schrijfPolicyBestand(),
+    '--evidence-complete', 'true',
+  ];
   const regels = [];
   const origineel = console.log;
   console.log = (regel) => regels.push(regel);
@@ -487,7 +519,10 @@ test('C6. runVerifyMergeGroupGate: precies één uitvoerregel, rc 0 bij GO en rc
 });
 
 test('C7. runVerifyMergeGroupGate: onleesbare mappen zijn MEASUREMENT_UNREADABLE, geen crash', async () => {
-  const argv = ['--raw', '/bestaat-niet', '--merge-group', '/bestaat-ook-niet', '--policy', schrijfPolicyBestand()];
+  const argv = [
+    '--raw', '/bestaat-niet', '--merge-group', '/bestaat-ook-niet', '--policy', schrijfPolicyBestand(),
+    '--evidence-complete', 'true',
+  ];
   const regels = [];
   const origineel = console.log;
   console.log = (regel) => regels.push(regel);

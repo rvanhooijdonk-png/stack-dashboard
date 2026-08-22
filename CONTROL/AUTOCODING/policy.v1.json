@@ -34,6 +34,7 @@
     "allowed_base_refs": ["main"],
     "allowed_builder_actors": ["rvanhooijdonk-png"],
     "required_checks": ["autocoding-shield"],
+    "required_merge_queue_checks": ["autocoding-shield", "autocoding-merge-group-gate"],
     "required_check_app_id": 15368,
     "candidate_limit": 5
   }
