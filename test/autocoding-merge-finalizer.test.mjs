@@ -31,7 +31,9 @@ import {
   resolveRequiredChecks, measurementFingerprint, resolveFinalization, mergePullRequest,
   parseFinalizeArgs, FINALIZE_VALUE_OPTIONS, FINALIZE_BOOLEAN_FLAGS, MEASUREMENT_FILES,
   readMeasurement, runFinalize, hasActiveMergeQueueRule, SERVER_GATE_MODE,
-  REJECTED_SERVER_GATE_MODE,
+  REJECTED_SERVER_GATE_MODE, OWNER_ACTION_REQUIRED_EXIT_CODE, OWNER_MERGE_PACKAGE_SCHEMA,
+  OWNER_MERGE_PACKAGE_FIELDS, OWNER_PACKAGE_REASON, OWNER_PACKAGE_MAX_AGE_SECONDS_MAX,
+  buildOwnerMergePackage, verifyOwnerMergePackage,
 } from '../scripts/autocoding/finalize-merge.mjs';
 import {
   CANDIDATE_REASON, CANDIDATE_VALUE_OPTIONS, selectFinalizationCandidates,
@@ -301,6 +303,22 @@ test('M3. een onexacte finalizerpolicy is UNSAFE en levert precies één reden o
     ['ster als merge-queue-check', policy({ merge_finalizer_enabled: true }, { required_merge_queue_checks: ['*'] })],
     ['dubbele merge-queue-check', policy(
       { merge_finalizer_enabled: true }, { required_merge_queue_checks: [CHECK_MG, CHECK_MG] },
+    )],
+    // V25 — `owner_package_max_age_seconds` valideert net zo gesloten als `candidate_limit`: geen
+    // ontbrekend, nul, negatief, niet-geheel of te hoog getal.
+    ['pakketverval ontbreekt', policy(
+      { merge_finalizer_enabled: true }, { owner_package_max_age_seconds: undefined },
+    )],
+    ['pakketverval 0', policy({ merge_finalizer_enabled: true }, { owner_package_max_age_seconds: 0 })],
+    ['pakketverval negatief', policy(
+      { merge_finalizer_enabled: true }, { owner_package_max_age_seconds: -1 },
+    )],
+    ['pakketverval geen geheel getal', policy(
+      { merge_finalizer_enabled: true }, { owner_package_max_age_seconds: 3600.5 },
+    )],
+    ['pakketverval te hoog', policy(
+      { merge_finalizer_enabled: true },
+      { owner_package_max_age_seconds: OWNER_PACKAGE_MAX_AGE_SECONDS_MAX + 1 },
     )],
   ];
   varianten[0][1].merge_finalizer = undefined;
@@ -1371,7 +1389,9 @@ function schrijfPolicy(p) {
 const lees = (pad) => readFileSync(pad, 'utf8');
 
 /** Draait de CLI en vangt de ENE uitvoerregel op, zodat de logvorm zelf toetsbaar is. */
-async function draai({ a, b = a, p = POLICY_MANUAL, nummer = PR_A, dryRun = true, fetchImpl }) {
+async function draai({
+  a, b = a, p = POLICY_MANUAL, nummer = PR_A, dryRun = true, fetchImpl, nowImpl,
+}) {
   const argv = [
     '--repository', 'rvanhooijdonk-png/stack-dashboard',
     '--pull-request', String(nummer),
@@ -1385,7 +1405,7 @@ async function draai({ a, b = a, p = POLICY_MANUAL, nummer = PR_A, dryRun = true
   console.log = (regel) => regels.push(regel);
   let rc;
   try {
-    rc = await runFinalize(argv, { readFile: lees, fetchImpl });
+    rc = await runFinalize(argv, { readFile: lees, fetchImpl, nowImpl });
   } finally {
     console.log = origineel;
   }
@@ -1913,28 +1933,53 @@ test('O4. het EFFECT van de eigenaarsstand is mechanisch NUL mergeverzoeken', as
   assert.equal(fetchImpl.aanroepen.length, 0);
 });
 
-test('O5. de CLI levert in de eigenaarsstand een MERGEPAKKET op, en nooit een merge', async () => {
+test('O5. de CLI levert in de eigenaarsstand een GEBONDEN MERGEPAKKET op, en nooit een merge '
+  + '(V25 — CODEX1/GEMINI1-P1 F330314)', async () => {
   const fetchImpl = verbodenFetch();
+  const KLOK = 1_700_000_000_000;
   const { rc, uitkomst } = await draai({
-    a: eigenaarsMeting(), p: POLICY_MANUAL, dryRun: false, fetchImpl,
+    a: eigenaarsMeting(), p: POLICY_MANUAL, dryRun: false, fetchImpl, nowImpl: () => KLOK,
   });
-  // rc 0, want dit IS de oplevering van deze stand — maar de regel zegt onmiskenbaar dat er niets is
-  // gemerged. Een aanroeper die alleen de exitcode leest, kan het pakket niet voor een merge aanzien
-  // zonder `merge_performed` te negeren.
-  assert.equal(rc, 0);
-  assert.deepEqual(uitkomst, {
-    decision: FINALIZE_DECISION.GO,
-    reasons: [],
-    finalization_class: 'A',
-    effect: 'OWNER_MERGE_PACKAGE',
-    merge_performed: false,
-    owner_action: 'OWNER_MERGE_REQUIRED',
-  });
+  // rc is NIET 0: dat is voorbehouden aan een werkelijk uitgevoerd effect. Een rc-only aanroeper met
+  // het normale contract `rc 0 => finalisatie geslaagd` leest deze uitkomst dus mechanisch NIET als
+  // merge — precies de reparatie van F330314.
+  assert.equal(rc, OWNER_ACTION_REQUIRED_EXIT_CODE);
+  assert.notEqual(rc, 0);
+  // En de decision is evenmin `GO`: een pakket is een aflevering, geen oordeel.
+  assert.equal(uitkomst.decision, FINALIZE_DECISION.OWNER_ACTION_REQUIRED);
+  assert.notEqual(uitkomst.decision, FINALIZE_DECISION.GO);
+  assert.equal(uitkomst.reasons.length, 0);
+  assert.equal(uitkomst.finalization_class, 'A');
+  assert.equal(uitkomst.effect, 'OWNER_MERGE_PACKAGE');
+  assert.equal(uitkomst.merge_performed, false);
+  assert.equal(uitkomst.owner_action, 'OWNER_MERGE_REQUIRED');
   assert.equal(fetchImpl.aanroepen.length, 0);
+
+  // Het pakket is EXACT de binding die `buildOwnerMergePackage` op dezelfde ruwe waarden zou leveren —
+  // uitsluitend digests, het PR-nummer en de mergemethode, plus de meettijd van de geïnjecteerde klok.
+  const verwacht = buildOwnerMergePackage({
+    repository: 'rvanhooijdonk-png/stack-dashboard',
+    pullRequest: PR_A,
+    sha: HEAD,
+    treeSha: TREE,
+    baseRef: 'main',
+    baseHeadSha: BASE_HEAD,
+    mergeMethod: 'squash',
+    measurementFingerprint: measurementFingerprint(eigenaarsMeting()),
+    measuredAtMs: KLOK,
+  });
+  assert.deepEqual(uitkomst.owner_package, verwacht);
+  assert.deepEqual(Object.keys(uitkomst.owner_package).sort(), [...OWNER_MERGE_PACKAGE_FIELDS].sort());
+  assert.equal(uitkomst.owner_package.measured_at, KLOK);
+  assert.equal(uitkomst.owner_package.pull_request, PR_A);
+  assert.equal(uitkomst.owner_package.merge_method, 'squash');
+
   // Het pakket draagt geen sha, geen pad en geen API-tekst — dezelfde reductie als elke andere
-  // uitvoerregel (M30).
-  const { regel } = await draai({ a: eigenaarsMeting(), p: POLICY_MANUAL, dryRun: false, fetchImpl });
-  assert.equal(/[0-9a-f]{40}/.test(regel), false, regel);
+  // uitvoerregel (M30): uitsluitend sha256-digests (64 hex-tekens), nooit een sha (40).
+  const { regel } = await draai({
+    a: eigenaarsMeting(), p: POLICY_MANUAL, dryRun: false, fetchImpl, nowImpl: () => KLOK,
+  });
+  assert.equal(/(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])/.test(regel), false, regel);
   assert.equal(regel.includes('/tmp'), false, regel);
 
   // Een pakket bestaat ALLEEN na een bewezen GO op beide metingen. Drift, een ingetrokken review of
@@ -1949,6 +1994,7 @@ test('O5. de CLI levert in de eigenaarsstand een MERGEPAKKET op, en nooit een me
   assert.equal(gedreven.rc, 1);
   assert.equal(gedreven.uitkomst.decision, FINALIZE_DECISION.NO_GO);
   assert.equal(gedreven.uitkomst.effect, undefined);
+  assert.equal(gedreven.uitkomst.owner_package, undefined);
 
   const uit = await draai({
     a: eigenaarsMeting(), p: POLICY_BESTAND, dryRun: false, fetchImpl,
@@ -1957,6 +2003,169 @@ test('O5. de CLI levert in de eigenaarsstand een MERGEPAKKET op, en nooit een me
   assert.ok(uit.uitkomst.reasons.includes(FINALIZE_REASON.FINALIZER_DISABLED));
   assert.equal(uit.uitkomst.effect, undefined);
   assert.equal(fetchImpl.aanroepen.length, 0);
+});
+
+test('O5a. RC-ONLY-AANROEPER-REGRESSIE: het normale contract `rc 0 => finalisatie geslaagd` leest '
+  + 'het eigenaarspakket nooit meer als merge', async () => {
+  // De letterlijke reproductie van de bevinding: een aanroeper die UITSLUITEND de exitcode leest en
+  // geen `merge_performed` parseert. Vóór V25 zou dit `merge_performed=true` opleveren op rc 0, wat
+  // hier de kern van de regressie is.
+  const rcOnlyLeestAlsMerge = (rc) => rc === 0;
+
+  const pakket = await draai({ a: eigenaarsMeting(), p: POLICY_MANUAL, dryRun: false });
+  assert.equal(rcOnlyLeestAlsMerge(pakket.rc), false, 'een rc-only-aanroeper leest dit niet als merge');
+  assert.equal(pakket.uitkomst.merge_performed, false);
+
+  const echteQueueMerge = await draai({
+    a: meting(), p: POLICY_QUEUE, dryRun: false, fetchImpl: antwoordFetch(202),
+  });
+  assert.equal(rcOnlyLeestAlsMerge(echteQueueMerge.rc), true, 'een werkelijk effect blijft rc 0');
+  assert.equal(echteQueueMerge.uitkomst.merge_performed, true);
+
+  // rc 3 valt bovendien buiten ELK generiek tweewaardig contract (`0` succes, niet-`0` fout): het is
+  // geen `1` — de gewone weigering — en het is nooit `0`.
+  assert.notEqual(pakket.rc, 0);
+  assert.notEqual(pakket.rc, 1);
+});
+
+const GELDIGE_PAKKET_VELDEN = Object.freeze({
+  repository: 'rvanhooijdonk-png/stack-dashboard',
+  pullRequest: PR_A,
+  sha: HEAD,
+  treeSha: TREE,
+  baseRef: 'main',
+  baseHeadSha: BASE_HEAD,
+  mergeMethod: 'squash',
+  measurementFingerprint: measurementFingerprint(eigenaarsMeting()),
+  measuredAtMs: 1_700_000_000_000,
+});
+
+function geldigPakket(overrides = {}) {
+  return buildOwnerMergePackage({ ...GELDIGE_PAKKET_VELDEN, ...overrides });
+}
+
+function verifieer(overrides = {}) {
+  const { ownerPackage, ...rest } = overrides;
+  return verifyOwnerMergePackage({
+    ownerPackage: 'ownerPackage' in overrides ? ownerPackage : geldigPakket(),
+    repository: GELDIGE_PAKKET_VELDEN.repository,
+    pullRequest: GELDIGE_PAKKET_VELDEN.pullRequest,
+    sha: GELDIGE_PAKKET_VELDEN.sha,
+    treeSha: GELDIGE_PAKKET_VELDEN.treeSha,
+    baseRef: GELDIGE_PAKKET_VELDEN.baseRef,
+    baseHeadSha: GELDIGE_PAKKET_VELDEN.baseHeadSha,
+    mergeMethod: GELDIGE_PAKKET_VELDEN.mergeMethod,
+    measurementFingerprint: GELDIGE_PAKKET_VELDEN.measurementFingerprint,
+    nowMs: GELDIGE_PAKKET_VELDEN.measuredAtMs,
+    maxAgeSeconds: 86400,
+    ...rest,
+  });
+}
+
+test('O8. `verifyOwnerMergePackage` accepteert een vers, zelfconsistent en ongewijzigd pakket', () => {
+  assert.deepEqual(verifieer(), { ok: true });
+  // Precies op de vervalgrens (nowMs - measured_at === maxAgeSeconds * 1000) is nog GELDIG: de
+  // vergelijking is `>`, niet `>=`.
+  assert.deepEqual(
+    verifieer({ nowMs: GELDIGE_PAKKET_VELDEN.measuredAtMs + 86400 * 1000 }),
+    { ok: true },
+  );
+});
+
+test('O9. `verifyOwnerMergePackage` wijst een ONTBREKEND pakket fail-closed af', () => {
+  for (const ontbrekend of [undefined, null, [], 'niet-een-object', 42]) {
+    assert.deepEqual(
+      verifieer({ ownerPackage: ontbrekend }),
+      { ok: false, reason: OWNER_PACKAGE_REASON.OWNER_PACKAGE_MISSING },
+      JSON.stringify(ontbrekend),
+    );
+  }
+});
+
+test('O10. `verifyOwnerMergePackage` wijst een MISVORMD pakket fail-closed af', () => {
+  const varianten = [
+    { ...geldigPakket(), extra_veld: 'x' },
+    (() => { const { schema, ...rest } = geldigPakket(); return rest; })(),
+    { ...geldigPakket(), schema: 'ANDERE_SCHEMA_V1' },
+    { ...geldigPakket(), pull_request: 0 },
+    { ...geldigPakket(), pull_request: 'zeventig' },
+    { ...geldigPakket(), merge_method: 'fast-forward' },
+    { ...geldigPakket(), head_digest: 'niet-hex' },
+    { ...geldigPakket(), head_digest: 'a'.repeat(40) },
+    { ...geldigPakket(), measured_at: GELDIGE_PAKKET_VELDEN.measuredAtMs + 1 },
+  ];
+  for (const pakket of varianten) {
+    assert.deepEqual(
+      verifieer({ ownerPackage: pakket }),
+      { ok: false, reason: OWNER_PACKAGE_REASON.OWNER_PACKAGE_MALFORMED },
+      JSON.stringify(pakket),
+    );
+  }
+});
+
+test('O11. `verifyOwnerMergePackage` herkent DIGEST-KNOEIEN: een bewerkt veld zonder herberekende '
+  + '`package_digest`', () => {
+  const beknoeid = { ...geldigPakket(), pull_request: PR_A + 1 };
+  assert.deepEqual(
+    verifieer({ ownerPackage: beknoeid }),
+    { ok: false, reason: OWNER_PACKAGE_REASON.OWNER_PACKAGE_DIGEST_MISMATCH },
+  );
+});
+
+test('O12. `verifyOwnerMergePackage` wijst een VERLOPEN pakket fail-closed af', () => {
+  assert.deepEqual(
+    verifieer({ nowMs: GELDIGE_PAKKET_VELDEN.measuredAtMs + 86400 * 1000 + 1 }),
+    { ok: false, reason: OWNER_PACKAGE_REASON.OWNER_PACKAGE_EXPIRED },
+  );
+});
+
+test('O13. `verifyOwnerMergePackage` herkent een VERSCHOVEN BINDING: het pakket zelf is intact, maar '
+  + 'de verse meting is een andere pull request, head, boom, basis of methode geworden', () => {
+  const varianten = [
+    { pullRequest: PR_A + 1 },
+    { sha: 'c'.repeat(40) },
+    { treeSha: 'd'.repeat(40) },
+    { baseRef: 'release' },
+    { baseHeadSha: 'a'.repeat(40) },
+    { mergeMethod: 'merge' },
+    {
+      measurementFingerprint: measurementFingerprint(
+        eigenaarsMeting({ checkRuns: [[checkRun({ head_sha: '3'.repeat(40) })]] }),
+      ),
+    },
+  ];
+  for (const afwijking of varianten) {
+    assert.deepEqual(
+      verifieer(afwijking),
+      { ok: false, reason: OWNER_PACKAGE_REASON.OWNER_PACKAGE_BINDING_CHANGED },
+      JSON.stringify(afwijking),
+    );
+  }
+});
+
+test('O14. `verifyOwnerMergePackage` wijst een ONGELDIGE `maxAgeSeconds`/`nowMs` fail-closed af, vóór '
+  + 'enige andere toets', () => {
+  for (const maxAgeSeconds of [0, -1, 3600.5, OWNER_PACKAGE_MAX_AGE_SECONDS_MAX + 1, undefined, null]) {
+    assert.deepEqual(
+      verifieer({ maxAgeSeconds }),
+      { ok: false, reason: OWNER_PACKAGE_REASON.OWNER_PACKAGE_MAX_AGE_INVALID },
+      JSON.stringify(maxAgeSeconds),
+    );
+  }
+  for (const nowMs of [-1, 1.5, undefined, null, 'nu']) {
+    assert.deepEqual(
+      verifieer({ nowMs }),
+      { ok: false, reason: OWNER_PACKAGE_REASON.OWNER_PACKAGE_MAX_AGE_INVALID },
+      JSON.stringify(nowMs),
+    );
+  }
+  // Een ongeldige klok/vervaltermijn wint zelfs van een pakket dat op geen enkele andere grond zou
+  // falen: de volgorde is met opzet zo dat een verkeerd geconfigureerde aanroeper nooit per ongeluk
+  // een andere, geruststellender redencode terugkrijgt.
+  assert.deepEqual(
+    verifieer({ maxAgeSeconds: 0, ownerPackage: { onzin: true } }),
+    { ok: false, reason: OWNER_PACKAGE_REASON.OWNER_PACKAGE_MAX_AGE_INVALID },
+  );
 });
 
 test('O6. de WACHTRIJTAK blijft naast de eigenaarsstand volledig intact', async () => {
@@ -1980,7 +2189,9 @@ test('O6. de WACHTRIJTAK blijft naast de eigenaarsstand volledig intact', async 
   const inEigenaar = await draai({
     a: meting(), p: POLICY_MANUAL, dryRun: false, fetchImpl: eigenaarFetch,
   });
-  assert.equal(inEigenaar.rc, 0);
+  assert.equal(inEigenaar.rc, OWNER_ACTION_REQUIRED_EXIT_CODE);
+  assert.notEqual(inEigenaar.rc, 0);
+  assert.equal(inEigenaar.uitkomst.decision, FINALIZE_DECISION.OWNER_ACTION_REQUIRED);
   assert.equal(inEigenaar.uitkomst.effect, 'OWNER_MERGE_PACKAGE');
   assert.equal(eigenaarFetch.aanroepen.length, 0);
 
