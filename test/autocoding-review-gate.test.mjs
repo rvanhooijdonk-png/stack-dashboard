@@ -462,14 +462,26 @@ test('W2. de live poort voert nooit PR-headcode uit en checkt uitsluitend de def
   );
   assert.ok(!liveGate.includes('node --test'), 'de live-gate-job mag geen PR-headtests draaien');
   assert.ok(!/actions\/(cache|download-artifact)/.test(liveGate), 'geen PR-artifacts of -cache');
-  // De writer serialiseert PER PULL REQUEST, niet globaal: de groep sleutelt op de matrixwaarde,
-  // zodat twee aanleidingen voor dezelfde PR achter elkaar aanschuiven (`queue: max`) terwijl
-  // verschillende PR's elkaar niet blokkeren. Een `concurrency` op WORKFLOWniveau zou die rijen
-  // weer samenvoegen en is daarom verboden.
+  // De writer draagt sinds V13 TWEE rijen, en ze doen verschillend werk.
+  //
+  // Op JOBNIVEAU, per pull request: de groep sleutelt op de matrixwaarde, zodat twee aanleidingen
+  // voor dezelfde PR achter elkaar aanschuiven (`queue: max`) terwijl verschillende PR's elkaar niet
+  // blokkeren en niet door elkaar heen op dezelfde head schrijven.
   assert.match(liveGate, /^ {6}group: autocoding-shield-live-gate-pr-\$\{\{ matrix\.pr \}\}$/m);
   assert.match(liveGate, /^ {6}cancel-in-progress: false$/m);
   assert.match(liveGate, /^ {6}queue: max$/m);
-  assert.ok(!/^concurrency:$/m.test(liveGate), 'geen concurrency op workflowniveau in de writer');
+
+  // Op WORKFLOWNIVEAU, repositorybreed: één vaste groep zonder enige expressie, verworven vóór de
+  // eerste job en dus vóór de `rate_limit`-meting. Zonder haar kunnen twee runs voor verschillende
+  // PR's hetzelfde resterende quotum meten en ieder datzelfde restant reserveren, terwijl het
+  // uurquotum per REPOSITORY gedeeld is. `queue: max` is daarbij de voorwaarde: met de standaard
+  // `single` zou een wachtende run geannuleerd worden en stil verdwijnen.
+  assert.match(liveGate, /^concurrency:$/m, 'de writer serialiseert zijn runs repositorybreed');
+  assert.match(liveGate, /^ {2}group: autocoding-shield-live-gate-repository$/m);
+  assert.match(liveGate, /^ {2}cancel-in-progress: false$/m);
+  assert.match(liveGate, /^ {2}queue: max$/m);
+  const globaleGroep = liveGate.match(/^ {2}group: (.*)$/m)[1];
+  assert.ok(!globaleGroep.includes('${{'), 'de repositorybrede groep draagt geen expressie');
   assert.match(yamlOnly(PR_SHIELD_PATH), /^ {2}group: autocoding-shield-/m);
 });
 

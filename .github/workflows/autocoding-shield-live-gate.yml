@@ -55,9 +55,8 @@ name: autocoding-shield-live-gate
 # outputs van de bronrun lezen, een head uit de eventpayload geloven, secrets lezen, mergen,
 # deployen, of iets anders schrijven dan commitstatussen. `statuses: write` staat op precies één job.
 #
-# ER STAAT BEWUST GEEN WORKFLOWBREDE `concurrency:` MEER. Een groep op workflowniveau coalesceert
-# hele runs — inclusief hun writerjobs — en zou de per-PR-rijen weer samenvoegen. Die afwezigheid is
-# geen omissie maar een grens, en `test/autocoding-workflow-trust.test.mjs` dwingt hem statisch af.
+# V11 SCHRAPTE DE WORKFLOWBREDE `concurrency:`, en V13 ZET HEM TERUG — in een andere vorm en om een
+# andere reden. Zie de sectie "WAT ER IN V13 VERANDERDE" onderaan deze kop.
 #
 # WAT ER IN V12 VERANDERDE. V11 rekende met een vaste bovengrens van 26 verzoeken per pull request,
 # maar haalde de vijf bewijslijsten op met `gh api --paginate --slurp`. `--paginate` volgt de
@@ -76,6 +75,30 @@ name: autocoding-shield-live-gate
 #   - een afgekapte OPEN-PR-LIJST meet niets en maakt de run rood. De rotatie verdeelt de volledige
 #     lijst in blokken, dus zou alles voorbij de grens nooit aan de beurt komen terwijl de ronde er
 #     gezond uitziet.
+#
+# WAT ER IN V13 VERANDERDE. V12 begrenst één RUN correct, maar de quotummeting is daarmee nog niet
+# atomair over runs heen. De per-PR-jobrij sleutelt op het PR-nummer, dus vallen twee eventruns voor
+# VERSCHILLENDE pull requests in verschillende rijen. Ze draaien dan gelijktijdig, lezen allebei
+# hetzelfde `rate_limit.remaining`, en reserveren allebei datzelfde restant. Elke run blijft
+# afzonderlijk binnen zijn eigen begroting terwijl ze samen over het GEDEELDE uurquotum heen gaan:
+# een schedule kost hoogstens 654 verzoeken, een event hoogstens 30, en het quotum is er duizend per
+# repository per uur — dus is 40 geburste events (1200) al genoeg, en een schedule plus twaalf
+# events (1014) evengoed.
+#
+# De reparatie is één rij om de HELE run: een workflowbrede `concurrency:` met een VASTE groep,
+# `cancel-in-progress: false` en `queue: max`. Omdat de groep op workflowniveau staat, is hij
+# verworven vóór de eerste job — dus vóór de selectie en vóór de `rate_limit`-meting — en komt hij
+# pas vrij als alle matrixwriters klaar zijn. Daardoor meet run N+1 pas nadat run N zijn verzoeken
+# werkelijk heeft uitgegeven, en is de reservering een opeenvolging in plaats van een gok.
+#
+# WAAROM DIT GEEN TERUGDRAAI VAN V11 IS. De V11-grond tegen een globale rij was niet de rij maar het
+# VERLIES: met de standaard `queue: single` bewaart GitHub hooguit één wachtende run per groep en
+# annuleert de vorige, dus zou een derde aanleiding de tweede opeten. `queue: max` bewaart wachtende
+# runs, en pas dáármee is een globale rij bruikbaar. De twee rijen staan bovendien naast elkaar en
+# niet in plaats van elkaar: de globale rij serialiseert het QUOTUM, de per-PR-rij bewaakt dat twee
+# aanleidingen voor dezelfde PR nooit door elkaar heen schrijven. `test/autocoding-workflow-trust.test.mjs`
+# dwingt beide vormen statisch af en keurt elke afwijking — geen rij, dynamische groep, `single`,
+# ontbrekende `queue`, `cancel-in-progress: true` — fail-closed af.
 #
 # BOOTSTRAP, eerlijk benoemd: een `workflow_run`- en `issue_comment`-workflow bestaat pas ná merge op
 # de default branch. PR #74 kan deze keten dus niet zelf live bewijzen. De poort staat bovendien nog
@@ -96,6 +119,17 @@ on:
     - cron: '23 * * * *'
 
 permissions: {}
+
+# DE REPOSITORYBREDE QUOTUMRIJ. Eén vaste groep voor het hele bestand: geen `run_id`, geen
+# `run_number`, geen eventveld, geen PR-nummer, geen enkele `${{ ... }}`-expressie. Elke aanleiding —
+# comment, workflow_run of schedule, voor welke pull request dan ook — valt hierin, dus wordt er
+# nooit door twee runs tegelijk tegen dezelfde resterende teller besloten. `cancel-in-progress: false`
+# kapt een lopende schrijfbeurt nooit af; `queue: max` bewaart wachtende runs in plaats van de vorige
+# te annuleren.
+concurrency:
+  group: autocoding-shield-live-gate-repository
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   # ---------------------------------------------------------------------------------------------

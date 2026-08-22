@@ -74,7 +74,7 @@ export const TRUST_VIOLATION = Object.freeze({
   TRUSTED_WRITER_WRITE_JOB_NOT_UNIQUE: 'TRUSTED_WRITER_WRITE_JOB_NOT_UNIQUE',
   TRUSTED_WRITER_WRITE_JOB_NOT_PER_PULL_REQUEST_QUEUED:
     'TRUSTED_WRITER_WRITE_JOB_NOT_PER_PULL_REQUEST_QUEUED',
-  TRUSTED_WRITER_HAS_WORKFLOW_LEVEL_CONCURRENCY: 'TRUSTED_WRITER_HAS_WORKFLOW_LEVEL_CONCURRENCY',
+  TRUSTED_WRITER_NOT_REPOSITORY_QUEUED: 'TRUSTED_WRITER_NOT_REPOSITORY_QUEUED',
   TRUSTED_WRITER_WRITE_SCOPE_NOT_ALLOWED: 'TRUSTED_WRITER_WRITE_SCOPE_NOT_ALLOWED',
   TRUSTED_WRITER_WORKFLOW_LEVEL_WRITE: 'TRUSTED_WRITER_WORKFLOW_LEVEL_WRITE',
   TRUSTED_WRITER_USES_SECRETS: 'TRUSTED_WRITER_USES_SECRETS',
@@ -417,19 +417,21 @@ function jobLevelKeys(job) {
 }
 
 /**
- * Leest de `concurrency:` van ÉÉN job — de per-PR schrijfrij van de writer.
+ * Leest één `concurrency:`-blok op de plek waar het staat: `lines[index]` IS de sleutelregel.
  *
- * `null` betekent "deze job heeft geen jobconcurrency". `unparseable: true` betekent "wel aanwezig,
- * niet met zekerheid te lezen"; de aanroeper behandelt dat als een overtreding, want een
- * onleesbare rij is geen rij.
+ * Dezelfde drie YAML-vormen komen op jobniveau en op workflowniveau voor, dus wordt de lezer gedeeld
+ * in plaats van gedupliceerd. Een tweede, net iets andere lezer zou de globale rij anders kunnen
+ * beoordelen dan de per-PR-rij, en juist die twee moeten hier tegen elkaar gehouden worden.
+ *
+ * `unparseable: true` betekent "wel aanwezig, niet met zekerheid te lezen"; de aanroeper behandelt
+ * dat als een overtreding, want een onleesbare rij is geen rij.
  *
  * De scalarvorm `concurrency: <groep>` wordt gelezen maar levert per definitie geen `queue:` op, dus
- * valt hij vanzelf door de per-PR-eis heen: zonder `queue: max` vervangt GitHub de vorige WACHTENDE
- * job in plaats van hem te bewaren, en dan kan een aanleiding stil verdwijnen.
+ * valt hij vanzelf door elke rij-eis heen: zonder `queue: max` vervangt GitHub de vorige WACHTENDE
+ * beurt in plaats van hem te bewaren, en dan kan een aanleiding stil verdwijnen.
  */
-export function extractJobConcurrency(job) {
-  const line = jobLevelKeys(job).find((l) => /^\s*["']?concurrency["']?\s*:/.test(l.text));
-  if (!line) return null;
+function readConcurrencyBlock(lines, index) {
+  const line = lines[index];
   const unreadable = { unparseable: true, group: '', cancelInProgress: '', queue: '' };
   const inline = line.text.replace(/^\s*["']?concurrency["']?\s*:/, '').trim();
 
@@ -447,7 +449,7 @@ export function extractJobConcurrency(job) {
     return { unparseable: false, group: unquote(inline), cancelInProgress: '', queue: '' };
   }
 
-  const children = blockChildren(job.lines, job.lines.indexOf(line));
+  const children = blockChildren(lines, index);
   if (children.length === 0) return unreadable;
   const keyIndent = Math.min(...children.map((l) => l.indent));
   const read = (key) => {
@@ -462,6 +464,29 @@ export function extractJobConcurrency(job) {
     cancelInProgress: read('cancel-in-progress'),
     queue: read('queue'),
   };
+}
+
+/**
+ * Leest de `concurrency:` van ÉÉN job — de per-PR schrijfrij van de writer. `null` betekent "deze
+ * job heeft geen jobconcurrency".
+ */
+export function extractJobConcurrency(job) {
+  const line = jobLevelKeys(job).find((l) => /^\s*["']?concurrency["']?\s*:/.test(l.text));
+  if (!line) return null;
+  return readConcurrencyBlock(job.lines, job.lines.indexOf(line));
+}
+
+/**
+ * Leest de `concurrency:` op WORKFLOWNIVEAU — de repositorybrede rij van de writer. Alleen
+ * inspringing 0 telt; een sleutel dieper in het document is een jobrij en geen runrij. `null`
+ * betekent "dit bestand serialiseert zijn runs niet".
+ */
+export function extractWorkflowConcurrency(lines) {
+  const index = lines.findIndex(
+    (l) => l.indent === 0 && /^["']?concurrency["']?\s*:/.test(l.text),
+  );
+  if (index === -1) return null;
+  return readConcurrencyBlock(lines, index);
 }
 
 /** De sleutels van `strategy.matrix` van één job; leeg als de job geen matrix draait. */
@@ -492,6 +517,7 @@ export function analyzeWorkflow(text) {
 
   const parsedTriggers = extractTriggers(lines);
   const nameLine = lines.find((l) => l.indent === 0 && /^["']?name["']?\s*:/.test(l.text));
+  const workflowConcurrency = extractWorkflowConcurrency(lines);
 
   return {
     name: nameLine ? unquote(nameLine.text.replace(/^["']?name["']?\s*:/, '')) : '',
@@ -499,13 +525,13 @@ export function analyzeWorkflow(text) {
     // verschil, zodat een onleesbare `on:` nooit stil als "geen trigger" kan doorgaan.
     triggers: parsedTriggers ?? [],
     triggersUnparseable: parsedTriggers === null,
-    // Een workflowbrede `concurrency:` coalesceert HELE runs. Voor de writer is dat precies de
-    // eigenschap die weg moest: GitHub bewaart per groep hooguit één wachtende run en annuleert de
-    // vorige, dus zou een globale groep de per-PR-rijen weer samenvoegen en aanleidingen laten
-    // vallen. Alleen inspringing 0 telt als workflowniveau.
-    workflowLevelConcurrency: lines.some(
-      (l) => l.indent === 0 && /^["']?concurrency["']?\s*:/.test(l.text),
-    ),
+    // Een workflowbrede `concurrency:` coalesceert HELE runs — inclusief de leesjob die het
+    // resterende quotum meet. Tot en met V12 was dat hier een verboden vorm; sinds V13 is precies
+    // deze vorm de REPARATIE, en daarom draagt de analyse nu het gelezen blok en niet enkel het
+    // feit dat er iets staat. Wat de vorm moet zijn staat in `isRepositoryWideQueuedLock()`.
+    // Alleen inspringing 0 telt als workflowniveau.
+    workflowConcurrency,
+    workflowLevelConcurrency: workflowConcurrency !== null,
     workflowRunSources: extractWorkflowRunSources(lines),
     writeGrants: extractWriteGrants(lines),
     workflowLevelWriteGrants: extractWriteGrants(outsideJobs),
@@ -583,6 +609,53 @@ export function isPerPullRequestQueuedWriteJob(job) {
   const reference = MATRIX_GROUP_REF_RE.exec(concurrency.group);
   if (!reference) return false;
   return Array.isArray(job.matrixKeys) && job.matrixKeys.includes(reference[1]);
+}
+
+/**
+ * De vaste naam van de repositorybrede schrijfrij van de trusted writer.
+ *
+ * Hij is met opzet een LITERAL zonder één expressie. Een groep met een `${{ ... }}`-suffix — welk
+ * veld dan ook — valt per run, per event of per PR uiteen in verschillende groepen, en dan
+ * serialiseert er niets meer. Dat is exact de vorm die de gedeelde quotumteller liet racen.
+ */
+export const TRUSTED_WRITER_REPOSITORY_LOCK_GROUP = 'autocoding-shield-live-gate-repository';
+
+/** Elke GitHub-expressie. In de globale groep is er geen enkele toegestaan. */
+const EXPRESSION_RE = /\$\{\{/;
+
+/**
+ * De HELE writerrun moet repositorybreed geserialiseerd zijn, en wel in een WACHTENDE rij.
+ *
+ * Codex-review-bevinding op V12: de per-PR-jobrij begrenst één run correct, maar de quotummeting is
+ * daarmee nog niet atomair over RUNS heen. Twee eventruns voor VERSCHILLENDE PR's vallen in
+ * verschillende jobrijen, meten dus tegelijk hetzelfde `rate_limit.remaining`, en reserveren ieder
+ * hetzelfde restant. Het uurquotum van duizend verzoeken is per REPOSITORY gedeeld, dus konden een
+ * schedule van hoogstens 654 verzoeken en een reeks eventruns er samen overheen gaan terwijl elke
+ * run afzonderlijk binnen zijn eigen begroting bleef.
+ *
+ * De rij die dat sluit heeft precies deze vorm, en elke afwijking is fail-closed:
+ *
+ *   - de groep is een VASTE literal, gelijk voor elk event, elke PR en elke run: alleen dan vallen
+ *     twee aanleidingen in dezelfde rij en meet de tweede pas ná wat de eerste heeft uitgegeven;
+ *   - `cancel-in-progress: false`: een lopende schrijfbeurt wordt nooit afgekapt, want dan blijft
+ *     een head op `pending` staan;
+ *   - `queue: max`: met de standaard `single` bewaart GitHub hooguit ÉÉN wachtende run per groep en
+ *     annuleert de vorige. Dat was in V11 de reden om een globale rij juist te WEIGEREN. Met `max`
+ *     blijven wachtende runs staan, en pas daardoor is een globale rij bruikbaar in plaats van een
+ *     stille verliespost.
+ *
+ * Omdat de rij op WORKFLOWNIVEAU staat, is hij verworven vóór de eerste job — dus vóór de selectie
+ * en vóór de `rate_limit`-meting — en komt hij pas vrij als alle matrixwriters klaar zijn.
+ */
+export function isRepositoryWideQueuedLock(concurrency, {
+  group = TRUSTED_WRITER_REPOSITORY_LOCK_GROUP,
+} = {}) {
+  if (!concurrency || concurrency.unparseable) return false;
+  if (concurrency.cancelInProgress !== 'false') return false;
+  if (concurrency.queue !== 'max') return false;
+  if (EXPRESSION_RE.test(concurrency.group)) return false;
+  if (VOLATILE_GROUP_RE.test(concurrency.group)) return false;
+  return concurrency.group === group;
 }
 
 function scopesOf(grants) {
@@ -680,8 +753,12 @@ export function findTrustBoundaryViolations({ workflows, prShieldPath, trustedWr
           add(TRUST_VIOLATION.TRUSTED_WRITER_WRITE_JOB_NOT_PER_PULL_REQUEST_QUEUED, path);
         }
       }
-      if (wf.workflowLevelConcurrency) {
-        add(TRUST_VIOLATION.TRUSTED_WRITER_HAS_WORKFLOW_LEVEL_CONCURRENCY, path);
+      // De repositorybrede rij is sinds V13 VERPLICHT en alleen in deze ene vorm toegestaan.
+      // Ontbrekend, onleesbaar, dynamisch, `queue: single`, geen `queue` of `cancel-in-progress:
+      // true` zijn allemaal dezelfde overtreding: zonder wachtende rij op één vaste groep kunnen
+      // twee runs hetzelfde resterende quotum reserveren.
+      if (!isRepositoryWideQueuedLock(wf.workflowConcurrency)) {
+        add(TRUST_VIOLATION.TRUSTED_WRITER_NOT_REPOSITORY_QUEUED, path);
       }
       if (wf.workflowLevelWriteGrants.length > 0) {
         add(TRUST_VIOLATION.TRUSTED_WRITER_WORKFLOW_LEVEL_WRITE, path);

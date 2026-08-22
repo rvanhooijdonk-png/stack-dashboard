@@ -42,7 +42,9 @@ import {
   SCHEDULE_REQUEST_BUDGET, SHARED_HOURLY_REQUEST_QUOTA, QUOTA_RESERVE,
   TARGET_OUTCOME, TARGET_REASON, TARGET_SELECTION,
 } from '../scripts/autocoding/select-live-gate-targets.mjs';
-import { analyzeWorkflow } from '../scripts/autocoding/workflow-trust.mjs';
+import {
+  analyzeWorkflow, isRepositoryWideQueuedLock, TRUSTED_WRITER_REPOSITORY_LOCK_GROUP,
+} from '../scripts/autocoding/workflow-trust.mjs';
 import { resolvePublication } from '../scripts/autocoding/publish-live-status.mjs';
 
 const SELECTOR = 'scripts/autocoding/select-live-gate-targets.mjs';
@@ -858,9 +860,11 @@ test('S11. PR 74 en PR 75 krijgen verschillende rijen; twee beurten voor PR 74 d
   assert.equal(schrijf.concurrency.queue, 'max');
   assert.equal(schrijf.concurrency.cancelInProgress, 'false');
 
-  // En de rij staat op JOBNIVEAU. Een groep op workflowniveau zou hele runs coalesceren, inclusief
-  // hun schrijfjobs, en de per-PR-rijen weer samenvoegen.
-  assert.equal(analyse.workflowLevelConcurrency, false);
+  // Deze rij staat op JOBNIVEAU en per PR. Daarnaast draagt het bestand sinds V13 een
+  // REPOSITORYBREDE rij op workflowniveau: die serialiseert het gedeelde QUOTUM over runs heen, wat
+  // een per-PR-rij per definitie niet kan. De twee vullen elkaar aan; zie S13.
+  assert.equal(isRepositoryWideQueuedLock(analyse.workflowConcurrency), true);
+  assert.equal(analyse.workflowConcurrency.group, TRUSTED_WRITER_REPOSITORY_LOCK_GROUP);
   assert.equal(analyse.jobs.find((job) => job.id === 'selecteer').concurrency, null);
 
   // De matrix komt uit de selectiejob, dus per doel-PR ontstaat er één job met een eigen rij.
@@ -879,7 +883,11 @@ function lockBevindingen(text) {
   const schrijf = analyse.jobs.find((job) => job.id === 'schrijf');
   if (!schrijf) return ['SCHRIJFJOB_ONTBREEKT'];
   if (!schrijf.concurrency || schrijf.concurrency.unparseable) bevindingen.push('SCHRIJFJOB_ZONDER_EIGEN_RIJ');
-  if (analyse.workflowLevelConcurrency) bevindingen.push('RIJ_OP_WORKFLOWNIVEAU');
+  // De repositorybrede rij hoort er te ZIJN en in precies één vorm. Zonder haar meten twee runs voor
+  // verschillende PR's gelijktijdig hetzelfde resterende quotum; met een dynamische groep evengoed.
+  if (!isRepositoryWideQueuedLock(analyse.workflowConcurrency)) {
+    bevindingen.push('GEEN_REPOSITORYBREDE_LOCK');
+  }
 
   // De uitvoer van de selectiefase, letterlijk uit het bestand: alles tussen `outputs:` en de
   // volgende sleutel op hetzelfde niveau.
@@ -908,12 +916,20 @@ test('S12. er wordt pas NA de per-PR-lock gemeten, en elke afwijking daarvan is 
   assert.doesNotMatch(stap, /github\.event\.[a-z_]*\.?head/);
   assert.doesNotMatch(stap, /workflow_run/);
 
-  // MUTATIE 1: de rij naar workflowniveau verplaatsen. Dan coalesceren hele runs weer.
-  const werkstroomRij = WRITER_TEKST.replace(
-    'permissions: {}\n',
-    'permissions: {}\nconcurrency:\n  group: autocoding-shield-live-gate\n  cancel-in-progress: false\n',
+  // MUTATIE 1: de repositorybrede rij dynamisch maken. Dan valt elke run in zijn eigen groep en
+  // meet er niets meer na elkaar — precies de vorm waarin twee runs hetzelfde restant reserveren.
+  const dynamischeLock = WRITER_TEKST.replace(
+    `group: ${TRUSTED_WRITER_REPOSITORY_LOCK_GROUP}\n`,
+    `group: ${TRUSTED_WRITER_REPOSITORY_LOCK_GROUP}-\${{ github.run_id }}\n`,
   );
-  assert.ok(lockBevindingen(werkstroomRij).includes('RIJ_OP_WORKFLOWNIVEAU'));
+  assert.ok(lockBevindingen(dynamischeLock).includes('GEEN_REPOSITORYBREDE_LOCK'));
+
+  // MUTATIE 1b: de repositorybrede rij helemaal weghalen — de V12-vorm.
+  const zonderLock = WRITER_TEKST.replace(
+    `concurrency:\n  group: ${TRUSTED_WRITER_REPOSITORY_LOCK_GROUP}\n  cancel-in-progress: false\n  queue: max\n`,
+    '',
+  );
+  assert.ok(lockBevindingen(zonderLock).includes('GEEN_REPOSITORYBREDE_LOCK'));
 
   // MUTATIE 2: de rij van de schrijfjob weghalen. Dan meet elke beurt zonder te wachten.
   const zonderRij = WRITER_TEKST
@@ -1421,4 +1437,129 @@ test('S21. het quotum vlak boven en vlak onder de grens beslist voorspelbaar', (
   assert.equal(onbekend.targets.length, SCHEDULE_BUCKET_LIMIT);
   assert.ok(SELECTION_REQUEST_BUDGET + (onbekend.targets.length * PER_PULL_REQUEST_REQUEST_BUDGET)
     + QUOTA_RESERVE <= SHARED_HOURLY_REQUEST_QUOTA);
+});
+
+
+// --- De repositorybrede quotumrij (V13) ----------------------------------------------------------
+
+/**
+ * Eén uur aan aanleidingen tegen het GEDEELDE quotum, doorgerekend met de ECHTE selector en de echte
+ * budgetten. Geen nabouw van `selectTargets()`: alleen de volgorde waarin de runs meten wordt
+ * gemodelleerd, want dát is precies wat de concurrencyrij bepaalt.
+ *
+ *   `geserialiseerd: true`  — de repositorybrede rij van V13. Run N+1 start pas als run N klaar is,
+ *                             dus meet zij het restant NA wat run N werkelijk heeft uitgegeven.
+ *   `geserialiseerd: false` — de V12-vorm. De per-PR-jobrij scheidt runs voor verschillende PR's
+ *                             niet, dus lezen ze allemaal hetzelfde `rate_limit.remaining` en
+ *                             reserveren ze allemaal datzelfde restant.
+ *
+ * Een run die MEET geeft zijn eigen begroting uit: de selectiekost plus het perp-PR-budget maal het
+ * aantal doelen. Een no-op geeft niets uit — een eventaanleiding raakt de open-PR-lijst niet aan.
+ */
+function simuleerUur({ aanleidingen, geserialiseerd, quotum = SHARED_HOURLY_REQUEST_QUOTA }) {
+  let besteed = 0;
+  const metingen = [];
+  const uitkomsten = [];
+  for (const aanleiding of aanleidingen) {
+    const gemeten = geserialiseerd ? quotum - besteed : quotum;
+    metingen.push(gemeten);
+    const uitkomst = selectTargets({ ...aanleiding, remainingQuota: gemeten });
+    uitkomsten.push(uitkomst);
+    if (uitkomst.outcome === TARGET_OUTCOME.MEASURE) {
+      besteed += SELECTION_REQUEST_BUDGET
+        + (uitkomst.targets.length * PER_PULL_REQUEST_REQUEST_BUDGET);
+    }
+  }
+  return { besteed, resterend: quotum - besteed, metingen, uitkomsten };
+}
+
+const eventAanleiding = (nummer) => ({
+  eventName: 'issue_comment', event: commentOpPr(nummer), openPullRequests: [],
+});
+const scheduleAanleiding = (open) => ({
+  eventName: 'schedule', event: {}, openPullRequests: open, nowEpochSeconds: 0,
+});
+
+test('S22. NEGATIEVE CONTROLE: zonder repositorybrede rij trekken 40 geburste events het gedeelde quotum leeg', () => {
+  // De exacte rekensom uit de bevinding, gebonden aan de echte constanten in plaats van aan een
+  // getal in proza: één event kost hoogstens 30 verzoeken, veertig events dus 1200 — meer dan het
+  // gedeelde uurquotum van duizend.
+  assert.equal(EVENT_REQUEST_BUDGET, 30);
+  assert.equal(SCHEDULE_REQUEST_BUDGET, 654);
+  assert.equal(SHARED_HOURLY_REQUEST_QUOTA, 1000);
+
+  const burst = Array.from({ length: 40 }, (_, i) => eventAanleiding(100 + i));
+  const zonderRij = simuleerUur({ aanleidingen: burst, geserialiseerd: false });
+
+  // ALLE VEERTIG beslissen tegen DEZELFDE teller. Dat is de race, letterlijk gemeten.
+  assert.equal(new Set(zonderRij.metingen).size, 1);
+  assert.deepEqual([...new Set(zonderRij.metingen)], [SHARED_HOURLY_REQUEST_QUOTA]);
+  assert.equal(zonderRij.uitkomsten.filter((u) => u.outcome === TARGET_OUTCOME.MEASURE).length, 40);
+
+  // En samen gaan ze over het quotum heen terwijl elke run afzonderlijk binnen zijn begroting bleef.
+  assert.equal(zonderRij.besteed, 40 * EVENT_REQUEST_BUDGET);
+  assert.ok(zonderRij.besteed > SHARED_HOURLY_REQUEST_QUOTA, 'quotum overschreden');
+  assert.ok(zonderRij.resterend < QUOTA_RESERVE, 'de reserve is opgegeten');
+});
+
+test('S22a. MET de repositorybrede rij kan geen enkele run tegen een al gereserveerd restant beslissen', () => {
+  const burst = Array.from({ length: 40 }, (_, i) => eventAanleiding(100 + i));
+  const metRij = simuleerUur({ aanleidingen: burst, geserialiseerd: true });
+
+  // Geen twee metende runs zien hetzelfde restant: elke volgende meet ná de uitgave van de vorige.
+  const metend = metRij.uitkomsten
+    .map((u, i) => [u, metRij.metingen[i]])
+    .filter(([u]) => u.outcome === TARGET_OUTCOME.MEASURE)
+    .map(([, gemeten]) => gemeten);
+  assert.equal(new Set(metend).size, metend.length, 'elke metende run ziet een eigen restant');
+  for (let i = 1; i < metend.length; i += 1) {
+    assert.ok(metend[i] < metend[i - 1], 'de gemeten teller loopt strikt af');
+    assert.equal(metend[i - 1] - metend[i], EVENT_REQUEST_BUDGET);
+  }
+
+  // Het quotum wordt nooit overschreden en de reserve blijft staan. Dat is de hele eigenschap.
+  assert.ok(metRij.besteed <= SHARED_HOURLY_REQUEST_QUOTA - QUOTA_RESERVE);
+  assert.equal(metRij.resterend, QUOTA_RESERVE);
+  assert.equal(metend.length, 30);
+
+  // De overgebleven tien aanleidingen verdwijnen niet stil: ze meten niets en zeggen waarom. Dat is
+  // ook precies waarom de rij `queue: max` draagt — met `single` waren ze geannuleerd in plaats van
+  // afgewezen, en dan had niemand geweten dat er iets niet gemeten was.
+  const afgewezen = metRij.uitkomsten.filter((u) => u.outcome === TARGET_OUTCOME.NO_OP);
+  assert.equal(afgewezen.length, 10);
+  assert.ok(afgewezen.every((u) => u.reason === TARGET_REASON.API_BUDGET_RESERVED));
+});
+
+test('S22b. schedule én event delen dezelfde rij, dus tellen hun begrotingen na elkaar', () => {
+  // De gemengde vorm uit de bevinding: een schedule van hoogstens 654 verzoeken NAAST eventruns.
+  // Twaalf events erbij is 1014 — over het quotum, terwijl beide soorten afzonderlijk keurig binnen
+  // hun eigen begroting blijven.
+  const open = Array.from({ length: 126 }, (_, i) => openPr(i + 1));
+  const gemengd = [
+    scheduleAanleiding(open),
+    ...Array.from({ length: 12 }, (_, i) => eventAanleiding(200 + i)),
+  ];
+
+  const zonderRij = simuleerUur({ aanleidingen: gemengd, geserialiseerd: false });
+  assert.equal(new Set(zonderRij.metingen).size, 1, 'schedule en events meten hetzelfde restant');
+  assert.equal(zonderRij.besteed, SCHEDULE_REQUEST_BUDGET + (12 * EVENT_REQUEST_BUDGET));
+  assert.ok(zonderRij.besteed > SHARED_HOURLY_REQUEST_QUOTA);
+
+  // Met de rij meet elk event pas ná de schedule, en stopt de reeks vanzelf bij de reserve.
+  const metRij = simuleerUur({ aanleidingen: gemengd, geserialiseerd: true });
+  assert.equal(metRij.metingen[0], SHARED_HOURLY_REQUEST_QUOTA);
+  assert.equal(metRij.metingen[1], SHARED_HOURLY_REQUEST_QUOTA - SCHEDULE_REQUEST_BUDGET);
+  assert.equal(metRij.uitkomsten[0].targets.length, SCHEDULE_BUCKET_LIMIT);
+  assert.ok(metRij.besteed <= SHARED_HOURLY_REQUEST_QUOTA - QUOTA_RESERVE);
+  assert.ok(metRij.resterend >= QUOTA_RESERVE);
+
+  // En de schedule krimpt zelf mee zodra events hem voor zijn geweest: dezelfde ronde in omgekeerde
+  // volgorde meet minder PR's per beurt in plaats van over het quotum heen te gaan.
+  const andersom = simuleerUur({
+    aanleidingen: [...gemengd.slice(1), gemengd[0]], geserialiseerd: true,
+  });
+  const scheduleUitkomst = andersom.uitkomsten[andersom.uitkomsten.length - 1];
+  assert.ok(scheduleUitkomst.targets.length < SCHEDULE_BUCKET_LIMIT);
+  assert.ok(andersom.besteed <= SHARED_HOURLY_REQUEST_QUOTA - QUOTA_RESERVE);
+  assert.ok(andersom.resterend >= QUOTA_RESERVE);
 });

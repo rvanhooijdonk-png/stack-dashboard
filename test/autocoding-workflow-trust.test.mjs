@@ -24,6 +24,7 @@ import {
   extractWorkflowRunSources, stripInlineComment, findTrustBoundaryViolations, TRUST_VIOLATION,
   UNTRUSTED_TRIGGERS, TRUSTED_WRITER_TRIGGERS, parseFlowMapping, extractJobConcurrency,
   extractJobMatrixKeys, isPerPullRequestQueuedWriteJob,
+  extractWorkflowConcurrency, isRepositoryWideQueuedLock, TRUSTED_WRITER_REPOSITORY_LOCK_GROUP,
 } from '../scripts/autocoding/workflow-trust.mjs';
 
 const WORKFLOW_DIR = '.github/workflows';
@@ -98,15 +99,33 @@ const WRITER_RIJ = [
 ];
 
 /**
- * Bouwt een writer. `on` vervangt het hele triggerblok, `scopes` voegt permissieregels aan de
- * schrijfjob toe, `rij` vervangt het concurrencyblok van die job, `schrijf` voegt regels binnen de
- * schrijfjob toe (stappen, env) en `jobs` voegt hele extra jobs achteraan toe.
+ * De repositorybrede rij van V13, op WORKFLOWNIVEAU. Zij staat naast de per-PR-rij en niet in plaats
+ * daarvan: deze serialiseert de hele RUN — dus ook de selectie en de `rate_limit`-meting — zodat
+ * twee aanleidingen nooit hetzelfde resterende quotum kunnen reserveren; de per-PR-rij bewaakt
+ * daarbinnen dat twee beurten voor dezelfde PR niet door elkaar heen schrijven.
  */
-function schoneWriter({ on = WRITER_ON, scopes = [], rij = WRITER_RIJ, schrijf = [], jobs = [] } = {}) {
+const WRITER_GLOBALE_RIJ = [
+  'concurrency:',
+  `  group: ${TRUSTED_WRITER_REPOSITORY_LOCK_GROUP}`,
+  '  cancel-in-progress: false',
+  '  queue: max',
+];
+
+/**
+ * Bouwt een writer. `on` vervangt het hele triggerblok, `scopes` voegt permissieregels aan de
+ * schrijfjob toe, `rij` vervangt het concurrencyblok van die job, `globaleRij` vervangt de
+ * repositorybrede rij op workflowniveau, `schrijf` voegt regels binnen de schrijfjob toe (stappen,
+ * env) en `jobs` voegt hele extra jobs achteraan toe.
+ */
+function schoneWriter({
+  on = WRITER_ON, scopes = [], rij = WRITER_RIJ, globaleRij = WRITER_GLOBALE_RIJ,
+  schrijf = [], jobs = [],
+} = {}) {
   return [
     'name: autocoding-shield-live-gate',
     ...on,
     'permissions: {}',
+    ...globaleRij,
     'jobs:',
     ...WRITER_SELECTEER,
     '  schrijf:',
@@ -515,8 +534,17 @@ test('T8. de gemeten vorm van de twee shieldbestanden is precies de bedoelde', (
     queue: 'max',
   });
   assert.equal(isPerPullRequestQueuedWriteJob(schrijf), true);
-  // Een concurrency op WORKFLOWNIVEAU zou alle PR's weer in één rij duwen en is daarom afwezig.
-  assert.equal(writer.workflowLevelConcurrency, false);
+  // En daarnaast draagt het bestand sinds V13 de REPOSITORYBREDE rij op workflowniveau: één vaste
+  // groep zonder enige expressie, wachtend in plaats van annulerend. Die rij is verworven vóór de
+  // eerste job, dus vóór de selectie en vóór de `rate_limit`-meting.
+  assert.equal(writer.workflowLevelConcurrency, true);
+  assert.deepEqual(writer.workflowConcurrency, {
+    unparseable: false,
+    group: TRUSTED_WRITER_REPOSITORY_LOCK_GROUP,
+    cancelInProgress: 'false',
+    queue: 'max',
+  });
+  assert.equal(isRepositoryWideQueuedLock(writer.workflowConcurrency), true);
   assert.equal(writer.usesSecrets, false);
   assert.equal(writer.usesArtifactsOrCache, false);
   assert.deepEqual(writer.checkoutRefs, [
@@ -848,13 +876,12 @@ test('T14. de schrijfjob moet PER PULL REQUEST in een WACHTENDE rij staan', () =
   });
   assert.ok(writerViolations(verkeerdeSleutel).includes(nietGeserialiseerd));
 
-  // MUTATIE 6: een concurrency op WORKFLOWNIVEAU. Die geldt voor de hele run en zet alle PR's van
-  // een schedulebeurt weer achter elkaar in één rij — of erger, laat ze elkaar annuleren.
-  const werkstroomRij = [
-    schoneWriter().replace('permissions: {}', 'permissions: {}\nconcurrency:\n  group: live-gate\n  cancel-in-progress: false'),
-  ][0];
-  assert.ok(writerViolations(werkstroomRij)
-    .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_HAS_WORKFLOW_LEVEL_CONCURRENCY}:${TRUSTED_WRITER}`));
+  // MUTATIE 6: de per-PR-rij weghalen terwijl de globale rij blijft staan. De twee rijen zijn geen
+  // alternatieven — de globale serialiseert het quotum, de per-PR-rij de schrijfbeurten per head —
+  // dus mag het wegvallen van de ene niet door de andere gedekt worden.
+  assert.ok(writerViolations(schoneWriter({ rij: [] })).includes(nietGeserialiseerd));
+  assert.ok(!writerViolations(schoneWriter({ rij: [] }))
+    .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_NOT_REPOSITORY_QUEUED}:${TRUSTED_WRITER}`));
 });
 
 test('T14a. verschillende PR-nummers leveren verschillende rijen op, dezelfde PR precies één', () => {
@@ -943,4 +970,193 @@ test('T15. `issue_comment` met schrijfrechten mag alleen in de trusted writer st
 
   // En in de writer zelf is het toegestaan.
   assert.deepEqual(writerViolations(schoneWriter()), []);
+});
+
+
+// --- De repositorybrede quotumrij (V13) ----------------------------------------------------------
+
+test('T16. de trusted writer serialiseert de HELE run repositorybreed, vóór de quotummeting', () => {
+  // De bevinding die dit sluit: de per-PR-jobrij begrenst één run correct, maar de quotummeting is
+  // daarmee nog niet atomair over RUNS. Twee eventruns voor verschillende pull requests vallen in
+  // verschillende jobrijen, lezen dus tegelijk hetzelfde `rate_limit.remaining` en reserveren
+  // allebei datzelfde restant — terwijl het uurquotum per REPOSITORY gedeeld is.
+  const tekst = readFileSync(TRUSTED_WRITER, 'utf8');
+  const writer = analyzeWorkflow(tekst);
+
+  assert.equal(isRepositoryWideQueuedLock(writer.workflowConcurrency), true);
+  assert.deepEqual(writer.workflowConcurrency, {
+    unparseable: false,
+    group: TRUSTED_WRITER_REPOSITORY_LOCK_GROUP,
+    cancelInProgress: 'false',
+    queue: 'max',
+  });
+
+  // De groep draagt GEEN enkele expressie. Was er één, dan viel hij per run, per event of per PR
+  // uiteen in verschillende groepen en serialiseerde hij niets.
+  assert.doesNotMatch(writer.workflowConcurrency.group, /\$\{\{/);
+  assert.doesNotMatch(writer.workflowConcurrency.group,
+    /github\.(run_id|run_number|run_attempt|event|sha|ref|actor|job)/);
+
+  // DE VOLGORDE IS DE HELE EIGENSCHAP: de rij staat op workflowniveau en dus vóór `jobs:`. GitHub
+  // verwerft een workflowbrede groep vóór de eerste job start, dus vallen zowel de selectie als de
+  // `rate_limit`-meting BINNEN de lock, en komt de lock pas vrij als alle matrixwriters klaar zijn.
+  //
+  // De posities worden in de RUWE tekst gemeten en niet in `structureLines()`: de meetopdracht zelf
+  // staat in een `run:`-blok-scalar, en die wordt door de structuurlezer bewust overgeslagen.
+  const ruw = tekst.split('\n');
+  const rijIndex = ruw.findIndex((l) => /^concurrency:/.test(l));
+  const jobsIndex = ruw.findIndex((l) => /^jobs:/.test(l));
+  const meetIndex = ruw.findIndex((l) => /gh api rate_limit/.test(l));
+  const selectieIndex = ruw.findIndex((l) => /^  selecteer:/.test(l));
+  assert.notEqual(rijIndex, -1, 'de repositorybrede rij staat in het bestand');
+  assert.notEqual(meetIndex, -1, 'de rate_limit-meting staat in het bestand');
+  assert.ok(rijIndex < jobsIndex, 'de rij staat vóór het jobsblok');
+  assert.ok(jobsIndex < selectieIndex, 'de selectiejob staat binnen het jobsblok');
+  assert.ok(selectieIndex < meetIndex, 'de rate_limit-meting staat in de selectiejob');
+  // En die meting staat in de LEZENDE selectiejob, dus vóór elke schrijfbeurt en binnen de lock.
+  assert.ok(meetIndex < ruw.findIndex((l) => /^  schrijf:/.test(l)));
+
+  // En de per-PR-rij staat er nog steeds naast: de globale rij serialiseert het QUOTUM, de per-PR-rij
+  // de schrijfbeurten op één head. De ene vervangt de andere niet.
+  const schrijf = writer.jobs.find((j) => j.id === 'schrijf');
+  assert.equal(isPerPullRequestQueuedWriteJob(schrijf), true);
+  assert.equal(schrijf.concurrency.queue, 'max');
+  assert.equal(schrijf.concurrency.cancelInProgress, 'false');
+});
+
+test('T16a. elke aanleiding valt in DEZELFDE repositorybrede groep — event, event, schedule', () => {
+  // De groep bevat geen expressie, dus is er niets om in te vullen: welke render je ook probeert,
+  // het resultaat is dezelfde string. Dat wordt hier uitgevoerd in plaats van beweerd, met de
+  // contextvelden die per aanleiding verschillen.
+  const groep = analyzeWorkflow(readFileSync(TRUSTED_WRITER, 'utf8')).workflowConcurrency.group;
+  const render = (context) => groep.replace(/\$\{\{\s*([^}]+?)\s*\}\}/g,
+    (_, expr) => String(context[expr] ?? ''));
+
+  const aanleidingen = [
+    { 'github.event_name': 'issue_comment', 'github.event.issue.number': 74, 'github.run_id': 1 },
+    { 'github.event_name': 'issue_comment', 'github.event.issue.number': 75, 'github.run_id': 2 },
+    { 'github.event_name': 'workflow_run', 'github.event.workflow_run.id': 9, 'github.run_id': 3 },
+    { 'github.event_name': 'schedule', 'github.run_id': 4 },
+  ];
+  const groepen = new Set(aanleidingen.map(render));
+  assert.equal(groepen.size, 1, 'twee eventruns én een schedule delen één repositorybrede rij');
+  assert.deepEqual([...groepen], [TRUSTED_WRITER_REPOSITORY_LOCK_GROUP]);
+
+  // Veertig geburste events leveren evengoed één groep op. Wat daarvan het GEVOLG is voor de
+  // gedeelde teller — dat er nooit twee runs tegelijk tegen hetzelfde restant beslissen — wordt in
+  // `test/autocoding-live-gate-targets.test.mjs` met de echte budgetten doorgerekend.
+  const burst = Array.from({ length: 40 }, (_, i) => render({
+    'github.event_name': 'issue_comment', 'github.event.issue.number': 100 + i, 'github.run_id': i,
+  }));
+  assert.equal(new Set(burst).size, 1);
+
+  // De per-PR-groep doet juist het tegenovergestelde en moet dat blijven doen.
+  const schrijf = analyzeWorkflow(schoneWriter()).jobs.find((j) => j.id === 'schrijf');
+  const perPr = (n) => schrijf.concurrency.group.replace(/\$\{\{\s*matrix\.pr\s*\}\}/, String(n));
+  assert.equal(new Set([74, 75, 76].map(perPr)).size, 3);
+});
+
+test('T16b. elke afwijkende vorm van de repositorybrede rij is fail-closed', () => {
+  const nietRepositoryBreed = `${TRUST_VIOLATION.TRUSTED_WRITER_NOT_REPOSITORY_QUEUED}:${TRUSTED_WRITER}`;
+  assert.deepEqual(writerViolations(schoneWriter()), []);
+
+  const globaal = (regels) => writerViolations(schoneWriter({ globaleRij: regels }));
+
+  // MUTATIE 1: helemaal geen repositorybrede rij — de V12-vorm. Twee eventruns voor verschillende
+  // PR's meten dan weer gelijktijdig hetzelfde resterende quotum.
+  assert.ok(globaal([]).includes(nietRepositoryBreed));
+
+  // MUTATIE 2: een DYNAMISCHE groep. Elke suffix die per run, per event of per PR verschilt splitst
+  // de rij op en serialiseert dus niets meer. `github.run_number` is precies de vorm die eerder al
+  // een defect opleverde.
+  for (const dynamisch of [
+    '${{ github.run_id }}',
+    'autocoding-shield-live-gate-repository-${{ github.run_number }}',
+    'autocoding-shield-live-gate-repository-${{ github.event_name }}',
+    'autocoding-shield-live-gate-repository-${{ github.event.issue.number }}',
+    'autocoding-shield-live-gate-repository-${{ matrix.pr }}',
+    'een-andere-vaste-groep',
+  ]) {
+    assert.ok(globaal([
+      'concurrency:',
+      `  group: ${dynamisch}`,
+      '  cancel-in-progress: false',
+      '  queue: max',
+    ]).includes(nietRepositoryBreed), dynamisch);
+  }
+
+  // MUTATIE 3: `queue: single`. GitHub bewaart dan hooguit ÉÉN wachtende run per groep en annuleert
+  // de vorige — precies de eigenschap waarom een globale rij tot en met V12 geweigerd werd. Zonder
+  // `max` is de rij een verliespost in plaats van een serialisatie.
+  assert.ok(globaal([
+    'concurrency:',
+    `  group: ${TRUSTED_WRITER_REPOSITORY_LOCK_GROUP}`,
+    '  cancel-in-progress: false',
+    '  queue: single',
+  ]).includes(nietRepositoryBreed));
+
+  // MUTATIE 4: `queue` weglaten. De GitHub-standaard is `single`, dus is dit dezelfde stille
+  // verliespost — en een ontbrekende sleutel mag nooit als "waarschijnlijk goed" gelezen worden.
+  assert.ok(globaal([
+    'concurrency:',
+    `  group: ${TRUSTED_WRITER_REPOSITORY_LOCK_GROUP}`,
+    '  cancel-in-progress: false',
+  ]).includes(nietRepositoryBreed));
+
+  // MUTATIE 5: annuleren in plaats van wachten. Dan kapt een nieuwe aanleiding een lopende
+  // schrijfbeurt af en blijft een head op `pending` staan.
+  assert.ok(globaal([
+    'concurrency:',
+    `  group: ${TRUSTED_WRITER_REPOSITORY_LOCK_GROUP}`,
+    '  cancel-in-progress: true',
+    '  queue: max',
+  ]).includes(nietRepositoryBreed));
+
+  // MUTATIE 6: onleesbare en scalaire vormen. Een rij die niet met zekerheid te lezen is, is geen
+  // rij; de scalarvorm draagt per definitie geen `queue`.
+  assert.ok(globaal(['concurrency: { group: autocoding-shield-live-gate-repository'])
+    .includes(nietRepositoryBreed));
+  assert.ok(globaal([`concurrency: ${TRUSTED_WRITER_REPOSITORY_LOCK_GROUP}`])
+    .includes(nietRepositoryBreed));
+
+  // En de flow-vorm met alle drie de sleutels is dezelfde YAML en dus WEL toegestaan; anders zou de
+  // regel niet meer meten maar alleen nog op opmaak blokkeren.
+  assert.deepEqual(globaal([
+    `concurrency: { group: ${TRUSTED_WRITER_REPOSITORY_LOCK_GROUP}, cancel-in-progress: false, queue: max }`,
+  ]), []);
+});
+
+test('T16c. de lezer van de workflowbrede rij is zelf gemeten, niet aangenomen', () => {
+  const lees = (regels) => extractWorkflowConcurrency(structureLines(regels.join('\n')));
+
+  // Geen rij op workflowniveau.
+  assert.equal(lees(['name: x', 'jobs:', '  a:', '    runs-on: ubuntu-latest']), null);
+
+  // Een rij op JOBNIVEAU is géén workflowbrede rij. Zou de lezer die meetellen, dan zou de per-PR-rij
+  // de globale eis kunnen vervullen en was de quotumrace niet gesloten.
+  assert.equal(lees([
+    'name: x', 'jobs:', '  a:', '    concurrency:', '      group: g', '      queue: max',
+  ]), null);
+
+  assert.deepEqual(
+    lees(['name: x', 'concurrency:', '  group: g', '  cancel-in-progress: false', '  queue: max']),
+    { unparseable: false, group: 'g', cancelInProgress: 'false', queue: 'max' },
+  );
+  assert.deepEqual(
+    lees(['name: x', 'concurrency: { group: g, cancel-in-progress: false, queue: max }']),
+    { unparseable: false, group: 'g', cancelInProgress: 'false', queue: 'max' },
+  );
+  assert.deepEqual(
+    lees(['name: x', 'concurrency: alleen-een-groep']),
+    { unparseable: false, group: 'alleen-een-groep', cancelInProgress: '', queue: '' },
+  );
+  assert.equal(lees(['name: x', 'concurrency: { group: g'])?.unparseable, true);
+
+  // En de predicaat-kant: onleesbaar, leeg en de standaardwaarden zijn allemaal onvoldoende.
+  assert.equal(isRepositoryWideQueuedLock(null), false);
+  assert.equal(isRepositoryWideQueuedLock({ unparseable: true, group: TRUSTED_WRITER_REPOSITORY_LOCK_GROUP, cancelInProgress: 'false', queue: 'max' }), false);
+  assert.equal(isRepositoryWideQueuedLock({ unparseable: false, group: TRUSTED_WRITER_REPOSITORY_LOCK_GROUP, cancelInProgress: 'false', queue: 'max' }), true);
+
+  // De vaste groepsnaam is zelf een literal zonder expressie — anders was de hele eis leeg.
+  assert.doesNotMatch(TRUSTED_WRITER_REPOSITORY_LOCK_GROUP, /\$\{\{/);
 });
