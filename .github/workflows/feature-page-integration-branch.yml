@@ -1,0 +1,66 @@
+name: feature-page-integration-branch
+
+on:
+  push:
+    branches:
+      - claude1/cockpit-all-features-001-20260811
+
+permissions: {}
+
+concurrency:
+  group: feature-page-integration-branch
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    if: ${{ !contains(github.event.head_commit.message, '[feature-integration]') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: claude1/cockpit-all-features-001-20260811
+          fetch-depth: 0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+
+      - name: Integreer features.html fail-closed
+        run: node scripts/apply-feature-page-integration.mjs
+
+      - name: Alle tests
+        run: node --test
+
+      - name: Productiebouw zonder publicatie
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/build.mjs
+
+      - name: Controleer de vijf publieke bestanden
+        run: |
+          set -euo pipefail
+          test -s public/index.html
+          test -s public/contentstroom.html
+          test -s public/features.html
+          test -s public/status.json
+          test -f public/.nojekyll
+          onverwacht="$(find public -mindepth 1 ! -name 'index.html' ! -name 'contentstroom.html' ! -name 'features.html' ! -name 'status.json' ! -name '.nojekyll' -printf '%P\n')"
+          test -z "$onverwacht" || { echo "onverwachte publieke bestanden: $onverwacht"; exit 1; }
+
+      - name: Land de geteste integratie op dezelfde branch
+        env:
+          BRANCH: claude1/cockpit-all-features-001-20260811
+        run: |
+          set -euo pipefail
+          rm -f scripts/apply-feature-page-integration.mjs .github/workflows/feature-page-integration-branch.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'geen integratiewijzigingen te committen'
+            exit 0
+          fi
+          git commit -m 'feat(cockpit): integrate full feature drill-down [feature-integration]'
+          git push origin "HEAD:${BRANCH}"
