@@ -81,9 +81,11 @@ name: autocoding-shield-live-gate
 # VERSCHILLENDE pull requests in verschillende rijen. Ze draaien dan gelijktijdig, lezen allebei
 # hetzelfde `rate_limit.remaining`, en reserveren allebei datzelfde restant. Elke run blijft
 # afzonderlijk binnen zijn eigen begroting terwijl ze samen over het GEDEELDE uurquotum heen gaan:
-# een schedule kost hoogstens 654 verzoeken, een event hoogstens 30, en het quotum is er duizend per
-# repository per uur — dus is 40 geburste events (1200) al genoeg, en een schedule plus twaalf
-# events (1014) evengoed.
+# een schedule kost hoogstens 754 verzoeken, een event hoogstens 34, en het quotum is er duizend per
+# repository per uur — dus is 30 geburste events (1020) al genoeg, en een schedule plus acht events
+# (1026) evengoed. (Die getallen waren in V13 nog 654 en 30; V17 telt er per pull request vier
+# verzoeken bij voor de head-isolatie hieronder. De rekensom staat in
+# `PER_PULL_REQUEST_REQUEST_BUDGET`.)
 #
 # De reparatie is één rij om de HELE run: een workflowbrede `concurrency:` met een VASTE groep,
 # `cancel-in-progress: false` en `queue: max`. Omdat de groep op workflowniveau staat, is hij
@@ -99,6 +101,20 @@ name: autocoding-shield-live-gate
 # aanleidingen voor dezelfde PR nooit door elkaar heen schrijven. `test/autocoding-workflow-trust.test.mjs`
 # dwingt beide vormen statisch af en keurt elke afwijking — geen rij, dynamische groep, `single`,
 # ontbrekende `queue`, `cancel-in-progress: true` — fail-closed af.
+#
+# WAT ER IN V17 VERANDERDE. V13 tot en met V16 serialiseerden de schrijfacties correct, maar de
+# uitspraak zelf bleef aan de COMMIT hangen: één vaste statuscontext op de head-SHA. Codex-bevinding
+# `3835302930` mat dat twee open pull requests dezelfde volledige head kunnen dragen — dezelfde
+# branch tegen twee bases, of twee branches naar dezelfde commit. Een `success` voor de PR die
+# werkelijk GO is stond dan op GitHub óók op de andere PR. Locks helpen daar niet tegen: ze ordenen
+# de writes, maar de laatst geschreven status geldt hoe dan ook voor beide.
+#
+# De schrijfjob meet daarom sinds V17, ná zijn eigen hermeting en vóór elke mogelijke `success`, de
+# actuele open-PR-lijst met dezelfde harde bounded-page discipline en vergelijkt VOLLEDIGE
+# `head.sha`-waarden. Alleen precies één open pull request met die head, en exact het gemeten
+# PR-nummer, bereikt de gewone poortevaluatie; alles anders is `failure` met de vaste redencode
+# `HEAD_NOT_ISOLATED`. De statuscontext blijft bewust VAST — een required check moet één canonieke
+# naam houden, dus wordt de isolatie afgedwongen en niet de naam gesplitst.
 #
 # BOOTSTRAP, eerlijk benoemd: een `workflow_run`- en `issue_comment`-workflow bestaat pas ná merge op
 # de default branch. PR #74 kan deze keten dus niet zelf live bewijzen. De poort staat bovendien nog
@@ -312,6 +328,7 @@ jobs:
              [ -f scripts/autocoding/collect-shield-input.mjs ] && \
              [ -f scripts/autocoding/publish-live-status.mjs ] && \
              [ -f scripts/autocoding/select-live-gate-targets.mjs ] && \
+             [ -f scripts/autocoding/verify-head-isolation.mjs ] && \
              [ -f scripts/autocoding/gh-bounded-pages.sh ] && \
              [ -f CONTROL/AUTOCODING/policy.v1.json ]; then
             echo 'trusted_gate_files=true' >> "$GITHUB_OUTPUT"
@@ -350,8 +367,10 @@ jobs:
       #   1. hermeet het PR-object via de API en lees daaruit de VOLLEDIGE head;
       #   2. publiceer ONMIDDELLIJK `pending` op die head — vanaf dat moment kan deze head geen oude
       #      `success` meer dragen, wat er verder ook misgaat;
-      #   3. haal pas daarna alle overige bewijs-GET's op;
-      #   4. publiceer de eindstatus uitsluitend op diezelfde, opnieuw gemeten head.
+      #   3. toets dat precies ÉÉN open pull request deze volledige head draagt, en dat dat exact
+      #      deze pull request is (V17, zie de stap zelf);
+      #   4. haal pas daarna alle overige bewijs-GET's op;
+      #   5. publiceer de eindstatus uitsluitend op diezelfde, opnieuw gemeten head.
       #
       # Een gequeueëde OUDERE aanleiding kan hierdoor geen oudere momentopname publiceren: zij leest
       # al haar bewijs pas nadat zij de rij heeft gekregen, dus is haar momentopname per definitie de
@@ -416,7 +435,55 @@ jobs:
             overall=1
           fi
 
-          # 3. Uitsluitend read-only GET's. Geen enkel veld hieruit wordt gelogd.
+          # 3. HEAD-ISOLATIE, vóór elk bewijsverzoek en dus ruim vóór elke mogelijke `success`.
+          #
+          #    De commitstatus hangt aan de COMMIT en niet aan de pull request. Twee open PR's kunnen
+          #    dezelfde volledige head-SHA dragen — dezelfde branch tegen twee bases, of twee
+          #    branches die naar dezelfde commit wijzen. Een `success` voor de PR die werkelijk GO is
+          #    geldt op GitHub dan evengoed voor de andere. De per-PR- en repositorybrede rijen
+          #    ordenen de writes maar isoleren die BETEKENIS niet: ze schrijven keurig na elkaar, en
+          #    de laatste wint voor allebei.
+          #
+          #    Daarom wordt hier, ná de hermeting, de actuele open-PR-lijst opgehaald met dezelfde
+          #    harde bounded-page discipline en op VOLLEDIGE `head.sha`-waarden vergeleken — nooit op
+          #    branchnaam en nooit op een prefix. Alleen precies één open PR met deze head, en exact
+          #    dit PR-nummer, mag de gewone poortevaluatie bereiken.
+          #
+          #    Alles anders — nul dragers, twee of meer, een andere PR, een onleesbare lijst, een op
+          #    de paginagrens afgekapte lijst — zet de vaste redencode `HEAD_NOT_ISOLATED` als
+          #    uitvoeringsfout. Die maakt de eindstatus hieronder `failure` op deze head en slaat het
+          #    hele bewijstraject over: er valt niets te beslissen zolang de drager van de uitspraak
+          #    niet eenduidig is. De logregel draagt geen nummer, geen SHA en geen branchnaam; het
+          #    script zelf schrijft uitsluitend één literal uit een gesloten verzameling.
+          gh_bounded_pages "repos/$REPOSITORY/pulls?state=open" \
+            "$raw/open-pulls.json" \
+            "$GH_BOUNDED_ISOLATION_PAGES" \
+            "$raw/pages-open-pulls"
+          open_rc=$?
+          isolatie_compleet='onleesbaar'
+          case "$open_rc" in
+            0) isolatie_compleet=true ;;
+            # De laatst toegestane pagina was VOL: er kan een tweede drager van deze head bestaan op
+            # een pagina die nooit is opgehaald. Dat is geen halve lijst maar geen zicht.
+            2) isolatie_compleet=false ;;
+          esac
+
+          geisoleerd=false
+          if [ "$isolatie_compleet" != 'onleesbaar' ]; then
+            if node scripts/autocoding/verify-head-isolation.mjs \
+              --open-pulls "$raw/open-pulls.json" \
+              --open-pulls-complete "$isolatie_compleet" \
+              --pull-request "$number" \
+              --head-sha "$head_sha"; then
+              geisoleerd=true
+            fi
+          fi
+          if [ "$geisoleerd" != 'true' ]; then
+            echo '::error::HEAD_NOT_ISOLATED'
+            execution_error='HEAD_NOT_ISOLATED'
+          fi
+
+          # 4. Uitsluitend read-only GET's. Geen enkel veld hieruit wordt gelogd.
           #
           #    Elke LIJST loopt via `gh_bounded_pages` en kost dus hoogstens `$GH_BOUNDED_EVIDENCE_PAGES`
           #    verzoeken. Dat is de hele reparatie van V11: met `--paginate` was er geen bovengrens en
@@ -426,6 +493,11 @@ jobs:
           #    Dat is fail-closed: er wordt geen vijfde pagina gehaald en er volgt geen `success`,
           #    maar `failure` met `GATE_EXECUTION_ERROR` op de al gemeten head. Een onvolledige oogst
           #    lijkt namelijk precies op een schone PR — geen tegenstem gevonden.
+          #
+          #    De hele lus wordt overgeslagen zodra de isolatie hierboven al is mislukt. Dat is geen
+          #    zuinigheid maar dezelfde fail-closed lijn: zonder eenduidige drager kan er geen
+          #    uitspraak volgen, dus is elk bewijsverzoek quotum dat niets meer kan beslissen.
+          if [ -z "$execution_error" ]; then
           for endpoint in \
             "git/commits/$head_sha:head-commit" \
             "pulls/$number/commits:pr-commits" \
@@ -449,6 +521,7 @@ jobs:
               fi
             fi
           done
+          fi
 
           # De uitspraak. Een NO_GO eindigt hier non-zero; dat is geen uitvoeringsfout maar de
           # uitkomst zelf, en de publicatie hieronder is de poort. Een echte crash laat
@@ -467,7 +540,7 @@ jobs:
             fi
           fi
 
-          # 4. Publiceert ALTIJD op de onder deze lock gemeten head, onder de vaste context.
+          # 5. Publiceert ALTIJD op de onder deze lock gemeten head, onder de vaste context.
           #    `success` uitsluitend bij een bewezen GO; elke NO_GO, parsefout, truncatie, ontbrekend
           #    bewijs of uitvoeringsfout wordt `failure` op diezelfde head.
           if ! node scripts/autocoding/publish-live-status.mjs \

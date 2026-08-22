@@ -36,6 +36,14 @@ GH_BOUNDED_EVIDENCE_PAGES=4
 # gemeten stand was er 126. Spiegelbeeld van `SELECTION_PAGE_BUDGET`.
 GH_BOUNDED_SELECTION_PAGES=4
 
+# Het aantal pagina's van de open-PR-lijst in de ISOLATIEMETING van de schrijfjob. Diezelfde lijst,
+# maar een ander moment en een ander doel: de selectiejob bepaalt er WELKE pull requests gemeten
+# worden, de schrijfjob toetst er of de gemeten head door precies één open pull request wordt
+# gedragen. Zie `scripts/autocoding/verify-head-isolation.mjs`. Spiegelbeeld van
+# `ISOLATION_PAGE_BUDGET`; bewust een eigen naam, zodat het ene budget niet ongemerkt met het andere
+# meebeweegt.
+GH_BOUNDED_ISOLATION_PAGES=4
+
 # `gh_bounded_pages <api-pad> <uitvoerbestand> <max-pagina's> <werkmap>`
 #
 #   rc 0 — de lijst is VOLLEDIG opgehaald en staat in het uitvoerbestand.

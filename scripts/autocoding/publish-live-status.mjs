@@ -46,6 +46,15 @@ export const PUBLISH_ERROR = Object.freeze({
   GATE_EXECUTION_ERROR: 'GATE_EXECUTION_ERROR',
   GATE_RESULT_UNREADABLE: 'GATE_RESULT_UNREADABLE',
   HEAD_UNMEASURED: 'HEAD_UNMEASURED',
+  /**
+   * De head waarop geschreven zou worden, wordt op dit moment door meer dan één open pull request
+   * gedragen — of dat is niet uit te sluiten. Zie `scripts/autocoding/verify-head-isolation.mjs`:
+   * een commitstatus hoort bij de COMMIT, dus zou een `success` voor de goedgekeurde pull request
+   * op GitHub evengoed op de andere gelden. Eén vaste code voor alle vormen van die twijfel — nul
+   * dragers, twee of meer, een andere pull request, een onleesbare of mogelijk afgekapte lijst —
+   * zodat de omschrijving niet verraadt hoeveel of welke pull requests deze commit delen.
+   */
+  HEAD_NOT_ISOLATED: 'HEAD_NOT_ISOLATED',
   STATUS_CONTEXT_INVALID: 'STATUS_CONTEXT_INVALID',
   REPOSITORY_INVALID: 'REPOSITORY_INVALID',
   STATUS_TRANSPORT_ERROR: 'STATUS_TRANSPORT_ERROR',
