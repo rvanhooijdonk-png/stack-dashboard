@@ -23,7 +23,8 @@ import { join } from 'node:path';
 
 import {
   selectTargets, isTrustedWorkflowRunSource, normaliseOpenPullRequests, parseTargetArgs, runSelect,
-  EXPECTED_SOURCE, OPEN_PULL_REQUEST_LIMIT, TARGET_OUTCOME, TARGET_REASON, TARGET_SELECTION,
+  EXPECTED_SOURCE, HEAD_BOUND_SOURCE_EVENTS, OPEN_PULL_REQUEST_LIMIT, TARGET_OUTCOME, TARGET_REASON,
+  TARGET_SELECTION,
 } from '../scripts/autocoding/select-live-gate-targets.mjs';
 
 const TRUSTED_WRITER = '.github/workflows/autocoding-shield-live-gate.yml';
@@ -143,6 +144,49 @@ test('S4. issue_comment- en schedule-aanleidingen meten alle open PR\'s', () => 
   const leeg = selectTargets({ eventName: 'schedule', openPullRequests: [] });
   assert.equal(leeg.outcome, TARGET_OUTCOME.MEASURE);
   assert.deepEqual(leeg.targets, []);
+});
+
+test('S4b. een issue_comment-hint versmalt nooit, ook niet als hij precies één PR aanwijst', () => {
+  // Live gereproduceerd: een commentrun draagt de head van de default branch. Staat er precies één
+  // open fork-PR met `head.ref=main` (en dus ook diens `head.sha`), dan MATCHT de hint eenduidig —
+  // op de verkeerde PR. Versmallen zou hier PR 74 zonder verse status laten. Beide hintvelden wijzen
+  // in deze opstelling naar PR 75; de eis is dat 74 én 75 gemeten worden.
+  const forkOpMain = openPr(75, { headSha: sha(5), headRef: 'main' });
+  const open = [openPr(74, { headRef: 'claude2/autocoding-live-gate-completion-20260822' }), forkOpMain];
+  const naComment = selectTargets({
+    eventName: 'workflow_run',
+    workflowRun: shieldRun({ event: 'issue_comment', head_sha: sha(5), head_branch: 'main' }),
+    openPullRequests: open,
+  });
+  assert.equal(naComment.outcome, TARGET_OUTCOME.MEASURE);
+  assert.equal(naComment.selection, TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS);
+  assert.deepEqual(naComment.targets, [74, 75]);
+
+  // De hint blijft wél gelden waar GitHub de bronrun echt aan één PR-head bindt. Zonder die
+  // versmalling zou elke review een volledige ronde kosten; mét een niet-gebonden bronevent erbij
+  // zou hij de verkeerde PR meten. Beide eigenschappen zitten in dezelfde lijst.
+  assert.deepEqual([...HEAD_BOUND_SOURCE_EVENTS], ['pull_request', 'pull_request_review']);
+  for (const event of HEAD_BOUND_SOURCE_EVENTS) {
+    const gebonden = selectTargets({
+      eventName: 'workflow_run',
+      workflowRun: shieldRun({ event, head_sha: sha(5), head_branch: 'main' }),
+      openPullRequests: open,
+    });
+    assert.equal(gebonden.selection, TARGET_SELECTION.HINT_MATCHED_HEAD_SHA, event);
+    assert.deepEqual(gebonden.targets, [75], event);
+  }
+
+  // Elk vertrouwd bronevent dat niet head-gebonden is, meet de volledige lijst — ook als er later
+  // een bronevent bij komt dat wél een eenduidige treffer oplevert.
+  for (const event of EXPECTED_SOURCE.events.filter((e) => !HEAD_BOUND_SOURCE_EVENTS.includes(e))) {
+    const ongebonden = selectTargets({
+      eventName: 'workflow_run',
+      workflowRun: shieldRun({ event, head_sha: sha(5), head_branch: 'main' }),
+      openPullRequests: open,
+    });
+    assert.equal(ongebonden.selection, TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS, event);
+    assert.deepEqual(ongebonden.targets, [74, 75], event);
+  }
 });
 
 test('S5. de volledige ronde is expliciet begrensd en faalt gesloten', () => {

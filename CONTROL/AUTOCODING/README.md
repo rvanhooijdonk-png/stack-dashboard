@@ -86,11 +86,16 @@ aanleiding te geloven:
    ander pad, een `workflow_dispatch`, een `push` — schrijft **geen enkele status** en is geen rode
    run: het is simpelweg geen aanleiding.
 2. De lijst zelf komt uit `GET /repos/{repo}/pulls?state=open`. De hint mag die lijst alleen
-   **versmallen**, nooit uitbreiden, en alleen bij een eenduidige treffer: precies één open PR met die
-   `head_sha`, anders precies één met die `head_ref`. Twee PR's met dezelfde branchnaam (bij forks
-   gewoon) leveren dus geen keuze op.
-3. Lukt dat niet — en bij `schedule` en `issue_comment` bestaat er sowieso geen bruikbare hint, want
-   dan draait de shield op de default branch — dan worden **alle open PR's** gemeten. Extra meten is
+   **versmallen**, nooit uitbreiden, en alleen als het bronevent hem aan een PR-head bindt: dat zijn
+   `pull_request` en `pull_request_review` (`HEAD_BOUND_SOURCE_EVENTS`), want daar draait de shield in
+   de context van die ene pull request. Versmallen mag dan nog steeds alleen bij een eenduidige
+   treffer: precies één open PR met die `head_sha`, anders precies één met die `head_ref`. Twee PR's
+   met dezelfde branchnaam (bij forks gewoon) leveren dus geen keuze op.
+3. Bij `issue_comment` worden `head_sha` én `head_branch` **volledig genegeerd**, en bij `schedule`
+   bestaat er geen hint. Een commentrun draait op de default branch en draagt dus de head van `main`;
+   heeft precies één open PR (een fork mag dat) `main` als head, dan zou versmallen op die hint
+   uitgerekend de verkeerde PR meten en alle andere statussen stale laten staan. In beide gevallen —
+   en overal waar de treffer niet eenduidig is — worden **alle open PR's** gemeten. Extra meten is
    onschadelijk (de uitspraak is een pure functie van de momentopname), een verkeerde PR meten laat een
    stale status staan. De asymmetrie bepaalt de keuze.
 4. Die volledige ronde is expliciet begrensd: meer dan `OPEN_PULL_REQUEST_LIMIT` (25) open PR's is een

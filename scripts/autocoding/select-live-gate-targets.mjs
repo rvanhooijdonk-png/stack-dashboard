@@ -8,13 +8,15 @@
  *     Naam, pad, `head_sha` en `head_branch` zijn dus hooguit een HINT, nooit een feit waarop een
  *     status geschreven mag worden. Outputs, artifacts en cache van die run worden hier niet gelezen
  *     en mogen dat ook nooit gaan doen.
- *   - Bij een `issue_comment` draait de shield op de default branch, dus wijst de hint helemaal niet
- *     naar de becommentarieerde PR. Bij `schedule` bestaat er überhaupt geen hint.
+ *   - Bij een `issue_comment` draait de shield op de default branch, dus binden `head_sha` en
+ *     `head_branch` aan die branch en niet aan de becommentarieerde PR. Bij `schedule` bestaat er
+ *     überhaupt geen hint.
  *
  * Daarom bepaalt deze module de doel-PR's OPNIEUW uit een read-only API-lijst van open pull
- * requests, en gebruikt hij de hint alleen om die lijst te versmallen wanneer hij precies één open PR
- * aanwijst. Lukt dat niet, dan worden alle open PR's gemeten — begrensd door een expliciete limiet
- * die fail-closed is: liever geen enkele status dan een stilzwijgend halve ronde.
+ * requests, en gebruikt hij de hint alleen om die lijst te versmallen wanneer het bronevent de
+ * bronrun werkelijk aan de PR-head bindt ÉN de hint precies één open PR aanwijst. Lukt dat niet, dan
+ * worden alle open PR's gemeten — begrensd door een expliciete limiet die fail-closed is: liever
+ * geen enkele status dan een stilzwijgend halve ronde.
  *
  * De uitspraak zelf is een pure functie van de API-momentopname per PR, dus een PR twee keer meten
  * levert twee keer dezelfde status op. Te veel meten kost API-budget; te weinig meten laat een stale
@@ -35,6 +37,18 @@ export const EXPECTED_SOURCE = Object.freeze({
   workflowPath: '.github/workflows/autocoding-shield.yml',
   events: Object.freeze(['pull_request', 'issue_comment', 'pull_request_review']),
 });
+
+/**
+ * De bronevents waarvan GitHub de bronrun WERKELIJK aan de PR-head bindt: bij `pull_request` en
+ * `pull_request_review` draait de shield in de context van die ene pull request, dus wijzen
+ * `head_sha` en `head_branch` naar diens head.
+ *
+ * `issue_comment` staat hier bewust NIET bij. Die run draait op de default branch, dus draagt hij
+ * de head van `main` — een hint die naar de verkeerde PR wijst zodra precies één open PR (een fork
+ * kan dat gewoon) `main` als head heeft. Versmallen op zo'n hint laat alle andere open PR's stale
+ * achter, en dat is duurder dan de extra metingen van een volledige ronde.
+ */
+export const HEAD_BOUND_SOURCE_EVENTS = Object.freeze(['pull_request', 'pull_request_review']);
 
 /** Bovengrens op één ronde. Meer open PR's dan dit is een weigering, geen gedeeltelijke ronde. */
 export const OPEN_PULL_REQUEST_LIMIT = 25;
@@ -98,20 +112,23 @@ export function normaliseOpenPullRequests(payload) {
 /**
  * Bepaalt welke PR-nummers deze ronde gemeten worden.
  *
- * De hint versmalt alleen bij een EENDUIDIGE treffer. Twee open PR's met dezelfde branchnaam (bij
- * een fork heel gewoon) leveren dus geen keuze op maar een volledige ronde: extra meten is
- * onschadelijk, de verkeerde PR meten zou een stale status laten staan.
+ * De hint doet alleen mee als het BRONEVENT hem aan een PR-head bindt, en versmalt dan alleen bij
+ * een EENDUIDIGE treffer. Twee open PR's met dezelfde branchnaam (bij een fork heel gewoon) leveren
+ * dus geen keuze op maar een volledige ronde: extra meten is onschadelijk, de verkeerde PR meten zou
+ * een stale status laten staan.
  */
 export function selectTargets({
   eventName, workflowRun, openPullRequests, limit = OPEN_PULL_REQUEST_LIMIT,
-  expected = EXPECTED_SOURCE,
+  expected = EXPECTED_SOURCE, headBoundEvents = HEAD_BOUND_SOURCE_EVENTS,
 }) {
   let hint = null;
   if (eventName === 'workflow_run') {
     if (!isTrustedWorkflowRunSource(workflowRun, expected)) {
       return { outcome: TARGET_OUTCOME.NO_OP, reason: TARGET_REASON.SOURCE_NOT_TRUSTED, targets: [] };
     }
-    hint = workflowRun;
+    // Alleen een head-gebonden bronevent levert een bruikbare hint; bij `issue_comment` worden
+    // `head_sha` en `head_branch` volledig genegeerd in plaats van als zwakke aanwijzing gebruikt.
+    hint = headBoundEvents.includes(workflowRun.event) ? workflowRun : null;
   } else if (eventName !== 'schedule') {
     // De workflow kent maar twee events. Een derde betekent dat bestand en script uit elkaar zijn
     // gelopen; dat is een defect en geen ruis, dus wordt het rood in plaats van stil.
