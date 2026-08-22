@@ -14,10 +14,28 @@
 //
 // De conclusie is niet nog een isolatiepatch maar een andere plaats voor de bevoegdheid. Dit
 // bestand is die plaats: één beslisser die de PULL REQUEST ZELF hermeet en, indien geactiveerd,
-// uitsluitend díé pull request kan mergen — via `PUT /repos/{owner}/{repo}/pulls/{number}/merge`
-// met de exact gemeten volledige `sha`. Er is geen artefact meer dat een tweede pull request kan
-// oppakken: het PR-nummer staat in het pad, de sha staat in het lichaam, en verschuift de head
-// tussen beslissing en effect dan eindigt de aanroep als 409-conflict in plaats van als merge.
+// uitsluitend díé pull request kan mergen. Er is geen artefact meer dat een tweede pull request kan
+// oppakken: het PR-nummer staat in het pad, de sha staat in het lichaam.
+//
+// V19 — CODEX `3835523940` (P1). De klassieke `PUT .../pulls/{n}/merge` is alleen op de head-sha
+// geconditioneerd: GitHub vergelijkt daarbij uitsluitend of de meegegeven `sha` nog de actuele head
+// is. Een BASE-retarget of het intrekken van een eigenaarsreview tussen meting B en het werkelijke
+// verzoek wordt door die vergelijking niet gezien — noch de base, noch ons eigen reviewbewijs wordt
+// door GitHub op het moment van de aanroep herbeoordeeld. Een directe merge-aanroep is daarom nooit
+// meer bereikbaar. In plaats daarvan is het EFFECT nu uitsluitend een aanvraag tot INSCHRIJVING in
+// GitHubs eigen merge queue — `PUT /repos/{owner}/{repo}/pulls/{number}/merge-async` met
+// `merge_action: "merge_queue"` — en die aanvraag wordt zelf pas toegelaten wanneer de meting bewijst
+// dat de base van deze pull request een ACTIEVE `merge_queue`-regel draagt
+// (`GET /repos/{owner}/{repo}/rules/branches/{base_ref}`, gemeten als `mergeQueueRules`). Ontbreekt
+// of is dat bewijs onleesbaar, dan is de uitkomst `NO_GO` en gebeurt er nul verzoeken — er bestaat in
+// deze code geen pad meer dat een directe merge doet.
+//
+// WAAROM DIT DE RACE STRUCTUREEL SLUIT EN NIET ALLEEN VERPLAATST. Het werkelijke mergen gebeurt bij
+// een inschrijving niet op het moment van ons verzoek, maar LATER, binnen GitHubs eigen wachtrij —
+// en die wachtrij herbeoordeelt de doelbranch vlak vóór het echte mergen opnieuw, als serverkant
+// autoriteit. De TOCTOU-opening zat in het feit dat WIJ de laatste beoordelaar waren op een moment
+// dat allang voorbij kon zijn; met `merge_queue` is GitHub zelf de laatste beoordelaar, op het
+// moment dat het er echt toe doet.
 //
 // SCHEIDING VAN BESLISSING EN EFFECT. `resolveFinalization` is puur: geen netwerk, geen bestanden,
 // geen klok. Zij levert een gesloten uitkomst — `FINALIZE_GO` of `FINALIZE_NO_GO` met redencodes
@@ -28,7 +46,10 @@
 // review gestart, geen branch aangeraakt en geen tweede reviewwet geparseerd: het native
 // tweevendorbewijs, de ownergate en de bewijsbinding komen ongewijzigd uit
 // `collect-shield-input.mjs` en `verify-review-gate.mjs`. Dit bestand voegt daar de MERGEspecifieke
-// eisen aan toe — PR-binding, base, required checks, driftdetectie — en niets anders.
+// eisen aan toe — PR-binding, base, required checks, driftdetectie, merge-queue-bewijs — en niets
+// anders. Er wordt in DEZE PR geen GitHub-ruleset of branch-protection gebouwd, geactiveerd of
+// gewijzigd: het bewijs wordt gelezen, niet aangemaakt. Of een repository daadwerkelijk een
+// merge-queue-regel draagt is een AFZONDERLIJKE, toekomstige activatiestap.
 //
 // STAND IN DEZE PR: `merge_finalizer_enabled` en `class_b_auto_merge_enabled` staan allebei op
 // `false`. Elke poging tot een echt effect eindigt daardoor op `FINALIZER_DISABLED` vóór er ook maar
@@ -93,6 +114,8 @@ export const FINALIZE_REASON = Object.freeze({
   TREE_UNMEASURED: 'TREE_UNMEASURED',
   BASE_UNMEASURED: 'BASE_UNMEASURED',
   BASE_REF_NOT_ALLOWED: 'BASE_REF_NOT_ALLOWED',
+  MERGE_QUEUE_RULES_UNREADABLE: 'MERGE_QUEUE_RULES_UNREADABLE',
+  SERVER_MERGE_QUEUE_PROOF_MISSING: 'SERVER_MERGE_QUEUE_PROOF_MISSING',
   BUILDER_ACTOR_NOT_ALLOWED: 'BUILDER_ACTOR_NOT_ALLOWED',
   TASK_ID_UNMEASURED: 'TASK_ID_UNMEASURED',
   EVIDENCE_INCOMPLETE: 'EVIDENCE_INCOMPLETE',
@@ -112,10 +135,13 @@ export const FINALIZE_REASON = Object.freeze({
  * transportuitkomst is iets anders dan een oordeel, en de twee mogen in een log niet op elkaar
  * lijken.
  *
- * 409, 405 en 422 zijn TERMINAAL. GitHub geeft 409 wanneer de meegegeven `sha` niet meer de head is
- * — precies de drift die deze finalizer moet vangen. Opnieuw proberen met de nieuwere head zou die
- * beveiliging omkeren: dan zou de finalizer een commit mergen die nooit is beoordeeld. Er is daarom
- * GEEN retrylus in dit bestand, op geen enkele statuscode.
+ * Dit zijn de statuscodes van `PUT .../pulls/{n}/merge-async` (niet meer van de klassieke
+ * `.../merge`): 400 (nog niet mergebaar, bv. gesloten), 403 (verboden), 404 (repository of pull
+ * request onvindbaar), 409 (voor deze pull request staat al een inschrijving in de wachtrij) en 422
+ * (validatie geweigerd, of het eindpunt is gespamd). ALLEMAAL TERMINAAL: er is geen retrylus in dit
+ * bestand, op geen enkele statuscode. Een 409 hier betekent niet meer "de head is verschoven" —
+ * die controle ligt nu bij de inschrijving zelf, verderop in GitHubs wachtrij — maar "er lag al een
+ * aanvraag"; ook dat is een reden om te stoppen en niet om opnieuw te proberen.
  */
 export const FINALIZE_ERROR = Object.freeze({
   FINALIZER_DISABLED: FINALIZE_REASON.FINALIZER_DISABLED,
@@ -123,8 +149,10 @@ export const FINALIZE_ERROR = Object.freeze({
   PULL_REQUEST_INVALID: 'PULL_REQUEST_INVALID',
   SHA_INVALID: 'SHA_INVALID',
   MERGE_METHOD_NOT_ALLOWED: 'MERGE_METHOD_NOT_ALLOWED',
-  MERGE_CONFLICT: 'MERGE_CONFLICT',
-  MERGE_NOT_ALLOWED: 'MERGE_NOT_ALLOWED',
+  MERGE_NOT_READY: 'MERGE_NOT_READY',
+  MERGE_FORBIDDEN: 'MERGE_FORBIDDEN',
+  MERGE_RESOURCE_NOT_FOUND: 'MERGE_RESOURCE_NOT_FOUND',
+  MERGE_ALREADY_QUEUED: 'MERGE_ALREADY_QUEUED',
   MERGE_REJECTED: 'MERGE_REJECTED',
   MERGE_TRANSPORT_ERROR: 'MERGE_TRANSPORT_ERROR',
   MERGE_STATUS_UNEXPECTED: 'MERGE_STATUS_UNEXPECTED',
@@ -135,12 +163,13 @@ export const FINALIZE_ERROR = Object.freeze({
  *
  *   1  `pulls/{n}`
  *   1  `git/commits/{sha}`
+ *   1  `rules/branches/{base_ref}` — het merge-queue-bewijs (V19, Codex `3835523940`)
  *  20  vijf bewijslijsten maal `LIST_PAGE_BUDGET` pagina's
  *   4  `commits/{sha}/check-runs` maal `CHECKS_PAGE_BUDGET` pagina's
  *  --
- *  26
+ *  27
  */
-export const FINALIZER_MEASUREMENT_REQUEST_BUDGET = 1 + 1 + (5 * LIST_PAGE_BUDGET)
+export const FINALIZER_MEASUREMENT_REQUEST_BUDGET = 1 + 1 + 1 + (5 * LIST_PAGE_BUDGET)
   + CHECKS_PAGE_BUDGET;
 
 /**
@@ -153,10 +182,10 @@ export const FINALIZER_PER_CANDIDATE_REQUEST_BUDGET = (2 * FINALIZER_MEASUREMENT
 
 /**
  * De begroting van een hele finalizerronde, inclusief de kandidatenlijst die eraan voorafgaat. Bij
- * `CANDIDATE_LIMIT_MAX` kandidaten is dat 4 + 25 × 53 = 1329, en dat past NIET binnen het gedeelde
+ * `CANDIDATE_LIMIT_MAX` kandidaten is dat 4 + 25 × 55 = 1379, en dat past NIET binnen het gedeelde
  * uurquotum minus reserve. Dat is geen ontwerpfout maar precies waarom de aanroeper deze functie
  * afmeet tegen het werkelijk resterende quotum vóór hij begint: `candidate_limit` in de policy staat
- * op 5 (4 + 5 × 53 = 269) en een hogere waarde moet zichzelf kunnen betalen op het moment zelf.
+ * op 5 (4 + 5 × 55 = 279) en een hogere waarde moet zichzelf kunnen betalen op het moment zelf.
  */
 export function finalizerRequestBudget(candidateCount) {
   const count = Number.isInteger(candidateCount) && candidateCount > 0 ? candidateCount : 0;
@@ -284,6 +313,21 @@ export function resolveRequiredChecks(checkRuns, requiredNames, headSha) {
   return { ok: reasons.size === 0, reasons: Array.from(reasons) };
 }
 
+/**
+ * Toetst of de gemeten regelset een ACTIEVE `merge_queue`-regel bevat voor de base van deze pull
+ * request. Dit is het bewijs dat GitHub zelf, en niet deze finalizer, de laatste beoordelaar is op
+ * het moment dat de merge echt gebeurt (zie de kopnotitie bij V19 / Codex `3835523940`).
+ *
+ * `rules/branches/{branch}` levert ALLE actieve regels op die uit rulesets op die branch van
+ * toepassing zijn, ongeacht de bron. Er wordt hier niets over de rest van die regels beoordeeld —
+ * dat is de taak van GitHub zelf op inschrijfmoment — alleen of het TYPE `merge_queue` erbij zit.
+ * Geen array, of een leeg antwoord, betekent: geen bewijs, en dus geen inschrijving.
+ */
+export function hasActiveMergeQueueRule(rules) {
+  if (!Array.isArray(rules)) return false;
+  return rules.some((rule) => rule?.type === 'merge_queue');
+}
+
 function digest(value) {
   return createHash('sha256').update(typeof value === 'string' ? value : '').digest('hex');
 }
@@ -331,6 +375,9 @@ function canonicalMeasurement(measurement) {
   const checks = normaliseCheckRuns(measurement?.checkRuns)
     .map((r) => `${r.name}|${r.head_sha}|${r.status}|${r.conclusion}`)
     .sort();
+  const mergeQueueRules = Array.isArray(measurement?.mergeQueueRules)
+    ? measurement.mergeQueueRules.map((rule) => tekst(rule?.type)).sort()
+    : null;
 
   return {
     pull_request: {
@@ -357,6 +404,7 @@ function canonicalMeasurement(measurement) {
     commits,
     files,
     checks,
+    merge_queue_rules: mergeQueueRules,
   };
 }
 
@@ -441,6 +489,17 @@ export function resolveFinalization({ pullRequest, measurement, policy }) {
   if (!cfg.allowed_base_refs.includes(context.pr_base_ref)) {
     add(FINALIZE_REASON.BASE_REF_NOT_ALLOWED);
   }
+
+  // Het merge-queue-bewijs. Zonder een ACTIEVE `merge_queue`-regel op deze base is er geen
+  // serverkant autoriteit die de merge later herbeoordeelt, en blijft een inschrijving net zo'n
+  // ongedekte belofte als de klassieke directe merge dat was. Dit is geen ruleset die hier wordt
+  // aangemaakt — alleen gelezen bewijs dat er elders al één bestaat.
+  if (!Array.isArray(measurement?.mergeQueueRules)) {
+    add(FINALIZE_REASON.MERGE_QUEUE_RULES_UNREADABLE);
+  } else if (!hasActiveMergeQueueRule(measurement.mergeQueueRules)) {
+    add(FINALIZE_REASON.SERVER_MERGE_QUEUE_PROOF_MISSING);
+  }
+
   if (!cfg.allowed_builder_actors.includes(context.builder_actor)) {
     add(FINALIZE_REASON.BUILDER_ACTOR_NOT_ALLOWED);
   }
@@ -501,20 +560,26 @@ export function resolveFinalization({ pullRequest, measurement, policy }) {
 }
 
 /**
- * HET EFFECT. Precies één verzoek, en alleen dit verzoek: `PUT /repos/{o}/{r}/pulls/{n}/merge`.
+ * HET EFFECT. Precies één verzoek, en alleen dit verzoek:
+ * `PUT /repos/{o}/{r}/pulls/{n}/merge-async` met `merge_action: "merge_queue"`. Geen ander
+ * `merge_action` is ooit toegestaan — niet `direct_merge`, niet `default` — want beide zouden GitHub
+ * kunnen laten kiezen voor een directe merge buiten de wachtrij om, en dat is precies de aanroep die
+ * V19 sluit (zie de kopnotitie, Codex `3835523940`). `resolveFinalization` heeft vóór dit punt al
+ * bewezen dat de base van deze pull request een actieve `merge_queue`-regel draagt; zonder dat bewijs
+ * is de uitkomst allang `NO_GO` en wordt deze functie niet met een GO-resultaat aangeroepen.
  *
  * Wat er NIET in het lichaam mag, en waarom:
  *
  *   - een BRANCHNAAM. Een branch beweegt; tussen beslissing en aanroep kan er een commit bij zijn
- *     gekomen en dan merget GitHub iets wat niemand heeft gezien;
+ *     gekomen en dan schrijft GitHub iets in de wachtrij wat niemand heeft gezien;
  *   - een AFGEKORTE SHA. Zeven tekens zijn geen identiteit maar een prefix, en GitHub zou hem
  *     weigeren of — erger — oplossen;
  *   - een SHA UIT EEN EVENTPAYLOAD. Die is bezorgd, niet gemeten.
  *
- * De `sha` uit `resolveFinalization` is de VOLLEDIGE, zelf gemeten head. GitHub vergelijkt hem met
- * de actuele head en antwoordt 409 zodra die verschoven is. Die 409 is de mechanische invulling van
- * de eis dat een headverschuiving als conflict eindigt — en hij is terminaal: er volgt geen tweede
- * poging met de nieuwe head, want die is niet beoordeeld.
+ * De `sha` uit `resolveFinalization` is de VOLLEDIGE, zelf gemeten head, en bindt de inschrijving
+ * aan exact die commit. Wat deze aanroep NIET meer zelf doet, is het echte mergen: dat verschuift
+ * naar GitHubs eigen wachtrij, die de doelbranch op het moment van het werkelijke mergen opnieuw
+ * beoordeelt. Elke statuscode hieronder is TERMINAAL — er is geen retrylus, op geen enkele code.
  *
  * De policyweigering staat vóór ELK netwerkverkeer en vóór elke andere validatie. Met de vlaggen op
  * `false` doet een aanroep dus nul verzoeken, ook wanneer alle argumenten kloppen.
@@ -549,7 +614,7 @@ export async function mergePullRequest({
     const doFetch = fetchImpl ?? globalThis.fetch;
     if (typeof doFetch !== 'function') throw new Error(FINALIZE_ERROR.MERGE_TRANSPORT_ERROR);
     response = await doFetch(
-      `https://api.github.com/repos/${repository}/pulls/${pullRequest}/merge`,
+      `https://api.github.com/repos/${repository}/pulls/${pullRequest}/merge-async`,
       {
         method: 'PUT',
         headers: {
@@ -559,7 +624,7 @@ export async function mergePullRequest({
           'user-agent': 'autocoding-shield',
           'x-github-api-version': '2022-11-28',
         },
-        body: JSON.stringify({ sha, merge_method: mergeMethod }),
+        body: JSON.stringify({ sha, merge_method: mergeMethod, merge_action: 'merge_queue' }),
       },
     );
   } catch {
@@ -568,9 +633,18 @@ export async function mergePullRequest({
     return { ok: false, blocked: FINALIZE_ERROR.MERGE_TRANSPORT_ERROR, requests: 1 };
   }
   const status = response?.status ?? 0;
-  if (status === 200) return { ok: true, status, requests: 1 };
-  if (status === 409) return { ok: false, blocked: FINALIZE_ERROR.MERGE_CONFLICT, status, requests: 1 };
-  if (status === 405) return { ok: false, blocked: FINALIZE_ERROR.MERGE_NOT_ALLOWED, status, requests: 1 };
+  // 200 — al gemerged of al ingeschreven; 202 — de inschrijving is aanvaard en loopt op de
+  // achtergrond verder. Beide zijn voor deze finalizer een geslaagd effect: het werkelijke mergen is
+  // vanaf hier aan GitHubs wachtrij, niet meer aan dit verzoek.
+  if (status === 200 || status === 202) return { ok: true, status, requests: 1 };
+  if (status === 400) return { ok: false, blocked: FINALIZE_ERROR.MERGE_NOT_READY, status, requests: 1 };
+  if (status === 403) return { ok: false, blocked: FINALIZE_ERROR.MERGE_FORBIDDEN, status, requests: 1 };
+  if (status === 404) {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESOURCE_NOT_FOUND, status, requests: 1 };
+  }
+  if (status === 409) {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_ALREADY_QUEUED, status, requests: 1 };
+  }
   if (status === 422) return { ok: false, blocked: FINALIZE_ERROR.MERGE_REJECTED, status, requests: 1 };
   return { ok: false, blocked: FINALIZE_ERROR.MERGE_STATUS_UNEXPECTED, status, requests: 1 };
 }
@@ -636,6 +710,7 @@ export const MEASUREMENT_FILES = Object.freeze({
   reviewComments: 'review-comments.json',
   changedFiles: 'files.json',
   checkRuns: 'check-runs.json',
+  mergeQueueRules: 'merge-queue-rules.json',
 });
 
 /**
@@ -745,7 +820,9 @@ export async function runFinalize(argv, { readFile, fetchImpl } = {}) {
     decision: FINALIZE_DECISION.GO,
     reasons: [],
     finalization_class: beslissingB.finalization_class,
-    effect: 'MERGED',
+    // `ok` betekent hier `200`/`202` op `merge-async`: de inschrijving is AANVAARD, niet dat het
+    // mergen zelf al heeft plaatsgevonden — dat gebeurt later, binnen GitHubs eigen wachtrij.
+    effect: 'MERGE_QUEUED',
   });
   return 0;
 }

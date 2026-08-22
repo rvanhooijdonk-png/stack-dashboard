@@ -30,7 +30,7 @@ import {
   finalizerRequestBudget, assertMergeFinalizerPolicySafe, normaliseCheckRuns,
   resolveRequiredChecks, measurementFingerprint, resolveFinalization, mergePullRequest,
   parseFinalizeArgs, FINALIZE_VALUE_OPTIONS, FINALIZE_BOOLEAN_FLAGS, MEASUREMENT_FILES,
-  readMeasurement, runFinalize,
+  readMeasurement, runFinalize, hasActiveMergeQueueRule,
 } from '../scripts/autocoding/finalize-merge.mjs';
 import {
   CANDIDATE_REASON, CANDIDATE_VALUE_OPTIONS, selectFinalizationCandidates,
@@ -39,6 +39,7 @@ import {
 import { REASON } from '../scripts/autocoding/verify-review-gate.mjs';
 import {
   SHARED_HOURLY_REQUEST_QUOTA, QUOTA_RESERVE, SELECTION_PAGE_BUDGET,
+  SCHEDULE_SLOT_SECONDS, SCHEDULE_BUCKET_LIMIT, scheduleSlotOf, selectScheduleBucket,
 } from '../scripts/autocoding/select-live-gate-targets.mjs';
 
 const FINALIZER = 'scripts/autocoding/finalize-merge.mjs';
@@ -52,6 +53,9 @@ const PR_A = 74;
 const PR_B = 75;
 const OWNER = 'rvanhooijdonk-png';
 const CHECK = 'autocoding-shield';
+// Slot 0: bij een bucket van één (elke lijst hieronder is korter dan `SCHEDULE_BUCKET_LIMIT`) is
+// `bezoek` 0 en begint het venster bij index 0 — dezelfde canonieke volgorde als vóór de rotatie.
+const NU = 0;
 
 const POLICY_BESTAND = Object.freeze(
   JSON.parse(readFileSync('CONTROL/AUTOCODING/policy.v1.json', 'utf8')),
@@ -130,6 +134,7 @@ function meting(overrides = {}) {
     reviewComments: kloon(raw('review-comments')),
     changedFiles: kloon(raw('files')),
     checkRuns: [[checkRun()]],
+    mergeQueueRules: [{ type: 'merge_queue' }],
     evidenceComplete: true,
     checksComplete: true,
     ...overrides,
@@ -620,7 +625,7 @@ test('M19. elk onexact argument blokkeert VÓÓR het transport', async () => {
   }
 });
 
-test('M20. de merge-aanroep is PRECIES één PUT met het PR-nummer in het pad en de volle sha erin', async () => {
+test('M20. de merge-aanroep is PRECIES één merge-queue-PUT met het PR-nummer in het pad en de volle sha erin', async () => {
   const fetchImpl = antwoordFetch(200);
   const uitkomst = await mergePullRequest({
     repository: 'rvanhooijdonk-png/stack-dashboard',
@@ -635,24 +640,33 @@ test('M20. de merge-aanroep is PRECIES één PUT met het PR-nummer in het pad en
   assert.equal(fetchImpl.aanroepen.length, 1);
 
   const [{ url, init }] = fetchImpl.aanroepen;
-  assert.equal(url, `https://api.github.com/repos/rvanhooijdonk-png/stack-dashboard/pulls/${PR_A}/merge`);
+  // V19 (Codex `3835523940`): geen klassieke `.../merge` meer, maar de asynchrone inschrijving.
+  assert.equal(
+    url,
+    `https://api.github.com/repos/rvanhooijdonk-png/stack-dashboard/pulls/${PR_A}/merge-async`,
+  );
   assert.equal(init.method, 'PUT');
   const body = JSON.parse(init.body);
   // DE MUTANTTOETS: zonder `sha` in het lichaam merget GitHub de HUIDIGE head, wat die ook is.
   assert.equal(body.sha, HEAD);
   assert.equal(body.merge_method, POLICY_AAN.merge_finalizer.merge_method);
+  // DE MUTANTTOETS VOOR P1: `merge_action` moet PRECIES `merge_queue` zijn — nooit `direct_merge`
+  // en nooit `default`, want beide zouden GitHub een merge buiten de wachtrij om kunnen laten kiezen.
+  assert.equal(body.merge_action, 'merge_queue');
   // Er staat NIETS anders in: geen branchnaam, geen titel, geen ref.
-  assert.deepEqual(Object.keys(body).sort(), ['merge_method', 'sha']);
+  assert.deepEqual(Object.keys(body).sort(), ['merge_action', 'merge_method', 'sha']);
 });
 
-test('M21. 409, 405 en 422 zijn TERMINAAL — er volgt nooit een tweede poging', async () => {
+test('M21. 400, 403, 404, 409 en 422 zijn TERMINAAL — er volgt nooit een tweede poging', async () => {
   const gevallen = [
-    [409, FINALIZE_ERROR.MERGE_CONFLICT],
-    [405, FINALIZE_ERROR.MERGE_NOT_ALLOWED],
+    [400, FINALIZE_ERROR.MERGE_NOT_READY],
+    [403, FINALIZE_ERROR.MERGE_FORBIDDEN],
+    [404, FINALIZE_ERROR.MERGE_RESOURCE_NOT_FOUND],
+    [409, FINALIZE_ERROR.MERGE_ALREADY_QUEUED],
     [422, FINALIZE_ERROR.MERGE_REJECTED],
     [500, FINALIZE_ERROR.MERGE_STATUS_UNEXPECTED],
-    [403, FINALIZE_ERROR.MERGE_STATUS_UNEXPECTED],
     [200, null],
+    [202, null],
   ];
   for (const [status, code] of gevallen) {
     const fetchImpl = antwoordFetch(status);
@@ -660,17 +674,103 @@ test('M21. 409, 405 en 422 zijn TERMINAAL — er volgt nooit een tweede poging',
       repository: 'a/b', pullRequest: PR_A, sha: HEAD,
       mergeMethod: POLICY_AAN.merge_finalizer.merge_method, policy: POLICY_AAN, token: 'x', fetchImpl,
     });
-    // Eén verzoek, altijd. 409 is precies de headverschuiving die deze poort moet vangen; opnieuw
-    // proberen met de nieuwere head zou een nooit beoordeelde commit mergen.
+    // Eén verzoek, altijd. Opnieuw proberen na een van deze codes zou ofwel een dubbele inschrijving
+    // ofwel een nooit beoordeelde commit riskeren.
     assert.equal(fetchImpl.aanroepen.length, 1, String(status));
     assert.equal(uitkomst.requests, 1, String(status));
     if (code) assert.equal(uitkomst.blocked, code, String(status));
-    else assert.equal(uitkomst.ok, true);
+    else assert.equal(uitkomst.ok, true, String(status));
   }
   // De broncode kent geen enkele retryconstructie.
   const bron = readFileSync(FINALIZER, 'utf8');
   assert.equal(/retry|opnieuw proberen|setTimeout|while \(/i.test(bron.replace(/^\s*(\/\/|\*).*$/gm, '')), false);
 });
+
+test('M21a. `hasActiveMergeQueueRule` eist het TYPE `merge_queue`, en niets minder', () => {
+  assert.equal(hasActiveMergeQueueRule([{ type: 'merge_queue' }]), true);
+  assert.equal(hasActiveMergeQueueRule([{ type: 'pull_request' }, { type: 'merge_queue' }]), true);
+  for (const onvoldoende of [
+    [], [{ type: 'pull_request' }], [{ type: 'required_status_checks' }], [{}], [null],
+    null, undefined, 'merge_queue', {},
+  ]) {
+    assert.equal(hasActiveMergeQueueRule(onvoldoende), false, JSON.stringify(onvoldoende));
+  }
+});
+
+test('M21b. ONTBREKEND of ONVOLDOENDE mergequeue-bewijs is NO_GO — nooit een directe merge', () => {
+  // Bevinding `3835523940` (P1): zonder een ACTIEVE `merge_queue`-regel op de base van deze pull
+  // request is er geen bewijs dat GitHub zelf de laatste beoordelaar op mergemoment is, dus mag er
+  // geen inschrijving volgen.
+  const onleesbaar = beslis({ mergeQueueRules: undefined });
+  assert.equal(onleesbaar.decision, FINALIZE_DECISION.NO_GO);
+  assert.ok(onleesbaar.reasons.includes(FINALIZE_REASON.MERGE_QUEUE_RULES_UNREADABLE));
+
+  const geenArray = beslis({ mergeQueueRules: 'geen lijst' });
+  assert.equal(geenArray.decision, FINALIZE_DECISION.NO_GO);
+  assert.ok(geenArray.reasons.includes(FINALIZE_REASON.MERGE_QUEUE_RULES_UNREADABLE));
+
+  const leeg = beslis({ mergeQueueRules: [] });
+  assert.equal(leeg.decision, FINALIZE_DECISION.NO_GO);
+  assert.ok(leeg.reasons.includes(FINALIZE_REASON.SERVER_MERGE_QUEUE_PROOF_MISSING));
+
+  const verkeerdType = beslis({ mergeQueueRules: [{ type: 'pull_request' }] });
+  assert.equal(verkeerdType.decision, FINALIZE_DECISION.NO_GO);
+  assert.ok(verkeerdType.reasons.includes(FINALIZE_REASON.SERVER_MERGE_QUEUE_PROOF_MISSING));
+
+  // Vandaag levert de echte repository `[]` op (`gh api repos/.../rules/branches/main`) — dit
+  // pad is dus GEEN hypothese maar de huidige werkelijke stand.
+  assert.equal(hasActiveMergeQueueRule([]), false);
+});
+
+test('M21c. mergequeue-DRIFT tussen de twee metingen levert nul verzoeken op', async () => {
+  // Beide metingen blijven op zichzelf GO — er komt in B een TWEEDE actieve regel bij naast
+  // `merge_queue` — zodat dit werkelijk de driftvergelijking raakt en niet al strandt op
+  // `SERVER_MERGE_QUEUE_PROOF_MISSING` zoals M25a/M25b voor de head/review doen.
+  const fetchImpl = verbodenFetch();
+  const gewijzigd = meting({
+    mergeQueueRules: [{ type: 'merge_queue' }, { type: 'pull_request' }],
+  });
+  const { rc, uitkomst } = await draai({ a: meting(), b: gewijzigd, dryRun: false, fetchImpl });
+  assert.equal(rc, 1);
+  assert.deepEqual(uitkomst, {
+    decision: FINALIZE_DECISION.NO_GO, reasons: [FINALIZE_REASON.MEASUREMENT_DRIFT],
+  });
+  assert.equal(fetchImpl.aanroepen.length, 0);
+
+  // Verdwijnt de regel juist WEG tussen A en B, dan is B op zichzelf al NO_GO — dezelfde lijn als
+  // M25a/M25b: het bewijs ontbreekt al vóór de driftvergelijking wordt bereikt.
+  const ingetrokken = meting({ mergeQueueRules: [] });
+  const tweede = await draai({ a: meting(), b: ingetrokken, dryRun: false, fetchImpl });
+  assert.equal(tweede.rc, 1);
+  assert.equal(tweede.uitkomst.decision, FINALIZE_DECISION.NO_GO);
+  assert.ok(tweede.uitkomst.reasons.includes(FINALIZE_REASON.SERVER_MERGE_QUEUE_PROOF_MISSING));
+  assert.equal(fetchImpl.aanroepen.length, 0);
+});
+
+test(
+  'MUT6. een finalizer zonder MERGEQUEUE-BEWIJSPOORT gaat rood op een lege regelset',
+  async () => {
+    const gemuteerd = await mutantVanDeFinalizer(
+      'zonder-mergequeue-poort',
+      "  if (!Array.isArray(measurement?.mergeQueueRules)) {\n"
+        + '    add(FINALIZE_REASON.MERGE_QUEUE_RULES_UNREADABLE);\n'
+        + '  } else if (!hasActiveMergeQueueRule(measurement.mergeQueueRules)) {\n'
+        + '    add(FINALIZE_REASON.SERVER_MERGE_QUEUE_PROOF_MISSING);\n  }',
+      '  if (false) {\n    add(FINALIZE_REASON.MERGE_QUEUE_RULES_UNREADABLE);\n  }',
+    );
+    // Precies de stand van vandaag: de echte repository draagt geen mergequeue-regel. De mutant
+    // laat dat toch een GO worden — de echte finalizer moet dat weigeren.
+    const gemuteerdeUitkomst = gemuteerd.resolveFinalization({
+      pullRequest: PR_A, measurement: meting({ mergeQueueRules: [] }), policy: POLICY_AAN,
+    });
+    assert.equal(gemuteerdeUitkomst.decision, FINALIZE_DECISION.GO);
+    const echt = resolveFinalization({
+      pullRequest: PR_A, measurement: meting({ mergeQueueRules: [] }), policy: POLICY_AAN,
+    });
+    assert.equal(echt.decision, FINALIZE_DECISION.NO_GO);
+    assert.ok(echt.reasons.includes(FINALIZE_REASON.SERVER_MERGE_QUEUE_PROOF_MISSING));
+  },
+);
 
 test('M22. een transportfout wordt tot één categorie gereduceerd, zonder de exceptietekst', async () => {
   const uitkomst = await mergePullRequest({
@@ -907,12 +1007,13 @@ test('M29. bij een GEACTIVEERDE finalizer draagt de merge de sha van de HERMETIN
   const { rc, uitkomst } = await draai({ a: meting(), dryRun: false, fetchImpl });
   assert.equal(rc, 0);
   assert.deepEqual(uitkomst, {
-    decision: FINALIZE_DECISION.GO, reasons: [], finalization_class: 'A', effect: 'MERGED',
+    decision: FINALIZE_DECISION.GO, reasons: [], finalization_class: 'A', effect: 'MERGE_QUEUED',
   });
   assert.equal(fetchImpl.aanroepen.length, 1);
   const body = JSON.parse(fetchImpl.aanroepen[0].init.body);
   assert.equal(body.sha, HEAD);
-  assert.ok(fetchImpl.aanroepen[0].url.endsWith(`/pulls/${PR_A}/merge`));
+  assert.equal(body.merge_action, 'merge_queue');
+  assert.ok(fetchImpl.aanroepen[0].url.endsWith(`/pulls/${PR_A}/merge-async`));
 });
 
 test('M30. de uitvoerregel draagt uitsluitend gesloten codes — geen sha, pad of API-tekst', async () => {
@@ -961,8 +1062,8 @@ function mutantVanDeFinalizer(naam, oud, nieuw) {
 test('MUT1. een merge-aanroep ZONDER `sha` in het lichaam gaat rood', async () => {
   const gemuteerd = await mutantVanDeFinalizer(
     'zonder-sha',
-    'body: JSON.stringify({ sha, merge_method: mergeMethod }),',
-    'body: JSON.stringify({ merge_method: mergeMethod }),',
+    "body: JSON.stringify({ sha, merge_method: mergeMethod, merge_action: 'merge_queue' }),",
+    "body: JSON.stringify({ merge_method: mergeMethod, merge_action: 'merge_queue' }),",
   );
   const fetchImpl = antwoordFetch(200);
   await gemuteerd.mergePullRequest({
@@ -974,7 +1075,7 @@ test('MUT1. een merge-aanroep ZONDER `sha` in het lichaam gaat rood', async () =
   const body = JSON.parse(fetchImpl.aanroepen[0].init.body);
   assert.throws(() => assert.equal(body.sha, HEAD), /AssertionError/);
   assert.throws(
-    () => assert.deepEqual(Object.keys(body).sort(), ['merge_method', 'sha']),
+    () => assert.deepEqual(Object.keys(body).sort(), ['merge_action', 'merge_method', 'sha']),
     /AssertionError/,
   );
 });
@@ -1073,13 +1174,13 @@ test('MUT5. een finalizer die de VLAG negeert, gaat rood op nul verzoeken', asyn
 // --- Het budget ---------------------------------------------------------------------------------
 
 test('M31. het verzoekbudget van een ronde is een BOVENGRENS, geen schatting', () => {
-  // 1 PR + 1 commit + 5 bewijslijsten van 4 pagina's + 4 pagina's check runs.
-  assert.equal(FINALIZER_MEASUREMENT_REQUEST_BUDGET, 26);
+  // 1 PR + 1 commit + 1 mergequeueregelset + 5 bewijslijsten van 4 pagina's + 4 pagina's check runs.
+  assert.equal(FINALIZER_MEASUREMENT_REQUEST_BUDGET, 27);
   // Twee volledige metingen plus hoogstens één merge-PUT.
-  assert.equal(FINALIZER_PER_CANDIDATE_REQUEST_BUDGET, 53);
+  assert.equal(FINALIZER_PER_CANDIDATE_REQUEST_BUDGET, 55);
   assert.equal(finalizerRequestBudget(0), SELECTION_PAGE_BUDGET);
-  assert.equal(finalizerRequestBudget(1), SELECTION_PAGE_BUDGET + 53);
-  assert.equal(finalizerRequestBudget(5), SELECTION_PAGE_BUDGET + 265);
+  assert.equal(finalizerRequestBudget(1), SELECTION_PAGE_BUDGET + 55);
+  assert.equal(finalizerRequestBudget(5), SELECTION_PAGE_BUDGET + 275);
   // De limiet uit de policy past binnen het gedeelde uurquotum minus reserve.
   assert.ok(
     finalizerRequestBudget(POLICY_BESTAND.merge_finalizer.candidate_limit)
@@ -1111,6 +1212,7 @@ test('K1. de kandidatenlijst is SELECTIE en nooit autorisatie', () => {
     openPulls: [[openPr(), openPr({ number: PR_B })]],
     openPullsComplete: true,
     policy: POLICY_AAN,
+    nowEpochSeconds: NU,
   });
   assert.deepEqual(gekozen, { ok: true, candidates: [PR_A, PR_B], reasons: [] });
 
@@ -1163,20 +1265,85 @@ test('K4. concepten, gesloten PR\'s, vreemde bases en vreemde bouwers vallen af'
     ]],
     openPullsComplete: true,
     policy: POLICY_AAN,
+    nowEpochSeconds: NU,
   });
   assert.deepEqual(gekozen.candidates, [6]);
 
   assert.deepEqual(selectFinalizationCandidates({
-    openPulls: [[]], openPullsComplete: true, policy: POLICY_AAN,
+    openPulls: [[]], openPullsComplete: true, policy: POLICY_AAN, nowEpochSeconds: NU,
   }), { ok: false, candidates: [], reasons: [CANDIDATE_REASON.NO_CANDIDATES] });
 
-  // De limiet uit de policy is een harde afkapping, in de volgorde van GitHub zelf.
+  // `candidate_limit` is de VENSTERCAPACITEIT binnen de gekozen emmer, geen afkapping in de volgorde
+  // van GitHub zelf (P2, bevinding `3835523942`) — bij slot 0 begint dat venster bij index 0.
   const veel = Array.from({ length: 12 }, (_, i) => openPr({ number: i + 1 }));
   const begrensd = selectFinalizationCandidates({
-    openPulls: [veel], openPullsComplete: true, policy: policy({ merge_finalizer_enabled: true }, { candidate_limit: 3 }),
+    openPulls: [veel],
+    openPullsComplete: true,
+    policy: policy({ merge_finalizer_enabled: true }, { candidate_limit: 3 }),
+    nowEpochSeconds: NU,
   });
   assert.deepEqual(begrensd.candidates, [1, 2, 3]);
+
+  // Een ANDER tijdslot schuift het venster op binnen dezelfde vaste emmer — dit is precies de
+  // rotatie die de vaste prefix uit V18 verving.
+  const anderSlot = selectFinalizationCandidates({
+    openPulls: [veel],
+    openPullsComplete: true,
+    policy: policy({ merge_finalizer_enabled: true }, { candidate_limit: 3 }),
+    nowEpochSeconds: 3 * SCHEDULE_SLOT_SECONDS,
+  });
+  assert.deepEqual(anderSlot.candidates, [4, 5, 6]);
 });
+
+test(
+  'K4a. NEGATIEVE CONTROLE: een vaste PREFIX verhongert bij meer dan `candidate_limit` kandidaten,'
+    + ' tijdslotrotatie niet',
+  () => {
+    // Het antwoord op `3835523942` (P2). Vóór V19 was dit `.slice(0, candidate_limit)`: zolang er
+    // meer dan `candidate_limit` in aanmerking komende PR's open blijven, wint dezelfde eerste
+    // reeks nummers elke ronde opnieuw en komt de rest nooit aan de beurt.
+    const nummers = Array.from({ length: 126 }, (_, i) => i + 1);
+    const open = [nummers.map((n) => openPr({ number: n }))];
+    const p = policy({ merge_finalizer_enabled: true }, { candidate_limit: 25 });
+
+    // De oude vorm: een vaste prefix van de GitHub-volgorde, ELKE ronde hetzelfde.
+    const viaPrefix = new Set();
+    for (let ronde = 0; ronde < 6; ronde += 1) {
+      for (const n of nummers.slice(0, 25)) viaPrefix.add(n);
+    }
+    assert.equal(viaPrefix.size, 25, 'de vaste prefix ziet nooit meer dan zijn eigen limiet');
+    assert.ok(viaPrefix.size < nummers.length, 'de rest verhongert onder de oude vorm');
+
+    // De huidige vorm: `count` opeenvolgende tijdslots dekken de hele verzameling. `count` volgt uit
+    // dezelfde vaste `SCHEDULE_BUCKET_LIMIT` als de doelenselector, niet uit `candidate_limit`.
+    const count = Math.ceil(nummers.length / SCHEDULE_BUCKET_LIMIT);
+    const viaSlot = new Set();
+    for (let slot = 0; slot < count; slot += 1) {
+      const gekozen = selectFinalizationCandidates({
+        openPulls: open,
+        openPullsComplete: true,
+        policy: p,
+        nowEpochSeconds: slot * SCHEDULE_SLOT_SECONDS,
+      });
+      assert.equal(gekozen.ok, true, `slot ${slot}`);
+      assert.ok(gekozen.candidates.length > 0, `slot ${slot}: nooit een lege ronde op een niet-lege lijst`);
+      for (const n of gekozen.candidates) viaSlot.add(n);
+    }
+    assert.equal(viaSlot.size, 126, 'elke kandidaat komt binnen `count` sloten aan de beurt');
+    assert.deepEqual([...viaSlot].sort((a, b) => a - b), nummers);
+
+    // Verandert `candidate_limit` tussentijds, dan verschuiven de emmergrenzen NIET mee — alleen het
+    // venster erbinnen krimpt. Dezelfde scheiding als bevinding `3835186656` voor de doelenselector.
+    const kleinerVenster = policy({ merge_finalizer_enabled: true }, { candidate_limit: 1 });
+    const eersteEmmerGroot = selectScheduleBucket(nummers, 0);
+    const gekozenKlein = selectFinalizationCandidates({
+      openPulls: open, openPullsComplete: true, policy: kleinerVenster, nowEpochSeconds: 0,
+    });
+    assert.equal(gekozenKlein.candidates.length, 1);
+    assert.ok(eersteEmmerGroot.bucket.includes(gekozenKlein.candidates[0]));
+    assert.equal(eersteEmmerGroot.count, count, 'de indeling zelf blijft ongewijzigd bij een ander venster');
+  },
+);
 
 test('K5. het quotum krimpt de ronde, en een onbekend quotum stopt hem', () => {
   const vijf = [1, 2, 3, 4, 5];
@@ -1222,6 +1389,7 @@ test('K6. de kandidaten-CLI schrijft ALTIJD een geldige matrix, ook bij een weig
     const argv = (p, quota) => [
       '--open-pulls', openPad, '--open-pulls-complete', 'true',
       '--policy', schrijfPolicy(p), '--remaining-quota', quota, '--out', uitPad,
+      '--now-epoch', String(NU),
     ];
     assert.equal(runSelectCandidates(argv(POLICY_AAN, '900'), { readFile: lees, writeFile: schrijf }), 0);
     assert.deepEqual(JSON.parse(geschreven.get(uitPad)), [PR_A]);
@@ -1252,6 +1420,7 @@ test('K7. de argumentvorm van de kandidatenkeuze is even gesloten als die van de
   const goed = [
     '--open-pulls', '/tmp/o', '--open-pulls-complete', 'true',
     '--policy', '/tmp/p', '--remaining-quota', '900', '--out', '/tmp/m',
+    '--now-epoch', '0',
   ];
   assert.equal(parseCandidateArgs(goed).ok, true);
   assert.equal(parseCandidateArgs(goed).openPullsComplete, true);
@@ -1259,6 +1428,7 @@ test('K7. de argumentvorm van de kandidatenkeuze is even gesloten als die van de
     [...goed, '--force', 'ja'],
     [...goed, '--out', '/tmp/n'],
     goed.slice(0, -1),
+    goed.slice(0, -2),
     ['--open-pulls-complete', 'waar', ...goed.slice(0, 2), ...goed.slice(4)],
     ['--open-pulls-complete', '', ...goed.slice(0, 2), ...goed.slice(4)],
     [],
@@ -1268,6 +1438,6 @@ test('K7. de argumentvorm van de kandidatenkeuze is even gesloten als die van de
     }, JSON.stringify(argv));
   }
   assert.deepEqual([...CANDIDATE_VALUE_OPTIONS].sort(), [
-    '--open-pulls', '--open-pulls-complete', '--out', '--policy', '--remaining-quota',
+    '--now-epoch', '--open-pulls', '--open-pulls-complete', '--out', '--policy', '--remaining-quota',
   ]);
 });

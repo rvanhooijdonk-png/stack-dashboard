@@ -11,10 +11,28 @@ name: autocoding-merge-finalizer
 # probeerde af te vangen is offsetgepagineerd en dus geen atomaire momentopname.
 #
 # De bevoegdheid is daarom verhuisd naar dit bestand: één plaats die de PULL REQUEST ZELF hermeet en,
-# indien geactiveerd, uitsluitend díé pull request kan mergen — via
-# `PUT /repos/{owner}/{repo}/pulls/{number}/merge` met de exact gemeten volledige `sha`. Er is geen
-# artefact meer dat een tweede pull request kan oppakken: het nummer staat in het pad, de sha in het
-# lichaam, en verschuift de head tussen beslissing en effect dan antwoordt GitHub 409.
+# indien geactiveerd, uitsluitend díé pull request kan laten INSCHRIJVEN in GitHubs eigen merge queue
+# — `PUT /repos/{owner}/{repo}/pulls/{number}/merge-async` met `merge_action: "merge_queue"` en de
+# exact gemeten volledige `sha`. Er is geen artefact meer dat een tweede pull request kan oppakken:
+# het nummer staat in het pad, de sha in het lichaam.
+#
+# V19 — CODEX `3835523940` (P1). Een directe merge-aanroep (`PUT .../merge`, of `merge-async` met
+# `merge_action: "direct_merge"`/`"default"`) is nooit meer bereikbaar: `finalize-merge.mjs` eist
+# vóór elk effect bewijs dat de base van deze pull request een ACTIEVE `merge_queue`-regel draagt
+# (`GET /repos/{owner}/{repo}/rules/branches/{base_ref}`, hieronder gemeten als
+# `merge-queue-rules.json`). Zonder dat bewijs is de uitkomst `NO_GO`, met nul verzoeken. Het
+# werkelijke mergen gebeurt bij een geslaagde inschrijving niet op dit moment, maar later, binnen
+# GitHubs eigen wachtrij — die herbeoordeelt de doelbranch vlak vóór het echte mergen opnieuw, als
+# serverkant autoriteit. Dat VERKLEINT de opening die de klassieke `PUT .../merge` open liet — die
+# was alleen op de head-sha geconditioneerd, zag een basisretarget of een ingetrokken
+# eigenaarsreview tussen hermeting en aanroep dus niet — tot het smalle venster tussen deze
+# inschrijving en GitHubs eigen herbeoordeling; het sluit dat venster niet atomisch, want de
+# `GET rules/branches/{base_ref}`-meting en de inschrijvings-PUT zijn zelf twee aparte verzoeken.
+# Wat resteert is hoe ver GitHub die herbeoordeling zelf doorvoert — dat is precies het bewijs dat
+# de aparte, toekomstige activatiestap moet leveren, niet deze pull request. Deze pull request
+# BOUWT, ACTIVEERT of WIJZIGT geen GitHub-ruleset of branch-protection — dat bewijs wordt
+# uitsluitend gelezen, nooit aangemaakt; of een repository daadwerkelijk zo'n regel draagt is een
+# afzonderlijke, toekomstige activatiestap.
 #
 # WAT DEZE WORKFLOW NOOIT DOET: PR-code uitchecken, PR-scripts draaien, PR-headpolicy lezen,
 # artifacts of cache lezen, secrets lezen, statussen schrijven, een branch aanraken, of op een ander
@@ -157,6 +175,7 @@ jobs:
             --open-pulls-complete "$complete" \
             --policy CONTROL/AUTOCODING/policy.v1.json \
             --remaining-quota "$remaining" \
+            --now-epoch "$(date -u +%s)" \
             --out "$RUNNER_TEMP/candidates.json" || rc=$?
 
           kandidaten="$(cat "$RUNNER_TEMP/candidates.json")"
@@ -257,6 +276,13 @@ jobs:
             gh api "repos/$REPOSITORY/pulls/$number" > "$doel/pr.json" || return 1
             head_sha="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const s=((p||{}).head||{}).sha;if(!/^[0-9a-f]{40}$/.test(s||""))process.exit(1);process.stdout.write(s)' "$doel/pr.json")" || return 1
             gh api "repos/$REPOSITORY/git/commits/$head_sha" > "$doel/head-commit.json" || return 1
+
+            # Het merge-queue-bewijs (V19, Codex `3835523940`): of de BASE van deze pull request een
+            # actieve `merge_queue`-regel draagt. Dit LEEST alleen bestaand bewijs — er wordt hier
+            # geen ruleset of branch-protection aangemaakt of gewijzigd. Onleesbare base of een
+            # mislukte meting maakt de hele meting onleesbaar, dezelfde lijn als bij `head_sha`.
+            base_ref="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const r=((p||{}).base||{}).ref;if(typeof r!=="string"||r.length===0)process.exit(1);process.stdout.write(r)' "$doel/pr.json")" || return 1
+            gh api "repos/$REPOSITORY/rules/branches/$base_ref" > "$doel/merge-queue-rules.json" || return 1
 
             for endpoint in \
               "pulls/$number/commits:pr-commits" \

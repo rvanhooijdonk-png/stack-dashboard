@@ -24,6 +24,7 @@ import {
 import { flattenPages } from './collect-shield-input.mjs';
 import {
   SHARED_HOURLY_REQUEST_QUOTA, QUOTA_RESERVE, parseCounter,
+  scheduleSlotOf, selectScheduleBucket, scheduleBucketVisit, selectBucketWindow,
 } from './select-live-gate-targets.mjs';
 
 export const CANDIDATE_REASON = Object.freeze({
@@ -33,6 +34,7 @@ export const CANDIDATE_REASON = Object.freeze({
   OPEN_PULL_REQUESTS_UNREADABLE: 'OPEN_PULL_REQUESTS_UNREADABLE',
   OPEN_PULL_REQUESTS_TRUNCATED: 'OPEN_PULL_REQUESTS_TRUNCATED',
   NO_CANDIDATES: 'NO_CANDIDATES',
+  SCHEDULE_SLOT_UNUSABLE: 'SCHEDULE_SLOT_UNUSABLE',
   API_QUOTA_UNKNOWN: 'API_QUOTA_UNKNOWN',
   API_BUDGET_RESERVED: 'API_BUDGET_RESERVED',
 });
@@ -45,10 +47,33 @@ export const CANDIDATE_REASON = Object.freeze({
  * omdat een halve lijst als volledige ronde behandelen de rotatie stil onvolledig maakt terwijl de
  * run groen oogt.
  *
- * De volgorde is die van GitHub zelf en wordt niet herschikt: er wordt afgekapt op
- * `candidate_limit`, en dat getal is de bovengrens waarop de budgetsom hieronder rust.
+ * CODEX `3835523942` (P2). Vóór V19 werd hier een vaste PREFIX van de GitHub-volgorde genomen
+ * (`.slice(0, candidate_limit)`). Zolang er meer dan `candidate_limit` in aanmerking komende pull
+ * requests open blijven staan, verhongert alles ná die prefix voor onbepaalde tijd: dezelfde eerste
+ * paar nummers winnen elke ronde opnieuw. Er is daarom GEEN vaste prefix meer. In plaats daarvan
+ * wordt de STABIELE, GESORTEERDE (op PR-nummer, niet op GitHub-volgorde) verzameling in aanmerking
+ * komende nummers verdeeld in vaste emmers ter grootte van `SCHEDULE_BUCKET_LIMIT`
+ * (`select-live-gate-targets.mjs`, dezelfde constante als de diagnostische route), en wordt per ronde
+ * exact één emmer bezocht — welke, bepaald door een TIJDSLOT, niet door een lokaal
+ * voortgangsbestand. Bij een vaste emmergrootte en een aantal emmers `count` bezoekt slot `s`
+ * dezelfde emmer als slot `s + count`, dus doorloopt elke ronde uiterlijk na `count` sloten de
+ * volledige verzameling — ongeacht welke ronde toevallig als eerste draait, en zonder dat er ergens
+ * een voortgangsbestand hoeft te bestaan dat kan verdwijnen, corrumperen of dubbel gebruikt worden.
+ *
+ * `candidate_limit` blijft bestaan, maar krijgt een ANDERE rol dan vroeger: het is niet langer de
+ * partitiegrootte maar uitsluitend de CAPACITEIT van het venster binnen de gekozen emmer — exact
+ * dezelfde scheiding als bevinding `3835186656` al voor de doelenselector afdwong, en om dezelfde
+ * reden: zou `candidate_limit` de indeling zelf bepalen, dan verschuiven de emmergrenzen zodra een
+ * operator die waarde in de policy wijzigt, en begint de rotatie stilzwijgend opnieuw.
+ *
+ * `nowEpochSeconds` moet een gehele, niet-negatieve seconde-teller zijn. Onleesbare of ontbrekende
+ * tijd is ONBEKEND en niet "sloot nul": een sloot-nul-fallback zou stilzwijgend altijd dezelfde
+ * eerste emmer bevoordelen zodra de klok een keer onleesbaar is, en dat is exact dezelfde
+ * verhongering in een nieuwe vermomming.
  */
-export function selectFinalizationCandidates({ openPulls, openPullsComplete, policy }) {
+export function selectFinalizationCandidates({
+  openPulls, openPullsComplete, policy, nowEpochSeconds,
+}) {
   if (policy?.merge_finalizer_enabled !== true) {
     return { ok: false, candidates: [], reasons: [CANDIDATE_REASON.FINALIZER_DISABLED] };
   }
@@ -60,20 +85,36 @@ export function selectFinalizationCandidates({ openPulls, openPullsComplete, pol
   if (openPullsComplete !== true) {
     return { ok: false, candidates: [], reasons: [CANDIDATE_REASON.OPEN_PULL_REQUESTS_TRUNCATED] };
   }
+  const slot = scheduleSlotOf(nowEpochSeconds);
+  if (slot === null) {
+    return { ok: false, candidates: [], reasons: [CANDIDATE_REASON.SCHEDULE_SLOT_UNUSABLE] };
+  }
   const cfg = policy.merge_finalizer;
   const lijst = flattenPages(openPulls);
-  const kandidaten = lijst
+  const inAanmerking = Array.from(new Set(lijst
     .filter((pr) => pr?.state === 'open' && pr?.draft !== true && pr?.merged !== true)
     .filter((pr) => cfg.allowed_base_refs.includes(pr?.base?.ref))
     .filter((pr) => cfg.allowed_builder_actors.includes(pr?.user?.login))
     .map((pr) => (Number.isInteger(pr?.number) && pr.number > 0 ? pr.number : 0))
-    .filter((n) => n > 0)
-    .slice(0, cfg.candidate_limit);
+    .filter((n) => n > 0)))
+    .sort((a, b) => a - b);
 
-  if (kandidaten.length === 0) {
+  if (inAanmerking.length === 0) {
     return { ok: false, candidates: [], reasons: [CANDIDATE_REASON.NO_CANDIDATES] };
   }
-  return { ok: true, candidates: kandidaten, reasons: [] };
+
+  // De indeling is QUOTUM- en LIMIETVRIJ: `selectScheduleBucket` krijgt hier expres geen derde
+  // argument, dus valt hij terug op de vaste `SCHEDULE_BUCKET_LIMIT`. Alleen het venster erbinnen
+  // krimpt tot `candidate_limit`.
+  const { bucket, count } = selectScheduleBucket(inAanmerking, slot);
+  const bezoek = scheduleBucketVisit(slot, count);
+  const capaciteit = Math.min(bucket.length, cfg.candidate_limit);
+  const { window } = selectBucketWindow(bucket, bezoek, capaciteit);
+
+  if (window.length === 0) {
+    return { ok: false, candidates: [], reasons: [CANDIDATE_REASON.NO_CANDIDATES] };
+  }
+  return { ok: true, candidates: window, reasons: [] };
 }
 
 /**
@@ -109,7 +150,7 @@ export function fitCandidatesToQuota(candidates, remainingQuota) {
 
 /** Sleutels die precies één niet-lege waarde nemen. */
 export const CANDIDATE_VALUE_OPTIONS = Object.freeze([
-  '--open-pulls', '--open-pulls-complete', '--policy', '--remaining-quota', '--out',
+  '--open-pulls', '--open-pulls-complete', '--policy', '--remaining-quota', '--now-epoch', '--out',
 ]);
 
 /** Dezelfde fail-closed, positie-onafhankelijke argumentlezing als elders in deze poort. */
@@ -175,7 +216,10 @@ export function runSelectCandidates(argv, { readFile, writeFile } = {}) {
   }
 
   const gekozen = selectFinalizationCandidates({
-    openPulls, openPullsComplete: parsed.openPullsComplete, policy,
+    openPulls,
+    openPullsComplete: parsed.openPullsComplete,
+    policy,
+    nowEpochSeconds: parseCounter(args.get('--now-epoch')),
   });
   if (!gekozen.ok) {
     schrijf([]);

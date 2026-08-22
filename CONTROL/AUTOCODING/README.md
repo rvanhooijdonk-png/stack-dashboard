@@ -610,27 +610,56 @@ de base-SHA en de base-ref, de bouwer, de task-id, de volledigheid van de bestan
 Codex- en Gemini-reviews inclusief inline bevindingen, de ownerautorisatie voor gevoelige paden, en de
 vereiste check-runs op precies deze head.
 
-**Het effect is één verzoek.** `mergePullRequest` doet uitsluitend
-`PUT /repos/{owner}/{repo}/pulls/{number}/merge` met de hermeten volledige `sha` en een `merge_method`
-uit een vaste allowlist. Geen branchnaam, geen afgekorte SHA, geen event-SHA. Vlak vóór het verzoek
+**Het effect is één verzoek, en dat verzoek is uitsluitend een inschrijving.** `mergePullRequest`
+doet sinds V19 (Codex `3835523940`, P1) niet meer de klassieke `PUT .../pulls/{number}/merge`, maar
+`PUT /repos/{owner}/{repo}/pulls/{number}/merge-async` met `merge_action: "merge_queue"`, de hermeten
+volledige `sha` en een `merge_method` uit een vaste allowlist. Geen branchnaam, geen afgekorte SHA,
+geen event-SHA, en geen ander `merge_action` — `direct_merge` en `default` zijn nooit toegestaan,
+want beide zouden een merge buiten GitHubs wachtrij om kunnen laten gebeuren. Vlak vóór het verzoek
 wordt opnieuw gemeten en tegen de vingerafdruk van de beslissing gelegd (`measurementFingerprint`,
-een sha256 over een genormaliseerde projectie met alleen digests van teksten, nooit tekst zelf). Bij
-drift, een ingetrokken review, een nieuwe bevinding, gewijzigde checks, ontbrekend bewijs of
-onleesbaarheid: nul mergeverzoeken. Een 409, 405 of 422 is terminaal — er wordt nooit opnieuw
-geprobeerd met een nieuwere, ongetoetste head.
+een sha256 over een genormaliseerde projectie met alleen digests van teksten, nooit tekst zelf, en
+sinds V19 inclusief het merge-queue-bewijs zelf). Bij drift, een ingetrokken review, een nieuwe
+bevinding, gewijzigde checks, ontbrekend bewijs of onleesbaarheid: nul mergeverzoeken. De statuscodes
+van `merge-async` (400/403/404/409/422) zijn stuk voor stuk terminaal — er wordt nooit opnieuw
+geprobeerd.
+
+**Waarom `direct_merge` niet kan bestaan — het merge-queue-bewijs.** De klassieke `PUT .../merge` was
+alleen op de head-sha geconditioneerd: GitHub vergelijkt uitsluitend of de meegegeven `sha` nog de
+actuele head is. Een BASE-retarget of het intrekken van een eigenaarsreview tussen de hermeting en het
+werkelijke verzoek werd door die vergelijking niet gezien. `resolveFinalization` eist daarom vóór elk
+GO-oordeel bewijs dat de base van deze pull request een ACTIEVE `merge_queue`-regel draagt
+(`GET /repos/{owner}/{repo}/rules/branches/{base_ref}`, gemeten als `mergeQueueRules`); ontbreekt of
+is dat bewijs onleesbaar, dan is de uitkomst `NO_GO` — `MERGE_QUEUE_RULES_UNREADABLE` respectievelijk
+`SERVER_MERGE_QUEUE_PROOF_MISSING` — met nul verzoeken. Dit LEEST alleen bestaand bewijs; er wordt in
+deze pull request geen ruleset of branch-protection aangemaakt, geactiveerd of gewijzigd. Wat dit
+structureel sluit: het werkelijke mergen gebeurt bij een geslaagde inschrijving niet op het moment van
+ons verzoek, maar later, binnen GitHubs eigen wachtrij, die de doelbranch vlak vóór het echte mergen
+opnieuw beoordeelt — GitHub is dan de laatste beoordelaar, op het moment dat het er echt toe doet, en
+niet meer deze finalizer op een moment dat allang voorbij kon zijn.
 
 **Klasse A en B.** Klasse A is de gewone weg en vereist een ownerautorisatie die exact aan dit
 PR-nummer, deze head, deze boom, deze base en deze task bindt. Klasse B is de latere autofinalisatie
 voor werk dat geen gevoelig pad raakt; die staat uit (`class_b_auto_merge_enabled: false`), dus is
 vandaag ELKE kandidaat klasse A.
 
-**Waarom een echte merge nu mechanisch onmogelijk is**, op drie onafhankelijke plaatsen: de
+**Waarom een echte merge nu mechanisch onmogelijk is**, op vier onafhankelijke plaatsen: de
 poortstap in de workflow stopt op de uitgeschakelde vlag vóór het eerste API-verzoek; de
-kandidatenlijst blijft daardoor leeg en de matrix draait nul jobs; en `mergePullRequest` weigert
-bovendien in de code zelf vóór elk netwerkverkeer. `test/autocoding-merge-finalizer.test.mjs` meet
-dat af, inclusief mutanten die respectievelijk de `sha` uit het lichaam halen, de PR-binding
-weglaten, de ownerbinding versoepelen, de driftvergelijking overslaan of de vlag negeren — alle vijf
-gaan aantoonbaar rood.
+kandidatenlijst blijft daardoor leeg en de matrix draait nul jobs; `resolveFinalization` eist het
+merge-queue-bewijs vóór elk GO-oordeel; en `mergePullRequest` weigert bovendien in de code zelf vóór
+elk netwerkverkeer, en zou zelfs bij een GO nooit een ander `merge_action` dan `merge_queue` kunnen
+versturen. `test/autocoding-merge-finalizer.test.mjs` meet dat af, inclusief mutanten die
+respectievelijk de `sha` uit het lichaam halen, de PR-binding weglaten, de ownerbinding versoepelen,
+de driftvergelijking overslaan, het merge-queue-bewijs overslaan of de vlag negeren.
+
+**Kandidaatselectie roteert op tijdslot, niet op een vaste voorkeur.** `3835523942` (P2) beschreef
+dat een vaste PREFIX van de open-PR-lijst (`.slice(0, candidate_limit)`) alles ná die prefix voor
+onbepaalde tijd kan laten verhongeren zolang er meer in aanmerking komende pull requests open staan
+dan `candidate_limit`. `select-finalize-candidates.mjs` verdeelt de stabiele, gesorteerde
+kandidatenverzameling sinds V19 daarom in vaste emmers (dezelfde `SCHEDULE_BUCKET_LIMIT` als de
+diagnostische doelenselector) en bezoekt er per uur-tijdslot precies één — hetzelfde
+slot-/emmerpatroon als `select-live-gate-targets.mjs`, zonder lokaal voortgangsbestand. Een
+onleesbare of ontbrekende klok is `SCHEDULE_SLOT_UNUSABLE` en levert nul kandidaten, nooit stilzwijgend
+emmer nul.
 
 ## Activering en compatibiliteit
 
@@ -652,6 +681,17 @@ Activering is een **afzonderlijke latere PR** die precies drie dingen doet, in d
    is zo'n check, al draait die PR-headcode en autoriseert hij dus niets), niet over een
    reviewuitspraak. De mergeautorisatie loopt sinds V18 uitsluitend via de mergefinalizer hieronder,
    die per pull request beslist en zijn uitkomst nergens als herbruikbaar artefact achterlaat.
+
+**Merge-queue-bewijs is een AFZONDERLIJKE, toekomstige activatiestap, geen onderdeel van deze PR.**
+`resolveFinalization` leest sinds V19 `GET /repos/{owner}/{repo}/rules/branches/{base_ref}` en eist
+daar een actieve `merge_queue`-regel in — maar deze pull request bouwt, activeert of wijzigt géén
+GitHub-ruleset, branch-protection of merge-queue-instelling. Vandaag levert die meting op de meeste
+repositories een lege lijst, dus blijft de uitkomst `SERVER_MERGE_QUEUE_PROOF_MISSING` totdat een
+afzonderlijke, latere activatie-PR aantoont dat de repository zelf een merge-queue-ruleset draagt als
+serverkant autoriteit. Die activatie is bewust buiten deze scope gehouden: het aanmaken van een
+ruleset is een onomkeerbare configuratiewijziging die eigen goedkeuring, een eigen fixture-bewijs en
+een eigen Codex-/Gemini-consult verdient, los van de code die hier alleen leert er bewijs voor te
+lezen.
 
 Een generieke regel "alle wijzigingen moeten via een PR" mag niet stilzwijgend worden geactiveerd.
 `.github/workflows/doorstroom.yml` en `.github/workflows/waarnemer.yml` bevatten jobs met
