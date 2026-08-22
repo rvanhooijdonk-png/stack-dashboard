@@ -487,6 +487,68 @@ function stepScript(workflowPath, stepName) {
   return body.join('\n');
 }
 
+test('S7d. een onbruikbare batchlimiet valt terug op de canonieke limiet, nooit op Infinity', () => {
+  // Een niet positief-gehele limiet was een STILLE lege ronde: `Math.ceil(126 / 0)` is `Infinity`,
+  // dus `(runNumber - 1) % count` is `NaN` en `slice(NaN, NaN)` levert een lege batch. De run
+  // invalideerde dan alle 126 heads en mat er vervolgens nul — iedereen bleef op `pending` staan.
+  const lijst = Array.from({ length: 126 }, (_, i) => i + 1);
+  const canoniek = selectEvaluationBatch(lijst, 1, EVALUATION_BATCH_LIMIT);
+  assert.equal(canoniek.count, 2);
+  assert.equal(canoniek.batch.length, 100);
+
+  const onbruikbaar = [
+    0, -1, -100, 2.5, 0.5, -0.5, Number.NaN, Infinity, -Infinity,
+    null, undefined, '100', '', 'honderd', true, false, {}, [], [100], () => 100,
+  ];
+  for (const limiet of onbruikbaar) {
+    const uitkomst = selectEvaluationBatch(lijst, 1, limiet);
+    const naam = `limiet ${String(limiet)}`;
+    assert.deepEqual(uitkomst, canoniek, naam);
+    assert.ok(Number.isInteger(uitkomst.count) && uitkomst.count > 0, `${naam}: eindig aantal blokken`);
+    assert.ok(Number.isInteger(uitkomst.index) && uitkomst.index >= 0, `${naam}: eindige index`);
+    assert.ok(uitkomst.batch.length > 0, `${naam}: nooit een lege meting op een niet-lege lijst`);
+
+    // De dekkingsgarantie mag niet van de aanroeper afhangen: iedere PR komt binnen `count` runs
+    // alsnog aan de beurt, ook als de limiet onzin was.
+    const gezien = new Set();
+    for (let run = 1; run <= uitkomst.count; run += 1) {
+      for (const nummer of selectEvaluationBatch(lijst, run, limiet).batch) gezien.add(nummer);
+    }
+    assert.deepEqual([...gezien].sort((a, b) => a - b), lijst, `${naam}: volledige dekking`);
+  }
+
+  // Een lijst KORTER dan de canonieke limiet mag door een kapotte limiet evenmin worden afgekapt.
+  for (const limiet of [0, -1, 2.5, 'honderd']) {
+    assert.deepEqual(
+      selectEvaluationBatch([7, 8, 9], 1, limiet),
+      { batch: [7, 8, 9], index: 0, count: 1, rotated: false },
+      `korte lijst bij limiet ${String(limiet)}`,
+    );
+  }
+
+  // En de grens is niet te ruim: een geldige eigen limiet blijft gewoon gelden.
+  const eigen = selectEvaluationBatch(lijst, 1, 50);
+  assert.equal(eigen.count, 3);
+  assert.deepEqual(eigen.batch, lijst.slice(0, 50));
+  assert.deepEqual(selectEvaluationBatch(lijst, 3, 50).batch, lijst.slice(100));
+
+  // Ook via `selectTargets`, want daar komt de limiet binnen als parameter: de ronde blijft volledig
+  // geïnvalideerd én meet een niet-lege batch.
+  for (const batchLimit of [0, -5, 3.7, 'honderd', null]) {
+    const ronde = selectTargets({
+      eventName: 'schedule',
+      openPullRequests: Array.from({ length: 126 }, (_, i) => openPr(i + 1)),
+      runNumber: 1,
+      batchLimit,
+    });
+    const naam = `selectTargets bij batchLimit ${String(batchLimit)}`;
+    assert.equal(ronde.outcome, TARGET_OUTCOME.MEASURE, naam);
+    assert.equal(ronde.heads.length, 126, `${naam}: alle heads geïnvalideerd`);
+    assert.equal(ronde.batchCount, 2, naam);
+    assert.deepEqual(ronde.batch, ronde.targets.slice(0, EVALUATION_BATCH_LIMIT), naam);
+  }
+});
+
 test('S8. een kapotte PR maakt de ronde rood maar stopt hem niet', () => {
   // Dit voert de ECHTE shell uit het workflowbestand uit, met gestubde `gh`, `node` en `sleep`.
   // PR 11 levert geen head op (record-lokale fout), PR 12 publiceert een `failure`, PR 13 een

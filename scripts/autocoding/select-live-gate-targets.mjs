@@ -157,14 +157,28 @@ export function normaliseOpenPullRequests(payload) {
  * een onbruikbaar nummer valt hij terug op blok 0. Het gevolg is hoogstens dat sommige heads langer
  * op `pending` blijven staan — en `pending` is niet groen. De ronde weigeren zou juist wél gevaarlijk
  * zijn, want dan wordt er niets geïnvalideerd en blijft élke oude `success` staan.
+ *
+ * Om diezelfde reden wordt een onbruikbare `limit` genormaliseerd in plaats van geweigerd. Een niet
+ * positief-gehele limiet levert anders een blokindeling op die geen indeling is: bij `0` wordt
+ * `Math.ceil(length / 0)` `Infinity`, dus is `(runNumber - 1) % count` `NaN` en snijdt
+ * `slice(NaN, NaN)` een LEGE batch — een run die alles invalideert en vervolgens niets meet, en dus
+ * elke head op `pending` achterlaat. Een negatieve limiet draait de slice om (ook leeg), en een
+ * fractionele limiet geeft blokken die elkaar overlappen of gaten laten vallen. Al die vormen zijn
+ * een defect in de AANROEP, niet in de lijst, dus valt de functie terug op de canonieke
+ * `EVALUATION_BATCH_LIMIT` en gebruikt die daarna overal: voor de vergelijking, het aantal blokken
+ * en de slicegrenzen. Zo blijft de dekkingsgarantie (elke PR binnen `count` runs aan de beurt) gelden
+ * ongeacht wat de aanroeper meegaf.
  */
 export function selectEvaluationBatch(numbers, runNumber, limit = EVALUATION_BATCH_LIMIT) {
   const list = Array.isArray(numbers) ? numbers : [];
-  if (list.length <= limit) return { batch: [...list], index: 0, count: 1, rotated: false };
-  const count = Math.ceil(list.length / limit);
+  const safeLimit = Number.isInteger(limit) && limit > 0 ? limit : EVALUATION_BATCH_LIMIT;
+  if (list.length <= safeLimit) return { batch: [...list], index: 0, count: 1, rotated: false };
+  const count = Math.ceil(list.length / safeLimit);
   const usable = Number.isInteger(runNumber) && runNumber > 0;
   const index = usable ? (runNumber - 1) % count : 0;
-  return { batch: list.slice(index * limit, index * limit + limit), index, count, rotated: usable };
+  return {
+    batch: list.slice(index * safeLimit, index * safeLimit + safeLimit), index, count, rotated: usable,
+  };
 }
 
 /**

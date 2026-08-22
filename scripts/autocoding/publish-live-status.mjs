@@ -195,6 +195,22 @@ export async function publishStatus({ repository, publication, token, fetchImpl 
   if (!REPOSITORY_RE.test(repository ?? '')) {
     return { ok: false, blocked: PUBLISH_ERROR.REPOSITORY_INVALID };
   }
+  // In de CLI-lus komt `publication` altijd uit `resolvePublication` of `resolvePendingPublication`,
+  // en die dwingen de volledige head al af. Deze functie is echter ook los aanroepbaar, en dan was
+  // `publication.sha` een ONBEWAAKTE property-read met twee verschillende gevolgen, allebei fout:
+  //
+  //   - `null` of `undefined` gooide een TypeError. Die viel binnen de transportafvang hieronder en
+  //     kwam er dus uit als `STATUS_TRANSPORT_ERROR` — een netwerkdiagnose voor een aanroepfout.
+  //   - Een object ZONDER geldige sha gooide niets: de URL werd letterlijk opgebouwd met `undefined`
+  //     of met de meegegeven tekst, en er ging een echte POST naar api.github.com. Bij een sha met
+  //     `/` of `..` erin wijst dat pad bovendien niet meer naar het statuseindpunt van deze head.
+  //
+  // Daarom eerst valideren, dan pas lezen. De uitkomst is dezelfde vaste code die de resolvers voor
+  // een ongemeten head gebruiken, zodat een ontbrekende head overal één naam heeft.
+  if (!publication || typeof publication !== 'object' || Array.isArray(publication)
+    || !SHA_RE.test(publication.sha ?? '')) {
+    return { ok: false, blocked: PUBLISH_ERROR.HEAD_UNMEASURED };
+  }
   let response;
   try {
     const doFetch = fetchImpl ?? globalThis.fetch;

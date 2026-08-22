@@ -235,6 +235,59 @@ test('L9. publishStatus schrijft op /statuses/<gemeten sha> en lekt het token ni
   });
 });
 
+test('L9b. een ongemeten publicatie doet NUL fetches en heet HEAD_UNMEASURED', async () => {
+  // `publishStatus` is los aanroepbaar, dus mag hij niet leunen op de resolvers die de head al
+  // afdwingen. Vóór deze grens was `publication.sha` een onbewaakte property-read met twee
+  // verschillende gevolgen: `null` gooide een TypeError die de transportafvang verkleedde als
+  // `STATUS_TRANSPORT_ERROR`, en een object ZONDER geldige sha gooide niets maar stuurde een echte
+  // POST naar `/statuses/undefined` — of, bij een sha met `/` of `..` erin, naar een heel ander pad.
+  let touched = 0;
+  const fetchImpl = async () => { touched += 1; return { status: 201 }; };
+  const ongemeten = [
+    null,
+    undefined,
+    {},
+    { state: 'pending', context: CONTEXT_NAME, description: 'x' },
+    { sha: null, state: 'pending', context: CONTEXT_NAME },
+    { sha: '', state: 'pending', context: CONTEXT_NAME },
+    { sha: HEAD.slice(0, 39), state: 'pending', context: CONTEXT_NAME },
+    { sha: `${HEAD}0`, state: 'pending', context: CONTEXT_NAME },
+    { sha: HEAD.toUpperCase(), state: 'pending', context: CONTEXT_NAME },
+    { sha: `../../${HEAD}`, state: 'pending', context: CONTEXT_NAME },
+    { sha: `${HEAD}/../../../repos/elders/statuses/${HEAD}`, state: 'pending', context: CONTEXT_NAME },
+    { sha: 42, state: 'pending', context: CONTEXT_NAME },
+    'not-an-object',
+    42,
+    [{ sha: HEAD, state: 'pending', context: CONTEXT_NAME }],
+  ];
+  for (const publication of ongemeten) {
+    const posted = await publishStatus({
+      repository: 'rvanhooijdonk-png/stack-dashboard', publication, token: 'x-token-x', fetchImpl,
+    });
+    assert.deepEqual(
+      posted, { ok: false, blocked: PUBLISH_ERROR.HEAD_UNMEASURED },
+      `ongemeten publicatie: ${JSON.stringify(publication) ?? String(publication)}`,
+    );
+  }
+  assert.equal(touched, 0, 'geen enkele fetch op een ongemeten head');
+
+  // De reponaamgrens blijft de eerste poort: bij twee kapotte invoeren is de uitkomst deterministisch
+  // en niet afhankelijk van de volgorde waarin de aanroeper toevallig iets vergat.
+  assert.deepEqual(
+    await publishStatus({ repository: '../../etc', publication: null, token: 'x', fetchImpl }),
+    { ok: false, blocked: PUBLISH_ERROR.REPOSITORY_INVALID },
+  );
+  assert.equal(touched, 0);
+
+  // En de grens is niet te ruim: een volledig gemeten head gaat er gewoon doorheen.
+  const goed = await publishStatus({
+    repository: 'rvanhooijdonk-png/stack-dashboard', token: 'x-token-x', fetchImpl,
+    publication: { ok: true, sha: HEAD, context: CONTEXT_NAME, ...PENDING_PUBLICATION },
+  });
+  assert.deepEqual(goed, { ok: true, status: 201 });
+  assert.equal(touched, 1);
+});
+
 test('L10. de CLI publiceert alleen bij een leesbaar GO-resultaat en geeft anders rc 1', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'autocoding-live-status-'));
   const goPath = join(dir, 'go.json');
