@@ -44,10 +44,31 @@ on:
 
 permissions: {}
 
-# Serialisatie per bronbranch, niet globaal: een lange ronde over één PR mag de volgende niet
-# verdringen, en een geplande ronde (geen `workflow_run`) krijgt altijd zijn eigen groep.
+# ÉÉN GLOBALE WRITERLOCK. De groep is een CONSTANTE: geen `${{ ... }}`, dus geen branch, geen
+# run-id, geen event. Reden, gemeten aan het ontwerp en niet aan de intentie: alle aanleidingen —
+# een review-run, een commentrun en de uurlijkse ronde — schrijven dezelfde gedeelde statuscontext
+# (`policy.live_status_context`) op dezelfde head. De vorige groep sleutelde op
+# `workflow_run.head_branch || run_id`, waardoor die drie in ONDERSCHEIDEN groepen vielen en dus
+# gelijktijdig draaiden. Twee gelijktijdige runs lezen dan elk een eigen momentopname, en de run met
+# de OUDERE momentopname kan als laatste publiceren. Reageerde de nieuwere run op een verwijderd of
+# bewerkt receipt, dan zet de oudere `success` terug en staat de poort stale groen tot een volgende
+# ronde. Eén constante groep maakt dat onmogelijk: er is hooguit één writer tegelijk.
+#
+# `cancel-in-progress: false` — een lopende ronde wordt nooit halverwege afgekapt, want dat zou
+# statussen van al geselecteerde maar nog niet gepubliceerde PR's stale laten staan.
+#
+# De lock wordt VÓÓR de eerste stap verworven, want `concurrency` staat hier op workflowniveau. Elke
+# meting in dit bestand gebeurt daarna: de open-PR-lijst en alle zes GET's per PR staan in de enige
+# job. Er wordt niets meegenomen wat vóór de lock is gemeten — geen artifact, geen cache, geen
+# output en geen veld uit de bronrun (de payload is hooguit een hint op de doelselectie).
+#
+# Eerlijke grens: GitHub houdt per groep hooguit één WACHTENDE run aan en annuleert een eerder
+# wachtende. Dat is hier onschadelijk voor de gedeelde statuscontext, want iedere writer hermeet de
+# volledige toestand via de API en de uurlijkse `schedule` doet altijd een volledige ronde. Een
+# geannuleerde wachtende run kan dus hooguit een versmalde hermeting uitstellen tot die volgende
+# volledige ronde; hij kan nooit een oudere uitspraak over een nieuwere heen schrijven.
 concurrency:
-  group: autocoding-shield-live-gate-${{ github.event.workflow_run.head_branch || github.run_id }}
+  group: autocoding-shield-live-gate
   cancel-in-progress: false
 
 jobs:
@@ -99,11 +120,15 @@ jobs:
           echo 'enabled=true' >> "$GITHUB_OUTPUT"
           echo "status_context=$context" >> "$GITHUB_OUTPUT"
 
-      # De doel-PR's worden hier OPNIEUW bepaald uit een read-only lijst van open pull requests. De
-      # eventpayload gaat als hint naar binnen en kan de lijst hooguit versmallen tot één eenduidige
-      # treffer; hij kan er nooit een PR aan toevoegen. Een onverwachte bron levert rc 2 op: niets
-      # publiceren, en dat is geen fout van deze poort. Een te grote of onleesbare lijst is rc 1:
-      # dan wordt er niets gepubliceerd en is de run rood.
+      # De doel-PR's worden hier OPNIEUW bepaald uit een read-only lijst van open pull requests. Dit
+      # is de EERSTE meting van de ronde en hij gebeurt binnen de globale writerlock, niet ervoor.
+      # `--paginate` haalt de lijst volledig op: er is geen bovengrens op het aantal open PR's, want
+      # een geweigerde ronde publiceert nul statussen en laat een eerder groene head groen staan.
+      # De eventpayload gaat als hint naar binnen en kan de lijst hooguit versmallen tot één
+      # eenduidige treffer; hij kan er nooit een PR aan toevoegen. Een onverwachte bron levert rc 2
+      # op: niets publiceren, en dat is geen fout van deze poort. Alleen een onleesbare of
+      # onvolledig opgehaalde lijst is rc 1: dan is onbekend WELKE PR's bestaan, dus wordt er niets
+      # gepubliceerd en is de run rood.
       - name: Bepaal de doel-PR's opnieuw via read-only API
         id: targets
         if: steps.enabled.outputs.enabled == 'true'

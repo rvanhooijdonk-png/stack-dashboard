@@ -454,8 +454,10 @@ test('W2. de live poort voert nooit PR-headcode uit en checkt uitsluitend de def
   );
   assert.ok(!liveGate.includes('node --test'), 'de live-gate-job mag geen PR-headtests draaien');
   assert.ok(!/actions\/(cache|download-artifact)/.test(liveGate), 'geen PR-artifacts of -cache');
-  // Per-PR serialisatie blijft staan, met een eigen groep naast die van de read-only shield.
-  assert.match(liveGate, /^ {2}group: autocoding-shield-live-gate-/m);
+  // De writer serialiseert globaal: één constante groep voor alle aanleidingen, zodat een oudere
+  // meting nooit ná een nieuwere op dezelfde statuscontext publiceert. De read-only shield houdt
+  // zijn eigen, per-PR groep — die schrijft immers niets.
+  assert.match(liveGate, /^ {2}group: autocoding-shield-live-gate$/m);
   assert.match(yamlOnly(PR_SHIELD_PATH), /^ {2}group: autocoding-shield-/m);
 });
 

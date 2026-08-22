@@ -98,9 +98,20 @@ aanleiding te geloven:
    en overal waar de treffer niet eenduidig is — worden **alle open PR's** gemeten. Extra meten is
    onschadelijk (de uitspraak is een pure functie van de momentopname), een verkeerde PR meten laat een
    stale status staan. De asymmetrie bepaalt de keuze.
-4. Die volledige ronde is expliciet begrensd: meer dan `OPEN_PULL_REQUEST_LIMIT` (25) open PR's is een
-   **weigering** — niets publiceren en rood worden — in plaats van een stilzwijgend halve ronde. Ook
-   een onleesbare of onbruikbare PR-lijst faalt zo gesloten.
+4. Die volledige ronde kent **geen bovengrens** op het aantal open PR's. De eerdere
+   `OPEN_PULL_REQUEST_LIMIT` (25) weigerde de hele ronde zodra er meer open PR's waren, en dat is
+   niet fail-closed maar fail-**stale**: een weigering publiceert nul statussen, en een eerder
+   gepubliceerde `success` op een PR-head blijft groen zolang er niets overheen wordt geschreven. Wie
+   na een groene uitspraak zijn receipt verwijderde of bewerkte, kreeg dus alleen een rode writerrun
+   op de default branch terwijl de PR-head groen bleef — en de uurlijkse fallback kon dat nooit
+   repareren zolang de teller boven de limiet bleef. Een ontbrekende status is stil, een verkeerde
+   status is groen; alleen de tweede is gevaarlijk. De lijst wordt daarom volledig gepagineerd
+   opgehaald en volledig verwerkt, oplopend gesorteerd en ontdubbeld (`--paginate` kan een PR twee
+   keer opleveren als de lijst tussen twee pagina's verschuift).
+5. Wat **wel** gesloten faalt is een onleesbare, onbruikbare of niet volledig opgehaalde PR-lijst.
+   Dan is niet bekend wélke PR's bestaan, dus is elke ronde per definitie onvolledig: niets
+   publiceren en rood worden. Raakt het API-budget van een lange ronde op, dan faalt dat per record
+   en levert het `failure` op de gemeten head — zichtbaar, niet stil groen.
 
 Elke doel-PR is een eigen record. De lus draait zonder `set -e`: een PR waarvan de head niet te meten
 is, of waarvan de publicatie faalt, zet `overall=1` en gaat door naar de volgende. De job wordt aan
@@ -108,10 +119,34 @@ het eind rood (`exit "$overall"`), maar één kapotte PR laat nooit de statussen
 stale staan. `test/autocoding-live-gate-targets.test.mjs` voert dat `run:`-blok werkelijk uit onder
 `bash` met gestubde `gh`/`node` en toetst dat gedrag, in plaats van het te beweren.
 
-Serialisatie loopt per bronbranch (`concurrency`-groep op `workflow_run.head_branch`), niet globaal:
-een lange ronde over één PR verdringt de volgende niet, en een geplande ronde krijgt zijn eigen groep.
+### Eén globale writerlock
+
+Alle aanleidingen schrijven dezelfde gedeelde statuscontext op dezelfde head. De `concurrency`-groep
+van de writer is daarom een **constante** (`autocoding-shield-live-gate`) op workflowniveau, zonder
+enige `${{ ... }}`-expressie, met `cancel-in-progress: false`.
+
+De eerdere groep sleutelde op `workflow_run.head_branch || run_id`. Daarmee vielen een reviewrun, een
+commentrun en de uurlijkse ronde in **drie verschillende** groepen en konden ze gelijktijdig draaien.
+Elk van die runs leest dan een eigen momentopname, en de run met de **oudere** momentopname kan als
+laatste publiceren: reageerde de nieuwere run op een verwijderd of bewerkt receipt, dan zette de
+oudere `success` terug en stond de poort stale groen tot een volgende ronde. Onder één constante
+groep is er hooguit één writer tegelijk, en omdat `concurrency` op workflowniveau staat, wordt de
+lock vóór de eerste stap verworven: de open-PR-lijst en alle zes GET's per PR worden pas daarna
+gemeten. Er wordt niets meegenomen wat vóór de lock is gemeten — geen artifact, geen cache, geen
+output en geen veld uit de bronrun.
+
+Eerlijke grens: GitHub houdt per groep hooguit één **wachtende** run aan en annuleert een eerder
+wachtende. Dat is hier onschadelijk, want iedere writer hermeet de volledige toestand via de API en
+de uurlijkse `schedule` doet altijd een volledige ronde. Een geannuleerde wachtende run kan dus
+hooguit een versmalde hermeting uitstellen tot die volgende volledige ronde; hij kan nooit een oudere
+uitspraak over een nieuwere heen schrijven.
+
 Per PR staan er zes read-only GET's; het uurlijkse `schedule` is de convergentiefallback voor edits,
 deletes, dismissals en gemiste of geannuleerde signaalruns.
+
+`test/autocoding-live-gate-targets.test.mjs` meet beide eigenschappen mét negatieve mutatie: het zet
+de oude groepsexpressie en de oude limietweigering terug en toetst dat die vormen zich aantoonbaar
+fout gedragen — drie groepen in plaats van één, en nul doelen bij 26 open PR's.
 
 ### Bootstrap: wat dit PR zelf niet kan bewijzen
 

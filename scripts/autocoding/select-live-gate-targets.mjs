@@ -15,8 +15,21 @@
  * Daarom bepaalt deze module de doel-PR's OPNIEUW uit een read-only API-lijst van open pull
  * requests, en gebruikt hij de hint alleen om die lijst te versmallen wanneer het bronevent de
  * bronrun werkelijk aan de PR-head bindt ÉN de hint precies één open PR aanwijst. Lukt dat niet, dan
- * worden alle open PR's gemeten — begrensd door een expliciete limiet die fail-closed is: liever
- * geen enkele status dan een stilzwijgend halve ronde.
+ * worden ALLE open PR's gemeten. Er is geen bovengrens meer op dat aantal.
+ *
+ * Waarom die bovengrens weg moest. `OPEN_PULL_REQUEST_LIMIT = 25` weigerde de hele ronde zodra er
+ * meer open PR's waren: nul statussen gepubliceerd en een rode writerrun. Dat is niet fail-closed
+ * maar fail-STALE. Een al gepubliceerde `success` op een PR-head blijft namelijk gewoon groen als er
+ * niets overheen wordt geschreven. Wie na een groene uitspraak zijn receipt verwijdert of bewerkt,
+ * kreeg dus precies wat hij wilde: de writer werd rood op de default branch, de PR-head bleef groen,
+ * en de uurlijkse fallback kon dat nooit repareren zolang de teller boven de limiet bleef. Een
+ * ontbrekende status is stil; een verkeerde status is groen. Alleen de tweede is gevaarlijk.
+ *
+ * Wat er WEL fail-closed blijft: een onleesbare of onbruikbare lijst. Dan is niet bekend WELKE PR's
+ * bestaan, dus is elke ronde per definitie onvolledig en wordt er niets gepubliceerd. Het verschil
+ * met de oude limiet is dat een volledig leesbare lijst nu altijd volledig verwerkt wordt, hoe lang
+ * hij ook is. De kosten daarvan (zes GET's per PR) zijn een budgetkwestie; loopt dat budget leeg,
+ * dan faalt dat per record en levert het `failure` op de gemeten head op — zichtbaar, niet stil groen.
  *
  * De uitspraak zelf is een pure functie van de API-momentopname per PR, dus een PR twee keer meten
  * levert twee keer dezelfde status op. Te veel meten kost API-budget; te weinig meten laat een stale
@@ -50,14 +63,10 @@ export const EXPECTED_SOURCE = Object.freeze({
  */
 export const HEAD_BOUND_SOURCE_EVENTS = Object.freeze(['pull_request', 'pull_request_review']);
 
-/** Bovengrens op één ronde. Meer open PR's dan dit is een weigering, geen gedeeltelijke ronde. */
-export const OPEN_PULL_REQUEST_LIMIT = 25;
-
 export const TARGET_REASON = Object.freeze({
   SOURCE_NOT_TRUSTED: 'SOURCE_NOT_TRUSTED',
   EVENT_NOT_SUPPORTED: 'EVENT_NOT_SUPPORTED',
   OPEN_PULL_REQUESTS_UNREADABLE: 'OPEN_PULL_REQUESTS_UNREADABLE',
-  OPEN_PULL_REQUEST_LIMIT_EXCEEDED: 'OPEN_PULL_REQUEST_LIMIT_EXCEEDED',
   ARGUMENTS_INVALID: 'ARGUMENTS_INVALID',
   EVENT_PAYLOAD_UNREADABLE: 'EVENT_PAYLOAD_UNREADABLE',
 });
@@ -118,7 +127,7 @@ export function normaliseOpenPullRequests(payload) {
  * een stale status laten staan.
  */
 export function selectTargets({
-  eventName, workflowRun, openPullRequests, limit = OPEN_PULL_REQUEST_LIMIT,
+  eventName, workflowRun, openPullRequests,
   expected = EXPECTED_SOURCE, headBoundEvents = HEAD_BOUND_SOURCE_EVENTS,
 }) {
   let hint = null;
@@ -161,17 +170,15 @@ export function selectTargets({
     }
   }
 
-  if (open.length > limit) {
-    return {
-      outcome: TARGET_OUTCOME.FAIL,
-      reason: TARGET_REASON.OPEN_PULL_REQUEST_LIMIT_EXCEEDED,
-      targets: [],
-    };
-  }
+  // De volledige lijst, zonder bovengrens en zonder stilzwijgende truncatie. Oplopend gesorteerd en
+  // ontdubbeld, zodat de ronde deterministisch is: `--paginate` kan een PR twee keer opleveren als de
+  // lijst tussen twee pagina's verschuift, en tweemaal dezelfde PR meten is verspilling, geen extra
+  // bewijs. Ontdubbelen verwijdert nooit een PR-NUMMER uit de ronde, alleen een herhaling ervan.
+  const targets = [...new Set(open.map((pr) => pr.number))].sort((a, b) => a - b);
   return {
     outcome: TARGET_OUTCOME.MEASURE,
     selection: TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS,
-    targets: open.map((pr) => pr.number).sort((a, b) => a - b),
+    targets,
   };
 }
 
@@ -202,8 +209,9 @@ export function parseTargetArgs(argv) {
 }
 
 /**
- * rc 0: meet de weggeschreven nummers. rc 2: geen aanleiding, publiceer niets, geen fout.
- * rc 1: de ronde kan niet volledig zijn — publiceer niets en word rood.
+ * rc 0: meet de weggeschreven nummers, hoeveel het er ook zijn. rc 2: geen aanleiding, publiceer
+ * niets, geen fout. rc 1: de lijst is onleesbaar, dus is niet bekend WELKE PR's bestaan — publiceer
+ * niets en word rood. Een lange lijst is géén rc 1 meer.
  */
 export function runSelect(argv, { readFile, writeFile } = {}) {
   const parsed = parseTargetArgs(argv);
