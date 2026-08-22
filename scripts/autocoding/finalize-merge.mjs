@@ -930,10 +930,27 @@ function ownerMergePackageBinding({
   };
 }
 
+/**
+ * DE ENE CANONICALISERING (V26). Zowel `buildOwnerMergePackage` als `verifyOwnerMergePackage` roepen
+ * uitsluitend déze functie aan om van een binding een digestbare vorm te maken — er bestaat geen
+ * tweede kopie. De vorm is de gesloten veldenlijst (`OWNER_MERGE_PACKAGE_FIELDS`, min `package_digest`)
+ * in een VASTE volgorde, ongeacht in welke sleutelvolgorde de binding is aangeleverd. Zonder dit zou
+ * een semantisch identiek pakket met omgekeerde veldvolgorde — bijvoorbeeld ná een JSON-rondgang — zijn
+ * eigen digest niet meer waarmaken, terwijl er niets aan de binding is veranderd.
+ */
+function canonicalOwnerMergePackageBinding(binding) {
+  const canoniek = {};
+  for (const veld of OWNER_MERGE_PACKAGE_FIELDS) {
+    if (veld === 'package_digest') continue;
+    canoniek[veld] = binding[veld];
+  }
+  return canoniek;
+}
+
 /** Bouwt een nieuw, zelfconsistent eigenaarspakket. Alleen `runFinalize` roept dit aan, op een GO. */
 export function buildOwnerMergePackage(velden) {
-  const binding = ownerMergePackageBinding(velden);
-  return { ...binding, package_digest: digest(JSON.stringify(binding)) };
+  const canoniek = canonicalOwnerMergePackageBinding(ownerMergePackageBinding(velden));
+  return { ...canoniek, package_digest: digest(JSON.stringify(canoniek)) };
 }
 
 /**
@@ -996,7 +1013,8 @@ export function verifyOwnerMergePackage({
   }
 
   const { package_digest: opgeslagenDigest, ...binding } = ownerPackage;
-  if (digest(JSON.stringify(binding)) !== opgeslagenDigest) {
+  const canoniek = canonicalOwnerMergePackageBinding(binding);
+  if (digest(JSON.stringify(canoniek)) !== opgeslagenDigest) {
     return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_DIGEST_MISMATCH);
   }
 

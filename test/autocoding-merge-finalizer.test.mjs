@@ -2112,6 +2112,46 @@ test('O11. `verifyOwnerMergePackage` herkent DIGEST-KNOEIEN: een bewerkt veld zo
   );
 });
 
+test('O11a. CANONICALISERINGSREGRESSIE (V26): `verifyOwnerMergePackage` accepteert een SEMANTISCH '
+  + 'IDENTIEK pakket met OMGEKEERDE veldvolgorde, en blijft fail-closed op een gewijzigde waarde, een '
+  + 'extra veld, een ontbrekend veld en een onjuiste digest', () => {
+  const pakket = geldigPakket();
+  const omgekeerd = {};
+  for (const veld of [...Object.keys(pakket)].reverse()) omgekeerd[veld] = pakket[veld];
+  // De sleutelvolgorde is aantoonbaar anders dan die van `geldigPakket()` — anders bewijst deze test
+  // niets over canonicalisering.
+  assert.notDeepEqual(Object.keys(omgekeerd), Object.keys(pakket));
+  assert.deepEqual(verifieer({ ownerPackage: omgekeerd }), { ok: true });
+
+  // Gewijzigde waarde (zonder herberekende digest) blijft fail-closed, óók in omgekeerde volgorde.
+  const gewijzigd = { ...omgekeerd, merge_method: 'merge' };
+  assert.deepEqual(
+    verifieer({ ownerPackage: gewijzigd }),
+    { ok: false, reason: OWNER_PACKAGE_REASON.OWNER_PACKAGE_DIGEST_MISMATCH },
+  );
+
+  // Extra veld blijft MALFORMED, óók in omgekeerde volgorde.
+  const extraVeld = { ...omgekeerd, ongeoorloofd_extra_veld: 'x' };
+  assert.deepEqual(
+    verifieer({ ownerPackage: extraVeld }),
+    { ok: false, reason: OWNER_PACKAGE_REASON.OWNER_PACKAGE_MALFORMED },
+  );
+
+  // Ontbrekend veld blijft MALFORMED, óók in omgekeerde volgorde.
+  const { base_ref_digest: _weggelaten, ...ontbrekendVeld } = omgekeerd;
+  assert.deepEqual(
+    verifieer({ ownerPackage: ontbrekendVeld }),
+    { ok: false, reason: OWNER_PACKAGE_REASON.OWNER_PACKAGE_MALFORMED },
+  );
+
+  // Onjuiste digest (zelf ook omgekeerd, waardeloos gewijzigd) blijft DIGEST_MISMATCH.
+  const foutieveDigest = { ...omgekeerd, package_digest: '0'.repeat(64) };
+  assert.deepEqual(
+    verifieer({ ownerPackage: foutieveDigest }),
+    { ok: false, reason: OWNER_PACKAGE_REASON.OWNER_PACKAGE_DIGEST_MISMATCH },
+  );
+});
+
 test('O12. `verifyOwnerMergePackage` wijst een VERLOPEN pakket fail-closed af', () => {
   assert.deepEqual(
     verifieer({ nowMs: GELDIGE_PAKKET_VELDEN.measuredAtMs + 86400 * 1000 + 1 }),

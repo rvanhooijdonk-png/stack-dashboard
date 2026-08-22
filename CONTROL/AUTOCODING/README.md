@@ -650,8 +650,10 @@ op beide vendors, de ownerautorisatie gebonden aan PR-nummer/head/boom/base/task
 check-runs op precies deze head, de live base-head, GitHubs eigen `mergeable`/`mergeable_state` en de
 driftvergelijking over beide metingen. Is dat bewijs compleet en groen, dan is het resultaat een
 MERGEPAKKET: `effect: "OWNER_MERGE_PACKAGE"`, `merge_performed: false`, `owner_action:
-"OWNER_MERGE_REQUIRED"`, exitcode 0 — een oplevering, en onmiskenbaar géén merge. De merge zelf doet de
-eigenaar, in GitHubs eigen interface.
+"OWNER_MERGE_REQUIRED"`, `decision: "FINALIZE_OWNER_ACTION_REQUIRED"`, exitcode 3
+(`OWNER_ACTION_REQUIRED_EXIT_CODE`, sinds V25 — zie hieronder) — een oplevering, en onmiskenbaar géén
+merge. `rc 0` is voorbehouden aan een werkelijk uitgevoerd effect. De merge zelf doet de eigenaar, in
+GitHubs eigen interface.
 
 Deze stand stelt bewust GEEN rulesetEIS. Dat is een uitspraak en geen gat: een serverpoort bewaakt een
 VERZOEK, en deze stand doet er nul. Een ruleset eisen die op dit object niet actief kan zijn, zou de
