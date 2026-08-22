@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, cpSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, cpSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -18,6 +18,7 @@ import { spawnSync } from 'node:child_process';
 import {
   buildShieldInput, buildCommitIndex, resolveCommitRef, extractTaskId, touchesSensitivePaths,
   groupReviewComments, flattenPages, measureFilesCompleteness, FILES_API_LIMIT,
+  parseCollectArgs, COLLECT_VALUE_OPTIONS,
 } from '../scripts/autocoding/collect-shield-input.mjs';
 import { evaluateShield, REASON } from '../scripts/autocoding/verify-review-gate.mjs';
 
@@ -511,4 +512,87 @@ test('A25. de adapter scheidt een leesfout van een schrijffout', () => {
   assert.equal(unwritable.status, 1);
   assert.match(unwritable.stdout, /COLLECT_OUTPUT_UNWRITABLE/);
   assert.doesNotMatch(unwritable.stdout, /COLLECT_RAW_INPUT_UNREADABLE/);
+});
+
+/**
+ * A26. De CLI-argumentgrens van de adapter. Twee van de vier sleutels zijn SCHRIJFpaden, dus een
+ * stille verschuiving legt het bewijsbestand ergens anders neer dan de beslisser leest. Deze test
+ * meet daarom niet alleen de exitcode, maar ook dat er bij een weigering GEEN enkel uitvoerbestand
+ * ontstaat — een half geschreven oogst zou als een echte oogst gelezen kunnen worden.
+ */
+test('A26. onleesbare argv eindigt nonzero en schrijft geen enkel uitvoerbestand', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'shield-adapter-argv-'));
+  const rawDir = join(dir, 'raw');
+  mkdirSync(rawDir);
+  cpSync(FIXTURES, rawDir, { recursive: true });
+  const POLICY_PATH = 'CONTROL/AUTOCODING/policy.v1.json';
+
+  let teller = 0;
+  const run = (bouw) => {
+    teller += 1;
+    const outContext = join(dir, `c${teller}.json`);
+    const outShieldInput = join(dir, `s${teller}.json`);
+    const cli = spawnSync(process.execPath, [
+      'scripts/autocoding/collect-shield-input.mjs', ...bouw(outContext, outShieldInput),
+    ], { encoding: 'utf8' });
+    return { cli, outContext, outShieldInput };
+  };
+
+  const goedeArgv = (c, s) => [
+    '--raw', rawDir, '--policy', POLICY_PATH, '--out-context', c, '--out-shield-input', s,
+  ];
+  const groen = run(goedeArgv);
+  assert.equal(groen.cli.status, 0, groen.cli.stdout + groen.cli.stderr);
+  assert.equal(existsSync(groen.outContext), true);
+  assert.equal(existsSync(groen.outShieldInput), true);
+
+  const kwaad = {
+    'onbekende optie': (c, s) => [...goedeArgv(c, s), '--onbekend', 'x'],
+    'onbekend los token': (c, s) => [...goedeArgv(c, s), 'x'],
+    'dubbele optie': (c, s) => [...goedeArgv(c, s), '--raw', rawDir],
+    'ontbrekende waarde': (c, s) => [...goedeArgv(c, s), '--policy'],
+    'oneven argv': (c) => ['--raw', rawDir, '--policy', POLICY_PATH, '--out-context', c, '--out-shield-input'],
+    'optie als waarde': (c, s) => ['--raw', '--policy', '--policy', POLICY_PATH, '--out-context', c, '--out-shield-input', s],
+    'lege waarde': (c, s) => ['--raw', '', '--policy', POLICY_PATH, '--out-context', c, '--out-shield-input', s],
+  };
+  for (const [naam, bouw] of Object.entries(kwaad)) {
+    const { cli, outContext, outShieldInput } = run(bouw);
+    assert.equal(cli.status, 1, `${naam} moet nonzero eindigen`);
+    assert.equal(cli.stderr, '', naam);
+    assert.match(cli.stdout, /^COLLECT_ARGS_INVALID\n$/, naam);
+    assert.equal(existsSync(outContext), false, `${naam} schreef alsnog een context`);
+    assert.equal(existsSync(outShieldInput), false, `${naam} schreef alsnog een shield-input`);
+  }
+
+  // Een argv die wél te lezen is maar een vereiste sleutel mist, is een ANDER defect en houdt zijn
+  // eigen code — zodat de diagnose niet naar een vormfout wordt gestuurd.
+  const ontbrekend = run((c) => ['--raw', rawDir, '--policy', POLICY_PATH, '--out-context', c]);
+  assert.equal(ontbrekend.cli.status, 1);
+  assert.match(ontbrekend.cli.stdout, /^COLLECT_ARGS_MISSING\n$/);
+  assert.equal(existsSync(ontbrekend.outContext), false);
+});
+
+test('A27. parseCollectArgs weigert per vorm en scheidt vormfout van ontbrekende sleutel', () => {
+  assert.deepEqual(
+    [...COLLECT_VALUE_OPTIONS].sort(),
+    ['--out-context', '--out-shield-input', '--policy', '--raw'],
+    'de toegestane verzameling is gesloten en expliciet',
+  );
+  const goed = ['--raw', 'r', '--policy', 'p', '--out-context', 'c', '--out-shield-input', 's'];
+  assert.equal(parseCollectArgs(goed).ok, true);
+  for (const argv of [
+    [...goed, '--onbekend', 'x'],
+    [...goed, 'x'],
+    [...goed, '--raw', 'r2'],
+    [...goed, '--policy'],
+    goed.slice(0, 7),
+    ['--raw', '--policy', '--policy', 'p', '--out-context', 'c', '--out-shield-input', 's'],
+    ['--raw', '', '--policy', 'p', '--out-context', 'c', '--out-shield-input', 's'],
+    ['--dry-run', ...goed],
+  ]) {
+    assert.deepEqual(parseCollectArgs(argv), { ok: false, error: 'COLLECT_ARGS_INVALID' }, String(argv));
+  }
+  for (const argv of [[], goed.slice(0, 6), null]) {
+    assert.deepEqual(parseCollectArgs(argv), { ok: false, error: 'COLLECT_ARGS_MISSING' }, String(argv));
+  }
 });

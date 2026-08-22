@@ -16,7 +16,7 @@ import {
   extractCodexNativeEvidence, extractCodexReviewEvidence, extractGeminiNativeEvidence,
   bindNativeEvidence, assertNativeVendorsSafe, assertOwnerGateSafe, evaluateNativeReview,
   evaluateShield, evaluateOwnerApprovals, extractOwnerApprovalFromBody, OWNER_APPROVAL_SCHEMA,
-  isSafeSensitivePrefix,
+  isSafeSensitivePrefix, parseVerifyArgs, VERIFY_VALUE_OPTIONS,
 } from '../scripts/autocoding/verify-review-gate.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -1235,3 +1235,75 @@ function codexReview(overrides = {}) {
     ...overrides,
   };
 }
+
+/**
+ * N31. De CLI-argumentgrens. Gemeten defect: de oude paarlezing (`i += 2`) las elke oneven positie
+ * als sleutel, dus één extra of ontbrekend token verschoof alle volgende bindingen STIL. Deze test
+ * gebruikt bewust een receiptset die met correcte argv GO oplevert: alleen zo bewijst een rc 1 dat
+ * de WEIGERING de uitkomst droeg en niet de inhoud.
+ */
+test('N31. onleesbare argv eindigt nonzero en levert nooit een GO', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'autocoding-argv-'));
+  const receipts = join(dir, 'receipts.json');
+  const context = join(dir, 'context.json');
+  const policy = join(dir, 'policy.json');
+  const shieldInput = join(dir, 'shield-input.json');
+  writeFileSync(receipts, JSON.stringify([signed(goCodex()), signed(goGemini())]));
+  writeFileSync(context, JSON.stringify(CONTEXT));
+  writeFileSync(policy, JSON.stringify(POLICY));
+  writeFileSync(shieldInput, JSON.stringify({ nativeEvidence: [], ownerApprovals: [] }));
+
+  const run = (argv) => spawnSync(process.execPath, [
+    'scripts/autocoding/verify-review-gate.mjs', ...argv,
+  ], { encoding: 'utf8' });
+
+  const goed = ['--receipts', receipts, '--context', context, '--policy', policy];
+  const groen = run(goed);
+  assert.equal(groen.status, 0, groen.stdout + groen.stderr);
+  assert.deepEqual(JSON.parse(groen.stdout), { decision: 'GO', reasons: [] });
+
+  const kwaad = {
+    'onbekende optie': [...goed, '--onbekend', 'x'],
+    'onbekend los token': [...goed, 'x'],
+    'dubbele optie': [...goed, '--policy', policy],
+    'ontbrekende waarde': [...goed, '--shield-input'],
+    'oneven argv': ['--receipts', receipts, '--context', context, '--policy'],
+    'optie als waarde': ['--receipts', '--context', '--context', context, '--policy', policy],
+    'lege waarde': ['--receipts', '', '--context', context, '--policy', policy],
+    'ontbrekende context': ['--receipts', receipts, '--policy', policy],
+    'ontbrekende policy': ['--receipts', receipts, '--context', context],
+    'geen bron': ['--context', context, '--policy', policy],
+    'beide bronnen': [...goed, '--shield-input', shieldInput],
+  };
+  for (const [naam, argv] of Object.entries(kwaad)) {
+    const cli = run(argv);
+    assert.equal(cli.status, 1, `${naam} moet nonzero eindigen`);
+    assert.equal(cli.stderr, '', naam);
+    assert.deepEqual(
+      JSON.parse(cli.stdout), { decision: 'NO_GO', reasons: [REASON.PARSE_ERROR] }, naam,
+    );
+  }
+});
+
+test('N32. parseVerifyArgs weigert per vorm en houdt de bronkeuze exclusief', () => {
+  assert.deepEqual(
+    [...VERIFY_VALUE_OPTIONS].sort(),
+    ['--context', '--policy', '--receipts', '--shield-input'],
+    'de toegestane verzameling is gesloten en expliciet',
+  );
+  const goed = ['--receipts', 'r.json', '--context', 'c.json', '--policy', 'p.json'];
+  assert.equal(parseVerifyArgs(goed).ok, true);
+  assert.equal(parseVerifyArgs(['--shield-input', 's.json', '--context', 'c.json', '--policy', 'p.json']).ok, true);
+  assert.equal(parseVerifyArgs([...goed, '--onbekend', 'x']).ok, false, 'onbekende optie');
+  assert.equal(parseVerifyArgs([...goed, '--policy', 'p2.json']).ok, false, 'dubbele optie');
+  assert.equal(parseVerifyArgs([...goed, '--shield-input']).ok, false, 'ontbrekende waarde');
+  assert.equal(parseVerifyArgs(goed.slice(0, 5)).ok, false, 'oneven argv');
+  assert.equal(parseVerifyArgs(['--receipts', '--context', '--context', 'c.json', '--policy', 'p.json']).ok, false);
+  assert.equal(parseVerifyArgs(['--receipts', '', '--context', 'c.json', '--policy', 'p.json']).ok, false);
+  assert.equal(parseVerifyArgs([...goed, '--shield-input', 's.json']).ok, false, 'twee bronnen');
+  assert.equal(parseVerifyArgs(['--context', 'c.json', '--policy', 'p.json']).ok, false, 'geen bron');
+  assert.equal(parseVerifyArgs([]).ok, false);
+  assert.equal(parseVerifyArgs(null).ok, false);
+  // De positieverschuiving zelf: een los token vóór de rest mag niets stil hernoemen.
+  assert.equal(parseVerifyArgs(['--dry-run', ...goed]).ok, false, 'geen vlaggen op deze grens');
+});

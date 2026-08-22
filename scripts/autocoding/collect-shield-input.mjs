@@ -271,22 +271,65 @@ export function buildShieldInput({
   };
 }
 
+/** Sleutels die precies één niet-lege waarde nemen. Alle vier zijn paden. */
+export const COLLECT_VALUE_OPTIONS = Object.freeze([
+  '--raw', '--policy', '--out-context', '--out-shield-input',
+]);
+
+/**
+ * Zelfde fail-closed argumentlezing als de publisher, de targetselector en de beslisser: token voor
+ * token in plaats van in VASTE PAREN.
+ *
+ * De paarlezing (`for (i = 0; i < argv.length; i += 2)`) las elke oneven positie als sleutel. Eén
+ * extra of ontbrekend token verschoof daardoor STIL alle volgende bindingen — en hier zijn twee van
+ * de vier sleutels SCHRIJFpaden. Een verschoven `--out-shield-input` schrijft het bewijsbestand naar
+ * een ander pad dan de beslisser hierna leest; die leest dan een oude of afwezige oogst zonder dat
+ * er iets aan de uitvoer te zien is.
+ *
+ * Twee onderscheiden weigeringen, in lijn met de scheiding tussen lees- en schrijffouten hieronder:
+ * `COLLECT_ARGS_INVALID` voor argv die niet te lezen valt (onbekend argument, dubbele sleutel,
+ * sleutel zonder waarde, lege waarde, sleutel als waarde), `COLLECT_ARGS_MISSING` voor argv die wel
+ * klopt maar een vereiste sleutel mist. Beide onder één code samenvatten stuurde de diagnose weg van
+ * de oorzaak.
+ */
+export function parseCollectArgs(argv) {
+  const list = Array.isArray(argv) ? argv : [];
+  const options = new Set(COLLECT_VALUE_OPTIONS);
+  const values = new Map();
+  const reject = { ok: false, error: 'COLLECT_ARGS_INVALID' };
+
+  for (let i = 0; i < list.length; i += 1) {
+    const token = list[i];
+    if (typeof token !== 'string') return reject;
+    if (!options.has(token)) return reject;
+    if (values.has(token)) return reject;
+    i += 1;
+    const value = list[i];
+    if (typeof value !== 'string' || value.length === 0) return reject;
+    if (options.has(value)) return reject;
+    values.set(token, value);
+  }
+  for (const option of options) {
+    if (!values.has(option)) return { ok: false, error: 'COLLECT_ARGS_MISSING' };
+  }
+  return { ok: true, values };
+}
+
 async function runCli() {
   const { readFileSync, writeFileSync } = await import('node:fs');
   const { join } = await import('node:path');
-  const args = new Map();
-  const argv = process.argv.slice(2);
-  for (let i = 0; i < argv.length; i += 2) args.set(argv[i], argv[i + 1]);
+  const parsed = parseCollectArgs(process.argv.slice(2));
+  if (!parsed.ok) {
+    console.log(parsed.error);
+    process.exitCode = 1;
+    return;
+  }
+  const args = parsed.values;
 
   const rawDir = args.get('--raw');
   const policyPath = args.get('--policy');
   const outContext = args.get('--out-context');
   const outShieldInput = args.get('--out-shield-input');
-  if (!rawDir || !policyPath || !outContext || !outShieldInput) {
-    console.log('COLLECT_ARGS_MISSING');
-    process.exitCode = 1;
-    return;
-  }
 
   // Lees- en schrijffouten zijn verschillende defecten en krijgen daarom verschillende redencodes.
   // Een ontbrekend of kapot RUW antwoord mag nooit stilzwijgend "niets gevonden" betekenen: dat zou

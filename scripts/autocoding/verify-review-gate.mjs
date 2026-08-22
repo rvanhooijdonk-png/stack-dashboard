@@ -832,22 +832,64 @@ export function evaluateShield({
   return { decision: reasons.size === 0 ? 'GO' : 'NO_GO', reasons: Array.from(reasons) };
 }
 
+/** Sleutels die precies één niet-lege waarde nemen. Alle vier zijn bestandspaden. */
+export const VERIFY_VALUE_OPTIONS = Object.freeze([
+  '--context', '--policy', '--receipts', '--shield-input',
+]);
+
+/**
+ * Zelfde fail-closed argumentlezing als de publisher en de targetselector: token voor token in
+ * plaats van in VASTE PAREN.
+ *
+ * De paarlezing (`for (i = 0; i < argv.length; i += 2)`) las elke oneven positie als sleutel en elke
+ * even positie als waarde. Eén extra of ontbrekend token verschoof daardoor STIL de hele rest:
+ * `--policy` kon het pad van `--receipts` krijgen, en een onbekend argument werd zonder klacht als
+ * sleutel opgeslagen. De poort besliste dan over ANDERE bestanden dan de aanroeper bedoelde, zonder
+ * dat er iets aan de uitvoer te zien was.
+ *
+ * Weigeringen: een onbekend argument, een dubbel opgegeven sleutel, een sleutel zonder waarde
+ * (inclusief oneven argv), een lege waarde en een waarde die zelf een bekende sleutel is.
+ *
+ * De bronkeuze blijft exclusief: precies één van `--receipts` of `--shield-input`. Beide tegelijk is
+ * geen rijkere invoer maar een dubbelzinnige opdracht — welke bron de uitspraak droeg zou dan van de
+ * implementatievolgorde afhangen in plaats van van de aanroep.
+ */
+export function parseVerifyArgs(argv) {
+  const list = Array.isArray(argv) ? argv : [];
+  const options = new Set(VERIFY_VALUE_OPTIONS);
+  const values = new Map();
+  const reject = { ok: false };
+
+  for (let i = 0; i < list.length; i += 1) {
+    const token = list[i];
+    if (typeof token !== 'string') return reject;
+    if (!options.has(token)) return reject;
+    if (values.has(token)) return reject;
+    i += 1;
+    const value = list[i];
+    if (typeof value !== 'string' || value.length === 0) return reject;
+    if (options.has(value)) return reject;
+    values.set(token, value);
+  }
+  if (!values.has('--context') || !values.has('--policy')) return reject;
+  if (values.has('--receipts') === values.has('--shield-input')) return reject;
+  return { ok: true, values };
+}
+
 async function runCli() {
   const { readFileSync } = await import('node:fs');
-  const args = new Map();
-  const argv = process.argv.slice(2);
-  for (let i = 0; i < argv.length; i += 2) args.set(argv[i], argv[i + 1]);
+  const parsed = parseVerifyArgs(process.argv.slice(2));
+  if (!parsed.ok) {
+    console.log(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.PARSE_ERROR] }));
+    process.exitCode = 1;
+    return;
+  }
+  const args = parsed.values;
 
   const contextPath = args.get('--context');
   const policyPath = args.get('--policy');
   const receiptsPath = args.get('--receipts');
   const shieldInputPath = args.get('--shield-input');
-
-  if (!contextPath || !policyPath || !(receiptsPath || shieldInputPath)) {
-    console.log(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.PARSE_ERROR] }));
-    process.exitCode = 1;
-    return;
-  }
 
   let context;
   let policy;
