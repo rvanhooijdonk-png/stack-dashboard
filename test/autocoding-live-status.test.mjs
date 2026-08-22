@@ -19,8 +19,9 @@ import { spawnSync } from 'node:child_process';
 import { buildShieldInput } from '../scripts/autocoding/collect-shield-input.mjs';
 import { evaluateShield, REASON } from '../scripts/autocoding/verify-review-gate.mjs';
 import {
-  describeReasons, resolvePublication, publishStatus, runPublish, parsePublishArgs,
-  PUBLISH_ERROR, DESCRIPTION_LIMIT, STATUS_CONTEXT_RE,
+  describeReasons, resolvePublication, resolvePendingPublication, publishStatus, runPublish,
+  parsePublishArgs, PUBLISH_ERROR, DESCRIPTION_LIMIT, STATUS_CONTEXT_RE, PENDING_PUBLICATION,
+  PENDING_INCOMPATIBLE_OPTIONS,
 } from '../scripts/autocoding/publish-live-status.mjs';
 
 const FIXTURES = 'test/fixtures/autocoding-shield';
@@ -526,6 +527,135 @@ test('L13b. runPublish weigert kapotte argv en publiceert dan niets', async () =
   } finally {
     console.log = original;
   }
+});
+
+// --- Invalidatie (pendingmodus) ------------------------------------------------------------------
+//
+// Codex P1, review 4998653669, inline 3834812708. De writerlock houdt hooguit één WACHTENDE run aan.
+// Wordt die door een nieuwe aanleiding geannuleerd, dan verdween de invalidatie die hij had moeten
+// doen — en bleef een eerder gepubliceerde `success` bruikbaar. De reparatie is dat iedere writer
+// EERST elke open head op `pending` zet, vóór er ook maar één detail-GET is gedaan. Dat maakt de
+// publisher de enige plek waar die invalidatie vandaan komt, dus wordt hij hier gemeten.
+
+test('L14. de pendingstatus is vast, draagt geen uitspraak en staat op de gemeten head', () => {
+  const invalidatie = resolvePendingPublication({ headSha: HEAD, statusContext: CONTEXT_NAME });
+  assert.equal(invalidatie.ok, true);
+  assert.equal(invalidatie.state, 'pending');
+  assert.notEqual(invalidatie.state, 'success', 'een invalidatie mag nooit groen zijn');
+  assert.equal(invalidatie.sha, HEAD, 'altijd op de gemeten head');
+  assert.equal(invalidatie.context, CONTEXT_NAME, 'exact dezelfde context als de uitspraak');
+  assert.equal(invalidatie.description, PENDING_PUBLICATION.description);
+  assert.ok(invalidatie.description.length <= DESCRIPTION_LIMIT);
+
+  // Twee aanroepen met dezelfde head leveren byte-identiek dezelfde status: de invalidatie is een
+  // constante, geen momentopname.
+  assert.deepEqual(resolvePendingPublication({ headSha: HEAD, statusContext: CONTEXT_NAME }), invalidatie);
+
+  // Zonder gemeten head of zonder geldige context wordt er niets geschreven — ook geen pending.
+  for (const kapot of ['', 'HEAD', HEAD.slice(0, 39), `${HEAD}0`]) {
+    const geweigerd = resolvePendingPublication({ headSha: kapot, statusContext: CONTEXT_NAME });
+    assert.equal(geweigerd.ok, false, JSON.stringify(kapot));
+    assert.equal(geweigerd.blocked, PUBLISH_ERROR.HEAD_UNMEASURED);
+  }
+  const geenContext = resolvePendingPublication({ headSha: HEAD, statusContext: '' });
+  assert.equal(geenContext.ok, false);
+  assert.equal(geenContext.blocked, PUBLISH_ERROR.STATUS_CONTEXT_INVALID);
+});
+
+test('L15. --pending geeft rc 0 UITSLUITEND als de pendingstatus werkelijk geplaatst is', async () => {
+  const argv = ['--pending', '--repository', 'rvanhooijdonk-png/stack-dashboard',
+    '--head-sha', HEAD, '--status-context', CONTEXT_NAME];
+  const logged = [];
+  const original = console.log;
+  console.log = (line) => logged.push(String(line));
+  try {
+    // Geaccepteerd: 201 → rc 0, en de POST draagt state `pending` op de gemeten head.
+    const verzoeken = [];
+    const ok = async (url, init) => {
+      verzoeken.push({ url, body: JSON.parse(init.body) });
+      return { status: 201 };
+    };
+    assert.equal(await runPublish(argv, { fetchImpl: ok }), 0);
+    assert.equal(verzoeken.length, 1);
+    assert.equal(verzoeken[0].url, `https://api.github.com/repos/rvanhooijdonk-png/stack-dashboard/statuses/${HEAD}`);
+    assert.deepEqual(verzoeken[0].body, {
+      state: 'pending', context: CONTEXT_NAME, description: PENDING_PUBLICATION.description,
+    });
+    assert.equal(logged.at(-1), 'LIVE_STATUS_PENDING_PUBLISHED');
+
+    // Geweigerd door de API → rc 1. De head kan dan nog groen staan, dus moet de job dat weten.
+    assert.equal(await runPublish(argv, { fetchImpl: async () => ({ status: 422 }) }), 1);
+    assert.equal(logged.at(-1), 'LIVE_STATUS_PENDING_POST_REJECTED_422');
+
+    // Transportfout → rc 1, één vaste categorie, geen stacktrace en geen verzoekdetails.
+    assert.equal(await runPublish(argv, { fetchImpl: () => { throw new Error('boom'); } }), 1);
+    assert.equal(logged.at(-1), `LIVE_STATUS_PENDING_POST_REJECTED_${PUBLISH_ERROR.STATUS_TRANSPORT_ERROR}`);
+
+    // Geen gemeten head → er wordt niets gePOST en de rc is 1.
+    let geraakt = false;
+    const rc = await runPublish(
+      ['--pending', '--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', '',
+        '--status-context', CONTEXT_NAME],
+      { fetchImpl: async () => { geraakt = true; return { status: 201 }; } },
+    );
+    assert.equal(rc, 1);
+    assert.equal(geraakt, false);
+    assert.equal(logged.at(-1), `LIVE_STATUS_PENDING_NOT_PUBLISHABLE_${PUBLISH_ERROR.HEAD_UNMEASURED}`);
+  } finally {
+    console.log = original;
+  }
+});
+
+test('L16. de pending-CLI heeft een GESLOTEN vorm en kan geen uitspraak meesmokkelen', () => {
+  const basis = ['--pending', '--repository', 'rvanhooijdonk-png/stack-dashboard',
+    '--head-sha', HEAD, '--status-context', CONTEXT_NAME];
+  const goed = parsePublishArgs(basis);
+  assert.equal(goed.ok, true);
+  assert.equal(goed.pending, true);
+  assert.equal(parsePublishArgs(basis.slice(1)).pending, false, 'zonder de vlag is er geen pendingmodus');
+
+  // Een poortresultaat of uitvoeringsfout heeft in deze modus geen betekenis. Stil negeren zou de
+  // aanroeper laten denken dat er een uitspraak is gepubliceerd; de vorm bestaat dus niet.
+  assert.deepEqual([...PENDING_INCOMPATIBLE_OPTIONS], ['--gate-result', '--execution-error']);
+  for (const optie of PENDING_INCOMPATIBLE_OPTIONS) {
+    const parsed = parsePublishArgs([...basis, optie, '/tmp/x.json']);
+    assert.equal(parsed.ok, false, optie);
+    assert.equal(parsed.error, PUBLISH_ERROR.ARGUMENTS_INVALID, optie);
+  }
+  // Ook andersom: de uitspraakvorm mag de vlag niet per ongeluk oppikken.
+  assert.equal(parsePublishArgs([...basis, '--pending']).ok, false, 'dubbele vlag');
+  assert.equal(parsePublishArgs(['--head-sha', '--pending']).ok, false, 'de vlag als waarde telt niet');
+
+  // De vlag is positie-onafhankelijk, net als `--dry-run`.
+  const achteraan = ['--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', HEAD,
+    '--status-context', CONTEXT_NAME, '--pending'];
+  assert.equal(parsePublishArgs(achteraan).pending, true);
+  assert.equal(parsePublishArgs(achteraan).values.get('--head-sha'), HEAD);
+});
+
+test('L17. de workflow invalideert ELKE open head vóór de eerste detailmeting', () => {
+  const liveGate = readFileSync('.github/workflows/autocoding-shield-live-gate.yml', 'utf8');
+  const invalidatie = liveGate.indexOf('      - name: Invalideer eerst iedere open head');
+  const meting = liveGate.indexOf('      - name: Meet, beslis en publiceer per doel-PR');
+  assert.ok(invalidatie !== -1, 'de invalidatiestap bestaat');
+  assert.ok(invalidatie < meting, 'de invalidatiestap staat vóór de meetstap');
+
+  const stap = liveGate.slice(invalidatie, meting);
+  // De invalidatie loopt over ALLE open heads, niet over de begrensde meetbatch.
+  assert.match(stap, /done 3< "\$RUNNER_TEMP\/heads\.txt"/);
+  assert.match(stap, /publish-live-status\.mjs \\\n\s+--pending/);
+  assert.match(stap, /--status-context "\$STATUS_CONTEXT"/);
+  // Geen enkele detail-GET in deze stap: hij kost precies één POST per head.
+  assert.ok(!/gh api/.test(stap), 'de invalidatieronde doet geen enkele GET');
+  // Record-lokaal: één mislukte POST mag de invalidatie van de volgende head niet tegenhouden.
+  assert.ok(!/^\s*set -euo pipefail$/m.test(stap), 'de invalidatielus mag niet vroegtijdig stoppen');
+  assert.match(stap, /pending_failed=1\n\s+continue$/m);
+  assert.match(stap, /pending_failed=\$pending_failed" >> "\$GITHUB_OUTPUT"/);
+  // En de fout blijft niet hangen: een onvolledige invalidatieronde maakt de job alsnog rood.
+  assert.match(
+    liveGate,
+    /if: always\(\) && steps\.invalidate\.outputs\.pending_failed == '1'/,
+  );
 });
 
 test('L13c. de vorm die de workflow werkelijk doorgeeft blijft geldig, inclusief lege --execution-error', () => {

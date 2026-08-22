@@ -7,8 +7,8 @@
  * bronrun kan een door een PR geleverde definitie hebben gehad. Twee eigenschappen worden hier
  * daarom gemeten in plaats van beloofd:
  *
- *   1. De doel-PR's komen uit een read-only API-lijst, niet uit de eventpayload. De payload mag die
- *      lijst hooguit versmallen tot één eenduidige treffer.
+ *   1. De doel-PR's komen uit een read-only API-lijst, niet uit de eventpayload, en de payload mag
+ *      die lijst NIET versmallen. Iedere aanleiding invalideert eerst alle open heads.
  *   2. Eén kapotte PR maakt de ronde rood maar stopt hem niet — anders zou de eerste kapotte PR alle
  *      andere statussen stale laten staan. Die eigenschap zit in de shell van het workflowbestand,
  *      dus wordt die shell hier echt uitgevoerd met gestubde `gh` en `node`.
@@ -30,8 +30,9 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
-  selectTargets, isTrustedWorkflowRunSource, normaliseOpenPullRequests, parseTargetArgs, runSelect,
-  EXPECTED_SOURCE, HEAD_BOUND_SOURCE_EVENTS, TARGET_OUTCOME, TARGET_REASON, TARGET_SELECTION,
+  selectTargets, selectEvaluationBatch, isTrustedWorkflowRunSource, normaliseOpenPullRequests,
+  parseTargetArgs, parseRunNumber, runSelect, EVALUATION_BATCH_LIMIT,
+  EXPECTED_SOURCE, TARGET_OUTCOME, TARGET_REASON, TARGET_SELECTION,
 } from '../scripts/autocoding/select-live-gate-targets.mjs';
 
 const SELECTOR = 'scripts/autocoding/select-live-gate-targets.mjs';
@@ -96,40 +97,43 @@ test('S2. een onverwachte bron publiceert niets en is geen fout van deze poort',
 
 // --- Doelbepaling -------------------------------------------------------------------------------
 
-test('S3. de hint versmalt alleen bij een eenduidige treffer, en voegt nooit een PR toe', () => {
+test('S3. GEEN enkele hint versmalt de ronde nog, ook niet bij een eenduidige treffer', () => {
+  // Codex P1, review 4998653669, inline 3834812708. De writergroep is een constante en GitHub houdt
+  // daar hooguit één WACHTENDE run van aan. Verwijdert iemand een receipt op PR 2 (run A gaat in de
+  // wachtrij) en komt er daarna een event op PR 3, dan ANNULEERT GitHub run A. Versmalde de
+  // overlevende run B op zijn eigen hint, dan deed niemand de invalidatie van PR 2 en bleef diens
+  // `success` bruikbaar tot de volgende uurlijkse ronde. Elke aanleiding doet daarom nu een
+  // volledige ronde — dan draagt de overlevende run het werk van elke geannuleerde voorganger.
   const open = [openPr(2), openPr(3)];
 
-  const opSha = selectTargets({ eventName: 'workflow_run', workflowRun: shieldRun(), openPullRequests: open });
-  assert.equal(opSha.selection, TARGET_SELECTION.HINT_MATCHED_HEAD_SHA);
-  assert.deepEqual(opSha.targets, [2]);
+  for (const event of EXPECTED_SOURCE.events) {
+    for (const hint of [{}, { head_sha: sha(9) }, { head_sha: sha(9), head_branch: 'weg' }]) {
+      const ronde = selectTargets({
+        eventName: 'workflow_run',
+        workflowRun: shieldRun({ event, ...hint }),
+        openPullRequests: open,
+      });
+      const label = `${event} ${JSON.stringify(hint)}`;
+      assert.equal(ronde.selection, TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS, label);
+      assert.deepEqual(ronde.targets, [2, 3], label);
+      assert.deepEqual(ronde.heads.map((h) => h.number), [2, 3], label);
+    }
+  }
 
-  // Head verschoven sinds de bronrun: de SHA matcht niet meer, de branch wel.
-  const opBranch = selectTargets({
-    eventName: 'workflow_run',
-    workflowRun: shieldRun({ head_sha: sha(9) }),
-    openPullRequests: open,
-  });
-  assert.equal(opBranch.selection, TARGET_SELECTION.HINT_MATCHED_HEAD_BRANCH);
-  assert.deepEqual(opBranch.targets, [2]);
+  // De selectievorm bestaat niet eens meer, dus kan geen enkel pad hem nog kiezen.
+  assert.deepEqual(Object.keys(TARGET_SELECTION), ['ALL_OPEN_PULL_REQUESTS']);
+  const code = readFileSync(SELECTOR, 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+  assert.doesNotMatch(code, /head_sha|head_branch/, 'de hintvelden worden nergens meer gelezen');
 
-  // Een hint die naar een gesloten of onbekende PR wijst mag die PR niet toevoegen; hij levert een
-  // volledige ronde over de open PR's op.
+  // Een hint die naar een gesloten of onbekende PR wijst, voegt die PR ook niet toe.
   const onbekend = selectTargets({
     eventName: 'workflow_run',
     workflowRun: shieldRun({ head_sha: sha(9), head_branch: 'weg' }),
     openPullRequests: open,
   });
-  assert.equal(onbekend.selection, TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS);
   assert.deepEqual(onbekend.targets, [2, 3]);
-
-  // Twee open PR's met dezelfde branchnaam (fork + eigen branch) zijn niet eenduidig.
-  const dubbel = selectTargets({
-    eventName: 'workflow_run',
-    workflowRun: shieldRun({ head_sha: sha(9) }),
-    openPullRequests: [openPr(2), openPr(3, { headRef: 'branch-2' })],
-  });
-  assert.equal(dubbel.selection, TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS);
-  assert.deepEqual(dubbel.targets, [2, 3]);
 });
 
 test('S4. issue_comment- en schedule-aanleidingen meten alle open PR\'s', () => {
@@ -155,47 +159,62 @@ test('S4. issue_comment- en schedule-aanleidingen meten alle open PR\'s', () => 
   assert.deepEqual(leeg.targets, []);
 });
 
-test('S4b. een issue_comment-hint versmalt nooit, ook niet als hij precies één PR aanwijst', () => {
-  // Live gereproduceerd: een commentrun draagt de head van de default branch. Staat er precies één
-  // open fork-PR met `head.ref=main` (en dus ook diens `head.sha`), dan MATCHT de hint eenduidig —
-  // op de verkeerde PR. Versmallen zou hier PR 74 zonder verse status laten. Beide hintvelden wijzen
-  // in deze opstelling naar PR 75; de eis is dat 74 én 75 gemeten worden.
-  const forkOpMain = openPr(75, { headSha: sha(5), headRef: 'main' });
-  const open = [openPr(74, { headRef: 'claude2/autocoding-live-gate-completion-20260822' }), forkOpMain];
-  const naComment = selectTargets({
-    eventName: 'workflow_run',
-    workflowRun: shieldRun({ event: 'issue_comment', head_sha: sha(5), head_branch: 'main' }),
-    openPullRequests: open,
+test('S4b. NEGATIEVE MUTATIE: de teruggezette hintversmalling verliest een invalidatie', () => {
+  // Het gemeten scenario uit de bevinding, nagespeeld op de module. PR 74 (het receipt is zojuist
+  // verwijderd) en PR 75 staan open; de overlevende writerrun is aan PR 75 gebonden. De mutant — de
+  // OUDE versmalling, terug in de code — meet alleen PR 75 en laat de head van PR 74 dus ongemoeid.
+  // De echte module invalideert er twee.
+  const bron = readFileSync(SELECTOR, 'utf8');
+  const anker = '  const targets = [...new Set(open.map((pr) => pr.number))].sort((a, b) => a - b);';
+  assert.equal(bron.split(anker).length - 1, 1, 'het mutatieanker moet precies één keer voorkomen');
+
+  const oudeVersmalling = [
+    '  const hint = workflowRun;',
+    '  if (hint) {',
+    "    const bySha = open.filter((pr) => pr.headSha !== '' && pr.headSha === hint.head_sha);",
+    '    if (bySha.length === 1) {',
+    '      return {',
+    '        outcome: TARGET_OUTCOME.MEASURE,',
+    '        selection: TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS,',
+    '        targets: [bySha[0].number],',
+    "        heads: [{ number: bySha[0].number, headSha: bySha[0].headSha }],",
+    '        batch: [bySha[0].number],',
+    '        batchIndex: 0, batchCount: 1, batchRotated: false,',
+    '      };',
+    '    }',
+    '  }',
+    anker,
+  ].join('\n');
+  const collect = pathToFileURL(resolve('scripts/autocoding/collect-shield-input.mjs')).href;
+  const mutant = bron
+    .replace(anker, oudeVersmalling)
+    .replace("'./collect-shield-input.mjs'", JSON.stringify(collect));
+  assert.notEqual(mutant, bron, 'de mutatie moet daadwerkelijk zijn aangebracht');
+
+  const dir = mkdtempSync(join(tmpdir(), 'live-gate-hint-mutant-'));
+  const pad = join(dir, 'select-live-gate-targets.hint.mjs');
+  writeFileSync(pad, mutant);
+  return import(pathToFileURL(pad).href).then((gemuteerd) => {
+    const open = [openPr(74), openPr(75)];
+    const aanleiding = {
+      eventName: 'workflow_run',
+      workflowRun: shieldRun({ event: 'pull_request_review', head_sha: sha(75), head_branch: 'branch-75' }),
+      openPullRequests: open,
+    };
+
+    const mutantRonde = gemuteerd.selectTargets(aanleiding);
+    assert.deepEqual(mutantRonde.targets, [75], 'de mutant versmalt op zijn eigen hint');
+    assert.deepEqual(
+      mutantRonde.heads.map((h) => h.number),
+      [75],
+      'de head van PR 74 wordt door de mutant nooit geïnvalideerd: diens success blijft staan',
+    );
+
+    const echt = selectTargets(aanleiding);
+    assert.deepEqual(echt.targets, [74, 75]);
+    assert.deepEqual(echt.heads.map((h) => h.number), [74, 75],
+      'de echte module invalideert ook de head van de geannuleerde aanleiding');
   });
-  assert.equal(naComment.outcome, TARGET_OUTCOME.MEASURE);
-  assert.equal(naComment.selection, TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS);
-  assert.deepEqual(naComment.targets, [74, 75]);
-
-  // De hint blijft wél gelden waar GitHub de bronrun echt aan één PR-head bindt. Zonder die
-  // versmalling zou elke review een volledige ronde kosten; mét een niet-gebonden bronevent erbij
-  // zou hij de verkeerde PR meten. Beide eigenschappen zitten in dezelfde lijst.
-  assert.deepEqual([...HEAD_BOUND_SOURCE_EVENTS], ['pull_request', 'pull_request_review']);
-  for (const event of HEAD_BOUND_SOURCE_EVENTS) {
-    const gebonden = selectTargets({
-      eventName: 'workflow_run',
-      workflowRun: shieldRun({ event, head_sha: sha(5), head_branch: 'main' }),
-      openPullRequests: open,
-    });
-    assert.equal(gebonden.selection, TARGET_SELECTION.HINT_MATCHED_HEAD_SHA, event);
-    assert.deepEqual(gebonden.targets, [75], event);
-  }
-
-  // Elk vertrouwd bronevent dat niet head-gebonden is, meet de volledige lijst — ook als er later
-  // een bronevent bij komt dat wél een eenduidige treffer oplevert.
-  for (const event of EXPECTED_SOURCE.events.filter((e) => !HEAD_BOUND_SOURCE_EVENTS.includes(e))) {
-    const ongebonden = selectTargets({
-      eventName: 'workflow_run',
-      workflowRun: shieldRun({ event, head_sha: sha(5), head_branch: 'main' }),
-      openPullRequests: open,
-    });
-    assert.equal(ongebonden.selection, TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS, event);
-    assert.deepEqual(ongebonden.targets, [74, 75], event);
-  }
 });
 
 test('S5. de volledige ronde kent geen bovengrens en truncateert nooit stilzwijgend', () => {
@@ -236,15 +255,9 @@ test('S5. de volledige ronde kent geen bovengrens en truncateert nooit stilzwijg
   });
   assert.deepEqual(metDubbel.targets, [30, 31, 32]);
 
-  // Een eenduidige hint versmalt nog steeds, ongeacht de lengte van de lijst.
-  const veel = Array.from({ length: 100 }, (_, i) => openPr(i + 1));
-  const metHint = selectTargets({
-    eventName: 'workflow_run',
-    workflowRun: shieldRun({ head_sha: veel[0].head.sha, head_branch: veel[0].head.ref }),
-    openPullRequests: veel,
-  });
-  assert.equal(metHint.outcome, TARGET_OUTCOME.MEASURE);
-  assert.deepEqual(metHint.targets, [1]);
+  // De 126 heads gaan ALLEMAAL de invalidatieronde in; alleen de MEETbatch is begrensd.
+  assert.equal(gepagineerd.heads.length, 126, 'iedere open head wordt geïnvalideerd');
+  assert.equal(gepagineerd.batch.length, EVALUATION_BATCH_LIMIT);
 
   // Er bestaat geen weigeringsgrond meer die op de LENGTE van de lijst slaat.
   assert.deepEqual(
@@ -258,7 +271,18 @@ test('S5. de volledige ronde kent geen bovengrens en truncateert nooit stilzwijg
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '');
   assert.doesNotMatch(code, /OPEN_PULL_REQUEST_LIMIT/, 'geen limietconstante in de code');
-  assert.doesNotMatch(code, /\blimit\b/, 'geen limietparameter in de selectie');
+
+  // `EVALUATION_BATCH_LIMIT` is wél een limiet, maar een andere soort: hij begrenst hoeveel PR's
+  // deze run DOORMEET, nooit hoeveel er in de ronde zitten. Dat verschil wordt gemeten, niet
+  // beloofd — bij elke lengte blijven `targets` en `heads` compleet.
+  for (const aantal of [1, 99, 100, 101, 126, 250]) {
+    const veel = Array.from({ length: aantal }, (_, i) => openPr(i + 1));
+    const ronde = selectTargets({ eventName: 'schedule', openPullRequests: veel, runNumber: 1 });
+    assert.equal(ronde.outcome, TARGET_OUTCOME.MEASURE, String(aantal));
+    assert.equal(ronde.targets.length, aantal, `${aantal}: de ronde blijft compleet`);
+    assert.equal(ronde.heads.length, aantal, `${aantal}: iedere head wordt geïnvalideerd`);
+    assert.ok(ronde.batch.length <= EVALUATION_BATCH_LIMIT, `${aantal}: de meetbatch is begrensd`);
+  }
 });
 
 test('S5b. negatieve mutatie: de teruggezette limietweigering laat 26 open PR\'s zonder status', async () => {
@@ -322,11 +346,12 @@ test('S6. een onbruikbare PR-lijst is nooit een lege ronde', () => {
 // --- CLI ----------------------------------------------------------------------------------------
 
 test('S7. de CLI leest zijn argumenten fail-closed en vertaalt uitkomsten naar exitcodes', () => {
-  const goed = ['--event-name', 'schedule', '--event', 'e.json', '--open-pulls', 'o.json', '--out', 't.txt'];
+  const goed = ['--event-name', 'schedule', '--event', 'e.json', '--open-pulls', 'o.json',
+    '--run-number', '7', '--out-heads', 'h.txt', '--out', 't.txt'];
   assert.equal(parseTargetArgs(goed).ok, true);
   assert.equal(parseTargetArgs([...goed, '--onbekend', 'x']).ok, false);
   assert.equal(parseTargetArgs([...goed, '--out', 'tweede.txt']).ok, false);
-  assert.equal(parseTargetArgs(goed.slice(0, 6)).ok, false, 'een ontbrekende sleutel is een weigering');
+  assert.equal(parseTargetArgs(goed.slice(0, 8)).ok, false, 'een ontbrekende sleutel is een weigering');
   assert.equal(parseTargetArgs(['--event-name', '--event']).ok, false, 'een sleutel als waarde telt niet');
   assert.equal(parseTargetArgs(['--event-name', '']).ok, false);
 
@@ -343,12 +368,24 @@ test('S7. de CLI leest zijn argumenten fail-closed en vertaalt uitkomsten naar e
     writeFile: (path, data) => written.set(path, data),
   };
 
-  const argv = ['--event-name', 'workflow_run', '--event', 'e.json', '--open-pulls', 'o.json', '--out', 't.txt'];
+  const argv = ['--event-name', 'workflow_run', '--event', 'e.json', '--open-pulls', 'o.json',
+    '--run-number', '7', '--out-heads', 'h.txt', '--out', 't.txt'];
   assert.equal(runSelect(argv, io), 0);
-  assert.equal(written.get('t.txt'), '2\n');
+  // De hint wees op PR 2; de ronde bevat er twee, en beide heads gaan de invalidatie in.
+  assert.equal(written.get('t.txt'), '2\n3\n');
+  assert.equal(written.get('h.txt'), `2 ${sha(2)}\n3 ${sha(3)}\n`);
+
+  // Een PR waarvan de LIJST geen bruikbare head gaf, krijgt `-`. De workflow maakt dat record rood
+  // in plaats van het stil over te slaan: zo'n head kan niet geïnvalideerd worden.
+  files.set('o.json', JSON.stringify([{ number: 5 }]));
+  written.clear();
+  assert.equal(runSelect(argv, io), 0);
+  assert.equal(written.get('h.txt'), '5 -\n');
+  assert.equal(written.get('t.txt'), '5\n');
 
   // Onverwachte bron: rc 2 (niets publiceren, geen rode run) en geen doelbestand.
   files.set('e.json', JSON.stringify({ workflow_run: shieldRun({ name: 'publish' }) }));
+  files.set('o.json', JSON.stringify([openPr(2), openPr(3)]));
   written.clear();
   assert.equal(runSelect(argv, io), 2);
   assert.equal(written.size, 0);
@@ -357,6 +394,80 @@ test('S7. de CLI leest zijn argumenten fail-closed en vertaalt uitkomsten naar e
   files.delete('o.json');
   assert.equal(runSelect(argv, io), 1);
   assert.equal(runSelect(['--event-name'], io), 1);
+});
+
+test('S7b. het run-nummer roteert de batch en weigert de ronde nooit', () => {
+  // De rotatie is SCHEDULING, geen poort: alle heads staan na de invalidatieronde al op `pending`,
+  // dus kan een onbruikbaar run-nummer hooguit een uitspraak uitstellen. De ronde weigeren zou juist
+  // gevaarlijk zijn — dan wordt er niets geïnvalideerd en blijft elke oude `success` staan.
+  assert.equal(parseRunNumber('1'), 1);
+  assert.equal(parseRunNumber('4211'), 4211);
+  for (const kapot of ['', '0', '-3', '2.5', 'zeven', ' 7', '7 ', undefined, null, 7]) {
+    assert.equal(parseRunNumber(kapot), null, JSON.stringify(kapot));
+  }
+
+  const nummers = Array.from({ length: 126 }, (_, i) => i + 1);
+  assert.deepEqual(
+    selectEvaluationBatch(nummers, 1),
+    { batch: nummers.slice(0, 100), index: 0, count: 2, rotated: true },
+  );
+  assert.deepEqual(selectEvaluationBatch(nummers, 2).batch, nummers.slice(100));
+  assert.deepEqual(selectEvaluationBatch(nummers, 3).batch, nummers.slice(0, 100), 'runnummer 3 begint opnieuw');
+
+  // Elke open PR komt binnen `count` opeenvolgende runs aan de beurt — hier dus binnen twee.
+  for (const aantal of [101, 126, 250, 401]) {
+    const lijst = Array.from({ length: aantal }, (_, i) => i + 1);
+    const eerste = selectEvaluationBatch(lijst, 1);
+    const gezien = new Set();
+    for (let run = 1; run <= eerste.count; run += 1) {
+      for (const nummer of selectEvaluationBatch(lijst, run).batch) gezien.add(nummer);
+    }
+    assert.deepEqual([...gezien].sort((a, b) => a - b), lijst,
+      `${aantal} PR's zijn binnen ${eerste.count} runs allemaal geëvalueerd`);
+  }
+  // En dat blijft gelden vanaf een willekeurig run-nummer, niet alleen vanaf 1.
+  const lijst = Array.from({ length: 126 }, (_, i) => i + 1);
+  const vanaf = new Set();
+  for (let run = 4210; run < 4212; run += 1) {
+    for (const nummer of selectEvaluationBatch(lijst, run).batch) vanaf.add(nummer);
+  }
+  assert.equal(vanaf.size, 126);
+
+  // Een onbruikbaar run-nummer valt terug op blok 0 en laat de ronde en de invalidatie heel.
+  const ronde = selectTargets({
+    eventName: 'schedule',
+    openPullRequests: Array.from({ length: 126 }, (_, i) => openPr(i + 1)),
+    runNumber: null,
+  });
+  assert.equal(ronde.outcome, TARGET_OUTCOME.MEASURE, 'nooit een weigering');
+  assert.equal(ronde.heads.length, 126, 'alle heads worden alsnog geïnvalideerd');
+  assert.equal(ronde.batchRotated, false);
+  assert.deepEqual(ronde.batch, ronde.targets.slice(0, 100));
+});
+
+test('S7c. een verschoven head levert TWEE invalidaties op, en de PR blijft één doel', () => {
+  // `--paginate` kan dezelfde PR met twee verschillende heads opleveren als de lijst tussen twee
+  // pagina's verschuift. Op allebei die heads kan een oude `success` staan, dus worden ze allebei
+  // geïnvalideerd; voor de meting telt de PR daarna gewoon één keer.
+  const ronde = selectTargets({
+    eventName: 'schedule',
+    openPullRequests: [
+      [openPr(30, { headSha: sha(1) }), openPr(31)],
+      [openPr(30, { headSha: sha(2) }), openPr(31)],
+    ],
+  });
+  assert.deepEqual(ronde.targets, [30, 31], 'de PR blijft één doel');
+  assert.deepEqual(
+    ronde.heads,
+    [{ number: 30, headSha: sha(1) }, { number: 30, headSha: sha(2) }, { number: 31, headSha: sha(31) }],
+    'beide heads van PR 30 worden geïnvalideerd',
+  );
+  // Een identieke herhaling levert géén tweede invalidatie op: dat zou alleen budget kosten.
+  const zelfde = selectTargets({
+    eventName: 'schedule',
+    openPullRequests: [[openPr(30)], [openPr(30)]],
+  });
+  assert.deepEqual(zelfde.heads, [{ number: 30, headSha: sha(30) }]);
 });
 
 // --- De ronde zelf ------------------------------------------------------------------------------
@@ -519,6 +630,344 @@ test('S9. de ronde publiceert op de GEMETEN head, ook zonder bruikbare API-neven
   assert.match(aanroep, /--status-context autocoding-shield-live-receipts/);
   // Mislukte nevenverzoeken worden als uitvoeringsfout doorgegeven, niet verzwegen.
   assert.match(aanroep, /--execution-error GATE_EXECUTION_ERROR/);
+});
+
+/**
+ * Voert de DRIE stappen van de writer echt uit, met gestubde `gh` en `node`, en houdt één gedeeld
+ * logboek bij van alles wat de buitenwereld raakt. Daarmee is de VOLGORDE tussen de fasen meetbaar
+ * in plaats van beloofd.
+ *
+ * De selectiestap draait op ECHTE productiecode: alleen `gh` levert de open-PR-lijst. Wat gestubd is
+ * zijn de netwerkkant (`gh`) en de publisher, want die zouden anders werkelijk POST'en.
+ */
+function draaiRonde({ aantalOpenPrs, runNumber, metMeting = true }) {
+  const dir = mkdtempSync(join(tmpdir(), 'live-gate-budget-'));
+  const bin = join(dir, 'bin');
+  const runnerTemp = join(dir, 'runner');
+  mkdirSync(bin);
+  mkdirSync(runnerTemp);
+
+  const headVan = (n) => String(n).padStart(40, '0');
+  const pagina = (van, tot) => Array.from({ length: tot - van + 1 }, (_, i) => ({
+    number: van + i, head: { sha: headVan(van + i), ref: `branch-${van + i}` },
+  }));
+  // Exact de vorm van `gh api --paginate --slurp`: een array van pagina's van 100.
+  const lijst = [pagina(1, Math.min(100, aantalOpenPrs))];
+  if (aantalOpenPrs > 100) lijst.push(pagina(101, aantalOpenPrs));
+  writeFileSync(join(dir, 'open-pulls.json'), JSON.stringify(lijst));
+  writeFileSync(join(dir, 'event.json'), JSON.stringify({}));
+  writeFileSync(join(dir, 'github-output.txt'), '');
+
+  const stub = (name, body) => {
+    const path = join(bin, name);
+    writeFileSync(path, `#!/usr/bin/env bash\n${body}\n`);
+    chmodSync(path, 0o755);
+  };
+
+  // `gh` logt IEDER verzoek. De lijst-GET is er één; alle andere zijn detailverzoeken per PR.
+  stub('gh', [
+    'for arg in "$@"; do path="$arg"; done',
+    'case "$path" in',
+    '  *state=open*) echo "LIST" >> "$STUB_LOG"; cat "$LIST_JSON"; exit 0 ;;',
+    'esac',
+    'echo "GET $path" >> "$STUB_LOG"',
+    'case "$path" in',
+    '  */pulls/*[0-9]) n="${path##*/}"; printf \'{"head":{"sha":"%040d"}}\\n\' "$n" ;;',
+    '  *) echo "[]" ;;',
+    'esac',
+  ].join('\n'));
+  stub('sleep', 'exit 0');
+  stub('node', [
+    // De doelselectie en de head-extractie zijn productiecode en draaien dus echt.
+    'if [ "$1" = "-e" ] || [ "$1" = "-p" ]; then exec "$REAL_NODE" "$@"; fi',
+    'case "$1" in',
+    '  */select-live-gate-targets.mjs) exec "$REAL_NODE" "$@" ;;',
+    'esac',
+    'script="$1"; shift',
+    'head=""; pending=0',
+    'while [ "$#" -gt 0 ]; do',
+    '  case "$1" in',
+    '    --head-sha) head="$2" ;;',
+    '    --pending) pending=1 ;;',
+    '  esac',
+    '  shift',
+    'done',
+    'case "$script" in',
+    '  */publish-live-status.mjs)',
+    '    if [ "$pending" = 1 ]; then echo "PENDING $head" >> "$STUB_LOG";',
+    '    else echo "PUBLISH $head" >> "$STUB_LOG"; fi',
+    '    exit 0 ;;',
+    '  */verify-review-gate.mjs) echo \'{"decision":"NO_GO","reasons":[]}\'; exit 1 ;;',
+    'esac',
+    'exit 0',
+  ].join('\n'));
+
+  const log = join(dir, 'log.txt');
+  const env = {
+    PATH: `${bin}:${process.env.PATH}`,
+    HOME: dir,
+    REAL_NODE: process.execPath,
+    RUNNER_TEMP: runnerTemp,
+    REPOSITORY: 'owner/repo',
+    EVENT_NAME: 'schedule',
+    RUN_NUMBER: String(runNumber),
+    STATUS_CONTEXT: 'autocoding-shield-live-receipts',
+    GH_TOKEN: 'x',
+    GITHUB_TOKEN: 'x',
+    GITHUB_EVENT_PATH: join(dir, 'event.json'),
+    GITHUB_OUTPUT: join(dir, 'github-output.txt'),
+    LIST_JSON: join(dir, 'open-pulls.json'),
+    STUB_LOG: log,
+  };
+
+  const stappen = [
+    "Bepaal de doel-PR's opnieuw via read-only API",
+    'Invalideer eerst iedere open head',
+    ...(metMeting ? ['Meet, beslis en publiceer per doel-PR'] : []),
+  ];
+  const codes = [];
+  for (const [i, naam] of stappen.entries()) {
+    const pad = join(dir, `stap-${i}.sh`);
+    writeFileSync(pad, stepScript(TRUSTED_WRITER, naam));
+    try {
+      execFileSync('bash', [pad], { env, stdio: 'pipe' });
+      codes.push(0);
+    } catch (error) {
+      codes.push(error.status);
+    }
+  }
+
+  return {
+    codes,
+    log: existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : [],
+    targets: readFileSync(join(runnerTemp, 'targets.txt'), 'utf8').trim().split('\n').filter(Boolean),
+    heads: readFileSync(join(runnerTemp, 'heads.txt'), 'utf8').trim().split('\n').filter(Boolean),
+    output: readFileSync(join(dir, 'github-output.txt'), 'utf8'),
+    headVan,
+  };
+}
+
+test('S14. bij 126 open PR\'s zijn ALLE 126 heads geïnvalideerd vóór de eerste detail-GET', () => {
+  // Codex P2, review 4998653669, inline 3834812711. Zeven verzoeken per PR maal 126 PR's overschrijdt
+  // het uurlijkse `GITHUB_TOKEN`-quotum van duizend. Wie per PR volledig afhandelt, raakt halverwege
+  // leeg — en de PR's die dan nog niet aan de beurt waren, houden hun oude `success`. Deze test voert
+  // de ECHTE shell van de drie stappen uit en meet de volgorde in één gedeeld logboek.
+  const ronde = draaiRonde({ aantalOpenPrs: 126, runNumber: 1 });
+  const { log, headVan } = ronde;
+
+  // 1. Alle 126 invalidaties zijn geprobeerd.
+  const pending = log.filter((l) => l.startsWith('PENDING '));
+  assert.equal(pending.length, 126, 'iedere open head krijgt een pendingpoging');
+  assert.deepEqual(
+    pending.map((l) => l.slice('PENDING '.length)),
+    Array.from({ length: 126 }, (_, i) => headVan(i + 1)),
+    'en wel op precies de 126 heads uit de open-PR-lijst',
+  );
+
+  // 2. Ze zijn ALLEMAAL geprobeerd vóórdat er één detailverzoek is gedaan. Dit is de hele eis: na
+  //    deze grens kan geen enkele geselecteerde head nog een oude `success` dragen, dus is elke
+  //    verdere budgetuitputting hooguit een uitgestelde uitspraak.
+  const laatstePending = log.findLastIndex((l) => l.startsWith('PENDING '));
+  const eersteDetail = log.findIndex((l) => l.startsWith('GET '));
+  assert.ok(eersteDetail !== -1, 'de meetronde doet werkelijk detailverzoeken');
+  assert.ok(
+    laatstePending < eersteDetail,
+    `de laatste invalidatie (${laatstePending}) moet vóór het eerste detailverzoek (${eersteDetail}) komen`,
+  );
+  // De invalidatieronde zelf kost geen enkele GET: alleen de lijst-GET gaat eraan vooraf.
+  assert.deepEqual(log.slice(0, laatstePending + 1).filter((l) => l.startsWith('GET ')), []);
+
+  // 3. Daarna wordt hoogstens de gekozen batch geëvalueerd, en dat past binnen het budget.
+  assert.deepEqual(ronde.targets, Array.from({ length: 100 }, (_, i) => String(i + 1)));
+  const gemeten = new Set(
+    log.filter((l) => l.startsWith('GET '))
+      .map((l) => /\/(?:pulls|issues)\/(\d+)/.exec(l)?.[1])
+      .filter(Boolean),
+  );
+  assert.deepEqual(
+    [...gemeten].map(Number).sort((a, b) => a - b),
+    Array.from({ length: 100 }, (_, i) => i + 1),
+    'precies de honderd PR\'s van de batch worden doorgemeten, en geen enkele daarbuiten',
+  );
+  // Het budget, exact geteld in plaats van geschat. Vóór de grens: één lijst-GET plus 126 POST's =
+  // 127 verzoeken om ALLE heads niet-groen te krijgen. Daarna hoogstens 100 x (1 + 6) GET's plus
+  // 100 POST's. Samen blijft de hele ronde onder het uurlijkse quotum van duizend.
+  assert.equal(laatstePending + 1, 127, 'alle heads zijn niet-groen na 127 verzoeken');
+  const verzoeken = log.length;
+  assert.equal(verzoeken, 927);
+  assert.ok(verzoeken <= 1000, `de hele ronde kost ${verzoeken} verzoeken, binnen het uurlijkse quotum`);
+  assert.equal(log.filter((l) => l.startsWith('PUBLISH ')).length, 100);
+
+  // 4. En de ronde is groen op de invalidatie: `pending_failed=0`.
+  assert.match(ronde.output, /pending_failed=0/);
+});
+
+test('S15. de batch roteert met het run-nummer, dus komt iedere PR aan de beurt', () => {
+  // Run 1 meet 1..100 (zie S14). Run 2 moet de rest meten — anders zouden PR 101..126 voor altijd
+  // op `pending` blijven staan. De invalidatie is in beide runs volledig; alleen de MEETbatch
+  // verschuift. Zonder meetstap, want die eigenschap is in S14 al gemeten en 26 PR's doormeten kost
+  // alleen tijd.
+  const tweede = draaiRonde({ aantalOpenPrs: 126, runNumber: 2, metMeting: false });
+  assert.equal(tweede.log.filter((l) => l.startsWith('PENDING ')).length, 126,
+    'ook run 2 invalideert alle 126 heads, niet alleen zijn eigen batch');
+  assert.deepEqual(
+    tweede.targets,
+    Array.from({ length: 26 }, (_, i) => String(i + 101)),
+    'run 2 meet precies het tweede blok door',
+  );
+  assert.deepEqual(tweede.codes, [0, 0]);
+
+  // Run 3 begint weer bij het eerste blok: de rotatie is periodiek, dus eindig.
+  const derde = draaiRonde({ aantalOpenPrs: 126, runNumber: 3, metMeting: false });
+  assert.deepEqual(derde.targets, Array.from({ length: 100 }, (_, i) => String(i + 1)));
+});
+
+test('S16. een mislukte invalidatie stopt de volgende niet en maakt de ronde alsnog rood', () => {
+  // Record-lokaal, net als bij de meting: zou de eerste mislukte POST de lus afbreken, dan hielden
+  // alle latere heads hun oude `success`. De stap eindigt bewust rc 0 zodat de meetronde nog draait;
+  // de rode kleur loopt via `pending_failed`, dat de afsluitende stap oppikt.
+  const script = stepScript(TRUSTED_WRITER, 'Invalideer eerst iedere open head');
+  const dir = mkdtempSync(join(tmpdir(), 'live-gate-invalidatie-'));
+  const bin = join(dir, 'bin');
+  const runnerTemp = join(dir, 'runner');
+  mkdirSync(bin);
+  mkdirSync(runnerTemp);
+  const head = (n) => String(n).padStart(40, '0');
+  writeFileSync(join(runnerTemp, 'heads.txt'), [
+    `1 ${head(1)}`,
+    `2 ${head(2)}`,   // deze POST faalt
+    '3 -',            // de lijst gaf geen bruikbare head
+    '4 nogeenhead',   // geen 40 hextekens
+    `5 ${head(5)}`,
+    '',               // lege regel: geen record, geen fout
+  ].join('\n'));
+  writeFileSync(join(dir, 'ronde.sh'), script);
+  writeFileSync(join(dir, 'github-output.txt'), '');
+
+  const path = join(bin, 'node');
+  writeFileSync(path, ['#!/usr/bin/env bash',
+    'head=""',
+    'while [ "$#" -gt 0 ]; do',
+    '  if [ "$1" = "--head-sha" ]; then head="$2"; fi',
+    '  shift',
+    'done',
+    'echo "$head" >> "$STUB_LOG"',
+    'case "$head" in',
+    '  0000000000000000000000000000000000000002) exit 1 ;;',
+    'esac',
+    'exit 0',
+  ].join('\n'));
+  chmodSync(path, 0o755);
+
+  const log = join(dir, 'log.txt');
+  let status = 0;
+  try {
+    execFileSync('bash', [join(dir, 'ronde.sh')], {
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: dir,
+        RUNNER_TEMP: runnerTemp,
+        REPOSITORY: 'owner/repo',
+        STATUS_CONTEXT: 'autocoding-shield-live-receipts',
+        GITHUB_TOKEN: 'x',
+        GITHUB_OUTPUT: join(dir, 'github-output.txt'),
+        STUB_LOG: log,
+      },
+      stdio: 'pipe',
+    });
+  } catch (error) {
+    status = error.status;
+  }
+
+  assert.equal(status, 0, 'de invalidatiestap blokkeert de meetronde nooit');
+  assert.deepEqual(
+    readFileSync(log, 'utf8').trim().split('\n'),
+    [head(1), head(2), head(5)],
+    'PR 5 krijgt zijn invalidatiepoging ondanks de mislukking bij 2 en de kapotte heads bij 3 en 4',
+  );
+  assert.match(
+    readFileSync(join(dir, 'github-output.txt'), 'utf8'),
+    /pending_failed=1/,
+    'de mislukking wordt doorgegeven en maakt de job rood',
+  );
+});
+
+test('S17. verschuift de head tussen lijst en meting, dan is de OUDE pending en de NIEUWE gemeten', () => {
+  // De lijst gaf head A; tegen de tijd dat de meetronde bij PR 40 is, staat de PR op head B. De eis:
+  // A staat op `pending` (dus niet groen) en de uitspraak landt uitsluitend op de OPNIEUW gemeten
+  // head B. Op B stond nog geen status van deze context, dus is ook B niet groen.
+  const headA = '0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const headB = '0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const dir = mkdtempSync(join(tmpdir(), 'live-gate-headshift-'));
+  const bin = join(dir, 'bin');
+  const runnerTemp = join(dir, 'runner');
+  mkdirSync(bin);
+  mkdirSync(runnerTemp);
+  writeFileSync(join(runnerTemp, 'heads.txt'), `40 ${headA}\n`);
+  writeFileSync(join(runnerTemp, 'targets.txt'), '40\n');
+  writeFileSync(join(dir, 'github-output.txt'), '');
+
+  const stub = (name, body) => {
+    const path = join(bin, name);
+    writeFileSync(path, `#!/usr/bin/env bash\n${body}\n`);
+    chmodSync(path, 0o755);
+  };
+  // De API levert bij de detailmeting de NIEUWE head.
+  stub('gh', [
+    'for arg in "$@"; do path="$arg"; done',
+    'case "$path" in',
+    `  */pulls/40) echo '{"head":{"sha":"${headB}"}}' ;;`,
+    '  *) echo "[]" ;;',
+    'esac',
+  ].join('\n'));
+  stub('sleep', 'exit 0');
+  stub('node', [
+    'if [ "$1" = "-e" ]; then exec "$REAL_NODE" "$@"; fi',
+    'script="$1"; shift',
+    'head=""; pending=0',
+    'while [ "$#" -gt 0 ]; do',
+    '  case "$1" in',
+    '    --head-sha) head="$2" ;;',
+    '    --pending) pending=1 ;;',
+    '  esac',
+    '  shift',
+    'done',
+    'case "$script" in',
+    '  */publish-live-status.mjs)',
+    '    if [ "$pending" = 1 ]; then echo "PENDING $head" >> "$STUB_LOG";',
+    '    else echo "PUBLISH $head" >> "$STUB_LOG"; fi',
+    '    exit 0 ;;',
+    '  */verify-review-gate.mjs) echo \'{"decision":"NO_GO","reasons":[]}\'; exit 1 ;;',
+    'esac',
+    'exit 0',
+  ].join('\n'));
+
+  const log = join(dir, 'log.txt');
+  const env = {
+    PATH: `${bin}:${process.env.PATH}`,
+    HOME: dir,
+    REAL_NODE: process.execPath,
+    RUNNER_TEMP: runnerTemp,
+    REPOSITORY: 'owner/repo',
+    STATUS_CONTEXT: 'autocoding-shield-live-receipts',
+    GH_TOKEN: 'x',
+    GITHUB_TOKEN: 'x',
+    GITHUB_OUTPUT: join(dir, 'github-output.txt'),
+    STUB_LOG: log,
+  };
+  for (const naam of ['Invalideer eerst iedere open head', 'Meet, beslis en publiceer per doel-PR']) {
+    const pad = join(dir, `${naam.split(' ')[0]}.sh`);
+    writeFileSync(pad, stepScript(TRUSTED_WRITER, naam));
+    try {
+      execFileSync('bash', [pad], { env, stdio: 'pipe' });
+    } catch { /* de meetronde is rood op een NO_GO; dat is de uitkomst, niet de eigenschap */ }
+  }
+
+  assert.deepEqual(
+    readFileSync(log, 'utf8').trim().split('\n'),
+    [`PENDING ${headA}`, `PUBLISH ${headB}`],
+    'de oude head blijft pending en de uitspraak landt alleen op de opnieuw gemeten head',
+  );
 });
 
 // --- De gedeelde writerlock ---------------------------------------------------------------------

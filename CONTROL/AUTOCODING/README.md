@@ -14,7 +14,7 @@ bewezen.
 | --- | --- | --- | --- | --- | --- |
 | `autocoding-shield` | job | `.github/workflows/autocoding-shield.yml` | uitsluitend `pull_request` | PR-head | validator-, adapter-, publisher-, doelselectie- en vertrouwensgrenstests, secretscan op de branchdiff |
 | `autocoding-shield-signal` | job | `.github/workflows/autocoding-shield.yml` | `issue_comment`, `pull_request_review` | geen | niets — een `echo` met `permissions: {}`, zodat de voltooiing van deze run de trusted writer aanstoot |
-| `autocoding-shield-live-gate` | job | `.github/workflows/autocoding-shield-live-gate.yml` | `workflow_run` (na `autocoding-shield`), `schedule` | default branch | bepaalt de doel-PR's opnieuw via read-only API, meet elke PR en publiceert de uitspraak |
+| `autocoding-shield-live-gate` | job | `.github/workflows/autocoding-shield-live-gate.yml` | `workflow_run` (na `autocoding-shield`), `schedule` | default branch | bepaalt alle open PR's opnieuw via read-only API, invalideert eerst iedere head en meet daarna een begrensde batch |
 | `autocoding-shield-live-receipts` | commitstatus-context | — | — | — | draagt de uitspraak op de gemeten PR-head; dit is de naam die later required wordt |
 
 ### Waarom dit twee bestanden zijn en geen twee jobs in één bestand
@@ -62,10 +62,10 @@ branch, en die merge valt onder de ownergate.
 
 ### Van de bronrun wordt niets geloofd
 
-De aanleiding is onprivileged, dus is de payload ervan hooguit een **hint**. De writer leest géén
-artifacts, géén cache, géén job-outputs en géén `head_sha` van de bronrun als feit. Hij checkt alleen
-de default branch uit (`persist-credentials: false`) en bepaalt de doel-PR's opnieuw via read-only
-API-lezingen. Zie "Welke PR's een ronde meet" hieronder.
+De aanleiding is onprivileged, dus wordt de payload ervan **nergens** voor gebruikt. De writer leest
+géén artifacts, géén cache, géén job-outputs en géén `head_sha` van de bronrun — ook niet als hint om
+de ronde te versmallen. Hij checkt alleen de default branch uit (`persist-credentials: false`) en
+bepaalt de doel-PR's opnieuw via read-only API-lezingen. Zie "Welke PR's een ronde meet" hieronder.
 
 De grens wordt niet in proza bewaakt maar statisch gemeten door
 `scripts/autocoding/workflow-trust.mjs` en `test/autocoding-workflow-trust.test.mjs`. Die tests falen
@@ -74,6 +74,17 @@ krijgt, zodra het writerbestand zelf zo'n trigger krijgt, zodra de PR-shield een
 en zodra de writer een tweede job, een andere schrijfscope dan `statuses`, secrets, een
 PR-headcheckout of PR-cache/artifacts zou aannemen. De meter is bewust over-benaderend: een vals
 alarm kost een commit, een gemiste schrijfscope kost de poort.
+
+Twee dingen zijn daarbij ruimer dan ze op het eerste gezicht hoeven te zijn. De PR-code-referentie
+matcht niet alleen de puntvormen uit een `pull_request`-payload maar ook de **onderstreepvarianten**
+`head_sha`, `head_ref`, `head_branch` en `head_commit`: precies die velden draagt een
+`workflow_run`-payload, dus een uitcheck op `github.event.workflow_run.head_sha` is dezelfde
+PR-gestuurde checkout in een andere spelling. En artifact/cache-acties worden herkend op de **naam
+van de actie, ongeacht de eigenaar**: elke `uses:` waarvan het actiepad `cache`, `download-artifact`
+of `upload-artifact` bevat telt mee, dus ook `dawidd6/action-download-artifact`, `buildjet/cache` en
+`Swatinem/rust-cache`. De vertrouwensgrens zit in wat er binnenkomt, niet in wie het publiceert. Beide
+regels lezen alleen structurele regels uit `structureLines()`, dus een `#`-commentaar of een
+`run: |`-blok met dezelfde tekst is geen treffer.
 
 ### Welke PR's een ronde meet
 
@@ -85,20 +96,19 @@ aanleiding te geloven:
    `pull_request_review`. Alles daarbuiten — een andere workflow, een gelijknamige workflow op een
    ander pad, een `workflow_dispatch`, een `push` — schrijft **geen enkele status** en is geen rode
    run: het is simpelweg geen aanleiding.
-2. De lijst zelf komt uit `GET /repos/{repo}/pulls?state=open`. De hint mag die lijst alleen
-   **versmallen**, nooit uitbreiden, en alleen als het bronevent hem aan een PR-head bindt: dat zijn
-   `pull_request` en `pull_request_review` (`HEAD_BOUND_SOURCE_EVENTS`), want daar draait de shield in
-   de context van die ene pull request. Versmallen mag dan nog steeds alleen bij een eenduidige
-   treffer: precies één open PR met die `head_sha`, anders precies één met die `head_ref`. Twee PR's
-   met dezelfde branchnaam (bij forks gewoon) leveren dus geen keuze op.
-3. Bij `issue_comment` worden `head_sha` én `head_branch` **volledig genegeerd**, en bij `schedule`
-   bestaat er geen hint. Een commentrun draait op de default branch en draagt dus de head van `main`;
-   heeft precies één open PR (een fork mag dat) `main` als head, dan zou versmallen op die hint
-   uitgerekend de verkeerde PR meten en alle andere statussen stale laten staan. In beide gevallen —
-   en overal waar de treffer niet eenduidig is — worden **alle open PR's** gemeten. Extra meten is
-   onschadelijk (de uitspraak is een pure functie van de momentopname), een verkeerde PR meten laat een
-   stale status staan. De asymmetrie bepaalt de keuze.
-4. Die volledige ronde kent **geen bovengrens** op het aantal open PR's. De eerdere
+2. De lijst zelf komt uit `GET /repos/{repo}/pulls?state=open`, en dat is de hele lijst. Iedere
+   geaccepteerde aanleiding selecteert **alle open PR's** — `pull_request`, `pull_request_review`,
+   `issue_comment` en `schedule` doen precies hetzelfde. `TARGET_SELECTION` kent nog maar één waarde,
+   `ALL_OPEN_PULL_REQUESTS`, en de payload van de bronrun raakt de selectie nergens meer aan.
+3. Versmallen op een hint is verwijderd omdat het niet samengaat met de gedeelde writerlock: GitHub
+   houdt per `concurrency`-groep hooguit één wachtende run aan en annuleert de eerdere. Versmalde die
+   geannuleerde run als enige naar PR 74, dan schreef niemand ooit nog over de status van PR 74 heen
+   tot de uurlijkse ronde — een verwijderd receipt bleef zolang groen. Nu draagt elke overlevende
+   writer de invalidatie van zijn geannuleerde voorganger vanzelf mee. Extra meten is onschadelijk (de
+   uitspraak is een pure functie van de momentopname), een PR overslaan laat een stale status staan.
+   De asymmetrie bepaalt de keuze.
+4. De **invalidatieronde** kent geen bovengrens op het aantal open PR's; alleen de daaropvolgende
+   detailmeting is begrensd. De eerdere
    `OPEN_PULL_REQUEST_LIMIT` (25) weigerde de hele ronde zodra er meer open PR's waren, en dat is
    niet fail-closed maar fail-**stale**: een weigering publiceert nul statussen, en een eerder
    gepubliceerde `success` op een PR-head blijft groen zolang er niets overheen wordt geschreven. Wie
@@ -112,6 +122,35 @@ aanleiding te geloven:
    Dan is niet bekend wélke PR's bestaan, dus is elke ronde per definitie onvolledig: niets
    publiceren en rood worden. Raakt het API-budget van een lange ronde op, dan faalt dat per record
    en levert het `failure` op de gemeten head — zichtbaar, niet stil groen.
+
+### Eerst invalideren, dan pas meten
+
+Een volledige ronde is niet gratis. Per PR staan er zes read-only GET's plus een POST, dus bij 126
+open PR's kost een ronde ruim achthonderd verzoeken op een uurlijks quotum van duizend. Zou de ronde
+PR voor PR meten en publiceren, dan raakt het budget op bij PR honderdzoveel en blijft op alle
+resterende heads de **oude** `success` staan. Dat is precies het gevaarlijke geval: niet stil, maar
+stil groen.
+
+De ronde is daarom omgedraaid. Direct na de lijst-GET schrijft de writer voor **iedere** gemeten open
+head één vaste `pending`-status — `pending`, met een vaste beschrijving, in exact dezelfde context als
+de uitspraak, via dezelfde centrale publisher (`publish-live-status.mjs --pending`). Pas als die ronde
+langs alle heads geweest is, begint de eerste detail-GET. Bij 126 open PR's zijn dus na **127**
+verzoeken (één lijst-GET plus 126 POST's) alle heads aantoonbaar niet-groen; wat daarna misgaat kan
+een uitspraak nog uitstellen, maar geen `success` meer laten staan.
+
+Een mislukte `pending`-POST zet `pending_failed=1` en gaat door naar de volgende head: één head die
+niet te invalideren is mag de andere 125 niet groen laten. De job wordt aan het eind alsnog rood via
+een aparte `if: always()`-stap (`PENDING_INVALIDATION_INCOMPLETE`), zodat de onvolledige ronde
+zichtbaar is zonder de rest van de ronde te blokkeren.
+
+Ná de invalidatieronde wordt hooguit een **begrensde batch** echt doorgemeten:
+`EVALUATION_BATCH_LIMIT = 100` PR's. De batch roteert deterministisch met het runnummer —
+`index = (run_number - 1) % ceil(n / 100)` — dus bij 126 open PR's meet run 1 de PR's 1..100, run 2 de
+PR's 101..126, run 3 weer 1..100. Iedere open PR komt binnen eindig veel writerruns aan de beurt, en
+met een uurlijkse `schedule` is dat ook zonder enige andere aanleiding gegarandeerd. De rotatie is
+**alleen scheduling**: ze bepaalt wie er dit uur een verse uitspraak krijgt, nooit wie er
+geïnvalideerd wordt. Is het runnummer onbruikbaar, dan valt de ronde terug op batch 0 in plaats van te
+weigeren — weigeren zou álle invalidaties overslaan, en dat is opnieuw fail-stale.
 
 Elke doel-PR is een eigen record. De lus draait zonder `set -e`: een PR waarvan de head niet te meten
 is, of waarvan de publicatie faalt, zet `overall=1` en gaat door naar de volgende. De job wordt aan
@@ -136,17 +175,21 @@ gemeten. Er wordt niets meegenomen wat vóór de lock is gemeten — geen artifa
 output en geen veld uit de bronrun.
 
 Eerlijke grens: GitHub houdt per groep hooguit één **wachtende** run aan en annuleert een eerder
-wachtende. Dat is hier onschadelijk, want iedere writer hermeet de volledige toestand via de API en
-de uurlijkse `schedule` doet altijd een volledige ronde. Een geannuleerde wachtende run kan dus
-hooguit een versmalde hermeting uitstellen tot die volgende volledige ronde; hij kan nooit een oudere
-uitspraak over een nieuwere heen schrijven.
+wachtende. Dat is onschadelijk zolang iedere writer dezelfde volledige verzameling heads invalideert,
+en dat doet hij: er is geen selectie meer die één run aan één PR bindt. Een geannuleerde wachtende run
+kan dus hooguit een **uitspraak** uitstellen tot de volgende ronde; een invalidatie kan hij nooit
+meenemen in zijn val, en een oudere uitspraak nooit over een nieuwere heen schrijven.
 
 Per PR staan er zes read-only GET's; het uurlijkse `schedule` is de convergentiefallback voor edits,
 deletes, dismissals en gemiste of geannuleerde signaalruns.
 
-`test/autocoding-live-gate-targets.test.mjs` meet beide eigenschappen mét negatieve mutatie: het zet
-de oude groepsexpressie en de oude limietweigering terug en toetst dat die vormen zich aantoonbaar
-fout gedragen — drie groepen in plaats van één, en nul doelen bij 26 open PR's.
+`test/autocoding-live-gate-targets.test.mjs` meet deze eigenschappen mét negatieve mutatie: het zet de
+oude groepsexpressie, de oude limietweigering en de oude hint-versmalling terug en toetst dat die
+vormen zich aantoonbaar fout gedragen — drie groepen in plaats van één, nul doelen bij 26 open PR's,
+en een ronde die na coalescing nog maar één van de twee open heads invalideert. De volgorde en het
+budget worden niet beweerd maar uitgevoerd: het `run:`-blok draait werkelijk onder `bash` met gestubde
+`gh`/`node`, en bij 126 open PR's toetst de test dat de laatste `pending`-POST vóór de eerste
+detail-GET valt en dat de hele ronde binnen het uurlijkse quotum blijft.
 
 ### Bootstrap: wat dit PR zelf niet kan bewijzen
 

@@ -292,13 +292,28 @@ export function analyzeWorkflow(text) {
     checkoutRefs: lines
       .filter((l) => /^\s*ref\s*:/.test(l.text))
       .map((l) => unquote(l.text.replace(/^\s*ref\s*:/, ''))),
+    // Bewust op de ACTIENAAM en niet op de eigenaar. De vorige vorm eiste het voorvoegsel
+    // `actions/`, waardoor `dawidd6/action-download-artifact`, een gevorkte `someone/cache` of
+    // welke herverpakking dan ook er ongemoeid doorheen liep — terwijl juist die acties de
+    // artifacts van de ONBEVOORRECHTE bronrun de trusted job in kunnen trekken. Over-benaderend in
+    // de veilige richting: `\S*` dekt ook de eigenaar, dus `cache-corp/iets` slaat ook aan. Dat kost
+    // hooguit een vals alarm. Comment- en blok-scalarruis kan hier niet binnenkomen, want `lines`
+    // komt uit `structureLines()` en die heeft beide al verwijderd.
     usesArtifactsOrCache: lines.some(
-      (l) => /uses\s*:\s*\S*actions\/(cache|download-artifact|upload-artifact)/.test(l.text),
+      (l) => /uses\s*:\s*\S*(cache|download-artifact|upload-artifact)/.test(l.text),
     ),
   };
 }
 
-const PR_CODE_REF_RE = /pull_request|pull\/|head\.(sha|ref)|github\.head_ref/;
+/**
+ * Refvormen die PR-GECONTROLEERDE code uitchecken. De puntvorm alleen volstond niet: de
+ * `workflow_run`-payload draagt dezelfde velden met een UNDERSCORE
+ * (`github.event.workflow_run.head_sha`, `.head_branch`), en die payload komt van een run waarvan de
+ * definitie door de pull request geleverd kan zijn. Een writer die daarop uitcheckt, checkt dus
+ * PR-code uit terwijl hij `statuses: write` draagt. `head_commit` staat er preventief bij, want
+ * `push`- en `workflow_run`-payloads dragen dat veld ook.
+ */
+const PR_CODE_REF_RE = /pull_request|pull\/|head[._](sha|ref|branch|commit)|github\.head_ref/;
 /** Een jobconditie die de job aantoonbaar tot het `pull_request`-event beperkt. */
 const PR_ONLY_RE = /github\.event_name\s*==\s*['"]pull_request['"]/;
 

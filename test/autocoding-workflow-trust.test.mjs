@@ -14,8 +14,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 
 import {
   analyzeWorkflow, structureLines, extractTriggers, extractWriteGrants, extractJobs,
@@ -59,6 +61,40 @@ const SCHONE_SHIELD = [
 function writerViolations(text) {
   return violations([{ path: PR_SHIELD, text: SCHONE_SHIELD }, { path: TRUSTED_WRITER, text }]);
 }
+
+/** Een verder schone writer met precies één uitcheckref, zodat alleen die ref gemeten wordt. */
+const WRITER_MET_REF = (ref) => [
+  'name: autocoding-shield-live-gate',
+  'on:',
+  '  workflow_run:',
+  '    workflows: [autocoding-shield]',
+  '    types: [completed]',
+  'permissions: {}',
+  'jobs:',
+  '  autocoding-shield-live-gate:',
+  '    permissions:',
+  '      statuses: write',
+  '    steps:',
+  '      - uses: actions/checkout@v4',
+  '        with:',
+  `          ref: ${ref}`,
+].join('\n');
+
+/** Idem met precies één extra actie, zodat alleen die `uses:` gemeten wordt. */
+const WRITER_MET_ACTIE = (uses) => [
+  'name: autocoding-shield-live-gate',
+  'on:',
+  '  workflow_run:',
+  '    workflows: [autocoding-shield]',
+  '    types: [completed]',
+  'permissions: {}',
+  'jobs:',
+  '  autocoding-shield-live-gate:',
+  '    permissions:',
+  '      statuses: write',
+  '    steps:',
+  `      - uses: ${uses}`,
+].join('\n');
 
 // --- De meter zelf ------------------------------------------------------------------------------
 
@@ -210,6 +246,159 @@ test('T6. een trusted writer die zelf een PR-event of extra schrijfscope krijgt,
   const metCache = `${basis([], [])}\n    steps:\n      - uses: actions/cache@v4`;
   assert.ok(writerViolations(metCache)
     .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_USES_PR_ARTIFACTS}:${TRUSTED_WRITER}`));
+});
+
+test('T6a. de headref van de BRONRUN is net zo goed PR-code als `head.sha`', () => {
+  // Gemini security-high, review 4998655866, inline 3834814303. De writer wordt door `workflow_run`
+  // gestart, en die payload draagt de PR-head onder een UNDERSCORE: `head_sha`, `head_branch`,
+  // `head_commit`. De bronrun kan een door de PR geleverde definitie hebben gehad, dus is die head
+  // even onbetrouwbaar als `github.event.pull_request.head.sha` — maar de oude puntvorm van
+  // `PR_CODE_REF_RE` liet hem gewoon door. Een writer met `statuses: write` checkte dan PR-code uit.
+  const onveilig = [
+    '${{ github.event.workflow_run.head_sha }}',
+    '${{ github.event.workflow_run.head_branch }}',
+    '${{ github.event.workflow_run.head_commit.id }}',
+    '${{ github.event.pull_request.head.sha }}',
+    '${{ github.event.pull_request.head.ref }}',
+    '${{ github.head_ref }}',
+    'refs/pull/74/merge',
+  ];
+  for (const ref of onveilig) {
+    assert.ok(
+      writerViolations(WRITER_MET_REF(ref))
+        .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_CHECKS_OUT_PR_CODE}:${TRUSTED_WRITER}`),
+      ref,
+    );
+  }
+
+  // En de enige vorm die de writer werkelijk gebruikt blijft toegestaan; anders zou de regel niet
+  // meer meten maar alleen nog blokkeren.
+  for (const ref of ['${{ github.event.repository.default_branch }}', 'main', 'refs/heads/main']) {
+    assert.deepEqual(writerViolations(WRITER_MET_REF(ref)), [], ref);
+  }
+});
+
+test('T6b. artifact- en cacheacties worden op de ACTIENAAM geweigerd, niet op de eigenaar', () => {
+  // Gemini security-high, review 4998655866, inline 3834814309. De oude vorm eiste het voorvoegsel
+  // `actions/`. Derdepartijacties als `dawidd6/action-download-artifact` doen precies hetzelfde —
+  // ze trekken de artifacts van de ONBEVOORRECHTE bronrun de trusted job in — en liepen er zo
+  // ongemoeid doorheen.
+  const verboden = [
+    'actions/cache@v4',
+    'actions/cache/restore@v4',
+    'actions/download-artifact@v4',
+    'actions/upload-artifact@v4',
+    'dawidd6/action-download-artifact@v6',
+    'buildjet/cache@v4',
+    'Swatinem/rust-cache@v2',
+    'aochmann/actions-download-artifact@v3',
+  ];
+  for (const uses of verboden) {
+    assert.ok(
+      writerViolations(WRITER_MET_ACTIE(uses))
+        .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_USES_PR_ARTIFACTS}:${TRUSTED_WRITER}`),
+      uses,
+    );
+  }
+
+  // Over-benaderend mag, vals alarm op TEKST mag niet: een commentaarregel en een shellregel in een
+  // blok-scalar zijn geen `uses:`-structuur. Dat onderscheid komt uit `structureLines()`, dus wordt
+  // het hier gemeten en niet aangenomen.
+  const schoon = [
+    'name: autocoding-shield-live-gate',
+    'on:',
+    '  workflow_run:',
+    '    workflows: [autocoding-shield]',
+    '    types: [completed]',
+    'permissions: {}',
+    'jobs:',
+    '  autocoding-shield-live-gate:',
+    '    permissions:',
+    '      statuses: write',
+    '    steps:',
+    '      # nooit: uses: dawidd6/action-download-artifact@v6',
+    '      - uses: actions/checkout@v4',
+    '      - run: |',
+    '          echo "uses: actions/upload-artifact@v4 staat hier alleen als tekst"',
+    '          echo "en uses: buildjet/cache@v4 ook"',
+  ].join('\n');
+  assert.equal(analyzeWorkflow(schoon).usesArtifactsOrCache, false);
+  assert.deepEqual(writerViolations(schoon), []);
+});
+
+const TRUST_MODULE = 'scripts/autocoding/workflow-trust.mjs';
+
+/** Eén regel uit de meter terugdraaien naar zijn oude vorm en de MUTANT importeren. */
+function mutantVanDeMeter(naam, oud, nieuw) {
+  const bron = readFileSync(TRUST_MODULE, 'utf8');
+  assert.equal(bron.split(oud).length - 1, 1, 'het mutatieanker moet precies één keer voorkomen');
+  const dir = mkdtempSync(join(tmpdir(), `workflow-trust-${naam}-`));
+  const pad = join(dir, `workflow-trust.${naam}.mjs`);
+  writeFileSync(pad, bron.replace(oud, nieuw));
+  return import(pathToFileURL(pad).href);
+}
+
+test('T6c. NEGATIEVE MUTATIE: de oude puntvorm laat de headref van de bronrun door', async () => {
+  // De regel uit T6a is pas bewezen als de OUDE vorm er aantoonbaar op stukloopt. De mutant krijgt
+  // exact de regex van vóór deze commit terug; hij mist dan precies de underscorevelden die de
+  // `workflow_run`-payload draagt, terwijl de echte meter ze alle drie afkeurt.
+  const gemuteerd = await mutantVanDeMeter(
+    'pr-code-ref',
+    'const PR_CODE_REF_RE = /pull_request|pull\\/|head[._](sha|ref|branch|commit)|github\\.head_ref/;',
+    'const PR_CODE_REF_RE = /pull_request|pull\\/|head\\.sha|head\\.ref|github\\.head_ref/;',
+  );
+
+  const workflows = (ref) => [
+    { path: PR_SHIELD, text: SCHONE_SHIELD },
+    { path: TRUSTED_WRITER, text: WRITER_MET_REF(ref) },
+  ];
+  const gemist = `${TRUST_VIOLATION.TRUSTED_WRITER_CHECKS_OUT_PR_CODE}:${TRUSTED_WRITER}`;
+  for (const ref of [
+    '${{ github.event.workflow_run.head_sha }}',
+    '${{ github.event.workflow_run.head_branch }}',
+    '${{ github.event.workflow_run.head_commit.id }}',
+  ]) {
+    assert.deepEqual(
+      gemuteerd.findTrustBoundaryViolations({
+        workflows: workflows(ref), prShieldPath: PR_SHIELD, trustedWriterPath: TRUSTED_WRITER,
+      }),
+      [],
+      `de mutant laat ${ref} door`,
+    );
+    assert.ok(writerViolations(WRITER_MET_REF(ref)).includes(gemist), ref);
+  }
+});
+
+test('T6d. NEGATIEVE MUTATIE: de oude `actions/`-eis laat derdepartijartifacts door', async () => {
+  // Zelfde bewijslast voor de eigenaar-eis. De mutant weigert alleen nog wat van `actions/` komt en
+  // laat elke derdepartijvariant binnen; de echte meter kijkt naar de actienaam.
+  const gemuteerd = await mutantVanDeMeter(
+    'artifacts',
+    "(l) => /uses\\s*:\\s*\\S*(cache|download-artifact|upload-artifact)/.test(l.text),",
+    "(l) => /uses\\s*:\\s*actions\\/(cache|download-artifact|upload-artifact)/.test(l.text),",
+  );
+
+  const gemist = `${TRUST_VIOLATION.TRUSTED_WRITER_USES_PR_ARTIFACTS}:${TRUSTED_WRITER}`;
+  for (const uses of [
+    'dawidd6/action-download-artifact@v6',
+    'buildjet/cache@v4',
+    'Swatinem/rust-cache@v2',
+    'aochmann/actions-download-artifact@v3',
+  ]) {
+    assert.equal(gemuteerd.analyzeWorkflow(WRITER_MET_ACTIE(uses)).usesArtifactsOrCache, false);
+    assert.deepEqual(
+      gemuteerd.findTrustBoundaryViolations({
+        workflows: [
+          { path: PR_SHIELD, text: SCHONE_SHIELD },
+          { path: TRUSTED_WRITER, text: WRITER_MET_ACTIE(uses) },
+        ],
+        prShieldPath: PR_SHIELD, trustedWriterPath: TRUSTED_WRITER,
+      }),
+      [],
+      `de mutant laat ${uses} door`,
+    );
+    assert.ok(writerViolations(WRITER_MET_ACTIE(uses)).includes(gemist), uses);
+  }
 });
 
 test('T7. geen enkel workflowbestand in deze repository overtreedt de grens', () => {

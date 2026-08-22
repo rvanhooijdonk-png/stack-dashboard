@@ -134,6 +134,46 @@ export function resolvePublication({ headSha, statusContext, gateResult, executi
 }
 
 /**
+ * De VASTE invalidatiestatus. Hij wordt vóór elke detailmeting op iedere geldig gemeten head van de
+ * volledige open-PR-lijst geschreven, onder exact dezelfde context als de uitspraak zelf.
+ *
+ * Waarom dit bestaat. De writerlock houdt per groep hooguit één WACHTENDE run aan; een nieuwe
+ * aanleiding annuleert die wachtende run. De invalidatie die zo'n geannuleerde run had moeten doen,
+ * was daarmee weg — en een eerder gepubliceerde `success` bleef staan tot de volgende uurlijkse
+ * ronde. Door iedere overlevende writer ALLE open heads eerst op `pending` te zetten, draagt hij de
+ * invalidaties van elke geannuleerde voorganger vanzelf mee: er valt niets meer te verliezen, want
+ * de status die verloren kon gaan is al weg.
+ *
+ * `pending` en niet `failure`: dit is geen uitspraak over het bewijs maar de expliciete afwezigheid
+ * van een uitspraak over deze head. Voor een required check telt het even hard — alleen `success`
+ * is groen — maar het liegt niet over wat er gemeten is.
+ */
+export const PENDING_PUBLICATION = Object.freeze({
+  state: 'pending',
+  description: 'PENDING: re-measuring native two-vendor review on this head',
+});
+
+/**
+ * Zet een gemeten head om naar de vaste pendingstatus. Zelfde poortwachters als de uitspraak: geen
+ * geldige head of geen geldige context betekent niet publiceren, nooit een gok.
+ */
+export function resolvePendingPublication({ headSha, statusContext }) {
+  if (!SHA_RE.test(headSha ?? '')) {
+    return { ok: false, blocked: PUBLISH_ERROR.HEAD_UNMEASURED };
+  }
+  if (!STATUS_CONTEXT_RE.test(statusContext ?? '')) {
+    return { ok: false, blocked: PUBLISH_ERROR.STATUS_CONTEXT_INVALID };
+  }
+  return {
+    ok: true,
+    sha: headSha,
+    context: statusContext,
+    state: PENDING_PUBLICATION.state,
+    description: PENDING_PUBLICATION.description,
+  };
+}
+
+/**
  * Publiceert de commitstatus. De enige schrijfactie in de hele shield, en de enige reden dat de
  * trusted job `statuses: write` heeft. Er wordt niets van het antwoord gelogd behalve de HTTP-code.
  *
@@ -184,7 +224,15 @@ export async function publishStatus({ repository, publication, token, fetchImpl 
 }
 
 /** Vlaggen zonder waarde. Hun POSITIE in argv mag niets aan de betekenis van de rest veranderen. */
-export const PUBLISH_BOOLEAN_FLAGS = Object.freeze(['--dry-run']);
+export const PUBLISH_BOOLEAN_FLAGS = Object.freeze(['--dry-run', '--pending']);
+
+/**
+ * De sleutels die in pendingmodus GEEN betekenis hebben. De pendingstatus is per definitie de
+ * afwezigheid van een uitspraak, dus zou een meegegeven poortresultaat of uitvoeringsfout stil
+ * genegeerd worden. Stil negeren is precies het soort herinterpretatie dat deze parser weigert:
+ * `--pending` samen met een van deze sleutels is een gesloten vorm die niet bestaat.
+ */
+export const PENDING_INCOMPATIBLE_OPTIONS = Object.freeze(['--gate-result', '--execution-error']);
 
 /** Sleutels die precies één waarde nemen. Een lege waarde is geldig; een ontbrekende nooit. */
 export const PUBLISH_VALUE_OPTIONS = Object.freeze([
@@ -229,12 +277,19 @@ export function parsePublishArgs(argv) {
     if (flags.has(value) || options.has(value)) return reject;
     values.set(token, value);
   }
-  return { ok: true, values, dryRun: seenFlags.has('--dry-run') };
+  const pending = seenFlags.has('--pending');
+  if (pending && PENDING_INCOMPATIBLE_OPTIONS.some((option) => values.has(option))) return reject;
+  return { ok: true, values, dryRun: seenFlags.has('--dry-run'), pending };
 }
 
 /**
- * De CLI-lus. Geeft rc 0 uitsluitend als er een `success`-status is gepubliceerd; elke andere
- * uitkomst geeft rc 1, zodat de job zelf ook rood wordt en er geen stille groene run bestaat.
+ * De CLI-lus. Twee modi, allebei met dezelfde harde regel: rc 0 uitsluitend als de bedoelde status
+ * WERKELIJK is geplaatst.
+ *
+ *   - Zonder `--pending`: de uitspraak. rc 0 alleen bij een gepubliceerde `success`; elke andere
+ *     uitkomst geeft rc 1, zodat de job rood wordt en er geen stille groene run bestaat.
+ *   - Met `--pending`: de invalidatie. rc 0 alleen als de `pending`-status is geaccepteerd. Hier is
+ *     rc 0 dus GEEN uitspraak over het bewijs maar het bewijs dat de head niet meer groen staat.
  */
 export async function runPublish(argv, { fetchImpl, readFile } = {}) {
   const parsed = parsePublishArgs(argv);
@@ -242,13 +297,34 @@ export async function runPublish(argv, { fetchImpl, readFile } = {}) {
     console.log(`LIVE_STATUS_NOT_PUBLISHABLE_${PUBLISH_ERROR.ARGUMENTS_INVALID}`);
     return 1;
   }
-  const { values: args, dryRun } = parsed;
+  const { values: args, dryRun, pending } = parsed;
 
   const repository = args.get('--repository') ?? '';
   const headSha = args.get('--head-sha') ?? '';
   const statusContext = args.get('--status-context') ?? '';
   const resultPath = args.get('--gate-result') ?? '';
   let executionError = args.get('--execution-error') ?? '';
+
+  if (pending) {
+    const invalidation = resolvePendingPublication({ headSha, statusContext });
+    if (!invalidation.ok) {
+      console.log(`LIVE_STATUS_PENDING_NOT_PUBLISHABLE_${invalidation.blocked}`);
+      return 1;
+    }
+    if (dryRun) {
+      console.log(JSON.stringify(invalidation));
+      return 0;
+    }
+    const invalidated = await publishStatus({
+      repository, publication: invalidation, token: process.env.GITHUB_TOKEN, fetchImpl,
+    });
+    if (!invalidated.ok) {
+      console.log(`LIVE_STATUS_PENDING_POST_REJECTED_${invalidated.blocked ?? invalidated.status}`);
+      return 1;
+    }
+    console.log('LIVE_STATUS_PENDING_PUBLISHED');
+    return 0;
+  }
 
   let gateResult = null;
   if (resultPath) {
