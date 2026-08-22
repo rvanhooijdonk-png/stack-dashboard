@@ -162,7 +162,7 @@ function kalenderGeldig(value) {
  * vorm, en precies dát vertekent "is dit vers" (zie ook `waarnemer.mjs` se ZONE_SPELING_MS-notitie
  * over diezelfde valkuil).
  */
-function parseTijdstempel(value) {
+export function parseTijdstempel(value) {
   if (typeof value !== 'string' || !TZ_AWARE.test(value)) return null;
   if (!kalenderGeldig(value)) return null;
   const ms = Date.parse(value);
