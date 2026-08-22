@@ -289,6 +289,87 @@ test('L10. de CLI publiceert alleen bij een leesbaar GO-resultaat en geeft ander
   }
 });
 
+test('L10a. een falende fetch eindigt in EEN vaste categorie, nooit in een crash of foutlek', async () => {
+  // De GitHub-API kan wegvallen: DNS, TLS, timeout, reset. `fetch` gooit dan. Zonder afvang werd dat
+  // een onafgevangen promise-rejection met stacktrace in het joblog; nu is het een gesloten
+  // categorie zonder een letter uit de exceptie.
+  const publication = {
+    ok: true, sha: HEAD, context: CONTEXT_NAME, state: 'success', description: 'GO: ...',
+  };
+  const geheim = 'ECONNREFUSED api.github.com token=x-token-x';
+  const stukkeFetches = [
+    async () => { throw new Error(geheim); },
+    () => { throw new Error(geheim); },              // synchroon falende impl
+    () => Promise.reject(new Error(geheim)),         // afgewezen promise zonder throw
+    {},                                               // geen aanroepbare fetch in deze runtime
+  ];
+  for (const fetchImpl of stukkeFetches) {
+    const posted = await publishStatus({
+      repository: 'rvanhooijdonk-png/stack-dashboard', publication, token: 'x-token-x', fetchImpl,
+    });
+    assert.deepEqual(posted, { ok: false, blocked: PUBLISH_ERROR.STATUS_TRANSPORT_ERROR });
+  }
+});
+
+test('L10b. runPublish eindigt rc 1 op een transportfout en logt alleen de vaste categorie', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'autocoding-live-status-'));
+  const goPath = join(dir, 'go.json');
+  writeFileSync(goPath, JSON.stringify({ decision: 'GO', reasons: [] }));
+  const readFile = (path) => readFileSync(path, 'utf8');
+  const geheim = 'getaddrinfo ENOTFOUND api.github.com (bearer x-token-x)';
+
+  const logged = [];
+  const original = console.log;
+  console.log = (line) => logged.push(String(line));
+  try {
+    const rc = await runPublish([
+      '--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', HEAD,
+      '--status-context', CONTEXT_NAME, '--gate-result', goPath,
+    ], { readFile, fetchImpl: async () => { throw new Error(geheim); } });
+
+    // Rood, niet stil groen: een mislukte publicatie is nooit een geslaagde poort.
+    assert.equal(rc, 1);
+    assert.deepEqual(logged, [`LIVE_STATUS_POST_REJECTED_${PUBLISH_ERROR.STATUS_TRANSPORT_ERROR}`]);
+    for (const line of logged) {
+      assert.ok(!line.includes('x-token-x'), 'geen tokenmateriaal in de uitvoer');
+      assert.ok(!line.includes('ENOTFOUND'), 'geen exceptietekst in de uitvoer');
+      assert.ok(!line.includes('api.github.com'), 'geen endpoint in de uitvoer');
+      assert.ok(!line.includes(geheim));
+    }
+  } finally {
+    console.log = original;
+  }
+});
+
+test('L10c. een transportfout in een APART PROCES geeft rc 1 zonder unhandled rejection', () => {
+  // De echte regressie zat op procesniveau: een afgewezen `fetch` verliet `publishStatus` als
+  // onafgevangen promise-rejection, met stacktrace op stderr. Dit draait de CLI-lus daarom in een
+  // eigen Node-proces met een gooiende `fetch` — geen netwerk, wel een echt proces.
+  const dir = mkdtempSync(join(tmpdir(), 'autocoding-live-status-cli-'));
+  const goPath = join(dir, 'go.json');
+  writeFileSync(goPath, JSON.stringify({ decision: 'GO', reasons: [] }));
+  const geheim = 'getaddrinfo ENOTFOUND api.github.com (bearer x-token-x)';
+  const script = `
+    globalThis.fetch = () => Promise.reject(new Error(${JSON.stringify(geheim)}));
+    const { readFileSync } = await import('node:fs');
+    const { runPublish } = await import('./scripts/autocoding/publish-live-status.mjs');
+    process.exitCode = await runPublish([
+      '--repository', 'rvanhooijdonk-png/stack-dashboard',
+      '--head-sha', ${JSON.stringify(HEAD)},
+      '--status-context', ${JSON.stringify(CONTEXT_NAME)},
+      '--gate-result', ${JSON.stringify(goPath)},
+    ], { readFile: (path) => readFileSync(path, 'utf8') });
+  `;
+  const cli = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8', env: { ...process.env, GITHUB_TOKEN: 'x-token-x' },
+  });
+  assert.equal(cli.status, 1);
+  assert.equal(cli.stderr, '', 'geen stacktrace, geen unhandled rejection');
+  assert.equal(cli.stdout.trim(), `LIVE_STATUS_POST_REJECTED_${PUBLISH_ERROR.STATUS_TRANSPORT_ERROR}`);
+  assert.ok(!cli.stdout.includes('x-token-x'));
+  assert.ok(!cli.stdout.includes('ENOTFOUND'));
+});
+
 test('L11. de CLI als losse binary schrijft geen stderr en lekt geen argumenten', () => {
   const dir = mkdtempSync(join(tmpdir(), 'autocoding-live-status-cli-'));
   const goPath = join(dir, 'go.json');

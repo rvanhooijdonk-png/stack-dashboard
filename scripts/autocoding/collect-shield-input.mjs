@@ -30,7 +30,7 @@ import { pathToFileURL } from 'node:url';
 
 import {
   extractCodexNativeEvidence, extractCodexReviewEvidence, extractGeminiNativeEvidence,
-  extractOwnerApprovalFromBody, codexReviewedCommitRef,
+  extractOwnerApprovalFromBody, codexReviewedCommitRef, isSafeSensitivePrefix,
 } from './verify-review-gate.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -118,11 +118,17 @@ export function measureFilesCompleteness(changedFiles, prChangedFiles) {
 }
 
 /**
- * Bepaalt of de PR een gevoelig pad raakt. Fail-closed: zonder bruikbare bestandslijst — leeg,
- * ontbrekend of zonder policy-globs — geldt de PR als gevoelig, zodat de ownergate juist dán geldt.
+ * Bepaalt of de PR een gevoelig pad raakt. De vergelijking is LETTERLIJKE prefixmatching, geen
+ * glob-expansie: `CONTROL/AUTOCODING/` dekt alles onder die map, `*` of `**` dekt niets. Daarom
+ * wordt elke prefix eerst door `isSafeSensitivePrefix` gehaald — een patroonachtige waarde zou
+ * anders geruisloos nergens op matchen en de ownergate stil uitschakelen.
+ *
+ * Fail-closed: zonder bruikbare bestandslijst — leeg, ontbrekend of zonder ENKELE veilige prefix —
+ * geldt de PR als gevoelig, zodat de ownergate juist dán geldt.
  */
-export function touchesSensitivePaths(changedFiles, globs) {
-  const prefixes = (Array.isArray(globs) ? globs : []).filter((g) => typeof g === 'string' && g.length > 0);
+export function touchesSensitivePaths(changedFiles, sensitivePathPrefixes) {
+  const raw = Array.isArray(sensitivePathPrefixes) ? sensitivePathPrefixes : [];
+  const prefixes = raw.filter((prefix) => isSafeSensitivePrefix(prefix));
   if (prefixes.length === 0) return true;
   const names = flattenPages(changedFiles)
     .map((f) => f?.filename)
@@ -195,10 +201,26 @@ export function buildShieldInput({
     }
   }
 
-  const ownerApprovals = [...comments, ...reviewList].flatMap((item) => {
+  // De DRAGER wordt meegegeven, niet alleen het blok. Een review draagt een `state` die na het
+  // schrijven nog verandert: wie zijn review intrekt, laat het lichaam (en dus het autorisatieblok)
+  // ongewijzigd staan terwijl GitHub de state op `DISMISSED` zet. Zonder die state kon de validator
+  // een ingetrokken autorisatie niet van een actuele onderscheiden. Een issuecomment heeft geen
+  // state; dat wordt expliciet als `null` doorgegeven in plaats van weggelaten.
+  const ownerCarriers = [
+    ...comments.map((item) => ({ item, source: 'issue_comment', review_state: null })),
+    ...reviewList.map((item) => ({
+      item, source: 'review', review_state: typeof item?.state === 'string' ? item.state : '',
+    })),
+  ];
+  const ownerApprovals = ownerCarriers.flatMap(({ item, source, review_state }) => {
     const approval = extractOwnerApprovalFromBody(item?.body);
     if (!approval) return [];
-    return [{ approval, transport_actor: typeof item?.user?.login === 'string' ? item.user.login : '' }];
+    return [{
+      approval,
+      transport_actor: typeof item?.user?.login === 'string' ? item.user.login : '',
+      source,
+      review_state,
+    }];
   });
 
   const files = measureFilesCompleteness(changedFiles, pr?.changed_files);
@@ -208,7 +230,9 @@ export function buildShieldInput({
     shieldInput: {
       nativeEvidence,
       ownerApprovals,
-      sensitivePathsTouched: touchesSensitivePaths(changedFiles, policy?.owner_gate?.sensitive_path_globs),
+      sensitivePathsTouched: touchesSensitivePaths(
+        changedFiles, policy?.owner_gate?.sensitive_path_prefixes,
+      ),
       filesComplete: files.complete,
     },
   };

@@ -91,7 +91,7 @@ wijst is een anomalie, geen ruis. Met uitsluitend stale bewijs blijft de uitslag
 
 ## Ownergate op gevoelige paden
 
-Raakt de diff `.github/workflows/**` of `CONTROL/AUTOCODING/**`, dan komt daar één aparte
+Raakt de diff `.github/workflows/` of `CONTROL/AUTOCODING/`, dan komt daar één aparte
 **ownerautorisatie** bij. Dat is een eigen schema in een eigen fenced blok met infostring
 `autocoding-owner-approval-v1`:
 
@@ -122,6 +122,41 @@ blijft zonder twee geldige vendor-`GO`'s rood, hoe geldig de ownerautorisatie oo
 `assertNativeVendorsSafe` weigert bovendien elke policy waarin een owner-actor ook als vendoractor
 voorkomt.
 
+### De drager telt mee, niet alleen het blok
+
+Een autorisatieblok kan op twee manieren binnenkomen, en die twee zijn niet gelijkwaardig.
+
+Een **issuecomment** heeft geen toestand: hij bestaat of hij is verwijderd, en beide zijn direct
+zichtbaar in de momentopname. Een **pull-request-review** draagt daarentegen een `state` die ná het
+schrijven nog verandert. Wie een review intrekt, laat het lichaam — en dus het autorisatieblok —
+letterlijk ongewijzigd staan; GitHub zet alleen `state` op `DISMISSED`. Zonder statefilter bleef zo'n
+ingetrokken autorisatie de gevoelige-padpoort dus groen houden.
+
+De adapter geeft daarom de drager mee (`source` en, voor een review, `review_state`), en de validator
+accepteert reviewbewijs uitsluitend in een expliciet allowlisted **actieve** state:
+`owner_gate.allowed_review_states`. Op deze repository staat daar alleen `COMMENTED` in — de
+toegestane owner is ook de PR-auteur, en GitHub laat een auteur zijn eigen PR niet goedkeuren, dus
+`APPROVED` is hier geen state die de eigenaar werkelijk kan produceren. `DISMISSED`,
+`CHANGES_REQUESTED`, `PENDING`, een ontbrekende state en een drager zonder herkenbare herkomst tellen
+nooit; ze leveren `OWNER_APPROVAL_CARRIER_NOT_ACTIVE` op en daarmee `OWNER_GATE_REQUIRED` zolang er
+geen ander actueel geldig ownerbewijs is. De allowlist zelf is bovendien begrensd: een policy die
+`DISMISSED` (of wat dan ook buiten `COMMENTED`/`APPROVED`) probeert toe te laten is `UNSAFE_POLICY`.
+
+### Prefixen, geen globs
+
+`owner_gate.sensitive_path_prefixes` is precies wat de naam zegt: een lijst **letterlijke
+padprefixen**, vergeleken met `String.startsWith`. Er is geen glob-expansie, en die is er ook nooit
+geweest — de vorige sleutelnaam (`sensitive_path_globs`) beloofde semantiek die de implementatie niet
+had, waardoor een toekomstige echte glob geruisloos nergens op zou matchen en de ownergate stil zou
+uitschakelen.
+
+De prefixen worden daarom fail-closed gevalideerd. Een prefix moet een niet-leeg, relatief repo-pad
+zijn; glob-meta (`*`, `?`, `[`, `]`, `{`, `}`, `!`), backslashes, controltekens, een leidende `/`,
+`.`- of `..`-segmenten en dubbele slashes zijn verboden. Eén onveilige prefix, één onbekende sleutel
+in `owner_gate` (waaronder de oude `sensitive_path_globs`) of een lege lijst maakt de hele policy
+`UNSAFE_POLICY` — nooit "dan maar geen gevoelige paden". De gevoelige bereiken zelf blijven exact
+`.github/workflows/` en `CONTROL/AUTOCODING/`.
+
 ## Volledigheid van de bestandslijst
 
 `/pulls/{n}/files` levert maximaal 3000 bestanden. De adapter legt het aantal verzamelde bestanden
@@ -151,6 +186,21 @@ receiptinhoud wordt niet gelogd.
 Een toegestane identiteit die zichzelf goedkeurt is het scherpe geval: die passeert de ruisfilter en
 faalt daarna mechanisch op `SELF_REVIEW`. Een niet-toegestane identiteit die zich als owner voordoet
 wordt daarvóór al als ruis verworpen en levert `NO_RECEIPTS` op.
+
+## Wat er gebeurt als de statuspublicatie zelf faalt
+
+De POST naar `/statuses/{sha}` kan mislukken: DNS, TLS, timeout, rate limit, een reset. Zo'n fout
+wordt volledig ingesloten en teruggebracht tot één vaste categorie, `STATUS_TRANSPORT_ERROR`. De
+exceptietekst wordt niet gelezen, niet doorgegeven en niet gelogd; de stap logt uitsluitend
+`LIVE_STATUS_POST_REJECTED_STATUS_TRANSPORT_ERROR` en eindigt rc 1, zodat de run rood is. Eerder
+verliet zo'n fout `publishStatus()` als onafgevangen promise-rejection, met stacktrace op stderr.
+
+Het restrisico wordt hier eerlijk benoemd in plaats van weggeschreven: een mislukte POST kan een
+**eerdere** status op dezelfde head niet overschrijven. Stond daar al een `success` van een vorige,
+toen nog geldige momentopname, dan blijft die staan tijdens de storing. De poort beschikt met
+`statuses: write` alleen over schrijven; wat niet geschreven kan worden, kan ook niet ingetrokken
+worden. De run is wél rood, en de eerstvolgende geslaagde publicatie op dezelfde head herstelt de
+uitspraak — die is immers een pure functie van de momentopname, niet van het event.
 
 ## Activering en compatibiliteit
 

@@ -108,6 +108,8 @@ test('A7. de gewijzigde workflow markeert de PR als gevoelig en eist de owner-au
   assert.equal(shieldInput.sensitivePathsTouched, true);
   assert.equal(shieldInput.ownerApprovals.length, 1);
   assert.equal(shieldInput.ownerApprovals[0].transport_actor, 'rvanhooijdonk-png');
+  assert.equal(shieldInput.ownerApprovals[0].source, 'issue_comment');
+  assert.equal(shieldInput.ownerApprovals[0].review_state, null);
   // Het blok draagt zelf geen actorveld: er valt niets te verzinnen, de auteur komt uit de API.
   assert.deepEqual(Object.keys(shieldInput.ownerApprovals[0].approval).sort(),
     ['decision', 'head_sha', 'schema', 'task_id', 'tree_sha']);
@@ -198,14 +200,73 @@ test('A13b. regelafsluiting: CRLF blijft werken en trailing witruimte wist de ta
   assert.equal(extractTaskId('task_id=A\rB\r\n'), 'A');
 });
 
-test('A14. gevoelige paden: prefixmatch, met fail-closed bij ontbrekend zicht', () => {
-  const globs = POLICY.owner_gate.sensitive_path_globs;
-  assert.equal(touchesSensitivePaths([[{ filename: 'docs/README.md' }]], globs), false);
-  assert.equal(touchesSensitivePaths([[{ filename: 'CONTROL/AUTOCODING/policy.v1.json' }]], globs), true);
-  assert.equal(touchesSensitivePaths([[{ filename: '.github/workflows/x.yml' }]], globs), true);
-  assert.equal(touchesSensitivePaths([], globs), true, 'geen bestandslijst => gevoelig');
-  assert.equal(touchesSensitivePaths(null, globs), true);
-  assert.equal(touchesSensitivePaths([[{ filename: 'docs/README.md' }]], []), true, 'geen globs => gevoelig');
+test('A14. gevoelige paden: LETTERLIJKE prefixmatch, met fail-closed bij ontbrekend zicht', () => {
+  const prefixes = POLICY.owner_gate.sensitive_path_prefixes;
+  assert.equal(touchesSensitivePaths([[{ filename: 'docs/README.md' }]], prefixes), false);
+  assert.equal(touchesSensitivePaths([[{ filename: 'CONTROL/AUTOCODING/policy.v1.json' }]], prefixes), true);
+  assert.equal(touchesSensitivePaths([[{ filename: '.github/workflows/x.yml' }]], prefixes), true);
+  assert.equal(touchesSensitivePaths([], prefixes), true, 'geen bestandslijst => gevoelig');
+  assert.equal(touchesSensitivePaths(null, prefixes), true);
+  assert.equal(touchesSensitivePaths([[{ filename: 'docs/README.md' }]], []), true, 'geen prefixen => gevoelig');
+});
+
+test('A14a. een patroonachtige prefix matcht niet stilzwijgend niets maar maakt de PR gevoelig', () => {
+  // Het contract is prefixmatching. Een waarde die eruitziet als een glob zou met `startsWith`
+  // nergens op matchen — en dus de ownergate uitschakelen precies waar hij bedoeld was. Zulke
+  // waarden worden daarom niet als prefix geteld; blijft er geen enkele veilige prefix over, dan
+  // geldt de PR als gevoelig. (De policyvalidatie weigert zo'n policy bovendien helemaal.)
+  const files = [[{ filename: 'docs/README.md' }]];
+  for (const onveilig of ['.github/workflows/**', '*', '/etc/', '../', 'CONTROL/AUTOCODING/*']) {
+    assert.equal(touchesSensitivePaths(files, [onveilig]), true, onveilig);
+  }
+  // Naast een onveilige waarde blijft een veilige prefix gewoon werken — geen match is geen match.
+  assert.equal(touchesSensitivePaths(files, ['*', 'CONTROL/AUTOCODING/']), false);
+  assert.equal(
+    touchesSensitivePaths([[{ filename: 'CONTROL/AUTOCODING/policy.v1.json' }]], ['*', 'CONTROL/AUTOCODING/']),
+    true,
+  );
+});
+
+test('A14b. de adapter geeft de DRAGER van een owner-autorisatie door, inclusief reviewstate', () => {
+  // Een review draagt een state die na een dismiss verandert zonder dat het lichaam meebeweegt.
+  // De adapter mag die state dus niet weggooien: de validator kan een ingetrokken autorisatie
+  // anders niet van een actuele onderscheiden.
+  const ownerBlok = flattenPages(raw('issue-comments'))
+    .find((c) => c.user.login === 'rvanhooijdonk-png').body;
+  const reviews = flattenPages(raw('reviews'));
+  const alsReview = [[...reviews, {
+    id: 4997700099,
+    user: { login: 'rvanhooijdonk-png', id: 1, type: 'User' },
+    state: 'DISMISSED',
+    commit_id: HEAD,
+    body: ownerBlok,
+  }]];
+  const { shieldInput } = buildShieldInput(fixtureInput({ reviews: alsReview }));
+  assert.equal(shieldInput.ownerApprovals.length, 2);
+
+  const uitComment = shieldInput.ownerApprovals.find((a) => a.source === 'issue_comment');
+  assert.equal(uitComment.review_state, null, 'een issuecomment heeft geen state');
+  const uitReview = shieldInput.ownerApprovals.find((a) => a.source === 'review');
+  assert.equal(uitReview.review_state, 'DISMISSED');
+
+  // De ingetrokken review telt niet mee; de actuele issuecomment nog wel, dus de PR blijft GO.
+  const { context } = buildShieldInput(fixtureInput({ reviews: alsReview }));
+  const r = evaluateShield({ ...shieldInput, context, policy: POLICY });
+  assert.deepEqual(r, { decision: 'GO', reasons: [] });
+
+  // Zonder die issuecomment blijft alléén de ingetrokken review over => de ownergate gaat dicht.
+  const comments = flattenPages(raw('issue-comments'));
+  const zonderOwnerComment = [comments.filter((c) => c.user.login !== 'rvanhooijdonk-png')];
+  const alleenDismissed = buildShieldInput(
+    fixtureInput({ reviews: alsReview, issueComments: zonderOwnerComment }),
+  );
+  assert.deepEqual(alleenDismissed.shieldInput.ownerApprovals.map((a) => a.review_state), ['DISMISSED']);
+  const dicht = evaluateShield({
+    ...alleenDismissed.shieldInput, context: alleenDismissed.context, policy: POLICY,
+  });
+  assert.equal(dicht.decision, 'NO_GO');
+  assert.ok(dicht.reasons.includes(REASON.OWNER_GATE_REQUIRED));
+  assert.ok(dicht.reasons.includes(REASON.OWNER_APPROVAL_CARRIER_NOT_ACTIVE));
 });
 
 test('A15. inline comments worden op review-id gegroepeerd, niet op auteur of volgorde', () => {

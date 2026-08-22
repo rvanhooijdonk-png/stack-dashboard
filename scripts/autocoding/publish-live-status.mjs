@@ -48,6 +48,7 @@ export const PUBLISH_ERROR = Object.freeze({
   HEAD_UNMEASURED: 'HEAD_UNMEASURED',
   STATUS_CONTEXT_INVALID: 'STATUS_CONTEXT_INVALID',
   REPOSITORY_INVALID: 'REPOSITORY_INVALID',
+  STATUS_TRANSPORT_ERROR: 'STATUS_TRANSPORT_ERROR',
   UNRECOGNISED_REASON: 'UNRECOGNISED_REASON',
   UNSPECIFIED: 'UNSPECIFIED',
 });
@@ -134,30 +135,50 @@ export function resolvePublication({ headSha, statusContext, gateResult, executi
 /**
  * Publiceert de commitstatus. De enige schrijfactie in de hele shield, en de enige reden dat de
  * trusted job `statuses: write` heeft. Er wordt niets van het antwoord gelogd behalve de HTTP-code.
+ *
+ * Transportfouten worden hier volledig ingesloten. Een DNS-fout, een afgebroken TLS-verbinding, een
+ * timeout of een ontbrekende `fetch` laat `fetch` gooien (of, bij een synchroon falende impl,
+ * meteen throwen) — zonder deze afvang eindigde de CLI in een onafgevangen promise-rejection, met
+ * een stacktrace en mogelijk verzoekdetails in het joblog. Elke zo'n fout wordt daarom gereduceerd
+ * tot ÉÉN vaste categorie: `STATUS_TRANSPORT_ERROR`. De exceptietekst wordt niet gelezen, niet
+ * doorgegeven en niet gelogd.
+ *
+ * Wat dit uitdrukkelijk NIET doet: het herstelt de status niet. Faalt de POST, dan blijft een
+ * eerdere status van deze context op deze head onaangeroerd staan — die kan dus ouder bewijs
+ * weerspiegelen. De run wordt daarvan wel rood (rc 1); het restrisico is dat een required check die
+ * al groen stond groen blijft tijdens een API-storing. Dat is bewust: deze poort kan met
+ * `statuses: write` alleen schrijven, en een status die niet geschreven kan worden kan ook niet
+ * ingetrokken worden.
  */
 export async function publishStatus({ repository, publication, token, fetchImpl }) {
   if (!REPOSITORY_RE.test(repository ?? '')) {
     return { ok: false, blocked: PUBLISH_ERROR.REPOSITORY_INVALID };
   }
-  const doFetch = fetchImpl ?? globalThis.fetch;
-  const response = await doFetch(
-    `https://api.github.com/repos/${repository}/statuses/${publication.sha}`,
-    {
-      method: 'POST',
-      headers: {
-        accept: 'application/vnd.github+json',
-        authorization: `Bearer ${token}`,
-        'content-type': 'application/json',
-        'user-agent': 'autocoding-shield',
-        'x-github-api-version': '2022-11-28',
+  let response;
+  try {
+    const doFetch = fetchImpl ?? globalThis.fetch;
+    if (typeof doFetch !== 'function') throw new Error(PUBLISH_ERROR.STATUS_TRANSPORT_ERROR);
+    response = await doFetch(
+      `https://api.github.com/repos/${repository}/statuses/${publication.sha}`,
+      {
+        method: 'POST',
+        headers: {
+          accept: 'application/vnd.github+json',
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+          'user-agent': 'autocoding-shield',
+          'x-github-api-version': '2022-11-28',
+        },
+        body: JSON.stringify({
+          state: publication.state,
+          context: publication.context,
+          description: publication.description,
+        }),
       },
-      body: JSON.stringify({
-        state: publication.state,
-        context: publication.context,
-        description: publication.description,
-      }),
-    },
-  );
+    );
+  } catch {
+    return { ok: false, blocked: PUBLISH_ERROR.STATUS_TRANSPORT_ERROR };
+  }
   return { ok: response?.status === 201, status: response?.status ?? 0 };
 }
 

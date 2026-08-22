@@ -21,7 +21,8 @@
   },
   "owner_gate": {
     "schema": "AUTOCODING_OWNER_APPROVAL_V1",
-    "sensitive_path_globs": [".github/workflows/", "CONTROL/AUTOCODING/"],
+    "sensitive_path_prefixes": [".github/workflows/", "CONTROL/AUTOCODING/"],
+    "allowed_review_states": ["COMMENTED"],
     "allowed_owner_actors": ["rvanhooijdonk-png"]
   }
 }

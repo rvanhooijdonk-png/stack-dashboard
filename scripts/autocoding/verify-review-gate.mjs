@@ -67,6 +67,7 @@ export const REASON = Object.freeze({
   OWNER_APPROVAL_SCHEMA_MISMATCH: 'OWNER_APPROVAL_SCHEMA_MISMATCH',
   OWNER_APPROVAL_UNKNOWN_FIELD: 'OWNER_APPROVAL_UNKNOWN_FIELD',
   OWNER_APPROVAL_ACTOR_NOT_ALLOWED: 'OWNER_APPROVAL_ACTOR_NOT_ALLOWED',
+  OWNER_APPROVAL_CARRIER_NOT_ACTIVE: 'OWNER_APPROVAL_CARRIER_NOT_ACTIVE',
   OWNER_APPROVAL_STALE_HEAD: 'OWNER_APPROVAL_STALE_HEAD',
   OWNER_APPROVAL_TREE_MISMATCH: 'OWNER_APPROVAL_TREE_MISMATCH',
   OWNER_APPROVAL_TASK_MISMATCH: 'OWNER_APPROVAL_TASK_MISMATCH',
@@ -579,20 +580,73 @@ function ownerActorList(gate) {
   return Array.isArray(actors) ? actors.filter((a) => isNonEmptyString(a)) : [];
 }
 
+/** Gesloten sleutelverzameling van de ownergate: een onbekende (of oude) sleutel is UNSAFE_POLICY. */
+const OWNER_GATE_FIELDS = new Set([
+  'schema', 'sensitive_path_prefixes', 'allowed_owner_actors', 'allowed_review_states',
+]);
+
+/**
+ * De enige reviewstates die de eigenaar zelf actief kan produceren en die een dismissal NIET
+ * overleven. GitHub zet een ingetrokken review op `DISMISSED`; die staat kan hier dus nooit binnen
+ * de allowlist vallen, hoe de policy ook wordt bewerkt. `PENDING` is een nog niet ingediende
+ * review, `CHANGES_REQUESTED` is geen autorisatie.
+ */
+const OWNER_REVIEW_ACTIVE_STATES = Object.freeze(['COMMENTED', 'APPROVED']);
+
+/** Glob-meta, backslash en controltekens. Een prefix is een letterlijk pad, geen patroon. */
+const UNSAFE_PREFIX_RE = /[*?[\]{}!\\\u0000-\u001f]/;
+
+/**
+ * De matching op gevoelige paden is bewust LETTERLIJKE prefixvergelijking (`String.startsWith`), geen
+ * glob-expansie. Deze functie bewaakt dat contract aan de invoerkant: alles wat eruitziet als een
+ * patroon, als een absoluut pad of als een traversal wordt geweigerd, zodat een prefix nooit
+ * geruisloos "niet matcht" terwijl de policy suggereert dat hij een hele boom afdekt.
+ *
+ * Toegestaan is uitsluitend een relatief repo-pad van niet-lege segmenten, eventueel met één
+ * afsluitende `/` (`CONTROL/AUTOCODING/`). Geweigerd worden: leeg, `*`, glob-meta, backslash,
+ * controltekens, een leidende `/`, `.`/`..`-segmenten en dubbele slashes.
+ */
+export function isSafeSensitivePrefix(value) {
+  if (!isNonEmptyString(value)) return false;
+  if (UNSAFE_PREFIX_RE.test(value)) return false;
+  if (value.startsWith('/')) return false;
+  const segments = value.split('/');
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i];
+    if (segment === '.' || segment === '..') return false;
+    // Een lege segmentwaarde mag alleen de afsluitende slash zijn, nooit `//` of een leidende slash.
+    if (segment === '' && i !== segments.length - 1) return false;
+  }
+  return true;
+}
+
 /**
  * Weigert een ownergate die niet exact is. Wordt ALTIJD bij het laden gedraaid, ook wanneer de diff
  * geen gevoelig pad raakt: een kapotte ownergate mag niet pas zichtbaar worden op het moment dat hij
  * nodig is.
+ *
+ * De sleutelverzameling is gesloten. De oude naam `sensitive_path_globs` beloofde glob-semantiek die
+ * de implementatie nooit had; een policy die hem nog draagt is daarom niet "compatibel" maar
+ * UNSAFE_POLICY — nooit ownergate-vrij.
  */
 export function assertOwnerGateSafe(policy) {
   const gate = policy?.owner_gate;
   if (!gate || typeof gate !== 'object' || Array.isArray(gate)) throw new Error(REASON.UNSAFE_POLICY);
+  for (const key of Object.keys(gate)) {
+    if (!OWNER_GATE_FIELDS.has(key)) throw new Error(REASON.UNSAFE_POLICY);
+  }
   if (gate.schema !== OWNER_APPROVAL_SCHEMA) throw new Error(REASON.UNSAFE_POLICY);
 
-  const globs = gate.sensitive_path_globs;
-  if (!Array.isArray(globs) || globs.length === 0) throw new Error(REASON.UNSAFE_POLICY);
-  for (const glob of globs) {
-    if (!isNonEmptyString(glob) || glob === '*') throw new Error(REASON.UNSAFE_POLICY);
+  const prefixes = gate.sensitive_path_prefixes;
+  if (!Array.isArray(prefixes) || prefixes.length === 0) throw new Error(REASON.UNSAFE_POLICY);
+  for (const prefix of prefixes) {
+    if (!isSafeSensitivePrefix(prefix)) throw new Error(REASON.UNSAFE_POLICY);
+  }
+
+  const states = gate.allowed_review_states;
+  if (!Array.isArray(states) || states.length === 0) throw new Error(REASON.UNSAFE_POLICY);
+  for (const state of states) {
+    if (!OWNER_REVIEW_ACTIVE_STATES.includes(state)) throw new Error(REASON.UNSAFE_POLICY);
   }
 
   const actors = gate.allowed_owner_actors;
@@ -600,6 +654,28 @@ export function assertOwnerGateSafe(policy) {
   for (const actor of actors) {
     if (!isNonEmptyString(actor) || actor === '*') throw new Error(REASON.UNSAFE_POLICY);
   }
+}
+
+/**
+ * Toetst de DRAGER van een owner-autorisatie, los van de inhoud van het blok.
+ *
+ * Een pull-request-review draagt een `state` die na het schrijven nog kan veranderen: wie een review
+ * intrekt, laat het lichaam — en dus het autorisatieblok — ongewijzigd staan terwijl GitHub de state
+ * op `DISMISSED` zet. Zonder statefilter bleef die ingetrokken autorisatie de gevoelige-padpoort
+ * groen houden. Alleen een expliciet allowlisted ACTIEVE state telt daarom; ontbrekend, onbekend,
+ * `DISMISSED`, `PENDING` of `CHANGES_REQUESTED` nooit.
+ *
+ * Een issuecomment kent geen state: die route staat los en wordt hier niet beperkt. Een drager
+ * zonder herkenbare herkomst telt nooit — fail-closed, niet "waarschijnlijk een comment".
+ */
+function ownerCarrierIsActive(envelope, gate) {
+  const source = envelope?.source;
+  const state = envelope?.review_state;
+  if (source === 'issue_comment') return state === undefined || state === null;
+  if (source !== 'review') return false;
+  const allowed = gate?.allowed_review_states;
+  if (!Array.isArray(allowed) || allowed.length === 0) return false;
+  return isNonEmptyString(state) && allowed.includes(state) && OWNER_REVIEW_ACTIVE_STATES.includes(state);
 }
 
 /**
@@ -628,6 +704,7 @@ export function evaluateOwnerApproval(envelope, rawContext, rawGate) {
   if (reasons.length > 0) return { valid: false, reasons };
 
   if (!ownerActorList(gate).includes(transportActor)) add(REASON.OWNER_APPROVAL_ACTOR_NOT_ALLOWED);
+  if (!ownerCarrierIsActive(envelope, gate)) add(REASON.OWNER_APPROVAL_CARRIER_NOT_ACTIVE);
   if (!isNonEmptyString(context.task_id) || approval.task_id !== context.task_id) {
     add(REASON.OWNER_APPROVAL_TASK_MISMATCH);
   }

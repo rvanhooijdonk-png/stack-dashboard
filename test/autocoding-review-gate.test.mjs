@@ -16,6 +16,7 @@ import {
   extractCodexNativeEvidence, extractCodexReviewEvidence, extractGeminiNativeEvidence,
   bindNativeEvidence, assertNativeVendorsSafe, assertOwnerGateSafe, evaluateNativeReview,
   evaluateShield, evaluateOwnerApprovals, extractOwnerApprovalFromBody, OWNER_APPROVAL_SCHEMA,
+  isSafeSensitivePrefix,
 } from '../scripts/autocoding/verify-review-gate.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -711,6 +712,14 @@ test('N19. policy.v1.json op de PR draagt de echte gemeten identiteiten en blijf
   assert.equal(policy.native_review.gemini.actor, 'gemini-code-assist[bot]');
   assert.deepEqual(policy.native_review.required_vendors, ['codex', 'gemini']);
   assert.doesNotThrow(() => assertNativeVendorsSafe(policy));
+
+  // Het prefixcontract van de echte policy: de gevoelige bereiken blijven exact, de sleutel heet
+  // `sensitive_path_prefixes` (nooit meer `..._globs`), en de ownerreviewstates zijn actief.
+  assert.doesNotThrow(() => assertOwnerGateSafe(policy));
+  assert.deepEqual(policy.owner_gate.sensitive_path_prefixes,
+    ['.github/workflows/', 'CONTROL/AUTOCODING/']);
+  assert.ok(!('sensitive_path_globs' in policy.owner_gate));
+  assert.deepEqual(policy.owner_gate.allowed_review_states, ['COMMENTED']);
 });
 
 test('N20. afgeronde reviewronde van een vorige head blokkeert een schone actuele head niet', () => {
@@ -839,6 +848,135 @@ test('N27. de shield-CLI faalt gesloten op een onveilige policy in plaats van fa
   assert.deepEqual(JSON.parse(cli.stdout), { decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] });
 });
 
+test('N28. een DISMISSED owner-review telt nooit meer, ook al blijft het blok in het lichaam staan', () => {
+  // Gemeten mechanisme: wie een review intrekt, laat het lichaam ongewijzigd staan; GitHub zet
+  // alleen `state` op DISMISSED. Zonder statefilter bleef die ingetrokken autorisatie de
+  // gevoelige-padpoort dus groen houden.
+  const codex = extractCodexNativeEvidence(codexComment(), resolved(), NATIVE_POLICY);
+  const gemini = extractGeminiNativeEvidence(geminiReview(), [], resolved(), NATIVE_POLICY);
+  const dismissed = ownerApprovalReview('DISMISSED');
+
+  const single = evaluateOwnerApprovals([dismissed], NATIVE_CONTEXT, NATIVE_POLICY.owner_gate);
+  assert.equal(single.decision, 'NO_GO');
+  assert.ok(single.reasons.includes(REASON.OWNER_APPROVAL_CARRIER_NOT_ACTIVE));
+
+  const shield = evaluateShield({
+    nativeEvidence: [codex, gemini], ownerApprovals: [dismissed], sensitivePathsTouched: true,
+    filesComplete: true, context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
+  });
+  assert.equal(shield.decision, 'NO_GO');
+  assert.ok(shield.reasons.includes(REASON.OWNER_GATE_REQUIRED));
+  assert.ok(shield.reasons.includes(REASON.OWNER_APPROVAL_CARRIER_NOT_ACTIVE));
+
+  // Exact hetzelfde blok in een ACTIEVE reviewstate is wél geldig — de dismissal is het verschil.
+  assert.deepEqual(
+    evaluateOwnerApprovals([ownerApprovalReview('COMMENTED')], NATIVE_CONTEXT, NATIVE_POLICY.owner_gate),
+    { decision: 'GO', reasons: [] },
+  );
+
+  // En ander, actueel geldig ownerbewijs op dezelfde momentopname blijft gewoon tellen.
+  const metIssueComment = evaluateShield({
+    nativeEvidence: [codex, gemini], ownerApprovals: [dismissed, ownerApprovalEnvelope()],
+    sensitivePathsTouched: true, filesComplete: true, context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
+  });
+  assert.deepEqual(metIssueComment, { decision: 'GO', reasons: [] });
+});
+
+test('N28a. geen enkele niet-actieve of onbekende dragerstaat levert ownerbewijs op', () => {
+  const gate = NATIVE_POLICY.owner_gate;
+  for (const state of ['DISMISSED', 'CHANGES_REQUESTED', 'PENDING', 'APPROVED', 'commented', 'ONBEKEND', '']) {
+    const r = evaluateOwnerApprovals([ownerApprovalReview(state)], NATIVE_CONTEXT, gate);
+    assert.equal(r.decision, 'NO_GO', state);
+    assert.ok(r.reasons.includes(REASON.OWNER_APPROVAL_CARRIER_NOT_ACTIVE), state);
+  }
+  // Ontbrekende state op een review, en een drager zonder herkenbare herkomst: allebei fail-closed.
+  for (const carrier of [
+    { source: 'review' },
+    { source: 'review', review_state: null },
+    { source: 'onbekend', review_state: 'COMMENTED' },
+    {},
+  ]) {
+    const envelope = { approval: ownerApproval(), transport_actor: 'rvanhooijdonk-png', ...carrier };
+    const r = evaluateOwnerApprovals([envelope], NATIVE_CONTEXT, gate);
+    assert.equal(r.decision, 'NO_GO', JSON.stringify(carrier));
+    assert.ok(r.reasons.includes(REASON.OWNER_APPROVAL_CARRIER_NOT_ACTIVE), JSON.stringify(carrier));
+  }
+  // Een issuecomment kent geen state en blijft de eigen, ongewijzigde route.
+  assert.deepEqual(
+    evaluateOwnerApprovals([ownerApprovalEnvelope()], NATIVE_CONTEXT, gate),
+    { decision: 'GO', reasons: [] },
+  );
+});
+
+test('N28b. een ownergate zonder of met een niet-actieve reviewstate-allowlist => UNSAFE_POLICY', () => {
+  const gate = NATIVE_POLICY.owner_gate;
+  for (const states of [undefined, [], ['DISMISSED'], ['COMMENTED', 'DISMISSED'], ['*'], [''], 'COMMENTED']) {
+    const policy = { ...NATIVE_POLICY, owner_gate: { ...gate, allowed_review_states: states } };
+    assert.throws(() => assertOwnerGateSafe(policy), JSON.stringify(states ?? null));
+    assert.deepEqual(
+      evaluateShield({
+        nativeEvidence: [], ownerApprovals: [], sensitivePathsTouched: false, filesComplete: true,
+        context: NATIVE_CONTEXT, policy,
+      }),
+      { decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] },
+    );
+  }
+});
+
+test('N29. de OUDE sleutel `sensitive_path_globs` maakt de policy UNSAFE_POLICY, nooit ownergate-vrij', () => {
+  // De implementatie matcht letterlijke prefixen. De oude sleutelnaam beloofde glob-semantiek die
+  // er nooit was; hem stilzwijgend blijven accepteren zou precies de misleiding bestendigen.
+  const { sensitive_path_prefixes: prefixes, ...rest } = NATIVE_POLICY.owner_gate;
+  for (const gate of [
+    { ...rest, sensitive_path_globs: prefixes },
+    { ...NATIVE_POLICY.owner_gate, sensitive_path_globs: prefixes },
+    { ...NATIVE_POLICY.owner_gate, een_onbekende_sleutel: true },
+  ]) {
+    const policy = { ...NATIVE_POLICY, owner_gate: gate };
+    assert.throws(() => assertOwnerGateSafe(policy));
+    // Ook op een niet-gevoelige PR met verder volledig bewijs: fail-closed, nooit fail-open.
+    const codex = extractCodexNativeEvidence(codexComment(), resolved(), NATIVE_POLICY);
+    const gemini = extractGeminiNativeEvidence(geminiReview(), [], resolved(), NATIVE_POLICY);
+    assert.deepEqual(
+      evaluateShield({
+        nativeEvidence: [codex, gemini], ownerApprovals: [ownerApprovalEnvelope()],
+        sensitivePathsTouched: false, filesComplete: true, context: NATIVE_CONTEXT, policy,
+      }),
+      { decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] },
+    );
+  }
+});
+
+test('N29a. een prefix met globmeta, wildcard, traversal of absoluut pad => UNSAFE_POLICY', () => {
+  for (const prefix of [
+    '*', '**', '.github/workflows/**', '.github/workflows/*.yml', 'CONTROL/{AUTOCODING,X}/',
+    'CONTROL/AUTOCODING/?', 'CONTROL/AUTOCODING/[a-z]', '!CONTROL/', '/etc/passwd', '../secrets/',
+    'CONTROL/../../etc/', './CONTROL/', 'CONTROL//AUTOCODING/', 'CONTROL\\AUTOCODING\\', '', '.', 42, null,
+  ]) {
+    assert.equal(isSafeSensitivePrefix(prefix), false, String(prefix));
+    const policy = {
+      ...NATIVE_POLICY,
+      owner_gate: { ...NATIVE_POLICY.owner_gate, sensitive_path_prefixes: ['.github/workflows/', prefix] },
+    };
+    assert.throws(() => assertOwnerGateSafe(policy), String(prefix));
+    assert.deepEqual(
+      evaluateShield({
+        nativeEvidence: [], ownerApprovals: [], sensitivePathsTouched: true, filesComplete: true,
+        context: NATIVE_CONTEXT, policy,
+      }),
+      { decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] },
+    );
+  }
+  // De twee gevoelige bereiken van deze repository blijven exact geldig, met en zonder submap.
+  for (const prefix of ['.github/workflows/', 'CONTROL/AUTOCODING/', 'CONTROL/AUTOCODING/sub/x.json']) {
+    assert.equal(isSafeSensitivePrefix(prefix), true, prefix);
+  }
+  // Een lege lijst is nooit "niets is gevoelig".
+  assert.throws(() => assertOwnerGateSafe({
+    ...NATIVE_POLICY, owner_gate: { ...NATIVE_POLICY.owner_gate, sensitive_path_prefixes: [] },
+  }));
+});
+
 // --- Native reviewbewijs (chatgpt-codex-connector[bot] / gemini-code-assist[bot]) ------------------
 //
 // De fixtures hieronder zijn LETTERLIJK opgehaald uit deze repository's eigen GitHub-geschiedenis
@@ -883,7 +1021,8 @@ const NATIVE_POLICY = Object.freeze({
   }),
   owner_gate: Object.freeze({
     schema: 'AUTOCODING_OWNER_APPROVAL_V1',
-    sensitive_path_globs: Object.freeze(['.github/workflows/', 'CONTROL/AUTOCODING/']),
+    sensitive_path_prefixes: Object.freeze(['.github/workflows/', 'CONTROL/AUTOCODING/']),
+    allowed_review_states: Object.freeze(['COMMENTED']),
     allowed_owner_actors: Object.freeze(['rvanhooijdonk-png']),
   }),
 });
@@ -942,6 +1081,19 @@ function ownerApproval(overrides = {}) {
 }
 
 // Het blok draagt zelf GEEN actorveld: de dragende auteur komt uitsluitend uit de GitHub-API.
-function ownerApprovalEnvelope(overrides = {}, transport_actor = 'rvanhooijdonk-png') {
-  return { approval: ownerApproval(overrides), transport_actor };
+// De DRAGER hoort er wél bij: een issuecomment kent geen state, een review wel, en die state
+// verandert na een dismiss zonder dat het lichaam meebeweegt.
+function ownerApprovalEnvelope(overrides = {}, transport_actor = 'rvanhooijdonk-png', carrier = {}) {
+  return {
+    approval: ownerApproval(overrides),
+    transport_actor,
+    source: 'issue_comment',
+    review_state: null,
+    ...carrier,
+  };
+}
+
+/** Dezelfde autorisatie, maar gedragen door een pull-request-review met een expliciete state. */
+function ownerApprovalReview(state, overrides = {}, transport_actor = 'rvanhooijdonk-png') {
+  return ownerApprovalEnvelope(overrides, transport_actor, { source: 'review', review_state: state });
 }
