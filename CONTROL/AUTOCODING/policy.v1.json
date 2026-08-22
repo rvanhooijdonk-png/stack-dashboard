@@ -30,6 +30,7 @@
   },
   "merge_finalizer": {
     "schema": "AUTOCODING_MERGE_FINALIZER_V1",
+    "server_gate_mode": "MANUAL_OWNER_GATE",
     "merge_method": "squash",
     "allowed_base_refs": ["main"],
     "allowed_builder_actors": ["rvanhooijdonk-png"],

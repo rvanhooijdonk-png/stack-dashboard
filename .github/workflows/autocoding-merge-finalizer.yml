@@ -11,28 +11,54 @@ name: autocoding-merge-finalizer
 # probeerde af te vangen is offsetgepagineerd en dus geen atomaire momentopname.
 #
 # De bevoegdheid is daarom verhuisd naar dit bestand: één plaats die de PULL REQUEST ZELF hermeet en,
-# indien geactiveerd, uitsluitend díé pull request kan laten INSCHRIJVEN in GitHubs eigen merge queue
-# — `PUT /repos/{owner}/{repo}/pulls/{number}/merge-async` met `merge_action: "merge_queue"` en de
-# exact gemeten volledige `sha`. Er is geen artefact meer dat een tweede pull request kan oppakken:
-# het nummer staat in het pad, de sha in het lichaam.
+# indien geactiveerd, uitsluitend díé pull request kan afronden. Er is geen artefact meer dat een
+# tweede pull request kan oppakken: het nummer staat in het pad, de sha in het lichaam.
 #
-# V19 — CODEX `3835523940` (P1). Een directe merge-aanroep (`PUT .../merge`, of `merge-async` met
-# `merge_action: "direct_merge"`/`"default"`) is nooit meer bereikbaar: `finalize-merge.mjs` eist
-# vóór elk effect bewijs dat de base van deze pull request een ACTIEVE `merge_queue`-regel draagt
+# V24 — DE EIGENAARSSTAND. `CONTROL/AUTOCODING/policy.v1.json` noemt sinds V23 expliciet één
+# `server_gate_mode`. Gemeten stand van dit object: `rvanhooijdonk-png/stack-dashboard` is een
+# PERSOONLIJK repository (`owner_type=User`), en GitHub weigert daar een ruleset met `merge_queue`
+# met HTTP 422 — merge queues bestaan uitsluitend op repositories van organisaties. De
+# `MERGE_QUEUE`-tak blijft daarom als dormante legacy bestaan, en de actieve modus is sinds V24
+# `MANUAL_OWNER_GATE`.
+#
+# Die stand kwam er op CODEX1-P1 tegen V23. V23 wilde de merge zelf doen onder een strikte
+# `required_status_checks`-regel, in de veronderstelling dat GitHub daarmee ons bewijs bewaakte. Dat
+# doet die regel niet: hij dwingt uitsluitend een up-to-date branch en groene VEREISTE CONTEXTEN af.
+# Ons zwaarste bewijs — de twee vendorreviews en de ownerautorisatie — zijn voor GitHub gewone
+# reviewthreads en comments. Ze konden dus tussen onze laatste meting en de merge-aanroep verdwijnen
+# ZONDER dat de head-sha of de check meebewoog, en de aanroep zou alsnog slagen. `STRICT_STATUS_CHECKS`
+# is daarom niet verzwaard maar VERWORPEN (`REJECTED_SERVER_GATE_MODE`), en de klassieke
+# `PUT /repos/{owner}/{repo}/pulls/{number}/merge` bestaat in `finalize-merge.mjs` niet meer.
+#
+# Wat `MANUAL_OWNER_GATE` doet: alles wat geautomatiseerd KAN worden — bouwen, meten, hermeten,
+# reviewpoort, ownerautorisatie, driftvergelijking — gebeurt automatisch en levert bij groen bewijs
+# een MERGEPAKKET (`OWNER_MERGE_PACKAGE`, `merge_performed: false`). De merge zelf doet de eigenaar,
+# in GitHubs eigen interface. Deze workflow doet in die stand mechanisch NUL mergeverzoeken; ook met
+# alle drie de vlaggen aan blijft dat nul. Dat is geen voorlopige zuinigheid maar de enige eerlijke
+# uitkomst op een persoonlijk repository: volledige klasse-B-automerge vraagt een serverkant
+# afdwingbare autorisatie die dit object niet kan dragen (waarschijnlijk een organisatie met merge
+# queue en NATIVE required reviews). Zie `CONTROL/AUTOCODING/README.md`.
+#
+# Rulesets worden hier UITSLUITEND GELEZEN, nooit aangemaakt of gewijzigd.
+#
+# V19 — CODEX `3835523940` (P1). `finalize-merge.mjs` eist vóór elk effect bewijs dat de base van deze
+# pull request de serverkant autoriteit van de GEKOZEN modus draagt
 # (`GET /repos/{owner}/{repo}/rules/branches/{base_ref}`, hieronder gemeten als
-# `merge-queue-rules.json`). Zonder dat bewijs is de uitkomst `NO_GO`, met nul verzoeken. Het
-# werkelijke mergen gebeurt bij een geslaagde inschrijving niet op dit moment, maar later, binnen
-# GitHubs eigen wachtrij — die herbeoordeelt de doelbranch vlak vóór het echte mergen opnieuw, als
-# serverkant autoriteit. Dat VERKLEINT de opening die de klassieke `PUT .../merge` open liet — die
-# was alleen op de head-sha geconditioneerd, zag een basisretarget of een ingetrokken
-# eigenaarsreview tussen hermeting en aanroep dus niet — tot het smalle venster tussen deze
-# inschrijving en GitHubs eigen herbeoordeling; het sluit dat venster niet atomisch, want de
-# `GET rules/branches/{base_ref}`-meting en de inschrijvings-PUT zijn zelf twee aparte verzoeken.
-# Wat resteert is hoe ver GitHub die herbeoordeling zelf doorvoert — dat is precies het bewijs dat
-# de aparte, toekomstige activatiestap moet leveren, niet deze pull request. Deze pull request
-# BOUWT, ACTIVEERT of WIJZIGT geen GitHub-ruleset of branch-protection — dat bewijs wordt
-# uitsluitend gelezen, nooit aangemaakt; of een repository daadwerkelijk zo'n regel draagt is een
-# afzonderlijke, toekomstige activatiestap.
+# `merge-queue-rules.json`, plus sinds V23 de live base-head en GitHubs eigen `mergeable`). Zonder dat
+# bewijs is de uitkomst `NO_GO`, met nul verzoeken.
+#
+# In `MERGE_QUEUE` gebeurt het werkelijke mergen bij een geslaagde inschrijving niet op dit moment,
+# maar later, binnen GitHubs eigen wachtrij, die de doelbranch vlak vóór het echte mergen opnieuw
+# beoordeelt. In `MANUAL_OWNER_GATE` is er geen wachtrij en ook geen verzoek: het venster tussen onze
+# laatste meting en een effect bestaat daar niet, omdat er geen effect is dat wij uitvoeren. Precies
+# dát venster was het gat van V23. De hermeting draagt sinds V23 ook de live base-head en GitHubs
+# eigen `mergeable`/`mergeable_state`; elk verschil met de eerste meting blokkeert vóór er één byte
+# over het netwerk gaat — in de wachtrijtak vóór de inschrijving, in de eigenaarsstand vóór het
+# pakket, want een pakket op verschoven bewijs zou de eigenaar een verlopen oordeel voorleggen.
+#
+# Deze pull request BOUWT, ACTIVEERT of WIJZIGT geen GitHub-ruleset of branch-protection — dat bewijs
+# wordt uitsluitend gelezen, nooit aangemaakt; of een repository daadwerkelijk zo'n ruleset draagt is
+# een afzonderlijke, toekomstige activatiestap.
 #
 # WAT DEZE WORKFLOW NOOIT DOET: PR-code uitchecken, PR-scripts draaien, PR-headpolicy lezen,
 # artifacts of cache lezen, secrets lezen, statussen schrijven, een branch aanraken, of op een ander
@@ -189,7 +215,10 @@ jobs:
 
   # ---------------------------------------------------------------------------------------------
   # FASE 2 — FINALISATIE, ÉÉN JOB PER PULL REQUEST. Dit is de enige job in de hele repository met
-  # `pull-requests: write`, en dus de enige plaats waar een merge-aanroep überhaupt kan slagen.
+  # `pull-requests: write`, en dus de enige plaats waar een mergeverzoek überhaupt kan slagen. In de
+  # actieve stand `MANUAL_OWNER_GATE` doet deze job er nul; het recht staat er voor de dormante
+  # wachtrijtak, en wordt hier bewust niet weggenomen zodat de smalste-rechtentoets één plaats houdt
+  # om over te oordelen.
   #
   # De job draait alleen wanneer fase 1 een niet-lege kandidatenlijst opleverde. Met de vlaggen op
   # `false` is die lijst per definitie leeg, dus draait deze job nul keer.
@@ -242,7 +271,9 @@ jobs:
       #   3. `finalize-merge.mjs` beslist op A, beslist opnieuw op B, en vergelijkt de
       #      vingerafdrukken. Elk verschil — verschoven head, ingetrokken review, bewerkt lichaam,
       #      nieuwe bevinding, omgeslagen check — is `MEASUREMENT_DRIFT` en nul mergeverzoeken;
-      #   4. pas dan, en alleen met de sha uit meting B, de merge-aanroep.
+      #   4. pas dan het effect van de gekozen stand, en alleen met de sha uit meting B:
+      #      `MANUAL_OWNER_GATE` levert een MERGEPAKKET op en doet nul verzoeken;
+      #      `MERGE_QUEUE` (dormant) schrijft in op `merge-async`. Een directe merge bestaat niet.
       - name: Meet, beslis en finaliseer deze pull request
         if: steps.enabled.outputs.enabled == 'true'
         env:
@@ -288,6 +319,15 @@ jobs:
             # zet `rules=false`, en `finalize-merge.mjs` behandelt dat expliciet als onvolledig bewijs
             # in plaats van als een branch zonder regels.
             base_ref="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const r=((p||{}).base||{}).ref;if(typeof r!=="string"||r.length===0)process.exit(1);process.stdout.write(r)' "$doel/pr.json")" || return 1
+
+            # V23 — de LIVE BASE-HEAD. `pr.json` draagt met `base.sha` het basispunt van deze pull
+            # request, niet de plaats waar de base-branch NU staat. Dat verschil is precies wat de
+            # klassieke `PUT .../merge` zelf niet ziet, dus wordt de branch apart gemeten. Bewust het
+            # SMALSTE eindpunt dat die vraag beantwoordt: één object met `object.sha`, geen
+            # commitlichaam en geen bestandslijst. Onleesbaar maakt de hele meting onleesbaar, dezelfde
+            # lijn als bij `head_sha` en `base_ref`.
+            gh api "repos/$REPOSITORY/git/ref/heads/$base_ref" > "$doel/base-head.json" || return 1
+
             gh_bounded_pages "repos/$REPOSITORY/rules/branches/$base_ref" \
               "$doel/merge-queue-rules.json" "$GH_BOUNDED_RULES_PAGES" "$doel/pages-merge-queue-rules"
             rc=$?
