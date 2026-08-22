@@ -383,3 +383,24 @@ jobs:
             --raw "$RUNNER_TEMP/meting-a" \
             --raw-recheck "$RUNNER_TEMP/meting-b" \
             --policy CONTROL/AUTOCODING/policy.v1.json
+          rc=$?
+
+          # V25 — CODEX1/GEMINI1-P1 F330314. `rc` draagt drie, en precies drie, gesloten betekenissen,
+          # en elke betekenis krijgt hier haar EIGEN, herkenbare annotatie — geen van de drie mag in de
+          # workflowlog onherkenbaar samenvallen met een van de andere twee:
+          #   0 — een WERKELIJK UITGEVOERD effect (een bewezen wachtrij-inschrijving);
+          #   3 — een GECONTROLEERDE EIGENAARSPOORT: geen effect, geen fout, geen onbekende crash, maar
+          #       een afgegeven, gebonden mergepakket dat op een handmatige eigenaarsactie wacht;
+          #   elke andere waarde (in de praktijk 1) — een geweigerde of gedreven meting.
+          # De exitcode van deze stap blijft ONGEWIJZIGD gelijk aan `rc` (zoals vóór V25): alleen de
+          # annotatie is nieuw. Dit repareert uitsluitend de F330314-bevinding (rc 3 mag nooit als
+          # rc 0 wórden gelezen door een rc-only-aanroeper) zonder de bestaande taakstatus van deze stap
+          # — groen op 0, rood op elke andere waarde — stilzwijgend te veranderen.
+          if [ "$rc" -eq 0 ]; then
+            echo "::notice::PR_${number}_MERGE_EFFECT_PERFORMED"
+          elif [ "$rc" -eq 3 ]; then
+            echo "::warning::PR_${number}_OWNER_ACTION_REQUIRED — gebonden mergepakket afgegeven, geen effect uitgevoerd; wacht op handmatige eigenaarsactie (geen fout, geen crash)"
+          else
+            echo "::warning::PR_${number}_FINALIZE_NO_GO (rc=${rc})"
+          fi
+          exit "$rc"

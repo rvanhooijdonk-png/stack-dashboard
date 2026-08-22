@@ -650,8 +650,10 @@ op beide vendors, de ownerautorisatie gebonden aan PR-nummer/head/boom/base/task
 check-runs op precies deze head, de live base-head, GitHubs eigen `mergeable`/`mergeable_state` en de
 driftvergelijking over beide metingen. Is dat bewijs compleet en groen, dan is het resultaat een
 MERGEPAKKET: `effect: "OWNER_MERGE_PACKAGE"`, `merge_performed: false`, `owner_action:
-"OWNER_MERGE_REQUIRED"`, exitcode 0 — een oplevering, en onmiskenbaar géén merge. De merge zelf doet de
-eigenaar, in GitHubs eigen interface.
+"OWNER_MERGE_REQUIRED"`, `decision: "FINALIZE_OWNER_ACTION_REQUIRED"`, exitcode 3
+(`OWNER_ACTION_REQUIRED_EXIT_CODE`, sinds V25 — zie hieronder) — een oplevering, en onmiskenbaar géén
+merge. `rc 0` is voorbehouden aan een werkelijk uitgevoerd effect. De merge zelf doet de eigenaar, in
+GitHubs eigen interface.
 
 Deze stand stelt bewust GEEN rulesetEIS. Dat is een uitspraak en geen gat: een serverpoort bewaakt een
 VERZOEK, en deze stand doet er nul. Een ruleset eisen die op dit object niet actief kan zijn, zou de
@@ -685,6 +687,39 @@ geprobeerd. V24 heeft aan deze tak niets veranderd; O6 toetst dat naast elkaar o
 De driftvergelijking geldt in BEIDE standen even hard. In de wachtrijtak blokkeert zij de
 inschrijving, in de eigenaarsstand het pakket: een pakket op verschoven bewijs zou de eigenaar een
 verlopen oordeel voorleggen, en dat is precies de fout die V24 repareert.
+
+**Het eigenaarspakket is een GEBONDEN, GESLOTEN aflevering, geen `rc 0` (V25 — Codex1- en
+Gemini1-P1, onafhankelijk bevestigd op head `f330314`).** V24 loste de driftvergelijking op, maar liet
+twee gaten in het CONTRACT rond diezelfde aflevering staan. Ten eerste retourneerde de CLI op
+`OWNER_MERGE_PACKAGE` nog `rc 0` — hetzelfde exitcode-contract als een werkelijk uitgevoerde
+wachtrij-inschrijving. Een aanroeper die uitsluitend de exitcode leest (het normale, generieke
+`rc 0 => geslaagd`-contract) kon een afgegeven pakket daardoor mechanisch NIET onderscheiden van een
+echte merge — een valse-succes-lezing zonder dat er ook maar één verzoek was gedaan. Ten tweede droeg
+het pakket zelf geen enkele binding: geen PR-nummer, geen head, geen boom, geen base, geen mergemethode
+en geen meettijd, dus kon niets weerhouden dat een oud pakket — afgegeven op een inmiddels verschoven
+head — alsnog als geldig werd voorgelegd.
+
+V25 sluit beide gaten zonder de PR #75-merge terug te draaien en zonder een van de drie live vlaggen
+aan te zetten. `rc 0` is voortaan uitsluitend voorbehouden aan een werkelijk uitgevoerd effect
+(`merge_performed: true`); `OWNER_MERGE_PACKAGE` retourneert een eigen, gesloten exitcode
+(`OWNER_ACTION_REQUIRED_EXIT_CODE = 3`) en de bijbehorende `decision` is `OWNER_ACTION_REQUIRED`, nooit
+`GO` — een pakket is een aflevering, geen oordeel. Het pakket zelf (`buildOwnerMergePackage`,
+schema `AUTOCODING_OWNER_MERGE_PACKAGE_V1`) bindt aan repository, PR-nummer, head, boom, base-ref, de
+LIVE base-head, de mergemethode, de meetvingerafdruk en de meettijd — uitsluitend als sha256-digests
+(64 hex-tekens), dezelfde reductie als elke andere uitvoerregel (M30): nooit een ruwe SHA (40
+hex-tekens) of een pad. Een `package_digest` over die binding maakt het pakket zelfconsistent
+verifieerbaar. `verifyOwnerMergePackage` herberekent die binding tegen een VERSE meting en wijst
+fail-closed af, in vaste volgorde: eerst een ongeldige `owner_package_max_age_seconds`/klok
+(`OWNER_PACKAGE_MAX_AGE_INVALID`, een gesloten policyveld met een harde bovengrens van 7 dagen), dan
+een ontbrekend pakket (`OWNER_PACKAGE_MISSING`), dan een misvormd pakket (`OWNER_PACKAGE_MALFORMED`),
+dan een pakket dat na afgifte is bewerkt zonder de digest te herberekenen (`OWNER_PACKAGE_DIGEST_MISMATCH`
+— knoeien, geen veroudering), dan een verlopen pakket (`OWNER_PACKAGE_EXPIRED`), en pas dan een
+zelfconsistent maar verschoven pakket (`OWNER_PACKAGE_BINDING_CHANGED` — de PR, head, boom, base of
+methode is sindsdien veranderd). De workflow (`autocoding-merge-finalizer.yml`) annoteert de drie
+exitcodes voortaan elk apart (`0` = uitgevoerd effect, `3` = gecontroleerde eigenaarspoort, elke andere
+waarde = geweigerde of gedreven meting) zonder de bestaande taakstatus van die stap te veranderen.
+`MANUAL_OWNER_GATE` blijft daarbij op nul netwerkverzoeken (O4, O5a); de wachtrijtak (`MERGE_QUEUE`,
+dormant) en alle drie de live vlaggen blijven ongewijzigd.
 
 **Waarom `direct_merge` niet kan bestaan — het merge-queue-bewijs (modus `MERGE_QUEUE`).** De klassieke `PUT .../merge` was
 alleen op de head-sha geconditioneerd: GitHub vergelijkt uitsluitend of de meegegeven `sha` nog de

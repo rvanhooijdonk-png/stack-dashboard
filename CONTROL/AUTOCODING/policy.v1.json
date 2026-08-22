@@ -37,6 +37,7 @@
     "required_checks": ["autocoding-shield"],
     "required_merge_queue_checks": ["autocoding-shield", "autocoding-merge-group-gate"],
     "required_check_app_id": 15368,
-    "candidate_limit": 5
+    "candidate_limit": 5,
+    "owner_package_max_age_seconds": 86400
   }
 }

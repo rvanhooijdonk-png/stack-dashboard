@@ -165,13 +165,32 @@ export const REJECTED_SERVER_GATE_MODE = Object.freeze({
 });
 
 /**
- * De gesloten uitkomstvorm. Twee waarden, meer bestaan er niet. Een aanroeper die iets anders ziet
- * heeft geen derde uitkomst maar een kapotte beslisser, en hoort dat als NO_GO te behandelen.
+ * De gesloten uitkomstvorm. `resolveFinalization` — DE BESLISSING zelf — retourneert uitsluitend
+ * `GO` of `NO_GO`; een aanroeper die daar iets anders ziet heeft geen derde oordeel maar een kapotte
+ * beslisser, en hoort dat als NO_GO te behandelen.
+ *
+ * V25 — CODEX1/GEMINI1-P1 OP V24. `runFinalize` voegt daarbovenop `OWNER_ACTION_REQUIRED` toe: de
+ * uitkomst van de eigenaarsstand, die GEEN oordeel is maar een AFGELEVERD PAKKET na een bewezen GO. Een
+ * pakket op zichzelf is nooit een merge en dus nooit hetzelfde als `GO` — zie `OWNER_ACTION_REQUIRED_
+ * EXIT_CODE` voor waarom dat ook in de exitcode moet staan en niet alleen in dit veld.
  */
 export const FINALIZE_DECISION = Object.freeze({
   GO: 'FINALIZE_GO',
   NO_GO: 'FINALIZE_NO_GO',
+  OWNER_ACTION_REQUIRED: 'FINALIZE_OWNER_ACTION_REQUIRED',
 });
+
+/**
+ * DE EXITCODE VAN HET EIGENAARSPAKKET (V25). Vóór deze reparatie retourneerde `runFinalize` `0` voor
+ * `OWNER_MERGE_PACKAGE` — dezelfde code als een werkelijk uitgevoerde merge. Codex1 (`F330314`, P1) en
+ * Gemini1 (dezelfde head, onafhankelijk) troffen hetzelfde: een aanroeper die uitsluitend de exitcode
+ * leest — het normale contract `rc 0 => finalisatie geslaagd` — kan een pakket dan niet meer van een
+ * merge onderscheiden zonder zelf `merge_performed` te parsen. `0` is sindsdien voorbehouden aan een
+ * WERKELIJK uitgevoerd effect (`merge_performed: true`, inclusief `--dry-run` op een bewezen GO); een
+ * eigenaarspakket krijgt deze eigen, gesloten, niet-nul code — nooit `0`, en nooit dezelfde code als een
+ * gewone weigering (`1`), want een pakket is geen fout maar een bewuste stop bij de eigenaar.
+ */
+export const OWNER_ACTION_REQUIRED_EXIT_CODE = 3;
 
 /**
  * De toegestane mergevormen. Gesloten, want `merge_method` gaat rechtstreeks het API-lichaam in.
@@ -183,10 +202,20 @@ export const ALLOWED_MERGE_METHODS = Object.freeze(['merge', 'squash', 'rebase']
 const MERGE_FINALIZER_FIELDS = new Set([
   'schema', 'server_gate_mode', 'merge_method', 'allowed_base_refs', 'allowed_builder_actors',
   'required_checks', 'required_merge_queue_checks', 'required_check_app_id', 'candidate_limit',
+  'owner_package_max_age_seconds',
 ]);
 
 /** De bovengrens op `candidate_limit`. Zie `finalizerRequestBudget` voor de rekensom erachter. */
 export const CANDIDATE_LIMIT_MAX = 25;
+
+/**
+ * De bovengrens op `owner_package_max_age_seconds` (V25): zeven dagen. Een eigenaarspakket bindt aan
+ * een meting op het moment van afgifte; hoe langer het daarna blijft liggen, hoe groter de kans dat de
+ * pull request intussen is bewogen zonder dat de eigenaar dat pakket nog als verouderd herkent. Een
+ * onbegrensde waarde zou `verifyOwnerMergePackage` een vrijbrief geven om ELK pakket eeuwig geldig te
+ * verklaren.
+ */
+export const OWNER_PACKAGE_MAX_AGE_SECONDS_MAX = 7 * 24 * 60 * 60;
 
 /**
  * De redencodes van de BESLISSING. Gesloten en literal: ze worden gelogd, dus mag er nooit een
@@ -452,6 +481,13 @@ export function assertMergeFinalizerPolicySafe(policy) {
 
   if (!Number.isInteger(cfg.candidate_limit) || cfg.candidate_limit <= 0
     || cfg.candidate_limit > CANDIDATE_LIMIT_MAX) fail();
+
+  // V25 — gesloten en verplicht, net als `candidate_limit`. Zonder bovengrens zou een pakket zonder
+  // vervaldatum kunnen bestaan; zonder ondergrens zou `0` of een negatief getal elk pakket per
+  // definitie meteen laten verlopen, wat er hetzelfde uitziet als een kapotte configuratie en niet als
+  // een bewuste keuze.
+  if (!Number.isInteger(cfg.owner_package_max_age_seconds) || cfg.owner_package_max_age_seconds <= 0
+    || cfg.owner_package_max_age_seconds > OWNER_PACKAGE_MAX_AGE_SECONDS_MAX) fail();
 
   const diagnostic = policy?.diagnostic_status_context;
   const assertCheckNameList = (names) => {
@@ -831,6 +867,173 @@ function canonicalMeasurement(measurement) {
  */
 export function measurementFingerprint(measurement) {
   return digest(JSON.stringify(canonicalMeasurement(measurement)));
+}
+
+/**
+ * HET EIGENAARSPAKKET, GEBONDEN (V25 — CODEX1/GEMINI1-P1 op V24, `F330314`). Vóór deze reparatie droeg
+ * `OWNER_MERGE_PACKAGE` geen enkele binding: geen repository, geen PR, geen head, geen boom, geen
+ * base, geen mergemethode en geen meettijd. Beide reviewers wezen op dezelfde consequentie — een
+ * pakket dat niet zelfstandig controleerbaar is, kan na uitgifte stil verouderen (de pull request
+ * beweegt verder) voordat de eigenaar het in GitHubs eigen interface uitvoert, zonder dat er ergens
+ * een spoor van die veroudering staat.
+ *
+ * De binding draagt UITSLUITEND digests van gevoelige waarden — nooit een ruwe sha, nooit een pad —
+ * dezelfde reductie als de rest van dit bestand (zie de kopnotitie bij `runFinalize`). Het PR-nummer en
+ * de mergemethode blijven leesbaar: het nummer stond al in de aanroep, en de methode is een
+ * beleidswaarde uit een gesloten lijst, geen geheim.
+ *
+ * `package_digest` bindt alle andere velden samen, inclusief `measured_at`: wie ná afgifte ook maar één
+ * teken van het pakket verandert — een digest, het PR-nummer, de meettijd — zonder deze functie opnieuw
+ * te draaien, laat een pakket achter dat zijn EIGEN digest niet meer waarmaakt. Dat is precies wat
+ * `verifyOwnerMergePackage` hieronder als eerste toetst, los van de vraag of de onderliggende pull
+ * request intussen is bewogen.
+ */
+export const OWNER_MERGE_PACKAGE_SCHEMA = 'AUTOCODING_OWNER_MERGE_PACKAGE_V1';
+
+/** De gesloten veldenlijst van een eigenaarspakket. Een pakket met een ander veld is MALFORMED. */
+export const OWNER_MERGE_PACKAGE_FIELDS = Object.freeze([
+  'schema', 'repository_digest', 'pull_request', 'head_digest', 'tree_digest', 'base_ref_digest',
+  'base_head_digest', 'merge_method', 'measurement_fingerprint', 'measured_at', 'package_digest',
+]);
+
+/**
+ * De redencodes van `verifyOwnerMergePackage`. Gesloten, net als `FINALIZE_REASON`: dit zijn de enige
+ * gronden waarop een verificatie fail-closed weigert.
+ */
+export const OWNER_PACKAGE_REASON = Object.freeze({
+  OWNER_PACKAGE_MISSING: 'OWNER_PACKAGE_MISSING',
+  OWNER_PACKAGE_MALFORMED: 'OWNER_PACKAGE_MALFORMED',
+  OWNER_PACKAGE_MAX_AGE_INVALID: 'OWNER_PACKAGE_MAX_AGE_INVALID',
+  OWNER_PACKAGE_DIGEST_MISMATCH: 'OWNER_PACKAGE_DIGEST_MISMATCH',
+  OWNER_PACKAGE_EXPIRED: 'OWNER_PACKAGE_EXPIRED',
+  OWNER_PACKAGE_BINDING_CHANGED: 'OWNER_PACKAGE_BINDING_CHANGED',
+});
+
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+/** De binding zelf, zonder `package_digest` — de precieze vorm die `package_digest` samenvat. */
+function ownerMergePackageBinding({
+  repository, pullRequest, sha, treeSha, baseRef, baseHeadSha, mergeMethod,
+  measurementFingerprint: vingerafdruk, measuredAtMs,
+}) {
+  return {
+    schema: OWNER_MERGE_PACKAGE_SCHEMA,
+    repository_digest: digest(repository),
+    pull_request: pullRequest,
+    head_digest: digest(sha),
+    tree_digest: digest(treeSha),
+    base_ref_digest: digest(baseRef),
+    base_head_digest: digest(baseHeadSha),
+    merge_method: mergeMethod,
+    measurement_fingerprint: vingerafdruk,
+    measured_at: measuredAtMs,
+  };
+}
+
+/**
+ * DE ENE CANONICALISERING (V26). Zowel `buildOwnerMergePackage` als `verifyOwnerMergePackage` roepen
+ * uitsluitend déze functie aan om van een binding een digestbare vorm te maken — er bestaat geen
+ * tweede kopie. De vorm is de gesloten veldenlijst (`OWNER_MERGE_PACKAGE_FIELDS`, min `package_digest`)
+ * in een VASTE volgorde, ongeacht in welke sleutelvolgorde de binding is aangeleverd. Zonder dit zou
+ * een semantisch identiek pakket met omgekeerde veldvolgorde — bijvoorbeeld ná een JSON-rondgang — zijn
+ * eigen digest niet meer waarmaken, terwijl er niets aan de binding is veranderd.
+ */
+function canonicalOwnerMergePackageBinding(binding) {
+  const canoniek = {};
+  for (const veld of OWNER_MERGE_PACKAGE_FIELDS) {
+    if (veld === 'package_digest') continue;
+    canoniek[veld] = binding[veld];
+  }
+  return canoniek;
+}
+
+/** Bouwt een nieuw, zelfconsistent eigenaarspakket. Alleen `runFinalize` roept dit aan, op een GO. */
+export function buildOwnerMergePackage(velden) {
+  const canoniek = canonicalOwnerMergePackageBinding(ownerMergePackageBinding(velden));
+  return { ...canoniek, package_digest: digest(JSON.stringify(canoniek)) };
+}
+
+/**
+ * DE VERIFIER (V25). Herberekent de binding van een AL AFGEGEVEN pakket tegen een VERSE meting en wijst
+ * fail-closed af wat ontbreekt, is gewijzigd of is verlopen — precies de drie gronden uit de
+ * reparatieorder. De volgorde is met opzet: eerst STRUCTUUR (ontbrekend/misvormd), dan
+ * ZELFCONSISTENTIE (is het pakket ná afgifte bewerkt — `package_digest` dekt exact dat), dan
+ * VERVALTERMIJN, en pas dan DRIFT tegen de verse meting. Een pakket dat zijn eigen digest niet
+ * waarmaakt, is nooit "verouderd": het is BEWERKT, en dat verdient een eigen redencode.
+ */
+export function verifyOwnerMergePackage({
+  ownerPackage, repository, pullRequest, sha, treeSha, baseRef, baseHeadSha, mergeMethod,
+  measurementFingerprint: verseVingerafdruk, nowMs, maxAgeSeconds,
+}) {
+  const fail = (reason) => ({ ok: false, reason });
+
+  if (!Number.isInteger(maxAgeSeconds) || maxAgeSeconds <= 0
+    || maxAgeSeconds > OWNER_PACKAGE_MAX_AGE_SECONDS_MAX) {
+    return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_MAX_AGE_INVALID);
+  }
+  if (!Number.isInteger(nowMs) || nowMs < 0) {
+    return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_MAX_AGE_INVALID);
+  }
+
+  if (!ownerPackage || typeof ownerPackage !== 'object' || Array.isArray(ownerPackage)) {
+    return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_MISSING);
+  }
+
+  const gemeten = new Set(Object.keys(ownerPackage));
+  for (const veld of gemeten) {
+    if (!OWNER_MERGE_PACKAGE_FIELDS.includes(veld)) {
+      return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_MALFORMED);
+    }
+  }
+  for (const veld of OWNER_MERGE_PACKAGE_FIELDS) {
+    if (!gemeten.has(veld)) return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_MALFORMED);
+  }
+  if (ownerPackage.schema !== OWNER_MERGE_PACKAGE_SCHEMA) {
+    return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_MALFORMED);
+  }
+  if (!Number.isInteger(ownerPackage.pull_request) || ownerPackage.pull_request <= 0) {
+    return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_MALFORMED);
+  }
+  if (!ALLOWED_MERGE_METHODS.includes(ownerPackage.merge_method)) {
+    return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_MALFORMED);
+  }
+  for (const veld of [
+    'repository_digest', 'head_digest', 'tree_digest', 'base_ref_digest', 'base_head_digest',
+    'measurement_fingerprint', 'package_digest',
+  ]) {
+    if (!SHA256_HEX_RE.test(ownerPackage[veld] ?? '')) {
+      return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_MALFORMED);
+    }
+  }
+  // `measured_at` mag nooit in de toekomst liggen: dat is geen "nieuw" pakket maar een onmeetbare
+  // klok, en fail-closed betekent hier hetzelfde behandelen als een misvormd pakket.
+  if (!Number.isInteger(ownerPackage.measured_at) || ownerPackage.measured_at < 0
+    || ownerPackage.measured_at > nowMs) {
+    return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_MALFORMED);
+  }
+
+  const { package_digest: opgeslagenDigest, ...binding } = ownerPackage;
+  const canoniek = canonicalOwnerMergePackageBinding(binding);
+  if (digest(JSON.stringify(canoniek)) !== opgeslagenDigest) {
+    return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_DIGEST_MISMATCH);
+  }
+
+  if (nowMs - ownerPackage.measured_at > maxAgeSeconds * 1000) {
+    return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_EXPIRED);
+  }
+
+  const verseBinding = ownerMergePackageBinding({
+    repository, pullRequest, sha, treeSha, baseRef, baseHeadSha, mergeMethod,
+    measurementFingerprint: verseVingerafdruk, measuredAtMs: ownerPackage.measured_at,
+  });
+  for (const veld of OWNER_MERGE_PACKAGE_FIELDS) {
+    if (veld === 'measured_at' || veld === 'package_digest') continue;
+    if (ownerPackage[veld] !== verseBinding[veld]) {
+      return fail(OWNER_PACKAGE_REASON.OWNER_PACKAGE_BINDING_CHANGED);
+    }
+  }
+
+  return { ok: true };
 }
 
 /**
@@ -1383,17 +1586,21 @@ export function readMeasurement(rawDir, readFile) {
  * `mergePullRequest` keert er terminaal terug met `OWNER_MERGE_REQUIRED`. Dat is geen mislukking maar
  * de OPLEVERING van deze stand — het MERGEPAKKET: een volledig bewezen GO op een hermeten pull
  * request, met de laatste handeling bij de eigenaar. De uitvoerregel meldt dat als
- * `effect: "OWNER_MERGE_PACKAGE"`.
+ * `effect: "OWNER_MERGE_PACKAGE"`, met `decision: "FINALIZE_OWNER_ACTION_REQUIRED"` — NOOIT `GO`.
  *
- * rc 0 bij precies drie uitkomsten, en bij geen enkele andere: een WERKELIJK uitgevoerde merge, een
- * `--dry-run` op een bewezen GO, en een opgeleverd eigenaarspakket. Omdat die drie niet dezelfde
- * betekenis hebben, draagt ELKE GO-regel sinds V24 het veld `merge_performed`: alleen een echt
- * uitgevoerd effect zet dat op `true`. Een aanroeper die uitsluitend de exitcode leest, kan een
- * pakket dus nooit voor een merge aanzien zonder dat veld te negeren. Elke andere uitkomst geeft
- * rc 1. De uitvoer blijft één JSON-regel met uitsluitend de gesloten uitkomstvorm en redencodes —
- * geen SHA's, geen paden, geen API-teksten.
+ * V25 — CODEX1/GEMINI1-P1 (`F330314`) OP V24. rc 0 bij precies TWEE uitkomsten, en bij geen enkele
+ * andere: een WERKELIJK uitgevoerde merge, en een `--dry-run` op een bewezen GO. Vóór deze reparatie
+ * viel het eigenaarspakket ook onder rc 0 en `decision: GO`; beide reviewers bewezen dat een aanroeper
+ * met het normale contract `rc 0 => finalisatie geslaagd` het pakket dan zonder `merge_performed` te
+ * parsen als merge leest. Het pakket krijgt sindsdien een EIGEN, gesloten, niet-nul exitcode
+ * (`OWNER_ACTION_REQUIRED_EXIT_CODE`) en een EIGEN decision — een rc-only aanroeper kan het dus
+ * mechanisch niet meer met een merge verwarren. ELKE GO-regel draagt nog altijd `merge_performed`, ook
+ * het pakket: alleen een echt uitgevoerd effect zet dat op `true`. Elke andere uitkomst geeft rc 1. De
+ * uitvoer blijft één JSON-regel; behalve de gesloten uitkomstvorm en redencodes draagt zij sinds V25
+ * ook het GEBONDEN eigenaarspakket (`owner_package`) — zelf uitsluitend digests, geen ruwe SHA's en
+ * geen paden.
  */
-export async function runFinalize(argv, { readFile, fetchImpl, sleepImpl } = {}) {
+export async function runFinalize(argv, { readFile, fetchImpl, sleepImpl, nowImpl } = {}) {
   const meld = (uitkomst) => console.log(JSON.stringify(uitkomst));
   const parsed = parseFinalizeArgs(argv);
   if (!parsed.ok) {
@@ -1462,9 +1669,15 @@ export async function runFinalize(argv, { readFile, fetchImpl, sleepImpl } = {})
   // `MANUAL_OWNER_GATE` heeft daarna bewust nul verzoeken gedaan. Dat als NO_GO melden zou de
   // uitkomst van deze modus permanent op rood zetten en daarmee precies het signaal onbruikbaar
   // maken dat een echte weigering zou moeten dragen.
+  //
+  // V25 — noch `GO` (dat is een oordeel, geen aflevering) noch rc 0 (voorbehouden aan een werkelijk
+  // uitgevoerd effect): een EIGEN decision, een EIGEN exitcode, en een pakket dat aan repository, PR,
+  // head, boom, base-ref, live base-head, mergemethode en meettijd bindt — zie `buildOwnerMergePackage`
+  // voor waarom dat uitsluitend digests zijn en geen ruwe waarden.
   if (!effect.ok && effect.blocked === FINALIZE_ERROR.OWNER_MERGE_REQUIRED) {
+    const nu = typeof nowImpl === 'function' ? nowImpl() : Date.now();
     meld({
-      decision: FINALIZE_DECISION.GO,
+      decision: FINALIZE_DECISION.OWNER_ACTION_REQUIRED,
       reasons: [],
       finalization_class: beslissingB.finalization_class,
       effect: 'OWNER_MERGE_PACKAGE',
@@ -1473,8 +1686,19 @@ export async function runFinalize(argv, { readFile, fetchImpl, sleepImpl } = {})
       // draagt geen sha en geen pad: het PR-nummer stond al in de aanroep, en de rest is te lezen op
       // de pull request zelf.
       owner_action: FINALIZE_ERROR.OWNER_MERGE_REQUIRED,
+      owner_package: buildOwnerMergePackage({
+        repository: args.get('--repository'),
+        pullRequest: beslissingB.merge.pull_request,
+        sha: beslissingB.merge.sha,
+        treeSha: metingB?.headCommit?.tree?.sha,
+        baseRef: metingB?.pr?.base?.ref,
+        baseHeadSha: metingB?.baseHead?.object?.sha,
+        mergeMethod: beslissingB.merge.merge_method,
+        measurementFingerprint: measurementFingerprint(metingB),
+        measuredAtMs: Number.isInteger(nu) ? nu : 0,
+      }),
     });
-    return 0;
+    return OWNER_ACTION_REQUIRED_EXIT_CODE;
   }
   if (!effect.ok) {
     meld({
