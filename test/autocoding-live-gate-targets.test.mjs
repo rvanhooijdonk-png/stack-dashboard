@@ -35,6 +35,7 @@ import { pathToFileURL } from 'node:url';
 import {
   selectTargets, isTrustedWorkflowRunSource, issueCommentTarget, workflowRunTargets,
   normaliseOpenPullRequests, scheduleSlotOf, selectScheduleBucket, affordablePullRequests,
+  scheduleBucketVisit, selectBucketWindow,
   parseTargetArgs, parseCounter, parseCompleteness, runSelect,
   EXPECTED_SOURCE, EVENT_TARGET_LIMIT, SCHEDULE_BUCKET_LIMIT, SCHEDULE_SLOT_SECONDS,
   LIST_PAGE_BUDGET, SELECTION_PAGE_BUDGET,
@@ -46,6 +47,13 @@ import {
   analyzeWorkflow, isRepositoryWideQueuedLock, TRUSTED_WRITER_REPOSITORY_LOCK_GROUP,
 } from '../scripts/autocoding/workflow-trust.mjs';
 import { resolvePublication } from '../scripts/autocoding/publish-live-status.mjs';
+
+/**
+ * Een ruim, BEKEND restquotum. Sinds de reparatie van bevinding `3835186662` is een ONBEKEND
+ * restant fail-closed: elke aanleiding die werkelijk wil meten moet een gemeten getal doorgeven,
+ * precies zoals de workflow dat doet. Tests die het budget niet onderzoeken gebruiken dit getal.
+ */
+const RUIM_QUOTUM = 1000;
 
 const SELECTOR = 'scripts/autocoding/select-live-gate-targets.mjs';
 const BOUNDED_PAGES = 'scripts/autocoding/gh-bounded-pages.sh';
@@ -197,6 +205,7 @@ test('S3. een issue_comment selecteert exact de PR uit zijn eigen payload, en ve
     eventName: 'issue_comment',
     event: commentOpPr(74),
     openPullRequests: Array.from({ length: 126 }, (_, i) => openPr(i + 1)),
+    remainingQuota: RUIM_QUOTUM,
   });
   assert.equal(uitkomst.outcome, TARGET_OUTCOME.MEASURE);
   assert.equal(uitkomst.selection, TARGET_SELECTION.EVENT_PULL_REQUEST);
@@ -228,6 +237,7 @@ test('S4. een workflow_run selecteert exact één PR; meer dan één associatie 
     eventName: 'workflow_run',
     event: { workflow_run: shieldRun({ pull_requests: [{ number: 74 }] }) },
     openPullRequests: Array.from({ length: 126 }, (_, i) => openPr(i + 1)),
+    remainingQuota: RUIM_QUOTUM,
   });
   assert.deepEqual(enkel.targets, [74]);
   assert.equal(enkel.selection, TARGET_SELECTION.EVENT_PULL_REQUEST);
@@ -270,8 +280,8 @@ test('S5. een eventaanleiding is NOOIT een volledige sweep, hoeveel PR\'s er ook
     ['issue_comment', { eventName: 'issue_comment', event: commentOpPr(74) }],
     ['workflow_run', { eventName: 'workflow_run', event: { workflow_run: shieldRun() } }],
   ]) {
-    const met = selectTargets({ ...invoer, openPullRequests: open });
-    const zonder = selectTargets({ ...invoer, openPullRequests: [] });
+    const met = selectTargets({ ...invoer, openPullRequests: open, remainingQuota: RUIM_QUOTUM });
+    const zonder = selectTargets({ ...invoer, openPullRequests: [], remainingQuota: RUIM_QUOTUM });
     assert.deepEqual(met.targets, [74], naam);
     assert.deepEqual(met.targets, zonder.targets, `${naam}: de open lijst verandert niets`);
     assert.ok(met.targets.length <= EVENT_TARGET_LIMIT, naam);
@@ -294,7 +304,10 @@ test('S5b. NEGATIEVE MUTATIE: een event dat tóch de hele lijst pakt, blaast de 
   );
 
   const open = Array.from({ length: 126 }, (_, i) => openPr(i + 1));
-  const invoer = { eventName: 'issue_comment', event: commentOpPr(74), openPullRequests: open };
+  const invoer = {
+    eventName: 'issue_comment', event: commentOpPr(74), openPullRequests: open,
+    remainingQuota: RUIM_QUOTUM,
+  };
 
   const sweep = gemuteerd.selectTargets(invoer);
   assert.equal(sweep.targets.length, 126, 'de mutant meet de hele lijst');
@@ -316,6 +329,7 @@ test('S6. de schedulebucket is hoogstens 25 en dekt alle 126 PR\'s over opeenvol
 
   const ronde = (slot) => selectTargets({
     eventName: 'schedule', event: {}, openPullRequests: open, nowEpochSeconds: slot * uur,
+    remainingQuota: RUIM_QUOTUM,
   });
 
   const eerste = ronde(0);
@@ -348,7 +362,8 @@ test('S6. de schedulebucket is hoogstens 25 en dekt alle 126 PR\'s over opeenvol
 
   // Een lijst die korter is dan de limiet wordt niet afgekapt en roteert niet.
   const kort = selectTargets({
-    eventName: 'schedule', event: {}, openPullRequests: [openPr(7), openPr(8)], nowEpochSeconds: 99 * uur,
+    eventName: 'schedule', event: {}, openPullRequests: [openPr(7), openPr(8)],
+    nowEpochSeconds: 99 * uur, remainingQuota: RUIM_QUOTUM,
   });
   assert.deepEqual(kort.targets, [7, 8]);
   assert.equal(kort.bucketCount, 1);
@@ -518,8 +533,9 @@ test('S7b. de ronde krimpt mechanisch mee met wat er van het GEDEELDE quotum ove
 
   // Vol quotum: de volle bucket.
   assert.equal(schedule(SHARED_HOURLY_REQUEST_QUOTA).targets.length, SCHEDULE_BUCKET_LIMIT);
-  // Onbekend quotum: de vaste bovengrens, die sowieso binnen het uurquotum past.
-  assert.equal(schedule(null).targets.length, SCHEDULE_BUCKET_LIMIT);
+  // Onbekend quotum meet NIETS meer. Zie S21b voor de volle behandeling van die grens.
+  assert.equal(schedule(null).outcome, TARGET_OUTCOME.FAIL);
+  assert.equal(schedule(null).reason, TARGET_REASON.API_QUOTA_UNKNOWN);
   assert.equal(affordablePullRequests(null), null);
   assert.equal(affordablePullRequests('900'), null);
 
@@ -1498,12 +1514,11 @@ test('S21. het quotum vlak boven en vlak onder de grens beslist voorspelbaar', (
   assert.equal(schedule(volleBucket - PER_PULL_REQUEST_REQUEST_BUDGET).targets.length,
     SCHEDULE_BUCKET_LIMIT - 1);
 
-  // ONBEKEND quotum opent geen onbegrensde uitvoering: de vaste bovengrenzen gelden dan, en die
-  // passen met de reserve sowieso binnen het gedeelde uurquotum.
+  // ONBEKEND quotum opent al helemaal niets: het is een eigen rode uitkomst zonder doelen.
   const onbekend = schedule(null);
-  assert.equal(onbekend.targets.length, SCHEDULE_BUCKET_LIMIT);
-  assert.ok(SELECTION_REQUEST_BUDGET + (onbekend.targets.length * PER_PULL_REQUEST_REQUEST_BUDGET)
-    + QUOTA_RESERVE <= SHARED_HOURLY_REQUEST_QUOTA);
+  assert.equal(onbekend.outcome, TARGET_OUTCOME.FAIL);
+  assert.equal(onbekend.reason, TARGET_REASON.API_QUOTA_UNKNOWN);
+  assert.deepEqual(onbekend.targets, []);
 });
 
 
@@ -1629,4 +1644,263 @@ test('S22b. schedule én event delen dezelfde rij, dus tellen hun begrotingen na
   assert.ok(scheduleUitkomst.targets.length < SCHEDULE_BUCKET_LIMIT);
   assert.ok(andersom.besteed <= SHARED_HOURLY_REQUEST_QUOTA - QUOTA_RESERVE);
   assert.ok(andersom.resterend >= QUOTA_RESERVE);
+});
+
+
+// --- V15: de indeling ligt vast, alleen het venster erbinnen krimpt -------------------------------
+
+/** Het restquotum waarbij precies `capaciteit` pull requests betaalbaar zijn. */
+const quotumVoor = (capaciteit) => QUOTA_RESERVE + SELECTION_REQUEST_BUDGET
+  + (capaciteit * PER_PULL_REQUEST_REQUEST_BUDGET);
+
+const OPEN_126 = Array.from({ length: 126 }, (_, i) => openPr(i + 1));
+
+const scheduleRonde = (slot, remainingQuota, open = OPEN_126) => selectTargets({
+  eventName: 'schedule',
+  event: {},
+  openPullRequests: open,
+  nowEpochSeconds: slot * SCHEDULE_SLOT_SECONDS,
+  remainingQuota,
+});
+
+/** Alles wat een reeks slots werkelijk meet, gegeven een capaciteit per slot. */
+function dekking(capaciteitVoorSlot, slots, selector = selectTargets) {
+  const gezien = new Set();
+  for (let slot = 0; slot < slots; slot += 1) {
+    const uitkomst = selector({
+      eventName: 'schedule',
+      event: {},
+      openPullRequests: OPEN_126,
+      nowEpochSeconds: slot * SCHEDULE_SLOT_SECONDS,
+      remainingQuota: quotumVoor(capaciteitVoorSlot(slot)),
+    });
+    if (uitkomst.outcome === TARGET_OUTCOME.MEASURE) for (const n of uitkomst.targets) gezien.add(n);
+  }
+  return gezien;
+}
+
+test('S23. het quotum verandert de bucketINDELING niet, alleen het venster daarbinnen', () => {
+  // Bevinding `3835186656`. De betaalbare limiet ging vóór de partitionering in, dus bepaalde het
+  // quotum hoeveel buckets er waren en wie erin zat. Nu is de indeling een functie van de LIJST en
+  // het SLOT, en van niets anders.
+  for (let slot = 0; slot < 24; slot += 1) {
+    const vol = scheduleRonde(slot, quotumVoor(SCHEDULE_BUCKET_LIMIT));
+    assert.equal(vol.bucketCount, 6, `slot ${slot}`);
+    assert.equal(vol.bucketIndex, slot % 6, `slot ${slot}`);
+    assert.equal(vol.bucketSize, slot % 6 === 5 ? 1 : SCHEDULE_BUCKET_LIMIT, `slot ${slot}`);
+    assert.deepEqual(vol.targets, vol.targets.slice().sort((a, b) => a - b), 'doelen blijven oplopend');
+
+    for (const capaciteit of [1, 2, 7, 13, 24, 25]) {
+      const krap = scheduleRonde(slot, quotumVoor(capaciteit));
+      assert.equal(krap.bucketIndex, vol.bucketIndex, `slot ${slot}, capaciteit ${capaciteit}`);
+      assert.equal(krap.bucketCount, vol.bucketCount, `slot ${slot}, capaciteit ${capaciteit}`);
+      assert.equal(krap.bucketSize, vol.bucketSize, `slot ${slot}, capaciteit ${capaciteit}`);
+      // Het venster is een DEELverzameling van de vaste bucket, nooit iets van buiten.
+      assert.equal(krap.targets.length, Math.min(capaciteit, vol.bucketSize));
+      for (const nummer of krap.targets) {
+        assert.ok(vol.targets.includes(nummer), `${nummer} hoort niet in bucket ${vol.bucketIndex}`);
+      }
+      // En de begroting van deze beurt past in wat er betaalbaar was.
+      assert.ok(SELECTION_REQUEST_BUDGET + (krap.targets.length * PER_PULL_REQUEST_REQUEST_BUDGET)
+        <= quotumVoor(capaciteit) - QUOTA_RESERVE);
+    }
+  }
+});
+
+test('S24. het venster schuift op de BEZOEKteller, dus geen enkele PR verhongert bij wisselend quota', () => {
+  // De bezoekteller loopt met één op bij elke terugkeer van dezelfde bucket, ongeacht het quotum.
+  for (const count of [1, 6, 7, 126]) {
+    for (const slot of [0, 3, 41, 999]) {
+      assert.equal(scheduleBucketVisit(slot + count, count), scheduleBucketVisit(slot, count) + 1);
+    }
+  }
+  // En het startanker volgt die teller, niet de capaciteit.
+  const bucket = Array.from({ length: 25 }, (_, i) => i + 1);
+  for (let visit = 0; visit < 30; visit += 1) {
+    const ankers = [1, 3, 25].map((cap) => selectBucketWindow(bucket, visit, cap).start);
+    assert.deepEqual(ankers, [visit % 25, visit % 25, visit % 25], `visit ${visit}`);
+    const venster = selectBucketWindow(bucket, visit, 1);
+    assert.deepEqual(venster.window, [bucket[visit % 25]], `visit ${visit}`);
+  }
+  assert.deepEqual(selectBucketWindow(bucket, 3, 25).window, bucket, 'volle capaciteit = hele bucket');
+  assert.deepEqual(selectBucketWindow([], 0, 5), { window: [], start: 0, size: 0 });
+
+  // VOLLE CAPACITEIT: alle 126 binnen de zes vaste buckets, in zes slots.
+  assert.equal(dekking(() => SCHEDULE_BUCKET_LIMIT, 6).size, 126);
+
+  // CAPACITEIT ÉÉN: eindige convergentie. Zes buckets maal hoogstens 25 leden is 150 slots.
+  assert.equal(dekking(() => 1, 150).size, 126, 'capaciteit één convergeert eindig');
+
+  // AFWISSELEND 25/1 en 1/25 — de reeks uit de negatieve controle. Geen enkel nummer overgeslagen.
+  const afwisselend = dekking((slot) => (slot % 2 === 0 ? SCHEDULE_BUCKET_LIMIT : 1), 150);
+  assert.equal(afwisselend.size, 126, '25/1 slaat niets over');
+  const omgekeerd = dekking((slot) => (slot % 2 === 0 ? 1 : SCHEDULE_BUCKET_LIMIT), 150);
+  assert.equal(omgekeerd.size, 126, '1/25 slaat niets over');
+  assert.deepEqual([...afwisselend].sort((a, b) => a - b), OPEN_126.map((pr) => pr.number));
+
+  // WILLEKEURIGE positieve reeks, deterministisch gezaaid.
+  let zaad = 20260822;
+  const volgende = () => {
+    zaad = (zaad * 1103515245 + 12345) % 2147483648;
+    return 1 + (zaad % SCHEDULE_BUCKET_LIMIT);
+  };
+  assert.equal(dekking(() => volgende(), 200).size, 126, 'willekeurige capaciteit convergeert');
+});
+
+test('S25. NEGATIEVE MUTATIE: quotum vóór de partitionering laat PR\'s bij wisselend budget verhongeren', async () => {
+  // Exact de vorm van vóór deze reparatie: de betaalbare limiet is óók de bucketgrootte.
+  const gemuteerd = await mutantVanDeSelector(
+    'quotum-in-de-indeling',
+    '  const { bucket, index, count } = selectScheduleBucket(open, slot, partitionLimit);',
+    '  const { bucket, index, count } = selectScheduleBucket(open, slot, Math.min(partitionLimit, affordable));',
+  );
+
+  const wisselend = (slot) => (slot % 2 === 0 ? SCHEDULE_BUCKET_LIMIT : 1);
+  const mutantDekking = dekking(wisselend, 600, gemuteerd.selectTargets);
+  const echteDekking = dekking(wisselend, 150);
+
+  assert.ok(mutantDekking.size < 126,
+    `de mutant meet ${mutantDekking.size} van 126 in 600 slots en laat de rest staan`);
+  assert.equal(echteDekking.size, 126, 'de echte selector heeft er dan al 126 gehad in 150 slots');
+
+  // De overgeslagen nummers zijn geen ruis: ze komen ook in tien keer zoveel slots niet aan de beurt.
+  const gemist = OPEN_126.map((pr) => pr.number).filter((n) => !mutantDekking.has(n));
+  assert.ok(gemist.length > 0);
+  for (const nummer of gemist) assert.ok(echteDekking.has(nummer), `${nummer} wordt wél gemeten`);
+
+  // En de oorzaak, direct gemeten: bij de mutant hangt de INDELING zelf aan het quotum.
+  const volleIndeling = gemuteerd.selectTargets({
+    eventName: 'schedule', event: {}, openPullRequests: OPEN_126, nowEpochSeconds: 0,
+    remainingQuota: quotumVoor(SCHEDULE_BUCKET_LIMIT),
+  });
+  const krappeIndeling = gemuteerd.selectTargets({
+    eventName: 'schedule', event: {}, openPullRequests: OPEN_126, nowEpochSeconds: 0,
+    remainingQuota: quotumVoor(1),
+  });
+  assert.notEqual(volleIndeling.bucketCount, krappeIndeling.bucketCount);
+  assert.equal(scheduleRonde(0, quotumVoor(SCHEDULE_BUCKET_LIMIT)).bucketCount,
+    scheduleRonde(0, quotumVoor(1)).bucketCount, 'bij de echte selector niet');
+});
+
+test('S26. een ONBEKEND restquotum start geen enkele schrijver — event noch schedule', () => {
+  // Bevinding `3835186662`. Onbekend is geen toestemming; het is een eigen, rode uitkomst.
+  const scheduleOnbekend = scheduleRonde(0, null);
+  assert.equal(scheduleOnbekend.outcome, TARGET_OUTCOME.FAIL);
+  assert.equal(scheduleOnbekend.reason, TARGET_REASON.API_QUOTA_UNKNOWN);
+  assert.deepEqual(scheduleOnbekend.targets, []);
+
+  for (const stuk of [null, undefined, '900', -1, 1.5, Number.NaN, Infinity, {}]) {
+    assert.equal(affordablePullRequests(stuk), null, String(stuk));
+    const viaSchedule = scheduleRonde(3, stuk);
+    assert.equal(viaSchedule.outcome, TARGET_OUTCOME.FAIL, String(stuk));
+    assert.equal(viaSchedule.reason, TARGET_REASON.API_QUOTA_UNKNOWN, String(stuk));
+
+    for (const invoer of [
+      { eventName: 'issue_comment', event: commentOpPr(74) },
+      { eventName: 'workflow_run', event: { workflow_run: shieldRun() } },
+    ]) {
+      const viaEvent = selectTargets({ ...invoer, openPullRequests: [], remainingQuota: stuk });
+      assert.equal(viaEvent.outcome, TARGET_OUTCOME.FAIL, `${invoer.eventName} ${String(stuk)}`);
+      assert.equal(viaEvent.reason, TARGET_REASON.API_QUOTA_UNKNOWN, `${invoer.eventName}`);
+      assert.deepEqual(viaEvent.targets, []);
+    }
+  }
+
+  // Onbekend en te-krap zijn UITDRUKKELIJK verschillende uitkomsten: een bekend budget dat niet
+  // voor één PR volstaat blijft de expliciete, stille budgetuitkomst.
+  const teKrap = scheduleRonde(0, quotumVoor(1) - 1);
+  assert.equal(teKrap.outcome, TARGET_OUTCOME.NO_OP);
+  assert.equal(teKrap.reason, TARGET_REASON.API_BUDGET_RESERVED);
+  assert.notEqual(TARGET_REASON.API_QUOTA_UNKNOWN, TARGET_REASON.API_BUDGET_RESERVED);
+});
+
+test('S26b. NEGATIEVE MUTATIE: onbekend quotum dat de vaste bovengrens opent, start 25 schrijvers', async () => {
+  // De V14-vorm: `null` betekende "niet krimpen", dus mat een mislukte `rate_limit`-meting de VOLLE
+  // bucket. Dat is precies wat er niet mag: de teller waarop de begroting rust was onleesbaar.
+  const gemuteerd = await mutantVanDeSelector(
+    'onbekend-quotum-is-maximum',
+    '  if (!Number.isInteger(remainingQuota) || remainingQuota < 0) return null;',
+    '  if (!Number.isInteger(remainingQuota) || remainingQuota < 0) return SCHEDULE_BUCKET_LIMIT;',
+  );
+
+  const mutantSchedule = gemuteerd.selectTargets({
+    eventName: 'schedule', event: {}, openPullRequests: OPEN_126, nowEpochSeconds: 0,
+    remainingQuota: null,
+  });
+  assert.equal(mutantSchedule.outcome, TARGET_OUTCOME.MEASURE);
+  assert.equal(mutantSchedule.targets.length, SCHEDULE_BUCKET_LIMIT,
+    'de mutant zet 25 schrijvers aan op een onleesbare teller');
+
+  const mutantEvent = gemuteerd.selectTargets({
+    eventName: 'issue_comment', event: commentOpPr(74), openPullRequests: [], remainingQuota: null,
+  });
+  assert.equal(mutantEvent.outcome, TARGET_OUTCOME.MEASURE);
+
+  // De echte selector doet in exact dezelfde situatie niets, en wordt rood.
+  assert.equal(scheduleRonde(0, null).outcome, TARGET_OUTCOME.FAIL);
+  assert.deepEqual(scheduleRonde(0, null).targets, []);
+});
+
+test('S27. de CLI maakt van een onleesbaar quotum een RODE ronde en publiceert de vensterkeuze', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'live-gate-quota-'));
+  const bestanden = new Map([
+    ['e.json', '{}'],
+    ['o.json', JSON.stringify(OPEN_126)],
+  ]);
+  const geschreven = new Map();
+  const readFile = (pad) => {
+    if (!bestanden.has(pad)) throw new Error('ENOENT');
+    return bestanden.get(pad);
+  };
+  const writeFile = (pad, data) => geschreven.set(pad, data);
+  const uit = () => JSON.parse(geschreven.get(join(dir, 'targets.json')));
+  const argv = (quota) => [
+    '--event-name', 'schedule', '--event', 'e.json', '--open-pulls', 'o.json',
+    '--open-pulls-complete', 'true', '--now-epoch', String(3600 * 7), '--remaining-quota', quota,
+    '--out', join(dir, 'targets.json'),
+  ];
+  const draai = (quota) => {
+    const regels = [];
+    const echteLog = console.log;
+    console.log = (regel) => regels.push(regel);
+    try {
+      return { rc: runSelect(argv(quota), { readFile, writeFile }), regels };
+    } finally {
+      console.log = echteLog;
+    }
+  };
+
+  // `-` is de vorm die de workflow doorgeeft als `gh api rate_limit` niets bruikbaars opleverde.
+  const onbekend = draai('-');
+  assert.equal(onbekend.rc, 1, 'rc 1 = rode run');
+  assert.deepEqual(uit(), [], 'geen matrix, dus geen schrijver');
+  assert.ok(onbekend.regels.includes(`LIVE_GATE_TARGETS_${TARGET_REASON.API_QUOTA_UNKNOWN}`),
+    onbekend.regels.join(','));
+
+  // Een BEKEND maar te krap budget blijft rc 2: stil, geen schrijver, geen rode run.
+  const krap = draai(String(quotumVoor(1) - 1));
+  assert.equal(krap.rc, 2);
+  assert.deepEqual(uit(), []);
+  assert.ok(krap.regels.includes(`LIVE_GATE_TARGETS_${TARGET_REASON.API_BUDGET_RESERVED}`));
+
+  // En een gewone ronde publiceert de vaste bucket ÉN het deelvenster, zodat in de runlog terug te
+  // lezen is dat de indeling niet met het quotum meebewoog.
+  const vol = draai(String(quotumVoor(SCHEDULE_BUCKET_LIMIT)));
+  assert.equal(vol.rc, 0);
+  assert.equal(uit().length, SCHEDULE_BUCKET_LIMIT);
+  assert.ok(vol.regels.some((r) => /^LIVE_GATE_SLOT_7_BUCKET_2_OF_6$/.test(r)), vol.regels.join(','));
+  assert.ok(vol.regels.some((r) => /^LIVE_GATE_BUCKET_SIZE_25_VISIT_1_WINDOW_1_COUNT_25$/.test(r)),
+    vol.regels.join(','));
+
+  const smal = draai(String(quotumVoor(3)));
+  assert.equal(smal.rc, 0);
+  assert.equal(uit().length, 3);
+  // Zelfde slot, zelfde bucket: alleen het aantal in het venster verschilt.
+  assert.ok(smal.regels.some((r) => /^LIVE_GATE_SLOT_7_BUCKET_2_OF_6$/.test(r)), smal.regels.join(','));
+  assert.ok(smal.regels.some((r) => /^LIVE_GATE_BUCKET_SIZE_25_VISIT_1_WINDOW_1_COUNT_3$/.test(r)),
+    smal.regels.join(','));
+
+  // De workflow geeft precies deze `-`-vorm door en vertaalt rc 1 naar een rode run.
+  assert.match(WRITER_TEKST, /remaining='-' ;;/);
+  assert.match(WRITER_TEKST, /--remaining-quota "\$remaining"/);
 });

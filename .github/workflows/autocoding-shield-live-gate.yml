@@ -229,6 +229,9 @@ jobs:
             echo '[]' > "$RUNNER_TEMP/open-pulls.json"
           fi
 
+          # `-` is de afgesproken ONBEKEND-vorm. Sinds de reparatie van bevinding `3835186662` is dat
+          # geen "reken dan met de vaste bovengrens" meer maar een rode ronde zonder schrijvers: de
+          # teller waarop de hele begroting rust was onleesbaar, dus is er niets te begroten.
           remaining="$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null || true)"
           case "$remaining" in
             ''|*[!0-9]*) remaining='-' ;;

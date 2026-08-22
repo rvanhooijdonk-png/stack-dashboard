@@ -163,9 +163,30 @@ meting ná de lock.
    dus hooguit `EVENT_REQUEST_BUDGET = 30`, een volle schedule-ronde hooguit
    `SCHEDULE_REQUEST_BUDGET = 654`, tegen `SHARED_HOURLY_REQUEST_QUOTA = 1000`. Boven op dat quotum
    ligt een vaste reserve van `QUOTA_RESERVE = 100`: is het resterende core-budget te krap, dan
-   **krimpt** de schedule-emmer tot wat er nog past en wijkt een eventronde helemaal terug in plaats
-   van de reserve op te eten. De oude volledige ronde kostte bij 126 open PR's `4 + 126 × 26 = 3280`
-   verzoeken; de test toetst dat getal expliciet tegen het quotum.
+   **krimpt** het venster binnen de emmer tot wat er nog past en wijkt een eventronde helemaal terug
+   in plaats van de reserve op te eten. De oude volledige ronde kostte bij 126 open PR's
+   `4 + 126 × 26 = 3280` verzoeken; de test toetst dat getal expliciet tegen het quotum.
+
+   **De indeling zelf blijft quotumvrij (Codex-bevinding `3835186656`).** De partities worden
+   uitsluitend met de vaste `SCHEDULE_BUCKET_LIMIT = 25` gemaakt; het budget bepaalt alleen hoeveel
+   leden van de gekozen emmer deze beurt gemeten worden. Ging het betaalbare aantal wél de
+   partitionering in, dan veranderde bij 126 open PR's het aantal emmers mee met het quotum — zes
+   bij capaciteit 25, honderdzesentwintig bij capaciteit 1 — en bezocht een budget dat heen en weer
+   sprong steeds dezelfde lage nummers. Krimpt het venster, dan wordt er binnen de VASTE emmer een
+   circulair deelvenster gekozen dat begint op `bezoek mod emmergrootte`, met
+   `bezoek = floor(slot / emmeraantal)`. Dat startanker schuift bij iedere terugkeer van dezelfde
+   emmer precies één positie op, ongeacht de capaciteit, dus is ieder lid binnen hoogstens
+   `emmergrootte` bezoeken aan de beurt geweest. De test toont dat afwisselend 25/1, 1/25 en een
+   willekeurige positieve reeks alle 126 nummers dekken, en dat de oude vorm dat aantoonbaar niet
+   doet. In de runlog staan de vaste emmer én het venster: `LIVE_GATE_SLOT_<slot>_BUCKET_<i>_OF_<n>`
+   en `LIVE_GATE_BUCKET_SIZE_<m>_VISIT_<b>_WINDOW_<start>_COUNT_<k>`.
+
+   **Een ONBEKEND restant is geen toestemming (Codex-bevinding `3835186662`).** Levert
+   `GET /rate_limit` niets bruikbaars op, dan geeft de workflow `-` door en eindigt de selectie op
+   de eigen redencode `API_QUOTA_UNKNOWN`: rc 1, lege matrix, rode run, geen enkele schrijver — voor
+   event én schedule. Eerder gold onbekend als "dan de vaste bovengrens", waarmee juist een mislukte
+   budgetmeting de grootste batch opende. Een BEKEND maar te krap budget blijft daarentegen de
+   stille `API_BUDGET_RESERVED` met rc 2: dat is een gemeten uitkomst en geen meetfout.
 6. Wat **wel** gesloten faalt is een onleesbare, onbruikbare of niet volledig opgehaalde PR-lijst.
    Dan is niet bekend wélke PR's bestaan, dus is elke ronde per definitie onvolledig: niets
    publiceren en rood worden. Een antwoord dat geen lijst ís, telt daarbij als **onleesbaar** en niet

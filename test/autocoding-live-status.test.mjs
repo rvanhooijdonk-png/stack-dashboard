@@ -15,6 +15,7 @@ import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 import { buildShieldInput } from '../scripts/autocoding/collect-shield-input.mjs';
 import { evaluateShield, REASON } from '../scripts/autocoding/verify-review-gate.mjs';
@@ -735,4 +736,210 @@ test('L13c. de vorm die de workflow werkelijk doorgeeft blijft geldig, inclusief
   assert.equal(parsed.dryRun, false);
   assert.equal(parsed.values.get('--execution-error'), '');
   assert.equal(parsed.values.get('--head-sha'), HEAD);
+});
+
+
+// --- De "+N"-teller op de beschrijvingsgrens (bevinding `3835177564`) ----------------------------
+
+const PUBLISHER = 'scripts/autocoding/publish-live-status.mjs';
+
+/** Alle codes die de beschrijving kent, in exact de volgorde waarin `describeReasons` ze sorteert. */
+const ALLE_CODES = [...new Set([...Object.values(REASON), ...Object.values(PUBLISH_ERROR)])].sort();
+
+/**
+ * Leest een beschrijving terug uit: welke codes staan er WERKELIJK in, en wat beweert de teller?
+ * De hele bevinding gaat over het verschil tussen die twee, dus wordt het verschil gemeten en niet
+ * geredeneerd.
+ */
+function ontleed(beschrijving) {
+  assert.ok(beschrijving.startsWith('NO_GO: '), beschrijving);
+  const romp = beschrijving.slice('NO_GO: '.length).split(',').filter((d) => d.length > 0);
+  const laatste = romp[romp.length - 1] ?? '';
+  const teller = laatste.startsWith('+') ? Number.parseInt(laatste.slice(1), 10) : 0;
+  return { codes: teller === 0 ? romp : romp.slice(0, -1), teller };
+}
+
+/**
+ * Hoeveel codes er passen ZONDER teller, gemeten met de echte functie: de langste oplopende reeks
+ * die nog zonder `+N` wordt afgedrukt. Geen nabouw van de afkaplogica — de functie zelf antwoordt.
+ */
+function pastZonderTeller(gesorteerd, limiet) {
+  let n = 0;
+  for (let i = 1; i <= gesorteerd.length; i += 1) {
+    const d = ontleed(describeReasons(gesorteerd.slice(0, i), limiet));
+    if (d.teller === 0 && d.codes.length === i) n = i;
+  }
+  return n;
+}
+
+/** Een deterministische pseudo-toevalsreeks: dezelfde steekproef bij elke run. */
+function reeks(zaad) {
+  let x = zaad;
+  return () => {
+    x = (x * 1103515245 + 12345) % 2147483648;
+    return x / 2147483648;
+  };
+}
+
+test('L18. de +N-teller telt exact de codes die zijn weggelaten, ook precies op de afkapgrens', () => {
+  // Drie GEMETEN grensgevallen. De gekozen codes vullen de beschrijving tot respectievelijk 138,
+  // 139 en 140 tekens vóór de teller erbij komt; mét teller zou de regel 141 tekens of meer worden
+  // en moet er nóg een code wijken. Juist die laatste pop werd niet meegeteld: de teller was één
+  // keer vooraf berekend, dus meldde hij `+3` waar er vier codes ontbraken.
+  const grensgevallen = [
+    [138, ['BUILDER_ACTOR_MISMATCH', 'EMPTY_CHECK_OUTPUT', 'FILES_INCOMPLETE',
+      'OWNER_APPROVAL_CARRIER_NOT_ACTIVE', 'OWNER_APPROVAL_MISSING', 'SCHEMA_MISMATCH',
+      'SELF_REVIEW', 'TREE_MISMATCH']],
+    [139, ['BAD_SHA_FORMAT', 'DUPLICATE_UUID', 'DUPLICATE_VENDOR', 'EMPTY_CHECK_OUTPUT',
+      'NO_GO_VERDICT_PRESENT', 'NO_RECEIPTS', 'OWNER_APPROVAL_ACTOR_NOT_ALLOWED',
+      'OWNER_APPROVAL_CARRIER_NOT_ACTIVE', 'OWNER_APPROVAL_NOT_APPROVE',
+      'OWNER_APPROVAL_STALE_HEAD', 'OWNER_APPROVAL_TREE_MISMATCH', 'OWNER_GATE_REQUIRED',
+      'REPOSITORY_INVALID', 'SELF_REVIEW', 'STATUS_CONTEXT_INVALID', 'UNKNOWN_ACTOR',
+      'UNKNOWN_VENDOR', 'UNRECOGNISED_REASON', 'UNSAFE_POLICY', 'UNSPECIFIED']],
+    [140, ['EMPTY_CHECKS', 'NATIVE_FINDINGS_PRESENT', 'NO_GO_VERDICT_PRESENT',
+      'OWNER_APPROVAL_ACTOR_NOT_ALLOWED', 'OWNER_APPROVAL_SCHEMA_MISMATCH', 'STALE_HEAD',
+      'STATUS_CONTEXT_INVALID', 'TASK_MISMATCH', 'UNRECOGNISED_REASON']],
+  ];
+
+  for (const [grens, gekozen] of grensgevallen) {
+    for (const code of gekozen) assert.ok(ALLE_CODES.includes(code), code);
+    const past = pastZonderTeller(gekozen, DESCRIPTION_LIMIT);
+    const zonderTeller = describeReasons(gekozen.slice(0, past));
+    assert.equal(zonderTeller.length, grens, `zonder teller moet dit ${grens} tekens zijn`);
+
+    // Met de teller erbij zou de regel over de grens gaan — in het eerste geval op exact 141.
+    const kandidaat = zonderTeller.length + 1 + `+${gekozen.length - past}`.length;
+    assert.ok(kandidaat > DESCRIPTION_LIMIT, `kandidaat ${kandidaat}`);
+    if (grens === 138) assert.equal(kandidaat, 141, 'het exacte 141-geval');
+
+    const uitkomst = describeReasons(gekozen);
+    const gelezen = ontleed(uitkomst);
+    assert.ok(uitkomst.length <= DESCRIPTION_LIMIT, `te lang: ${uitkomst.length}`);
+    assert.ok(gelezen.codes.length < past, 'de teller heeft een code gekost');
+    // DE EIGENSCHAP: de teller telt wat er werkelijk ontbreekt, niet wat er vóór de pop ontbrak.
+    assert.equal(gelezen.teller, gekozen.length - gelezen.codes.length, uitkomst);
+    for (const code of gelezen.codes) assert.ok(gekozen.includes(code), code);
+  }
+});
+
+test('L18b. de teller blijft exact bij elke afkapgrens, en meer dan één pop is aantoonbaar onbereikbaar', () => {
+  const volgende = reeks(20260822);
+  let popsGezien = 0;
+  let maxPops = 0;
+
+  for (const limiet of [20, 40, 60, 90, 120, DESCRIPTION_LIMIT]) {
+    for (let poging = 0; poging < 120; poging += 1) {
+      const gekozen = ALLE_CODES.filter(() => volgende() < 0.35);
+      if (gekozen.length === 0) continue;
+      const uitkomst = describeReasons(gekozen, limiet);
+      const gelezen = ontleed(uitkomst);
+
+      // Exact, altijd: de som van getoonde codes en teller is het aantal codes dat erin ging.
+      assert.equal(gelezen.codes.length + gelezen.teller, gekozen.length, uitkomst);
+      if (gelezen.codes.length > 0) {
+        assert.ok(uitkomst.length <= limiet, `limiet ${limiet}: ${uitkomst.length} — ${uitkomst}`);
+      }
+
+      const pops = pastZonderTeller(gekozen, limiet) - gelezen.codes.length;
+      assert.ok(pops >= 0, 'de teller kan nooit codes toevoegen');
+      popsGezien += pops;
+      maxPops = Math.max(maxPops, pops);
+    }
+  }
+
+  assert.ok(popsGezien > 0, 'de steekproef moet de popsituatie werkelijk raken');
+
+  // Meer dan één pop is met DEZE allowlist onbereikbaar, en dat is geen aanname maar een gebonden
+  // eigenschap: één pop maakt minstens `kortste code + 1` tekens vrij, terwijl de teller hoogstens
+  // `1 + aantal cijfers` lang is. Beide getallen staan hieronder vast, zodat een kortere code of een
+  // veel langere allowlist deze test breekt in plaats van stil een verouderde teller op te leveren.
+  // De meervoudige-popTAK zelf wordt in L18c wél gedraaid, op dezelfde broncode.
+  const kortste = Math.min(...ALLE_CODES.map((c) => c.length));
+  const langsteTeller = 1 + String(ALLE_CODES.length).length;
+  assert.ok(kortste >= langsteTeller, `kortste code ${kortste} vs teller ${langsteTeller}`);
+  assert.equal(maxPops, 1, 'één pop volstaat bij deze codelengtes');
+});
+
+/**
+ * Laadt de ECHTE publisher met een gewijzigd fragment. Zelfde vorm als `mutantVanDeSelector` in de
+ * doelentest: de mutant leeft buiten de repository, dus worden zijn relatieve imports absoluut.
+ */
+function mutantVanDePublisher(naam, oud, nieuw) {
+  const bron = readFileSync(PUBLISHER, 'utf8');
+  assert.equal(bron.split(oud).length - 1, 1, 'het mutatieanker moet precies één keer voorkomen');
+  const dir = mkdtempSync(join(tmpdir(), `publish-status-${naam}-`));
+  const pad = join(dir, `publish-live-status.${naam}.mjs`);
+  writeFileSync(pad, bron.replace(oud, nieuw).replace(
+    "from './verify-review-gate.mjs'",
+    `from ${JSON.stringify(pathToFileURL('scripts/autocoding/verify-review-gate.mjs').href)}`,
+  ));
+  return import(pathToFileURL(pad).href);
+}
+
+test('L18c. MEERDERE pops: met korte codes moet de teller twee keer opnieuw worden bepaald', async () => {
+  // Met de productie-allowlist volstaat één pop altijd (L18b). De lus moet er tóch tegen kunnen,
+  // want de codelengtes zijn geen wet. Deze mutant raakt de LUS NIET aan: hij voegt alleen korte
+  // codes aan de allowlist toe, zodat een pop nauwelijks ruimte vrijmaakt en de meervoudige-popTAK
+  // van de ECHTE broncode werkelijk gedraaid wordt.
+  const kort = Array.from({ length: 20 }, (_, i) => String.fromCharCode(65 + i));
+  const gemuteerd = await mutantVanDePublisher(
+    'korte-codes',
+    "  ARGUMENTS_INVALID: 'ARGUMENTS_INVALID',\n});",
+    `  ARGUMENTS_INVALID: 'ARGUMENTS_INVALID',\n${kort.map((c) => `  ${c}: '${c}',`).join('\n')}\n});`,
+  );
+
+  const alle = [...new Set([...Object.values(REASON), ...Object.values(gemuteerd.PUBLISH_ERROR)])].sort();
+  // Bij limiet 28 passen er drie codes zonder teller (`A,ARGUMENTS_INVALID,B` is exact 28 tekens).
+  // De teller `+63` past er dan niet meer bij, en ook ná de eerste pop niet: er moeten er twee weg.
+  const limiet = 28;
+  const uitkomst = gemuteerd.describeReasons(alle, limiet);
+  const gelezen = ontleed(uitkomst);
+
+  assert.ok(uitkomst.length <= limiet, `${uitkomst.length}: ${uitkomst}`);
+  assert.equal(gelezen.codes.length + gelezen.teller, alle.length, uitkomst);
+
+  // En hier zijn het er écht meer dan één.
+  let past = 0;
+  for (let i = 1; i <= alle.length; i += 1) {
+    const d = ontleed(gemuteerd.describeReasons(alle.slice(0, i), limiet));
+    if (d.teller === 0 && d.codes.length === i) past = i;
+  }
+  assert.equal(past, 3, 'drie codes passen zonder teller');
+  assert.equal(past - gelezen.codes.length, 2, 'twee pops');
+
+  // De gerepareerde lus telt beide pops mee; de oude vorm zou hier `+63` melden terwijl er 65
+  // codes ontbreken.
+  assert.equal(gelezen.teller, alle.length - gelezen.codes.length);
+  assert.ok(gelezen.teller > alle.length - past, 'de teller groeide met de pops mee');
+});
+
+test('L18d. NEGATIEVE MUTATIE: een teller die vóór de pops wordt vastgezet, liegt over het restant', async () => {
+  // De vorm van vóór deze reparatie, letterlijk: `dropped` één keer berekenen en daarna nog codes
+  // laten wijken. De mutant is groen op alles wat niet afkapt — en meldt op het gemeten grensgeval
+  // één weggelaten code te weinig. Dat is precies het defect uit bevinding `3835177564`.
+  const gemuteerd = await mutantVanDePublisher(
+    'teller-vooraf',
+    '  const counterFor = () => `+${sorted.length - kept.length}`;\n'
+    + '  const rendered = () => prefix + [...kept, counterFor()].join(\',\');\n'
+    + '  while (kept.length > 0 && rendered().length > max) kept.pop();\n'
+    + '  return rendered();',
+    '  const counter = `+${sorted.length - kept.length}`;\n'
+    + '  while (kept.length > 0 && prefix.length + kept.join(\',\').length + 1 + counter.length > max) {\n'
+    + '    kept.pop();\n'
+    + '  }\n'
+    + '  return `${prefix}${[...kept, counter].join(\',\')}`;',
+  );
+
+  const gekozen = ['EMPTY_CHECKS', 'NATIVE_FINDINGS_PRESENT', 'NO_GO_VERDICT_PRESENT',
+    'OWNER_APPROVAL_ACTOR_NOT_ALLOWED', 'OWNER_APPROVAL_SCHEMA_MISMATCH', 'STALE_HEAD',
+    'STATUS_CONTEXT_INVALID', 'TASK_MISMATCH', 'UNRECOGNISED_REASON'];
+
+  const oud = ontleed(gemuteerd.describeReasons(gekozen));
+  const nieuw = ontleed(describeReasons(gekozen));
+
+  // Beide tonen evenveel codes; alleen de mutant telt de laatste pop niet mee.
+  assert.equal(oud.codes.length, nieuw.codes.length);
+  assert.equal(nieuw.teller, gekozen.length - nieuw.codes.length, 'de gerepareerde teller klopt');
+  assert.equal(oud.teller, nieuw.teller - 1, 'de mutant meldt er één te weinig');
+  assert.notEqual(oud.teller, gekozen.length - oud.codes.length, 'de mutant liegt over het restant');
 });

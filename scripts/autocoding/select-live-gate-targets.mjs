@@ -161,6 +161,7 @@ export const TARGET_REASON = Object.freeze({
   SCHEDULE_SLOT_UNUSABLE: 'SCHEDULE_SLOT_UNUSABLE',
   NO_OPEN_PULL_REQUESTS: 'NO_OPEN_PULL_REQUESTS',
   API_BUDGET_RESERVED: 'API_BUDGET_RESERVED',
+  API_QUOTA_UNKNOWN: 'API_QUOTA_UNKNOWN',
   ARGUMENTS_INVALID: 'ARGUMENTS_INVALID',
   EVENT_PAYLOAD_UNREADABLE: 'EVENT_PAYLOAD_UNREADABLE',
 });
@@ -279,6 +280,10 @@ export function scheduleSlotOf(nowEpochSeconds, slotSeconds = SCHEDULE_SLOT_SECO
  * en hetzelfde slot geven altijd dezelfde bucket. Over de slots `s … s + count - 1` komt iedere PR
  * precies één keer aan de beurt, ongeacht welke runs er tussendoor zijn geannuleerd.
  *
+ * `limit` is de VASTE partitiegrootte en mag nooit uit het resterende quotum worden afgeleid — dan
+ * zou de indeling zelf met het budget meebewegen. Het budget begrenst alleen het deelvenster binnen
+ * de gekozen bucket; zie `selectBucketWindow`.
+ *
  * Een onbruikbare `limit` valt terug op de canonieke `SCHEDULE_BUCKET_LIMIT`. Zou hij op `0` blijven
  * staan, dan is `Math.ceil(n / 0)` `Infinity`, `slot % Infinity` `NaN` en `slice(NaN, NaN)` leeg —
  * een ronde die niets meet en dus nooit convergeert.
@@ -301,8 +306,10 @@ export function selectScheduleBucket(numbers, slot, limit = SCHEDULE_BUCKET_LIMI
 
 /**
  * Hoeveel pull requests er nog binnen het GEDEELDE uurbudget passen, gegeven wat er van het core-
- * quotum over is. `null` betekent "het resterende budget is onbekend"; dan wordt er niet gekrompen,
- * want de vaste bovengrenzen passen sowieso binnen het uurquotum.
+ * quotum over is. `null` betekent "het resterende budget is ONBEKEND" en is uitdrukkelijk geen
+ * getal: `selectTargets()` maakt daar `API_QUOTA_UNKNOWN` van en meet niets. Eerder gold onbekend
+ * als "dan de vaste bovengrens", en dat maakte een mislukte `rate_limit`-meting tot toestemming
+ * voor de grootste batch (bevinding `3835186662`).
  */
 export function affordablePullRequests(remainingQuota, {
   perPullRequest = PER_PULL_REQUEST_REQUEST_BUDGET,
@@ -313,6 +320,52 @@ export function affordablePullRequests(remainingQuota, {
   const usable = remainingQuota - reserve - selectionCost;
   if (usable <= 0) return 0;
   return Math.floor(usable / perPullRequest);
+}
+
+/**
+ * Het HOEVEELSTE bezoek dit slot aan zijn eigen vaste bucket is.
+ *
+ * Bucket `i` komt terug op de slots `i`, `i + count`, `i + 2·count`, … — dus is het bezoeknummer
+ * `floor(slot / count)`. Dat getal loopt per constructie met precies één op bij iedere volgende
+ * beurt van DEZELFDE bucket, ongeacht wat er tussendoor met het quotum gebeurt. Daar hangt de
+ * convergentie hieronder aan: het venster schuift op de bezoekteller, niet op de capaciteit.
+ *
+ * `Math.floor` is de juiste metgezel van de vloermodulo in `selectScheduleBucket`: ook bij een
+ * negatief slot verschillen twee opeenvolgende bezoeken exact één.
+ */
+export function scheduleBucketVisit(slot, count) {
+  if (!Number.isInteger(slot)) return 0;
+  if (!Number.isInteger(count) || count <= 0) return 0;
+  return Math.floor(slot / count);
+}
+
+/**
+ * Kiest binnen een VASTE bucket een circulair deelvenster van hoogstens `capacity` leden.
+ *
+ * Dit is de reparatie van bevinding `3835186656`. De vorige vorm gaf het betaalbare aantal door als
+ * bucketGROOTTE, waardoor het quotum de partitionering zelf veranderde: bij 126 open PR's en
+ * capaciteit 25 waren er zes buckets, bij capaciteit 1 honderdzesentwintig, en een lijst die tussen
+ * beide heen en weer sprong bezocht steeds weer de lage nummers terwijl de hoge nooit aan de beurt
+ * kwamen. De indeling ligt nu vast op `SCHEDULE_BUCKET_LIMIT`; alleen HOEVEEL leden van de gekozen
+ * bucket deze beurt gemeten worden hangt van het budget af.
+ *
+ * Het startanker is `visit mod bucketgrootte`. Omdat `visit` bij elke terugkeer van dezelfde bucket
+ * met één oploopt, schuift het anker elke beurt één positie op — onafhankelijk van de capaciteit.
+ * Daardoor is ieder bucketlid binnen hoogstens `bucketgrootte` bezoeken minstens één keer het
+ * startanker geweest, óók als de capaciteit blijft wisselen tussen 25 en 1: geen starvation.
+ *
+ * De teruggegeven leden staan oplopend, zodat de doelenlijst dezelfde canonieke vorm houdt als
+ * vóór deze wijziging; `start` legt vast wáár het venster begon.
+ */
+export function selectBucketWindow(bucket, visit, capacity) {
+  const list = Array.isArray(bucket) ? bucket : [];
+  const size = list.length;
+  if (size === 0) return { window: [], start: 0, size: 0 };
+  const wanted = Number.isInteger(capacity) && capacity > 0 ? Math.min(capacity, size) : size;
+  const anchor = Number.isInteger(visit) ? (((visit % size) + size) % size) : 0;
+  const window = [];
+  for (let i = 0; i < wanted; i += 1) window.push(list[(anchor + i) % size]);
+  return { window: window.sort((a, b) => a - b), start: anchor, size: wanted };
 }
 
 /**
@@ -350,9 +403,12 @@ export function selectTargets({
         return noOp(TARGET_REASON.EVENT_ASSOCIATION_AMBIGUOUS);
       }
     }
-    if (affordable !== null && affordable < candidates.length) {
-      return noOp(TARGET_REASON.API_BUDGET_RESERVED);
-    }
+    // Bevinding `3835186662`: een onleesbaar restant is GEEN toestemming. Vóór deze reparatie liet
+    // `affordable === null` de vaste bovengrens staan, dus startte een mislukte `rate_limit`-meting
+    // gewoon de maximale batch. Onbekend budget is nu een eigen, zichtbare FAIL zonder schrijver —
+    // niet stil, niet groen, en met een andere code dan het bekende-maar-te-krappe budget eronder.
+    if (affordable === null) return fail(TARGET_REASON.API_QUOTA_UNKNOWN);
+    if (affordable < candidates.length) return noOp(TARGET_REASON.API_BUDGET_RESERVED);
     return {
       outcome: TARGET_OUTCOME.MEASURE,
       selection: TARGET_SELECTION.EVENT_PULL_REQUEST,
@@ -386,19 +442,34 @@ export function selectTargets({
   const slot = scheduleSlotOf(nowEpochSeconds, slotSeconds);
   if (slot === null) return fail(TARGET_REASON.SCHEDULE_SLOT_UNUSABLE);
 
-  const requested = Number.isInteger(scheduleBucketLimit) && scheduleBucketLimit > 0
+  // Zie de eventtak: onbekend restant is fail-closed, ook hier, en juist hier — dit is de enige
+  // aanleiding die een hele bucket ineens kan aanzetten.
+  if (affordable === null) return fail(TARGET_REASON.API_QUOTA_UNKNOWN);
+
+  // DE INDELING IS QUOTUMVRIJ. `partitionLimit` komt uitsluitend uit de vaste constante (of uit de
+  // expliciete testparameter) en NOOIT uit `affordable`: bucketindex, bucketaantal en bucketleden
+  // moeten hetzelfde zijn bij een vol en bij een bijna leeg quotum. Alleen het venster binnen de
+  // bucket krimpt.
+  const partitionLimit = Number.isInteger(scheduleBucketLimit) && scheduleBucketLimit > 0
     ? scheduleBucketLimit
     : SCHEDULE_BUCKET_LIMIT;
-  const limit = affordable === null ? requested : Math.min(requested, affordable);
-  if (limit < 1) return noOp(TARGET_REASON.API_BUDGET_RESERVED);
+  const { bucket, index, count } = selectScheduleBucket(open, slot, partitionLimit);
 
-  const { bucket, index, count } = selectScheduleBucket(open, slot, limit);
+  const capacity = Math.min(bucket.length, affordable);
+  if (capacity < 1) return noOp(TARGET_REASON.API_BUDGET_RESERVED);
+
+  const visit = scheduleBucketVisit(slot, count);
+  const { window, start, size } = selectBucketWindow(bucket, visit, capacity);
   return {
     outcome: TARGET_OUTCOME.MEASURE,
     selection: TARGET_SELECTION.SCHEDULE_SLOT_BUCKET,
-    targets: bucket,
+    targets: window,
     bucketIndex: index,
     bucketCount: count,
+    bucketSize: bucket.length,
+    visit,
+    windowStart: start,
+    windowSize: size,
     slot,
   };
 }
@@ -487,8 +558,10 @@ export function runSelect(argv, { readFile, writeFile } = {}) {
     return 1;
   }
 
+  // `-` (of elke andere onleesbare waarde) blijft `null`; `selectTargets()` maakt daar een rode
+  // `API_QUOTA_UNKNOWN` van. De losse informatieve regel die hier stond is weg: hij zei hetzelfde
+  // als de terminale redencode en suggereerde dat de ronde daarna gewoon doorliep.
   const remainingQuota = parseCounter(args.get('--remaining-quota'));
-  if (remainingQuota === null) console.log('LIVE_GATE_QUOTA_UNKNOWN');
 
   const openPullRequestsComplete = parseCompleteness(args.get('--open-pulls-complete'));
   if (openPullRequestsComplete === null) {
@@ -522,6 +595,12 @@ export function runSelect(argv, { readFile, writeFile } = {}) {
   if (result.selection === TARGET_SELECTION.SCHEDULE_SLOT_BUCKET) {
     console.log(
       `LIVE_GATE_SLOT_${result.slot}_BUCKET_${result.bucketIndex + 1}_OF_${result.bucketCount}`,
+    );
+    // De vaste bucket én het deelvenster daarbinnen, zodat in de runlog terug te lezen is dat de
+    // indeling niet met het quotum meebewoog en waar het venster deze beurt begon.
+    console.log(
+      `LIVE_GATE_BUCKET_SIZE_${result.bucketSize}`
+      + `_VISIT_${result.visit}_WINDOW_${result.windowStart}_COUNT_${result.windowSize}`,
     );
   }
   return 0;

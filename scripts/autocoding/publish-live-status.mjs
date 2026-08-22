@@ -61,7 +61,7 @@ const KNOWN_CODES = new Set([...Object.values(REASON), ...Object.values(PUBLISH_
  * maar evenmin verzwegen: ze worden vervangen door de vaste literal `UNRECOGNISED_REASON`, zodat er
  * nooit een leeg of misleidend "clean" bericht ontstaat.
  */
-export function describeReasons(codes) {
+export function describeReasons(codes, limit = DESCRIPTION_LIMIT) {
   const list = Array.isArray(codes) ? codes : [];
   const known = new Set();
   let sawUnknown = false;
@@ -72,24 +72,32 @@ export function describeReasons(codes) {
   if (sawUnknown) known.add(PUBLISH_ERROR.UNRECOGNISED_REASON);
   if (known.size === 0) known.add(PUBLISH_ERROR.UNSPECIFIED);
 
+  // `limit` is uitsluitend een TESTHAAK op dezelfde functie: de productieaanroep laat hem staan op
+  // `DESCRIPTION_LIMIT`. Hij bestaat zodat de afkap- en telgrens met de ECHTE functie beproefd kan
+  // worden in plaats van met een nabouw.
+  const max = Number.isInteger(limit) && limit > 0 ? limit : DESCRIPTION_LIMIT;
   const sorted = Array.from(known).sort();
   const prefix = 'NO_GO: ';
   const kept = [];
   let length = prefix.length;
   for (const code of sorted) {
     const cost = kept.length === 0 ? code.length : code.length + 1;
-    if (length + cost > DESCRIPTION_LIMIT) break;
+    if (length + cost > max) break;
     kept.push(code);
     length += cost;
   }
-  const dropped = sorted.length - kept.length;
-  if (dropped === 0) return prefix + kept.join(',');
-  // Ruimte vrijmaken voor de "+N"-teller zodat het aantal weggelaten codes altijd zichtbaar blijft.
-  const counter = `+${dropped}`;
-  while (kept.length > 0 && prefix.length + kept.join(',').length + 1 + counter.length > DESCRIPTION_LIMIT) {
-    kept.pop();
-  }
-  return `${prefix}${[...kept, counter].join(',')}`;
+  if (kept.length === sorted.length) return prefix + kept.join(',');
+
+  // De "+N"-teller telt de codes die NIET in het bericht staan, dus verandert hij bij iedere pop.
+  // Hij een keer vooraf berekenen was de fout uit bevinding `3835177564`: elke pop verwijdert nog
+  // een code, dus werd `+1` gemeld terwijl er twee waren weggelaten. De teller kan bovendien zelf
+  // langer worden (`+9` -> `+10`), waardoor de lengtetoets met een verouderde teller rekende. Hij
+  // wordt daarom binnen de lus telkens opnieuw afgeleid uit het WERKELIJKE verschil, en de toets
+  // meet de string die ook echt gepubliceerd wordt.
+  const counterFor = () => `+${sorted.length - kept.length}`;
+  const rendered = () => prefix + [...kept, counterFor()].join(',');
+  while (kept.length > 0 && rendered().length > max) kept.pop();
+  return rendered();
 }
 
 /**
