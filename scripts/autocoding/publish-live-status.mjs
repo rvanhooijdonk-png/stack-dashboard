@@ -279,6 +279,14 @@ export async function publishStatus({ repository, publication, token, fetchImpl 
     || !SHA_RE.test(publication.sha ?? '')) {
     return { ok: false, blocked: PUBLISH_ERROR.HEAD_UNMEASURED };
   }
+  // DEZELFDE REDEN ALS HIERBOVEN VOOR `sha`, MAAR DAN VOOR `context`: deze functie is los
+  // aanroepbaar en de resolvers zijn bewerkbaar. Zonder deze toets zou een `context` met een
+  // ongeldige vorm (leeg, te lang, met een `/` die een ander eindpunt raakt) ongecontroleerd de
+  // POST-body in gaan. GEMINI `3835806621` markeerde precies dit ontbrekende symmetrische
+  // wachterpaar naast de reeds bestaande `sha`- en `state`-toets.
+  if (!STATUS_CONTEXT_RE.test(publication.context ?? '')) {
+    return { ok: false, blocked: PUBLISH_ERROR.STATUS_CONTEXT_INVALID };
+  }
   // DE LAATSTE POORT VÓÓR HET NETWERK. `resolvePublication` en `resolvePendingPublication` kunnen
   // vandaag geen `success` produceren, maar deze functie is los aanroepbaar en de resolvers zijn
   // bewerkbaar. Zonder deze toets zou één regel elders volstaan om weer een herbruikbaar groen

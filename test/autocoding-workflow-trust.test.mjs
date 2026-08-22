@@ -23,15 +23,17 @@ import {
   analyzeWorkflow, structureLines, extractTriggers, extractWriteGrants, extractJobs,
   extractWorkflowRunSources, stripInlineComment, findTrustBoundaryViolations, TRUST_VIOLATION,
   UNTRUSTED_TRIGGERS, TRUSTED_WRITER_TRIGGERS, parseFlowMapping, extractJobConcurrency,
-  extractJobMatrixKeys, isPerPullRequestQueuedWriteJob,
+  extractJobMatrixKeys, isPerPullRequestQueuedWriteJob, isPerMergeGroupQueuedWriteJob,
   extractWorkflowConcurrency, isRepositoryWideQueuedLock, TRUSTED_WRITER_REPOSITORY_LOCK_GROUP,
   TRUSTED_FINALIZER_TRIGGERS, ALLOWED_FINALIZER_WRITE_SCOPES, FINALIZER_REPOSITORY_LOCK_GROUP,
+  TRUSTED_MERGE_GROUP_GATE_TRIGGERS, ALLOWED_MERGE_GROUP_GATE_WRITE_SCOPES,
 } from '../scripts/autocoding/workflow-trust.mjs';
 
 const WORKFLOW_DIR = '.github/workflows';
 const PR_SHIELD = `${WORKFLOW_DIR}/autocoding-shield.yml`;
 const TRUSTED_WRITER = `${WORKFLOW_DIR}/autocoding-shield-live-gate.yml`;
 const TRUSTED_FINALIZER = `${WORKFLOW_DIR}/autocoding-merge-finalizer.yml`;
+const TRUSTED_MERGE_GROUP_GATE = `${WORKFLOW_DIR}/autocoding-merge-group-gate.yml`;
 
 function allWorkflows() {
   return readdirSync(WORKFLOW_DIR)
@@ -56,6 +58,7 @@ function alleViolations(workflows) {
     prShieldPath: PR_SHIELD,
     trustedWriterPath: TRUSTED_WRITER,
     trustedFinalizerPath: TRUSTED_FINALIZER,
+    trustedMergeGroupGatePath: TRUSTED_MERGE_GROUP_GATE,
   });
 }
 
@@ -1464,4 +1467,257 @@ test('F9. de trusted writer draagt GEEN mergescope, de finalizer GEEN statusscop
     Array.from(new Set(finalizer.writeGrants.map((g) => g.scope))),
     ['pull-requests'],
   );
+});
+
+// --- De merge-group-poort (V20 scope-item 1/2) ---------------------------------------------------
+
+const MERGE_GROUP_GATE_ON = ['on:', '  merge_group:', '    types: [checks_requested]'];
+const MERGE_GROUP_GATE_RIJ = [
+  '    concurrency:',
+  '      group: autocoding-merge-group-gate-${{ github.event.merge_group.head_sha }}',
+  '      cancel-in-progress: false',
+];
+
+/**
+ * Bouwt een merge-group-poort. Dezelfde knoppenvorm als `schoneFinalizer`, zodat elke mutatie
+ * hieronder precies één eigenschap verandert en de rest aantoonbaar schoon blijft. Geen matrix en
+ * geen repositorybrede rij: die twee bestaan bij de writer/finalizer omdat meerdere PR's om hetzelfde
+ * gedeelde quotum concurreren; hier is er precies één job per aanleiding en is de merge-group-SHA
+ * zelf al de unieke sleutel.
+ */
+function schoneMergeGroupGate({
+  on = MERGE_GROUP_GATE_ON, scopes = [], rij = MERGE_GROUP_GATE_RIJ,
+  ref = '${{ github.event.repository.default_branch }}', poort = [], jobs = [],
+} = {}) {
+  return [
+    'name: autocoding-merge-group-gate',
+    ...on,
+    'permissions: {}',
+    'jobs:',
+    '  poort:',
+    '    runs-on: ubuntu-latest',
+    '    permissions:',
+    '      contents: read',
+    '      checks: write',
+    ...scopes.map((scope) => `      ${scope}`),
+    ...rij,
+    '    steps:',
+    '      - uses: actions/checkout@v4',
+    '        with:',
+    `          ref: ${ref}`,
+    ...poort,
+    ...jobs,
+  ].join('\n');
+}
+
+/** De overtredingen van één merge-group-gatetekst, met een verder schone shield/writer/finalizer. */
+function mergeGroupGateViolations(text) {
+  return findTrustBoundaryViolations({
+    workflows: [
+      { path: PR_SHIELD, text: SCHONE_SHIELD },
+      { path: TRUSTED_WRITER, text: schoneWriter() },
+      { path: TRUSTED_FINALIZER, text: schoneFinalizer() },
+      { path: TRUSTED_MERGE_GROUP_GATE, text },
+    ],
+    prShieldPath: PR_SHIELD,
+    trustedWriterPath: TRUSTED_WRITER,
+    trustedFinalizerPath: TRUSTED_FINALIZER,
+    trustedMergeGroupGatePath: TRUSTED_MERGE_GROUP_GATE,
+  });
+}
+
+test('G1. een schone merge-group-poort levert geen enkele overtreding op', () => {
+  assert.deepEqual(mergeGroupGateViolations(schoneMergeGroupGate()), []);
+});
+
+test('G2. de merge-group-poort mag UITSLUITEND op `merge_group` draaien', () => {
+  assert.deepEqual(TRUSTED_MERGE_GROUP_GATE_TRIGGERS, ['merge_group']);
+
+  const nietToegestaan = `${TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_TRIGGER_NOT_ALLOWED}:${TRUSTED_MERGE_GROUP_GATE}`;
+  for (const on of [
+    ['on:', '  workflow_dispatch:'],
+    ['on:', '  schedule:', "    - cron: '0 * * * *'"],
+    ['on:', '  push:', '    branches: [main]'],
+    ['on:', '  workflow_run:', '    workflows: [autocoding-shield]', '    types: [completed]'],
+  ]) {
+    assert.ok(mergeGroupGateViolations(schoneMergeGroupGate({ on })).includes(nietToegestaan), on[1]);
+  }
+
+  // Een DIRECT PR-event is bovendien nog een tweede, zwaardere overtreding — precies het defect dat
+  // deze hele grens bewaakt: een PR-actor mag deze definitie nooit zelf kunnen richten.
+  const prEvent = mergeGroupGateViolations(schoneMergeGroupGate({
+    on: ['on:', '  pull_request_target:', '    types: [opened]'],
+  }));
+  assert.ok(prEvent.includes(`${TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_HAS_UNTRUSTED_TRIGGER}:${TRUSTED_MERGE_GROUP_GATE}`));
+  assert.ok(prEvent.includes(`${TRUST_VIOLATION.PULL_REQUEST_TARGET_PRESENT}:${TRUSTED_MERGE_GROUP_GATE}`));
+  assert.ok(prEvent.includes(`${TRUST_VIOLATION.UNTRUSTED_TRIGGER_WITH_WRITE_PERMISSION}:${TRUSTED_MERGE_GROUP_GATE}`));
+
+  assert.ok(mergeGroupGateViolations(schoneMergeGroupGate({ on: ['permissions: {}'] }))
+    .includes(`${TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_HAS_NO_TRIGGER}:${TRUSTED_MERGE_GROUP_GATE}`));
+});
+
+test('G3. `checks: write` bestaat in precies ÉÉN bestand van de repository', () => {
+  const buiten = TRUST_VIOLATION.CHECKS_WRITE_OUTSIDE_MERGE_GROUP_GATE;
+
+  // De writer die er stiekem een checkscope bij neemt, is een tweede weg naar dezelfde vereiste
+  // status en wordt als zodanig afgekeurd.
+  assert.ok(findTrustBoundaryViolations({
+    workflows: [
+      { path: PR_SHIELD, text: SCHONE_SHIELD },
+      { path: TRUSTED_WRITER, text: schoneWriter({ scopes: ['checks: write'] }) },
+      { path: TRUSTED_FINALIZER, text: schoneFinalizer() },
+      { path: TRUSTED_MERGE_GROUP_GATE, text: schoneMergeGroupGate() },
+    ],
+    prShieldPath: PR_SHIELD, trustedWriterPath: TRUSTED_WRITER, trustedFinalizerPath: TRUSTED_FINALIZER,
+    trustedMergeGroupGatePath: TRUSTED_MERGE_GROUP_GATE,
+  }).includes(`${buiten}:${TRUSTED_WRITER}`));
+
+  // En omgekeerd: de merge-group-poort mag geen ANDERE schrijfscope dragen dan `checks`.
+  assert.deepEqual(ALLOWED_MERGE_GROUP_GATE_WRITE_SCOPES, ['checks']);
+  for (const scope of ['contents: write', 'statuses: write', 'pull-requests: write']) {
+    assert.ok(
+      mergeGroupGateViolations(schoneMergeGroupGate({ scopes: [scope] }))
+        .includes(`${TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_WRITE_SCOPE_NOT_ALLOWED}:${TRUSTED_MERGE_GROUP_GATE}`),
+      scope,
+    );
+  }
+  // `statuses: write` op de merge-group-poort is bovendien een overtreding van de ANDERE
+  // concentratieregel (de trusted writer is de enige drager van die scope).
+  assert.ok(
+    mergeGroupGateViolations(schoneMergeGroupGate({ scopes: ['statuses: write'] }))
+      .includes(`${TRUST_VIOLATION.STATUSES_WRITE_OUTSIDE_TRUSTED_WRITER}:${TRUSTED_MERGE_GROUP_GATE}`),
+  );
+  // `pull-requests: write` erbij is eveneens een tweede overtreding — een tweede weg naar de
+  // mergescope die uitsluitend de finalizer mag dragen.
+  assert.ok(
+    mergeGroupGateViolations(schoneMergeGroupGate({ scopes: ['pull-requests: write'] }))
+      .includes(`${TRUST_VIOLATION.PULL_REQUESTS_WRITE_OUTSIDE_FINALIZER}:${TRUSTED_MERGE_GROUP_GATE}`),
+  );
+});
+
+test('G4. de schrijvende job staat per MERGE-GROUP-SHA in een wachtende rij', () => {
+  const perMergeGroup = `${TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_WRITE_JOB_NOT_PER_MERGE_GROUP_QUEUED}:${TRUSTED_MERGE_GROUP_GATE}`;
+
+  for (const rij of [
+    [],
+    // Op een matrixwaarde sleutelen is hier zinloos: er is geen matrix.
+    ['    concurrency:', '      group: autocoding-merge-group-gate-${{ matrix.pr }}', '      cancel-in-progress: false'],
+    // `cancel-in-progress: true` zou een lopende beoordeling kunnen afkappen.
+    ['    concurrency:', '      group: autocoding-merge-group-gate-${{ github.event.merge_group.head_sha }}', '      cancel-in-progress: true'],
+    // Een vaste, repositorybrede groep zou twee VERSCHILLENDE merge-groups elkaar laten blokkeren —
+    // exact het probleem dat de per-PR-rij bij de writer/finalizer voorkomt.
+    ['    concurrency:', '      group: autocoding-merge-group-gate-vast', '      cancel-in-progress: false'],
+    // Elke ANDERE vluchtige `github.*`-verwijzing blijft verboden, ook naast de toegestane sleutel.
+    ['    concurrency:', '      group: autocoding-merge-group-gate-${{ github.event.merge_group.head_sha }}-${{ github.run_id }}', '      cancel-in-progress: false'],
+  ]) {
+    assert.ok(mergeGroupGateViolations(schoneMergeGroupGate({ rij })).includes(perMergeGroup), JSON.stringify(rij));
+  }
+
+  // Twee schrijvende jobs is geen verdeling maar een tweede weg naar dezelfde publicatie.
+  assert.ok(
+    mergeGroupGateViolations(schoneMergeGroupGate({
+      jobs: ['  tweede:', '    permissions:', '      checks: write'],
+    })).includes(`${TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_WRITE_JOB_NOT_UNIQUE}:${TRUSTED_MERGE_GROUP_GATE}`),
+  );
+});
+
+test('isPerMergeGroupQueuedWriteJob() staat uitsluitend de merge-group-SHA toe als sleutel', () => {
+  const job = (group, cancelInProgress = 'false') => ({
+    concurrency: { unparseable: false, group, cancelInProgress, queue: '' },
+  });
+  assert.equal(
+    isPerMergeGroupQueuedWriteJob(job('autocoding-merge-group-gate-${{ github.event.merge_group.head_sha }}')),
+    true,
+  );
+  assert.equal(isPerMergeGroupQueuedWriteJob(null), false);
+  assert.equal(isPerMergeGroupQueuedWriteJob({ concurrency: { unparseable: true } }), false);
+  assert.equal(
+    isPerMergeGroupQueuedWriteJob(job('autocoding-merge-group-gate-${{ github.event.merge_group.head_sha }}', 'true')),
+    false,
+  );
+  assert.equal(isPerMergeGroupQueuedWriteJob(job('autocoding-merge-group-gate-vast')), false);
+  assert.equal(isPerMergeGroupQueuedWriteJob(job('autocoding-merge-group-gate-${{ github.run_id }}')), false);
+  // De toegestane sleutel plus een ANDERE vluchtige verwijzing blijft alsnog verboden — de knip
+  // verwijdert alleen de toegestane substring, niet de hele groep.
+  assert.equal(
+    isPerMergeGroupQueuedWriteJob(job('${{ github.event.merge_group.head_sha }}-${{ github.actor }}')),
+    false,
+  );
+});
+
+test('G5. de merge-group-poort checkt AANTOONBAAR de default branch uit — niets anders', () => {
+  const verkeerd = `${TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_CHECKS_OUT_PR_CODE}:${TRUSTED_MERGE_GROUP_GATE}`;
+
+  for (const ref of [
+    '${{ github.event.merge_group.head_sha }}',
+    'refs/pull/${{ matrix.pr }}/head',
+    '${{ github.head_ref }}',
+    'main',
+  ]) {
+    assert.ok(mergeGroupGateViolations(schoneMergeGroupGate({ ref })).includes(verkeerd), ref);
+  }
+
+  const zonderCheckout = [
+    'name: autocoding-merge-group-gate',
+    ...MERGE_GROUP_GATE_ON,
+    'permissions: {}',
+    'jobs:',
+    '  poort:',
+    '    runs-on: ubuntu-latest',
+    '    permissions:',
+    '      contents: read',
+    '      checks: write',
+    ...MERGE_GROUP_GATE_RIJ,
+  ].join('\n');
+  assert.ok(mergeGroupGateViolations(zonderCheckout).includes(verkeerd));
+});
+
+test('G6. de merge-group-poort leest geen secrets en geen artifacts van een onbevoorrechte run', () => {
+  assert.ok(
+    mergeGroupGateViolations(schoneMergeGroupGate({
+      poort: ['      - env:', '          T: ${{ secrets.MERGE_TOKEN }}'],
+    })).includes(`${TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_USES_SECRETS}:${TRUSTED_MERGE_GROUP_GATE}`),
+  );
+  for (const uses of [
+    'actions/download-artifact@v4',
+    'dawidd6/action-download-artifact@v6',
+    'actions/cache@v4',
+  ]) {
+    assert.ok(
+      mergeGroupGateViolations(schoneMergeGroupGate({ poort: [`      - uses: ${uses}`] }))
+        .includes(`${TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_USES_PR_ARTIFACTS}:${TRUSTED_MERGE_GROUP_GATE}`),
+      uses,
+    );
+  }
+});
+
+test('G7. een ontbrekend merge-group-gatebestand is een overtreding, geen stilte', () => {
+  assert.ok(findTrustBoundaryViolations({
+    workflows: [
+      { path: PR_SHIELD, text: SCHONE_SHIELD },
+      { path: TRUSTED_WRITER, text: schoneWriter() },
+      { path: TRUSTED_FINALIZER, text: schoneFinalizer() },
+    ],
+    prShieldPath: PR_SHIELD, trustedWriterPath: TRUSTED_WRITER, trustedFinalizerPath: TRUSTED_FINALIZER,
+    trustedMergeGroupGatePath: TRUSTED_MERGE_GROUP_GATE,
+  }).includes(`${TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_MISSING}:${TRUSTED_MERGE_GROUP_GATE}`));
+});
+
+test('G8. de gemeten vorm van het werkelijke merge-group-gatebestand is precies de bedoelde', () => {
+  const gate = analyzeWorkflow(readFileSync(TRUSTED_MERGE_GROUP_GATE, 'utf8'));
+  assert.deepEqual(gate.triggers, ['merge_group']);
+  assert.equal(gate.triggersUnparseable, false);
+  assert.equal(gate.usesSecrets, false);
+  assert.equal(gate.usesArtifactsOrCache, false);
+  assert.deepEqual(gate.workflowLevelWriteGrants, []);
+  // Precies één schrijvende job, en zijn enige scope is `checks`.
+  const schrijvend = gate.jobs.filter((j) => j.writeGrants.length > 0);
+  assert.deepEqual(schrijvend.map((j) => j.id), ['poort']);
+  assert.deepEqual(schrijvend[0].writeGrants.map((g) => g.scope), ['checks']);
+  assert.equal(isPerMergeGroupQueuedWriteJob(schrijvend[0]), true);
+  // Elke checkout gaat naar de default branch — er is er geen enkele die iets anders doet.
+  assert.ok(gate.checkoutRefs.length > 0);
+  for (const ref of gate.checkoutRefs) {
+    assert.equal(ref, '${{ github.event.repository.default_branch }}');
+  }
 });

@@ -271,7 +271,7 @@ jobs:
             local doel="$1"
             rm -rf "$doel"
             mkdir -p "$doel"
-            local evidence=true checks=true rc=0
+            local evidence=true checks=true rules=true rc=0
 
             gh api "repos/$REPOSITORY/pulls/$number" > "$doel/pr.json" || return 1
             head_sha="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const s=((p||{}).head||{}).sha;if(!/^[0-9a-f]{40}$/.test(s||""))process.exit(1);process.stdout.write(s)' "$doel/pr.json")" || return 1
@@ -279,10 +279,20 @@ jobs:
 
             # Het merge-queue-bewijs (V19, Codex `3835523940`): of de BASE van deze pull request een
             # actieve `merge_queue`-regel draagt. Dit LEEST alleen bestaand bewijs — er wordt hier
-            # geen ruleset of branch-protection aangemaakt of gewijzigd. Onleesbare base of een
-            # mislukte meting maakt de hele meting onleesbaar, dezelfde lijn als bij `head_sha`.
+            # geen ruleset of branch-protection aangemaakt of gewijzigd. Onleesbare base maakt de hele
+            # meting onleesbaar, dezelfde lijn als bij `head_sha`.
+            #
+            # V20 — scope-item 6 (CLAUDE4-review): dit liep tot dan toe via één ONGEBONDEN `gh api`,
+            # als enige lijst zonder de begrenzing die de vijf bewijslijsten en de check-runs al hadden.
+            # Nu dezelfde begrensde lees-lus en dezelfde truncatiedetectie: een volle laatste pagina
+            # zet `rules=false`, en `finalize-merge.mjs` behandelt dat expliciet als onvolledig bewijs
+            # in plaats van als een branch zonder regels.
             base_ref="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const r=((p||{}).base||{}).ref;if(typeof r!=="string"||r.length===0)process.exit(1);process.stdout.write(r)' "$doel/pr.json")" || return 1
-            gh api "repos/$REPOSITORY/rules/branches/$base_ref" > "$doel/merge-queue-rules.json" || return 1
+            gh_bounded_pages "repos/$REPOSITORY/rules/branches/$base_ref" \
+              "$doel/merge-queue-rules.json" "$GH_BOUNDED_RULES_PAGES" "$doel/pages-merge-queue-rules"
+            rc=$?
+            if [ "$rc" -eq 2 ]; then rules=false; fi
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then return 1; fi
 
             for endpoint in \
               "pulls/$number/commits:pr-commits" \
@@ -310,6 +320,7 @@ jobs:
 
             printf '%s' "$evidence" > "$doel/evidence-complete"
             printf '%s' "$checks" > "$doel/checks-complete"
+            printf '%s' "$rules" > "$doel/merge-queue-rules-complete"
             return 0
           }
 

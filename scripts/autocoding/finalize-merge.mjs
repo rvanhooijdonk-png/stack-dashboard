@@ -68,6 +68,15 @@ const SHA_RE = /^[0-9a-f]{40}$/;
 const REPOSITORY_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 const CHECK_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,127}$/;
 const REF_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
+const MERGE_ASYNC_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Pagina's van `rules/branches/{base_ref}` per meting (V20, scope-item 6). Spiegelbeeld van
+ * `GH_BOUNDED_RULES_PAGES` in `gh-bounded-pages.sh`, zoals `LIST_PAGE_BUDGET` en `CHECKS_PAGE_BUDGET`
+ * dat al waren voor hun eigen begrensde lijsten. Dit eindpunt is uniek voor de finalizer — geen
+ * andere script gebruikt het — dus staat de constante hier en niet in `select-live-gate-targets.mjs`.
+ */
+const MERGE_QUEUE_RULES_PAGE_BUDGET = 4;
 
 export const MERGE_FINALIZER_SCHEMA = 'AUTOCODING_MERGE_FINALIZER_V1';
 
@@ -89,7 +98,7 @@ export const ALLOWED_MERGE_METHODS = Object.freeze(['merge', 'squash', 'rebase']
 /** De sleutels die het finalizerblok in de policy mag dragen. Alles daarbuiten is UNSAFE. */
 const MERGE_FINALIZER_FIELDS = new Set([
   'schema', 'merge_method', 'allowed_base_refs', 'allowed_builder_actors',
-  'required_checks', 'candidate_limit',
+  'required_checks', 'required_check_app_id', 'candidate_limit',
 ]);
 
 /** De bovengrens op `candidate_limit`. Zie `finalizerRequestBudget` voor de rekensom erachter. */
@@ -115,7 +124,22 @@ export const FINALIZE_REASON = Object.freeze({
   BASE_UNMEASURED: 'BASE_UNMEASURED',
   BASE_REF_NOT_ALLOWED: 'BASE_REF_NOT_ALLOWED',
   MERGE_QUEUE_RULES_UNREADABLE: 'MERGE_QUEUE_RULES_UNREADABLE',
+  // V20 — scope-item 6 (CLAUDE4-review): `rules/branches/{base_ref}` is nu net als de vijf
+  // bewijslijsten en de check-runs begrensd gepagineerd. Een volle laatste pagina levert géén tweede
+  // verzoek op maar zet deze reden: een afgekapte regelset ziet er zonder dit veld uit als een branch
+  // zonder regels, en dat is precies het `merge_queue`-bewijs dat scope-item 6 moet dekken.
+  MERGE_QUEUE_RULES_INCOMPLETE: 'MERGE_QUEUE_RULES_INCOMPLETE',
   SERVER_MERGE_QUEUE_PROOF_MISSING: 'SERVER_MERGE_QUEUE_PROOF_MISSING',
+  // V20 — scope-item 3 (CLAUDE4-review): de inschrijvingsvoorwaarde is nu ÉÉN atomair gemeten
+  // conjunctie op DEZELFDE `rules/branches`-meting: een actieve `merge_queue`-regel MET de
+  // mergemethode van de policy, PLUS een actieve `required_status_checks`-regel die ELKE vereiste
+  // check dekt, PLUS — scope-item 5 — een `integration_id` per context die aan de gepinde
+  // producent-app bindt. Ontbreekt of wijkt één van de vier, dan is de conjunctie zelf onwaar en
+  // volgt er geen inschrijving; deze drie redenen dragen WELK deel er ontbrak, niet alleen dát.
+  MERGE_QUEUE_METHOD_MISMATCH: 'MERGE_QUEUE_METHOD_MISMATCH',
+  REQUIRED_STATUS_CHECKS_RULE_MISSING: 'REQUIRED_STATUS_CHECKS_RULE_MISSING',
+  REQUIRED_STATUS_CHECKS_CONTEXT_MISSING: 'REQUIRED_STATUS_CHECKS_CONTEXT_MISSING',
+  REQUIRED_CHECK_APP_ID_MISMATCH: 'REQUIRED_CHECK_APP_ID_MISMATCH',
   BUILDER_ACTOR_NOT_ALLOWED: 'BUILDER_ACTOR_NOT_ALLOWED',
   TASK_ID_UNMEASURED: 'TASK_ID_UNMEASURED',
   EVIDENCE_INCOMPLETE: 'EVIDENCE_INCOMPLETE',
@@ -156,36 +180,70 @@ export const FINALIZE_ERROR = Object.freeze({
   MERGE_REJECTED: 'MERGE_REJECTED',
   MERGE_TRANSPORT_ERROR: 'MERGE_TRANSPORT_ERROR',
   MERGE_STATUS_UNEXPECTED: 'MERGE_STATUS_UNEXPECTED',
+  // V20 — CODEX/CLAUDE4-bevinding: een 200/202 op `merge-async` is op zichzelf GEEN bewijs van
+  // inschrijving. Het HTTP-statusnummer zegt alleen dat GitHub het VERZOEK heeft aanvaard; wat er
+  // werkelijk is gebeurd staat uitsluitend in het LICHAAM (`status`/`details`), en dat lichaam wordt
+  // vanaf hier gelezen en getoetst in plaats van genegeerd.
+  MERGE_RESPONSE_INVALID: 'MERGE_RESPONSE_INVALID',
+  MERGE_RESULT_NOT_ENQUEUED: 'MERGE_RESULT_NOT_ENQUEUED',
+  MERGE_RESULT_MISMATCH: 'MERGE_RESULT_MISMATCH',
+  MERGE_POLL_EXHAUSTED: 'MERGE_POLL_EXHAUSTED',
+  MERGE_POLL_TRANSPORT_ERROR: 'MERGE_POLL_TRANSPORT_ERROR',
 });
+
+/**
+ * De gesloten uitkomstwaarden van `status` in het lichaam van `merge-async` en
+ * `merge-async/{uuid}` — precies de vier die de API-documentatie noemt. Een vijfde waarde is geen
+ * nieuwe status maar een onleesbaar lichaam.
+ */
+const MERGE_ASYNC_STATUS = Object.freeze({
+  PENDING: 'pending',
+  ENQUEUED: 'enqueued',
+  MERGED: 'merged',
+  FAILED: 'failed',
+});
+
+/**
+ * Hoogstens dit aantal `GET .../merge-async/{uuid}`-pogingen NA het eerste verzoek, wanneer het
+ * lichaam van dat eerste verzoek nog `pending` meldt. Begrensd: dit bestand kent geen wachtlus
+ * zonder bovengrens, op geen enkel pad. Wordt de grens bereikt zonder terminale status, dan is de
+ * uitkomst `MERGE_POLL_EXHAUSTED` — geen aanname over wat er daarna gebeurt.
+ */
+const MERGE_ASYNC_POLL_BUDGET = 3;
 
 /**
  * Het aantal API-verzoeken van ÉÉN volledige meting van één kandidaat:
  *
  *   1  `pulls/{n}`
  *   1  `git/commits/{sha}`
- *   1  `rules/branches/{base_ref}` — het merge-queue-bewijs (V19, Codex `3835523940`)
+ *   4  `rules/branches/{base_ref}` maal `MERGE_QUEUE_RULES_PAGE_BUDGET` pagina's — het
+ *      merge-queue-bewijs (V19, Codex `3835523940`; sinds V20 zelf ook begrensd gepagineerd,
+ *      scope-item 6)
  *  20  vijf bewijslijsten maal `LIST_PAGE_BUDGET` pagina's
  *   4  `commits/{sha}/check-runs` maal `CHECKS_PAGE_BUDGET` pagina's
  *  --
- *  27
+ *  30
  */
-export const FINALIZER_MEASUREMENT_REQUEST_BUDGET = 1 + 1 + 1 + (5 * LIST_PAGE_BUDGET)
-  + CHECKS_PAGE_BUDGET;
+export const FINALIZER_MEASUREMENT_REQUEST_BUDGET = 1 + 1 + MERGE_QUEUE_RULES_PAGE_BUDGET
+  + (5 * LIST_PAGE_BUDGET) + CHECKS_PAGE_BUDGET;
 
 /**
  * Wat één kandidaat hoogstens kost: TWEE volledige metingen — de beslissing en de hermeting vlak
- * vóór het effect — plus hoogstens één merge-PUT. De tweede meting staat voluit in de som en niet
- * als "alleen bij GO": het budget moet het duurste pad dragen, en dat is het pad dat werkelijk tot
- * een merge komt.
+ * vóór het effect — plus hoogstens één merge-PUT plus, sinds V20, hoogstens `MERGE_ASYNC_POLL_BUDGET`
+ * pollpogingen op het lichaam van dat verzoek (CODEX/CLAUDE4: een 202 alleen is geen bewijs van
+ * inschrijving, het lichaam moet terminaal `enqueued` worden gelezen). De tweede meting staat voluit
+ * in de som en niet als "alleen bij GO": het budget moet het duurste pad dragen, en dat is het pad
+ * dat werkelijk tot een merge komt.
  */
-export const FINALIZER_PER_CANDIDATE_REQUEST_BUDGET = (2 * FINALIZER_MEASUREMENT_REQUEST_BUDGET) + 1;
+export const FINALIZER_PER_CANDIDATE_REQUEST_BUDGET = (2 * FINALIZER_MEASUREMENT_REQUEST_BUDGET) + 1
+  + MERGE_ASYNC_POLL_BUDGET;
 
 /**
  * De begroting van een hele finalizerronde, inclusief de kandidatenlijst die eraan voorafgaat. Bij
- * `CANDIDATE_LIMIT_MAX` kandidaten is dat 4 + 25 × 55 = 1379, en dat past NIET binnen het gedeelde
+ * `CANDIDATE_LIMIT_MAX` kandidaten is dat 4 + 25 × 64 = 1604, en dat past NIET binnen het gedeelde
  * uurquotum minus reserve. Dat is geen ontwerpfout maar precies waarom de aanroeper deze functie
  * afmeet tegen het werkelijk resterende quotum vóór hij begint: `candidate_limit` in de policy staat
- * op 5 (4 + 5 × 55 = 279) en een hogere waarde moet zichzelf kunnen betalen op het moment zelf.
+ * op 5 (4 + 5 × 64 = 324) en een hogere waarde moet zichzelf kunnen betalen op het moment zelf.
  */
 export function finalizerRequestBudget(candidateCount) {
   const count = Number.isInteger(candidateCount) && candidateCount > 0 ? candidateCount : 0;
@@ -248,6 +306,12 @@ export function assertMergeFinalizerPolicySafe(policy) {
     seen.add(name);
     if (isNonEmptyString(diagnostic) && name === diagnostic) fail();
   }
+
+  // V20 — scope-item 5 (CLAUDE4-review): een contextnaam ALLEEN is geen bewijs. Elke publiceerder die
+  // een check run met deze naam kan aanmaken zou hem anders kunnen laten voldoen — een contextnaam is
+  // geen namespace. `required_check_app_id` bindt elke vereiste check aan de PRODUCENT-app die de
+  // ruleset zelf ook noemt (`integration_id`), niet alleen aan de tekst van zijn naam.
+  if (!Number.isInteger(cfg.required_check_app_id) || cfg.required_check_app_id <= 0) fail();
 }
 
 /**
@@ -322,10 +386,91 @@ export function resolveRequiredChecks(checkRuns, requiredNames, headSha) {
  * toepassing zijn, ongeacht de bron. Er wordt hier niets over de rest van die regels beoordeeld —
  * dat is de taak van GitHub zelf op inschrijfmoment — alleen of het TYPE `merge_queue` erbij zit.
  * Geen array, of een leeg antwoord, betekent: geen bewijs, en dus geen inschrijving.
+ *
+ * `rules` is hier al de PLATTE lijst van regels — de aanroeper heeft `flattenPages` al toegepast op
+ * de ruwe array-van-pagina's die `gh_bounded_pages` teruglevert (V20, scope-item 6). Deze functie
+ * kent de paginavorm zelf niet.
  */
 export function hasActiveMergeQueueRule(rules) {
   if (!Array.isArray(rules)) return false;
   return rules.some((rule) => rule?.type === 'merge_queue');
+}
+
+/**
+ * Levert de `merge_method` van de eerste ACTIEVE `merge_queue`-regel, of `''` als die er niet is of
+ * geen leesbare methode draagt. GitHub levert deze in hoofdletters (`MERGE`/`SQUASH`/`REBASE`); de
+ * vergelijking met de policy (kleine letters) gebeurt hoofdletterongevoelig door de aanroeper.
+ */
+function activeMergeQueueMethod(rules) {
+  const regel = rules.find((rule) => rule?.type === 'merge_queue');
+  return typeof regel?.parameters?.merge_method === 'string' ? regel.parameters.merge_method : '';
+}
+
+/**
+ * Bouwt de context→regel-afbeelding van ALLE ACTIEVE `required_status_checks`-regels in de gemeten
+ * regelset. Meerdere regels van dit type worden samengevoegd — GitHub staat dat toe, en elke regel
+ * draagt zijn eigen contexten — dus een context die op een ANDERE regel dan de eerste staat telt hier
+ * evengoed mee. Een niet-tekstuele of lege contextnaam wordt genegeerd: dat is geen bruikbare regel,
+ * geen valse dekking.
+ */
+function requiredStatusCheckContexts(rules) {
+  const contexten = new Map();
+  for (const rule of rules) {
+    if (rule?.type !== 'required_status_checks') continue;
+    const lijst = rule?.parameters?.required_status_checks;
+    if (!Array.isArray(lijst)) continue;
+    for (const item of lijst) {
+      if (typeof item?.context !== 'string' || item.context.length === 0) continue;
+      contexten.set(item.context, item);
+    }
+  }
+  return contexten;
+}
+
+/**
+ * DE ATOMAIRE INSCHRIJVINGSVOORWAARDE (V20, scope-item 3 + scope-item 5). Eén conjunctie, gemeten op
+ * DEZELFDE regelset als `hasActiveMergeQueueRule`, nooit op een tweede of latere meting:
+ *
+ *   1. een actieve `merge_queue`-regel met de mergemethode van de policy (hoofdletterongevoelig);
+ *   2. een actieve `required_status_checks`-regel die ELKE naam uit `cfg.required_checks` dekt;
+ *   3. per gedekte context een `integration_id` die exact `cfg.required_check_app_id` is.
+ *
+ * Zonder deze drie extra eisen zou een repository die alleen de KALE `merge_queue`-regel draagt —
+ * zonder required-status-checks-regel, of met een gedekte context van een WILLEKEURIGE andere
+ * publiceerder — door de oude, smallere toets heen komen. Een contextnaam is geen namespace: elke
+ * app die een check run met die naam kan aanmaken zou anders aan de vereiste kunnen voldoen zonder
+ * ooit de echte `autocoding-shield`-workflow te hebben gedraaid.
+ *
+ * Cumulatief zoals de rest van dit bestand: elke ontbrekende of foute deeleis krijgt zijn eigen
+ * redencode, in plaats van te stoppen bij de eerste.
+ */
+function evaluateEnqueuePrecondition(rules, cfg) {
+  const reasons = new Set();
+  if (!hasActiveMergeQueueRule(rules)) {
+    reasons.add(FINALIZE_REASON.SERVER_MERGE_QUEUE_PROOF_MISSING);
+  } else {
+    const methode = activeMergeQueueMethod(rules);
+    if (methode.toUpperCase() !== cfg.merge_method.toUpperCase()) {
+      reasons.add(FINALIZE_REASON.MERGE_QUEUE_METHOD_MISMATCH);
+    }
+  }
+
+  const contexten = requiredStatusCheckContexts(rules);
+  if (contexten.size === 0) {
+    reasons.add(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_RULE_MISSING);
+  } else {
+    for (const naam of cfg.required_checks) {
+      const item = contexten.get(naam);
+      if (!item) {
+        reasons.add(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_CONTEXT_MISSING);
+        continue;
+      }
+      if (!Number.isInteger(item.integration_id) || item.integration_id !== cfg.required_check_app_id) {
+        reasons.add(FINALIZE_REASON.REQUIRED_CHECK_APP_ID_MISMATCH);
+      }
+    }
+  }
+  return reasons;
 }
 
 function digest(value) {
@@ -375,8 +520,27 @@ function canonicalMeasurement(measurement) {
   const checks = normaliseCheckRuns(measurement?.checkRuns)
     .map((r) => `${r.name}|${r.head_sha}|${r.status}|${r.conclusion}`)
     .sort();
+  // V20 — scope-item 3/5: de vingerafdruk draagt niet langer alleen het TYPE van elke regel, maar ook
+  // exact de velden waarop de atomaire inschrijvingsvoorwaarde rust — de mergemethode van de
+  // `merge_queue`-regel, en per context van elke `required_status_checks`-regel zijn
+  // `integration_id`. Zou dat wegvallen, dan zou een regelset die alleen van METHODE of PRODUCENT-app
+  // verandert — zonder het TYPE te veranderen — buiten de driftvergelijking blijven, terwijl precies
+  // dat de atomaire voorwaarde omdraait.
   const mergeQueueRules = Array.isArray(measurement?.mergeQueueRules)
-    ? measurement.mergeQueueRules.map((rule) => tekst(rule?.type)).sort()
+    ? flattenPages(measurement.mergeQueueRules).map((rule) => {
+      if (rule?.type === 'merge_queue') {
+        return `merge_queue|${tekst(rule?.parameters?.merge_method)}`;
+      }
+      if (rule?.type === 'required_status_checks') {
+        const lijst = Array.isArray(rule?.parameters?.required_status_checks)
+          ? rule.parameters.required_status_checks : [];
+        const contexten = lijst
+          .map((item) => `${tekst(item?.context)}:${getal(item?.integration_id)}`)
+          .sort().join(',');
+        return `required_status_checks|${contexten}`;
+      }
+      return `${tekst(rule?.type)}|`;
+    }).sort()
     : null;
 
   return {
@@ -398,6 +562,7 @@ function canonicalMeasurement(measurement) {
     },
     evidence_complete: measurement?.evidenceComplete === true,
     checks_complete: measurement?.checksComplete === true,
+    merge_queue_rules_complete: measurement?.mergeQueueRulesComplete === true,
     reviews: opId(reviews),
     review_comments: opId(reviewComments),
     issue_comments: opId(issueComments),
@@ -494,10 +659,21 @@ export function resolveFinalization({ pullRequest, measurement, policy }) {
   // serverkant autoriteit die de merge later herbeoordeelt, en blijft een inschrijving net zo'n
   // ongedekte belofte als de klassieke directe merge dat was. Dit is geen ruleset die hier wordt
   // aangemaakt — alleen gelezen bewijs dat er elders al één bestaat.
+  //
+  // Sinds V20 (scope-item 6) is deze lijst zelf ook begrensd gepagineerd, net als de vijf
+  // bewijslijsten en de check-runs: `measurement.mergeQueueRules` is een array-van-pagina's, en moet
+  // eerst via `flattenPages` plat worden gemaakt. Een afkapping op de laatst toegestane pagina is
+  // GEEN "geen regels" — dat zou een branch met genoeg actieve rulesets kunnen laten voorkomen als
+  // een branch zonder merge-queue-bewijs, en dus fail-open zijn. `mergeQueueRulesComplete` vangt dat.
   if (!Array.isArray(measurement?.mergeQueueRules)) {
     add(FINALIZE_REASON.MERGE_QUEUE_RULES_UNREADABLE);
-  } else if (!hasActiveMergeQueueRule(measurement.mergeQueueRules)) {
-    add(FINALIZE_REASON.SERVER_MERGE_QUEUE_PROOF_MISSING);
+  } else {
+    if (measurement?.mergeQueueRulesComplete !== true) {
+      add(FINALIZE_REASON.MERGE_QUEUE_RULES_INCOMPLETE);
+    }
+    for (const r of evaluateEnqueuePrecondition(flattenPages(measurement.mergeQueueRules), cfg)) {
+      add(r);
+    }
   }
 
   if (!cfg.allowed_builder_actors.includes(context.builder_actor)) {
@@ -584,6 +760,108 @@ export function resolveFinalization({ pullRequest, measurement, policy }) {
  * De policyweigering staat vóór ELK netwerkverkeer en vóór elke andere validatie. Met de vlaggen op
  * `false` doet een aanroep dus nul verzoeken, ook wanneer alle argumenten kloppen.
  */
+/**
+ * Leest en toetst het lichaam van `merge-async`/`merge-async/{uuid}` tegen het EXACTE schema uit de
+ * primaire documentatie. `null` betekent: geen bruikbaar lichaam — nooit een gok naar de dichtstbije
+ * bekende vorm.
+ */
+function parseMergeAsyncBody(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (!Object.values(MERGE_ASYNC_STATUS).includes(raw.status)) return null;
+  const details = raw.details;
+  if (details !== undefined && details !== null
+    && (typeof details !== 'object' || Array.isArray(details))) return null;
+  return {
+    status: raw.status,
+    uuid: typeof details?.uuid === 'string' ? details.uuid : '',
+    mergeAction: typeof details?.merge_action === 'string' ? details.merge_action : '',
+    expectedHeadSha: typeof details?.expected_head_sha === 'string' ? details.expected_head_sha : '',
+  };
+}
+
+/**
+ * Of een TERMINAAL lichaam echt een inschrijving in de wachtrij bewijst. Drie eisen tegelijk, geen
+ * enkele optioneel: de status is letterlijk `enqueued`, de actie is letterlijk `merge_queue` — nooit
+ * `direct_merge` of `default`, die zouden een directe merge kunnen betekenen — en de verwachte head
+ * in het lichaam is EXACT de sha die is aangevraagd. `merged` en `failed` zijn met opzet UITGESLOTEN
+ * van dit predicaat: al gemerged is geen bewezen wachtrij-inschrijving, ook al is het geen fout.
+ */
+function isProvenQueueEnrollment(body, sha) {
+  return body?.status === MERGE_ASYNC_STATUS.ENQUEUED
+    && body.mergeAction === 'merge_queue'
+    && SHA_RE.test(body.expectedHeadSha)
+    && body.expectedHeadSha === sha;
+}
+
+/**
+ * Eén poging om het resultaat van een lopende asynchrone merge op te halen. Retourneert een gesloten
+ * vorm — nooit de ruwe fetch-uitzondering of -tekst — zodat de aanroeper daar niet opnieuw op hoeft
+ * te controleren.
+ */
+async function fetchMergeAsyncResult({
+  repository, pullRequest, uuid, token, doFetch,
+}) {
+  let response;
+  try {
+    response = await doFetch(
+      `https://api.github.com/repos/${repository}/pulls/${pullRequest}/merge-async/${uuid}`,
+      {
+        method: 'GET',
+        headers: {
+          accept: 'application/vnd.github+json',
+          authorization: `Bearer ${token}`,
+          'user-agent': 'autocoding-shield',
+          'x-github-api-version': '2022-11-28',
+        },
+      },
+    );
+  } catch {
+    return { kind: 'transport' };
+  }
+  if (response?.status !== 200) return { kind: 'transport' };
+  let raw;
+  try {
+    raw = await response.json();
+  } catch {
+    return { kind: 'invalid' };
+  }
+  const body = parseMergeAsyncBody(raw);
+  if (!body) return { kind: 'invalid' };
+  return { kind: 'body', body };
+}
+
+/**
+ * HET EFFECT. Precies één schrijvend verzoek — de `PUT`— gevolgd door hoogstens
+ * `MERGE_ASYNC_POLL_BUDGET` LEZENDE pollpogingen op hetzelfde asynchrone verzoek. Geen ander
+ * `merge_action` is ooit toegestaan — niet `direct_merge`, niet `default` — want beide zouden GitHub
+ * kunnen laten kiezen voor een directe merge buiten de wachtrij om, en dat is precies de aanroep die
+ * V19 sluit (zie de kopnotitie, Codex `3835523940`). `resolveFinalization` heeft vóór dit punt al
+ * bewezen dat de base van deze pull request een actieve `merge_queue`-regel draagt; zonder dat bewijs
+ * is de uitkomst allang `NO_GO` en wordt deze functie niet met een GO-resultaat aangeroepen.
+ *
+ * V20 — CODEX/CLAUDE4-bevinding: een 200/202 op de eerste aanroep is GEEN bewijs van inschrijving,
+ * alleen bewijs dat GitHub het VERZOEK heeft aanvaard. Het echte antwoord staat in het LICHAAM
+ * (`status`/`details`), en de documentatie laat zien dat het eerste lichaam vaak nog `"pending"` is
+ * — geen `"enqueued"`. Dit bestand leest dat lichaam nu VOLLEDIG en polt, begrensd, door tot een
+ * TERMINALE status (`enqueued`/`merged`/`failed`) voordat het een uitspraak doet. `MERGE_QUEUED`
+ * volgt uitsluitend uit `isProvenQueueEnrollment`: een terminale `"enqueued"` met de juiste
+ * `merge_action` en een `expected_head_sha` die exact de aangevraagde sha is. `failed`, `merged`,
+ * een uitgeput pollbudget, of een lichaam dat niet aan het schema voldoet, leveren ALLEMAAL een
+ * NO_GO — geen van die vormen wordt ooit als succes gelezen.
+ *
+ * Wat er NIET in het lichaam van de PUT mag, en waarom:
+ *
+ *   - een BRANCHNAAM. Een branch beweegt; tussen beslissing en aanroep kan er een commit bij zijn
+ *     gekomen en dan schrijft GitHub iets in de wachtrij wat niemand heeft gezien;
+ *   - een AFGEKORTE SHA. Zeven tekens zijn geen identiteit maar een prefix, en GitHub zou hem
+ *     weigeren of — erger — oplossen;
+ *   - een SHA UIT EEN EVENTPAYLOAD. Die is bezorgd, niet gemeten.
+ *
+ * De `sha` uit `resolveFinalization` is de VOLLEDIGE, zelf gemeten head, en bindt de inschrijving
+ * aan exact die commit. Elke HTTP-statuscode buiten 200/202 blijft TERMINAAL zoals voorheen — er is
+ * op die codes geen retrylus. De pollgrens hierboven geldt uitsluitend voor het LEZEN van het
+ * resultaat van een reeds aanvaard verzoek, niet voor het opnieuw INDIENEN van een geweigerd verzoek.
+ */
 export async function mergePullRequest({
   repository, pullRequest, sha, mergeMethod, policy, token, fetchImpl,
 }) {
@@ -609,10 +887,13 @@ export async function mergePullRequest({
     return { ok: false, blocked: FINALIZE_ERROR.MERGE_METHOD_NOT_ALLOWED, requests: 0 };
   }
 
+  const doFetch = fetchImpl ?? globalThis.fetch;
+  if (typeof doFetch !== 'function') {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_TRANSPORT_ERROR, requests: 0 };
+  }
+
   let response;
   try {
-    const doFetch = fetchImpl ?? globalThis.fetch;
-    if (typeof doFetch !== 'function') throw new Error(FINALIZE_ERROR.MERGE_TRANSPORT_ERROR);
     response = await doFetch(
       `https://api.github.com/repos/${repository}/pulls/${pullRequest}/merge-async`,
       {
@@ -633,10 +914,6 @@ export async function mergePullRequest({
     return { ok: false, blocked: FINALIZE_ERROR.MERGE_TRANSPORT_ERROR, requests: 1 };
   }
   const status = response?.status ?? 0;
-  // 200 — al gemerged of al ingeschreven; 202 — de inschrijving is aanvaard en loopt op de
-  // achtergrond verder. Beide zijn voor deze finalizer een geslaagd effect: het werkelijke mergen is
-  // vanaf hier aan GitHubs wachtrij, niet meer aan dit verzoek.
-  if (status === 200 || status === 202) return { ok: true, status, requests: 1 };
   if (status === 400) return { ok: false, blocked: FINALIZE_ERROR.MERGE_NOT_READY, status, requests: 1 };
   if (status === 403) return { ok: false, blocked: FINALIZE_ERROR.MERGE_FORBIDDEN, status, requests: 1 };
   if (status === 404) {
@@ -646,7 +923,55 @@ export async function mergePullRequest({
     return { ok: false, blocked: FINALIZE_ERROR.MERGE_ALREADY_QUEUED, status, requests: 1 };
   }
   if (status === 422) return { ok: false, blocked: FINALIZE_ERROR.MERGE_REJECTED, status, requests: 1 };
-  return { ok: false, blocked: FINALIZE_ERROR.MERGE_STATUS_UNEXPECTED, status, requests: 1 };
+  if (status !== 200 && status !== 202) {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_STATUS_UNEXPECTED, status, requests: 1 };
+  }
+
+  let raw;
+  try {
+    raw = await response.json();
+  } catch {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESPONSE_INVALID, status, requests: 1 };
+  }
+  let body = parseMergeAsyncBody(raw);
+  if (!body) {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESPONSE_INVALID, status, requests: 1 };
+  }
+
+  let requests = 1;
+  if (body.status === MERGE_ASYNC_STATUS.PENDING) {
+    if (!MERGE_ASYNC_UUID_RE.test(body.uuid)) {
+      return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESPONSE_INVALID, status, requests };
+    }
+    let terminal = false;
+    for (let poging = 0; poging < MERGE_ASYNC_POLL_BUDGET && !terminal; poging += 1) {
+      const uitkomst = await fetchMergeAsyncResult({
+        repository, pullRequest, uuid: body.uuid, token, doFetch,
+      });
+      requests += 1;
+      if (uitkomst.kind === 'transport') {
+        return { ok: false, blocked: FINALIZE_ERROR.MERGE_POLL_TRANSPORT_ERROR, status, requests };
+      }
+      if (uitkomst.kind === 'invalid') {
+        return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESPONSE_INVALID, status, requests };
+      }
+      body = uitkomst.body;
+      terminal = body.status !== MERGE_ASYNC_STATUS.PENDING;
+    }
+    if (!terminal) {
+      return { ok: false, blocked: FINALIZE_ERROR.MERGE_POLL_EXHAUSTED, status, requests };
+    }
+  }
+
+  if (isProvenQueueEnrollment(body, sha)) {
+    return { ok: true, status, requests, effect: 'MERGE_QUEUED' };
+  }
+  if (body.status === MERGE_ASYNC_STATUS.ENQUEUED) {
+    // Terminaal `enqueued`, maar de actie of de head wijkt af van wat is aangevraagd — een divergent
+    // antwoord telt niet als bewezen inschrijving van DEZE aanvraag.
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESULT_MISMATCH, status, requests };
+  }
+  return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESULT_NOT_ENQUEUED, status, requests };
 }
 
 /** Vlaggen zonder waarde. Hun POSITIE in argv mag niets aan de betekenis van de rest veranderen. */
@@ -714,10 +1039,10 @@ export const MEASUREMENT_FILES = Object.freeze({
 });
 
 /**
- * Leest één meting uit een rawmap. `evidenceComplete` en `checksComplete` komen uit vlagbestanden
- * die de workflow schrijft op grond van de exitcode van `gh_bounded_pages`: alleen de letterlijke
- * tekst `true` telt als volledig. Ontbreekt het bestand, of staat er iets anders in, dan is de
- * meting onvolledig — nooit stilzwijgend volledig.
+ * Leest één meting uit een rawmap. `evidenceComplete`, `checksComplete` en `mergeQueueRulesComplete`
+ * komen uit vlagbestanden die de workflow schrijft op grond van de exitcode van `gh_bounded_pages`:
+ * alleen de letterlijke tekst `true` telt als volledig. Ontbreekt het bestand, of staat er iets
+ * anders in, dan is de meting onvolledig — nooit stilzwijgend volledig.
  */
 export function readMeasurement(rawDir, readFile) {
   const measurement = {};
@@ -733,6 +1058,7 @@ export function readMeasurement(rawDir, readFile) {
   };
   measurement.evidenceComplete = vlag('evidence-complete');
   measurement.checksComplete = vlag('checks-complete');
+  measurement.mergeQueueRulesComplete = vlag('merge-queue-rules-complete');
   return measurement;
 }
 

@@ -93,6 +93,26 @@ export const FINALIZER_REPOSITORY_LOCK_GROUP = 'autocoding-merge-finalizer-repos
  */
 const DEFAULT_BRANCH_REF_RE = /^\$\{\{\s*github\.event\.repository\.default_branch\s*\}\}$/;
 
+/**
+ * De enige trigger waarop de MERGE-GROUP-POORT mag draaien: `merge_group`.
+ *
+ * Dit event is de reden dat dit bestand fysiek gescheiden staat van shield, writer en finalizer.
+ * GitHub laadt een `merge_group`-run met de workflowdefinitie van de DEFAULT BRANCH (net als
+ * `workflow_run`/`schedule`), maar het event zelf kan uitsluitend ontstaan doordat GitHub een reeds
+ * goedgekeurde pull request in de merge-wachtrij plaatst — geen PR-actor kan dit event rechtstreeks
+ * richten op een zelfgekozen definitie. `workflow_dispatch` staat er nadrukkelijk niet bij, om
+ * dezelfde reden als bij de finalizer: dat event draait de definitie van de gekozen ref.
+ */
+export const TRUSTED_MERGE_GROUP_GATE_TRIGGERS = Object.freeze(['merge_group']);
+
+/**
+ * De enige schrijfscope die de merge-group-poort mag dragen: `checks`. Dat is de API waarmee een
+ * check-run aan een specifieke SHA gebonden wordt (`POST /repos/{o}/{r}/check-runs`) — de merge-
+ * group-commit is immers een synthetische, per-inschrijving-unieke SHA, dus is een check-run hier
+ * de correcte GitHub-vereiste vorm en niet de `statuses`-scope van de trusted writer.
+ */
+export const ALLOWED_MERGE_GROUP_GATE_WRITE_SCOPES = Object.freeze(['checks']);
+
 export const TRUST_VIOLATION = Object.freeze({
   UNTRUSTED_TRIGGER_WITH_WRITE_PERMISSION: 'UNTRUSTED_TRIGGER_WITH_WRITE_PERMISSION',
   PULL_REQUEST_TARGET_PRESENT: 'PULL_REQUEST_TARGET_PRESENT',
@@ -134,6 +154,23 @@ export const TRUST_VIOLATION = Object.freeze({
   ISSUE_COMMENT_WRITE_OUTSIDE_TRUSTED_WRITER: 'ISSUE_COMMENT_WRITE_OUTSIDE_TRUSTED_WRITER',
   TRIGGER_MAPPING_UNPARSEABLE: 'TRIGGER_MAPPING_UNPARSEABLE',
   PR_SHIELD_CHECKS_OUT_CODE_OUTSIDE_PULL_REQUEST: 'PR_SHIELD_CHECKS_OUT_CODE_OUTSIDE_PULL_REQUEST',
+  // De merge-group-poort. Precies één trigger (`merge_group`), precies één schrijfscope (`checks`),
+  // repositorybreed de ENIGE plaats waar die scope mag bestaan — dezelfde concentratielogica als
+  // `pull-requests: write` bij de finalizer, hier toegepast op de scope die de merge-queue-vereiste
+  // status-check publiceert.
+  CHECKS_WRITE_OUTSIDE_MERGE_GROUP_GATE: 'CHECKS_WRITE_OUTSIDE_MERGE_GROUP_GATE',
+  TRUSTED_MERGE_GROUP_GATE_MISSING: 'TRUSTED_MERGE_GROUP_GATE_MISSING',
+  TRUSTED_MERGE_GROUP_GATE_HAS_UNTRUSTED_TRIGGER: 'TRUSTED_MERGE_GROUP_GATE_HAS_UNTRUSTED_TRIGGER',
+  TRUSTED_MERGE_GROUP_GATE_TRIGGER_NOT_ALLOWED: 'TRUSTED_MERGE_GROUP_GATE_TRIGGER_NOT_ALLOWED',
+  TRUSTED_MERGE_GROUP_GATE_HAS_NO_TRIGGER: 'TRUSTED_MERGE_GROUP_GATE_HAS_NO_TRIGGER',
+  TRUSTED_MERGE_GROUP_GATE_WRITE_JOB_NOT_UNIQUE: 'TRUSTED_MERGE_GROUP_GATE_WRITE_JOB_NOT_UNIQUE',
+  TRUSTED_MERGE_GROUP_GATE_WRITE_JOB_NOT_PER_MERGE_GROUP_QUEUED:
+    'TRUSTED_MERGE_GROUP_GATE_WRITE_JOB_NOT_PER_MERGE_GROUP_QUEUED',
+  TRUSTED_MERGE_GROUP_GATE_WRITE_SCOPE_NOT_ALLOWED: 'TRUSTED_MERGE_GROUP_GATE_WRITE_SCOPE_NOT_ALLOWED',
+  TRUSTED_MERGE_GROUP_GATE_WORKFLOW_LEVEL_WRITE: 'TRUSTED_MERGE_GROUP_GATE_WORKFLOW_LEVEL_WRITE',
+  TRUSTED_MERGE_GROUP_GATE_USES_SECRETS: 'TRUSTED_MERGE_GROUP_GATE_USES_SECRETS',
+  TRUSTED_MERGE_GROUP_GATE_CHECKS_OUT_PR_CODE: 'TRUSTED_MERGE_GROUP_GATE_CHECKS_OUT_PR_CODE',
+  TRUSTED_MERGE_GROUP_GATE_USES_PR_ARTIFACTS: 'TRUSTED_MERGE_GROUP_GATE_USES_PR_ARTIFACTS',
 });
 
 const BLOCK_SCALAR_RE = /:\s*[|>][+-]?\d*\s*$/;
@@ -662,6 +699,37 @@ export function isPerPullRequestQueuedWriteJob(job) {
 }
 
 /**
+ * De verwijzing naar de merge-group-SHA waarop de merge-group-poort per unit geserialiseerd moet
+ * zijn — het analogon van `matrix.pr` bij de writer/finalizer, maar dan voor een job ZONDER matrix:
+ * de merge-group-poort draait als één vaste job per `merge_group`-aanleiding, dus is er geen
+ * matrixdimensie om op te sleutelen. `github.event.merge_group.head_sha` is de enige per-aanleiding
+ * waarde die GitHub voor dit event levert en die niet per RUN maar per MERGE-GROUP verschilt (twee
+ * herinschrijvingen van dezelfde group delen dezelfde head_sha totdat de queue-commit verandert).
+ */
+const MERGE_GROUP_SHA_GROUP_RE = /\$\{\{\s*github\.event\.merge_group\.head_sha\s*\}\}/;
+
+/**
+ * De schrijvende job van de merge-group-poort moet PER MERGE-GROUP-SHA geserialiseerd zijn.
+ *
+ * `VOLATILE_GROUP_RE` verbiedt élke `github.event`-verwijzing — een bewust brede regel, want de
+ * schrijvers waarvoor hij oorspronkelijk geschreven is (de trusted writer, de finalizer) hebben geen
+ * enkele legitieme reden om op een `github.event.*`-veld te sleutelen. Voor DEZE job is dat anders:
+ * `github.event.merge_group.head_sha` is precies de per-eenheid sleutel die de queue-poort nodig
+ * heeft, op dezelfde manier als `matrix.pr` dat voor de writer is. Deze validator staat daarom
+ * UITSLUITEND die ene verwijzing toe: hij knipt de toegestane substring uit de groepstekst en toetst
+ * wat overblijft opnieuw aan `VOLATILE_GROUP_RE` — elke ANDERE vluchtige `github.*`-verwijzing in
+ * dezelfde groep blijft dus alsnog een overtreding.
+ */
+export function isPerMergeGroupQueuedWriteJob(job) {
+  const concurrency = job?.concurrency;
+  if (!concurrency || concurrency.unparseable) return false;
+  if (concurrency.cancelInProgress !== 'false') return false;
+  if (!MERGE_GROUP_SHA_GROUP_RE.test(concurrency.group)) return false;
+  const remainder = concurrency.group.replace(MERGE_GROUP_SHA_GROUP_RE, '');
+  return !VOLATILE_GROUP_RE.test(remainder);
+}
+
+/**
  * De vaste naam van de repositorybrede schrijfrij van de trusted writer.
  *
  * Hij is met opzet een LITERAL zonder één expressie. Een groep met een `${{ ... }}`-suffix — welk
@@ -720,7 +788,7 @@ function scopesOf(grants) {
  * shield geldt.
  */
 export function findTrustBoundaryViolations({
-  workflows, prShieldPath, trustedWriterPath, trustedFinalizerPath,
+  workflows, prShieldPath, trustedWriterPath, trustedFinalizerPath, trustedMergeGroupGatePath,
 }) {
   const violations = [];
   const add = (code, path) => violations.push(`${code}:${path}`);
@@ -729,6 +797,7 @@ export function findTrustBoundaryViolations({
   let sawPrShield = false;
   let sawTrustedWriter = false;
   let sawTrustedFinalizer = false;
+  let sawTrustedMergeGroupGate = false;
 
   // De naam waarop de writer zijn `workflow_run` moet pinnen komt uit het SHIELDBESTAND zelf, niet
   // uit een losse literal: zo kan een hernoemde shield de keten niet stil loskoppelen.
@@ -766,6 +835,14 @@ export function findTrustBoundaryViolations({
     if (path !== trustedFinalizerPath
       && wf.writeGrants.some((g) => g.scope === 'pull-requests' || g.scope === '*')) {
       add(TRUST_VIOLATION.PULL_REQUESTS_WRITE_OUTSIDE_FINALIZER, path);
+    }
+    // De check-runscope is repositorybreed geconcentreerd op de merge-group-poort, om dezelfde reden
+    // als bij `pull-requests: write`: dit is de enige plek die een merge-queue-vereiste status mag
+    // publiceren, en elke andere drager van die scope zou een tweede, ongecontroleerde weg naar
+    // diezelfde vereiste context openen.
+    if (path !== trustedMergeGroupGatePath
+      && wf.writeGrants.some((g) => g.scope === 'checks' || g.scope === '*')) {
+      add(TRUST_VIOLATION.CHECKS_WRITE_OUTSIDE_MERGE_GROUP_GATE, path);
     }
 
     if (path === prShieldPath) {
@@ -873,12 +950,53 @@ export function findTrustBoundaryViolations({
       }
       if (wf.usesArtifactsOrCache) add(TRUST_VIOLATION.TRUSTED_FINALIZER_USES_PR_ARTIFACTS, path);
     }
+
+    // DE MERGE-GROUP-POORT. Zelfde grondvorm als writer/finalizer — één schrijvende job, geen
+    // secrets, geen artifacts, aantoonbaar de default branch uitgecheckt — met drie verschillen: de
+    // enige toegestane trigger is `merge_group`, de enige toegestane schrijfscope is `checks`, en de
+    // per-eenheid rij sleutelt op de merge-group-SHA in plaats van op een matrixwaarde (er is geen
+    // matrix: dit is één vaste job per aanleiding). Anders dan de finalizer heeft deze job GEEN
+    // repositorybrede rij nodig: een merge-group-SHA is al uniek per inschrijving, dus ontbreekt hier
+    // het gedeelde-quotumprobleem dat de writer/finalizer wél hebben.
+    if (path === trustedMergeGroupGatePath) {
+      sawTrustedMergeGroupGate = true;
+      if (untrusted.length > 0) add(TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_HAS_UNTRUSTED_TRIGGER, path);
+      if (wf.triggers.some((t) => !TRUSTED_MERGE_GROUP_GATE_TRIGGERS.includes(t))) {
+        add(TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_TRIGGER_NOT_ALLOWED, path);
+      }
+      if (wf.triggers.length === 0) add(TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_HAS_NO_TRIGGER, path);
+
+      const gateWriteJobs = wf.jobs.filter((job) => job.writeGrants.length > 0);
+      if (gateWriteJobs.length !== 1) {
+        add(TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_WRITE_JOB_NOT_UNIQUE, path);
+      }
+      for (const job of gateWriteJobs) {
+        if (!isPerMergeGroupQueuedWriteJob(job)) {
+          add(TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_WRITE_JOB_NOT_PER_MERGE_GROUP_QUEUED, path);
+        }
+      }
+      if (wf.workflowLevelWriteGrants.length > 0) {
+        add(TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_WORKFLOW_LEVEL_WRITE, path);
+      }
+      if (!scopesOf(wf.writeGrants).every((s) => ALLOWED_MERGE_GROUP_GATE_WRITE_SCOPES.includes(s))) {
+        add(TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_WRITE_SCOPE_NOT_ALLOWED, path);
+      }
+      if (wf.usesSecrets) add(TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_USES_SECRETS, path);
+      if (wf.checkoutRefs.length === 0
+        || !wf.checkoutRefs.every((ref) => DEFAULT_BRANCH_REF_RE.test(ref))) {
+        add(TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_CHECKS_OUT_PR_CODE, path);
+      }
+      if (wf.usesArtifactsOrCache) add(TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_USES_PR_ARTIFACTS, path);
+    }
   }
 
   if (prShieldPath && !sawPrShield) add(TRUST_VIOLATION.PR_SHIELD_MISSING, prShieldPath);
   if (trustedWriterPath && !sawTrustedWriter) add(TRUST_VIOLATION.TRUSTED_WRITER_MISSING, trustedWriterPath);
   if (trustedFinalizerPath && !sawTrustedFinalizer) {
     add(TRUST_VIOLATION.TRUSTED_FINALIZER_MISSING, trustedFinalizerPath);
+  }
+  if (trustedMergeGroupGatePath && !sawTrustedMergeGroupGate) {
+    add(TRUST_VIOLATION.TRUSTED_MERGE_GROUP_GATE_MISSING, trustedMergeGroupGatePath);
   }
   return violations;
 }

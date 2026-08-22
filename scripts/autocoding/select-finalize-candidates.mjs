@@ -18,13 +18,14 @@
 
 import {
   FINALIZE_REASON,
+  FINALIZER_PER_CANDIDATE_REQUEST_BUDGET,
   assertMergeFinalizerPolicySafe,
-  finalizerRequestBudget,
 } from './finalize-merge.mjs';
 import { flattenPages } from './collect-shield-input.mjs';
 import {
-  SHARED_HOURLY_REQUEST_QUOTA, QUOTA_RESERVE, parseCounter,
+  SHARED_HOURLY_REQUEST_QUOTA, QUOTA_RESERVE, SELECTION_PAGE_BUDGET, parseCounter,
   scheduleSlotOf, selectScheduleBucket, scheduleBucketVisit, selectBucketWindow,
+  affordablePullRequests,
 } from './select-live-gate-targets.mjs';
 
 export const CANDIDATE_REASON = Object.freeze({
@@ -70,9 +71,24 @@ export const CANDIDATE_REASON = Object.freeze({
  * tijd is ONBEKEND en niet "sloot nul": een sloot-nul-fallback zou stilzwijgend altijd dezelfde
  * eerste emmer bevoordelen zodra de klok een keer onleesbaar is, en dat is exact dezelfde
  * verhongering in een nieuwe vermomming.
+ *
+ * CODEX `3835810736`. Vóór V20 kreeg `selectBucketWindow` hier alleen `candidate_limit` als
+ * capaciteit; het quotum werd DAARNA, in een aparte functie (`fitCandidatesToQuota`), als een platte
+ * `.slice(0, passend)`-voorvoegsel op het AL GEROTEERDE en AL GESORTEERDE venster toegepast. Die
+ * tweede stap negeerde het anker volledig: welk lid van het venster ook het ronde-anker was, de
+ * quotumslice pakte altijd de LAAGSTE nummers van het venster — en omdat een gewrapt venster
+ * (bijvoorbeeld `[1, 22, 23, 24, 25]`) bijna altijd een laag nummer bevat, won dat lage nummer bij
+ * een krap quotum elke ronde opnieuw. Bij `candidate_limit=5` en quotum-voor-1 bleven de PR's 22-25
+ * daardoor blijvend verhongerd, ondanks de tijdslotrotatie eronder.
+ *
+ * Het quotum wordt daarom hier, in DEZELFDE stap als `candidate_limit`, in de capaciteit gevouwen —
+ * exact het patroon van `selectTargets()` in `select-live-gate-targets.mjs`
+ * (`Math.min(bucket.length, affordable)`, vóór `selectBucketWindow`). Zo bepaalt het anker zelf,
+ * niet een sorteervolgorde erna, welk lid bij een capaciteit van 1 wordt gekozen — en schuift dat
+ * ene lid gewoon met de rotatie mee.
  */
 export function selectFinalizationCandidates({
-  openPulls, openPullsComplete, policy, nowEpochSeconds,
+  openPulls, openPullsComplete, policy, nowEpochSeconds, remainingQuota = null,
 }) {
   if (policy?.merge_finalizer_enabled !== true) {
     return { ok: false, candidates: [], reasons: [CANDIDATE_REASON.FINALIZER_DISABLED] };
@@ -103,49 +119,37 @@ export function selectFinalizationCandidates({
     return { ok: false, candidates: [], reasons: [CANDIDATE_REASON.NO_CANDIDATES] };
   }
 
-  // De indeling is QUOTUM- en LIMIETVRIJ: `selectScheduleBucket` krijgt hier expres geen derde
-  // argument, dus valt hij terug op de vaste `SCHEDULE_BUCKET_LIMIT`. Alleen het venster erbinnen
-  // krimpt tot `candidate_limit`.
+  // De INDELING blijft QUOTUM- en LIMIETVRIJ: `selectScheduleBucket` krijgt hier expres geen derde
+  // argument, dus valt hij terug op de vaste `SCHEDULE_BUCKET_LIMIT`. Alleen de CAPACITEIT van het
+  // venster erbinnen hangt af van `candidate_limit` én van het quotum — en dat gebeurt in ÉÉN stap
+  // vóór `selectBucketWindow`, nooit erna.
   const { bucket, count } = selectScheduleBucket(inAanmerking, slot);
+
+  // DEZELFDE strenge lezer als de doelenselector: een quotum groter dan de totale gedeelde
+  // uurlimiet is geen ruim quotum maar een onaannemelijke meting, en telt daarom als ONBEKEND —
+  // exact de bovengrenstoets die vóór V20 in `fitCandidatesToQuota` stond.
+  if (!Number.isInteger(remainingQuota) || remainingQuota < 0
+    || remainingQuota > SHARED_HOURLY_REQUEST_QUOTA) {
+    return { ok: false, candidates: [], reasons: [CANDIDATE_REASON.API_QUOTA_UNKNOWN] };
+  }
+  const affordable = affordablePullRequests(remainingQuota, {
+    perPullRequest: FINALIZER_PER_CANDIDATE_REQUEST_BUDGET,
+    reserve: QUOTA_RESERVE,
+    selectionCost: SELECTION_PAGE_BUDGET,
+  });
+
+  const capaciteit = Math.min(bucket.length, cfg.candidate_limit, affordable);
+  if (capaciteit < 1) {
+    return { ok: false, candidates: [], reasons: [CANDIDATE_REASON.API_BUDGET_RESERVED] };
+  }
+
   const bezoek = scheduleBucketVisit(slot, count);
-  const capaciteit = Math.min(bucket.length, cfg.candidate_limit);
   const { window } = selectBucketWindow(bucket, bezoek, capaciteit);
 
   if (window.length === 0) {
     return { ok: false, candidates: [], reasons: [CANDIDATE_REASON.NO_CANDIDATES] };
   }
   return { ok: true, candidates: window, reasons: [] };
-}
-
-/**
- * Krimpt de kandidatenlijst op het WERKELIJK resterende gedeelde uurquotum.
- *
- * `-` is de afgesproken ONBEKEND-vorm en betekent hier: geen ronde. De teller waarop de hele
- * begroting rust was onleesbaar, dus valt er niets te begroten — dat is dezelfde lijn als in de
- * targetselector van de diagnostische route.
- *
- * Er wordt gekrompen en niet geweigerd: past er nog één kandidaat binnen het restant min de vaste
- * reserve, dan wordt die ene gedaan. Past er geen enkele, dan doet deze ronde niets.
- */
-export function fitCandidatesToQuota(candidates, remainingQuota) {
-  const lijst = Array.isArray(candidates) ? candidates : [];
-  // DEZELFDE strenge lezer als de doelenselector, en met opzet geen `Number()`. `Number('')` en
-  // `Number(' ')` zijn allebei 0, dus zou een leeggevallen meting hier als "nul verzoeken over"
-  // binnenkomen: fail-closed, maar met de verkeerde reden. Een onleesbaar quotum is ONBEKEND, niet
-  // uitgeput, en die twee horen in het log niet op elkaar te lijken.
-  const remaining = parseCounter(remainingQuota);
-  if (remaining === null || remaining > SHARED_HOURLY_REQUEST_QUOTA) {
-    return { ok: false, candidates: [], reasons: [CANDIDATE_REASON.API_QUOTA_UNKNOWN] };
-  }
-  const beschikbaar = remaining - QUOTA_RESERVE;
-  let passend = 0;
-  while (passend < lijst.length && finalizerRequestBudget(passend + 1) <= beschikbaar) {
-    passend += 1;
-  }
-  if (passend === 0) {
-    return { ok: false, candidates: [], reasons: [CANDIDATE_REASON.API_BUDGET_RESERVED] };
-  }
-  return { ok: true, candidates: lijst.slice(0, passend), reasons: [] };
 }
 
 /** Sleutels die precies één niet-lege waarde nemen. */
@@ -220,16 +224,11 @@ export function runSelectCandidates(argv, { readFile, writeFile } = {}) {
     openPullsComplete: parsed.openPullsComplete,
     policy,
     nowEpochSeconds: parseCounter(args.get('--now-epoch')),
+    remainingQuota: parseCounter(args.get('--remaining-quota')),
   });
+  schrijf(gekozen.candidates);
   if (!gekozen.ok) {
-    schrijf([]);
     meld(gekozen.reasons);
-    return 0;
-  }
-  const passend = fitCandidatesToQuota(gekozen.candidates, args.get('--remaining-quota'));
-  schrijf(passend.candidates);
-  if (!passend.ok) {
-    meld(passend.reasons);
     return 0;
   }
   meld(['CANDIDATES_SELECTED']);

@@ -43,6 +43,14 @@ GH_BOUNDED_SELECTION_PAGES=4
 # `CHECKS_PAGE_BUDGET`.
 GH_BOUNDED_CHECKS_PAGES=4
 
+# Het aantal pagina's van `rules/branches/{base_ref}` in de finalizer (V20 — scope-item 6: dit
+# eindpunt liep tot dan toe via één ongebonden `gh api`-aanroep, terwijl de vijf bewijslijsten en de
+# check-runs al begrensd waren; een branch met genoeg actieve rulesets kon dat ene verzoek dus
+# willekeurig veel regels laten teruggeven zonder dat er ooit een tweede pagina werd opgehaald of een
+# afkapping werd gemeld. Vier pagina's is 400 actieve regels op één branch — ruimschoots boven wat
+# deze repository draait. Spiegelbeeld van `MERGE_QUEUE_RULES_PAGE_BUDGET`.
+GH_BOUNDED_RULES_PAGES=4
+
 # `gh_bounded_pages <api-pad> <uitvoerbestand> <max-pagina's> <werkmap> [<veld>]`
 #
 #   rc 0 — de lijst is VOLLEDIG opgehaald en staat in het uitvoerbestand.
