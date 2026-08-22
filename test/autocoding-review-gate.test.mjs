@@ -13,8 +13,9 @@ import { spawnSync } from 'node:child_process';
 import {
   evaluateReceipts, evaluateReceipt, extractReceiptFromCommentBody, assertPolicyIsSafe,
   REASON, RECEIPT_SCHEMA,
-  extractCodexNativeEvidence, extractGeminiNativeEvidence, bindNativeEvidence,
-  assertNativeVendorsSafe, evaluateNativeReview, evaluateShield,
+  extractCodexNativeEvidence, extractCodexReviewEvidence, extractGeminiNativeEvidence,
+  bindNativeEvidence, assertNativeVendorsSafe, assertOwnerGateSafe, evaluateNativeReview,
+  evaluateShield, evaluateOwnerApprovals, extractOwnerApprovalFromBody, OWNER_APPROVAL_SCHEMA,
 } from '../scripts/autocoding/verify-review-gate.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -363,8 +364,11 @@ test('workflow-eventmatrix houdt bootstrap-events groen en live gate uit', () =>
   }
   assert.match(workflow, /BOOTSTRAP_TRUSTED_GATE_FILES_NOT_ON_DEFAULT_BRANCH/);
   assert.match(workflow, /BOOTSTRAP_RECEIPT_GATE_DISABLED/);
-  assert.match(workflow, /Live receiptpoort\n\s+if: steps\.bootstrap\.outputs\.trusted_gate_files == 'true'/);
+  assert.match(workflow, /Bepaal poortstand en statuscontext\n\s+id: enabled\n\s+if: steps\.bootstrap\.outputs\.trusted_gate_files == 'true'/);
+  // De poort blijft in deze PR uit, en de statuscontext waaronder hij later publiceert is geen jobnaam.
   assert.equal(policy.live_receipt_gate_enabled, false);
+  assert.equal(policy.live_status_context, 'autocoding-shield-live-receipts');
+  assert.ok(!/^ {2}autocoding-shield-live-receipts:$/m.test(workflow), 'de statuscontext is geen jobnaam');
 });
 
 test('W1. de stabiele checknaam draait alleen op pull_request; comment/review-events kunnen hem niet groen maken', () => {
@@ -403,7 +407,18 @@ test('W3. geen pull_request_target, geen schrijfrechten, geen secrets in de shie
   // Toelichtende commentaarregels mogen deze namen noemen; het gaat om de werkelijke YAML.
   const yaml = workflow.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
   assert.ok(!yaml.includes('pull_request_target'), 'pull_request_target is verboden');
-  assert.ok(!/:\s*write\b/.test(yaml), 'geen enkele permission mag write zijn');
+
+  // De ENIGE toegestane schrijfscope is `statuses: write`, en uitsluitend op de trusted job die de
+  // default branch uitcheckt. Elke andere write-scope, en dezelfde scope op de PR-head-job, is fout.
+  const writeScopes = yaml.split('\n').filter((line) => /^\s+[a-z-]+:\s*write\b/.test(line));
+  assert.deepEqual(writeScopes.map((l) => l.trim()), ['statuses: write']);
+  const headJobYaml = yaml.slice(yaml.indexOf('\n  autocoding-shield:'), yaml.indexOf('\n  autocoding-shield-live-gate:'));
+  assert.ok(!/:\s*write\b/.test(headJobYaml), 'de PR-head-job mag geen enkele schrijfscope hebben');
+  const liveGateYaml = yaml.slice(yaml.indexOf('\n  autocoding-shield-live-gate:'));
+  assert.match(liveGateYaml, /^\s+statuses: write$/m);
+  assert.ok(!/contents:\s*write/.test(yaml), 'geen contents: write');
+  assert.ok(!/actions:\s*write/.test(yaml), 'geen actions: write');
+  assert.ok(!/pull-requests:\s*write/.test(yaml), 'geen pull-requests: write');
   assert.ok(!/secrets\./.test(yaml), 'de workflow mag geen secrets lezen');
   assert.ok(!yaml.includes('workflow_dispatch'), 'geen handmatige trigger op dit pad');
   // Elke API-aanroep is een read-only GET: geen -X/--method, geen -f/--field payloads.
@@ -432,20 +447,49 @@ test('N2. niet-gevoelige PR heeft geen ownerbewijs nodig (positief)', () => {
   const codex = extractCodexNativeEvidence(codexComment(), resolved(), NATIVE_POLICY);
   const gemini = extractGeminiNativeEvidence(geminiReview(), [], resolved(), NATIVE_POLICY);
   const r = evaluateShield({
-    nativeEvidence: [codex, gemini], ownerReceipts: [], sensitivePathsTouched: false,
+    nativeEvidence: [codex, gemini], ownerApprovals: [], sensitivePathsTouched: false,
+    filesComplete: true,
     context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
   });
   assert.deepEqual(r, { decision: 'GO', reasons: [] });
 });
 
-test('N3. gevoelige PR met geldig ownerreceipt => GO', () => {
+test('N3. gevoelige PR met geldige owner-autorisatie => GO', () => {
   const codex = extractCodexNativeEvidence(codexComment(), resolved(), NATIVE_POLICY);
   const gemini = extractGeminiNativeEvidence(geminiReview(), [], resolved(), NATIVE_POLICY);
   const r = evaluateShield({
-    nativeEvidence: [codex, gemini], ownerReceipts: [ownerReceiptEnvelope()], sensitivePathsTouched: true,
+    nativeEvidence: [codex, gemini], ownerApprovals: [ownerApprovalEnvelope()],
+    sensitivePathsTouched: true, filesComplete: true,
     context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
   });
   assert.deepEqual(r, { decision: 'GO', reasons: [] });
+});
+
+test('N3a. de ECHTE gedeelde identiteit: PR-auteur en owner zijn dezelfde GitHub-gebruiker => GO', () => {
+  // Dit is het gemeten geval op deze repository: PR-auteur `rvanhooijdonk-png` is ook de enige
+  // toegestane owner. Onder de oude opzet liep de ownergate door de reviewer-zelfreviewregel en
+  // was goedkeuring dáárdoor structureel onmogelijk — de poort kon nooit dichtgaan én nooit open.
+  // Owner-autorisatie is geen review, dus die regel geldt hier niet. Wél blijft gelden dat de
+  // owner nooit een vendor vervangt: de twee vendor-GO's zijn er nog steeds bij nodig.
+  const ownerIsBuilder = { ...NATIVE_CONTEXT, builder_actor: 'rvanhooijdonk-png' };
+  const codex = extractCodexNativeEvidence(codexComment(), resolved(), NATIVE_POLICY);
+  const gemini = extractGeminiNativeEvidence(geminiReview(), [], resolved(), NATIVE_POLICY);
+  const r = evaluateShield({
+    nativeEvidence: [codex, gemini], ownerApprovals: [ownerApprovalEnvelope()],
+    sensitivePathsTouched: true, filesComplete: true,
+    context: ownerIsBuilder, policy: NATIVE_POLICY,
+  });
+  assert.deepEqual(r, { decision: 'GO', reasons: [] });
+
+  // Zonder de twee vendorronden blijft dezelfde ownergoedkeuring rood.
+  const zonderVendors = evaluateShield({
+    nativeEvidence: [], ownerApprovals: [ownerApprovalEnvelope()],
+    sensitivePathsTouched: true, filesComplete: true,
+    context: ownerIsBuilder, policy: NATIVE_POLICY,
+  });
+  assert.equal(zonderVendors.decision, 'NO_GO');
+  assert.ok(zonderVendors.reasons.includes(REASON.INSUFFICIENT_GO));
+  assert.ok(!zonderVendors.reasons.includes(REASON.OWNER_GATE_REQUIRED), 'de ownergate zelf is voldaan');
 });
 
 test('N4. spoofing: aanvaller-login met identieke succestekst levert geen bewijs op', () => {
@@ -461,32 +505,37 @@ test('N4b. spoofing: juiste login maar verkeerde GitHub-App-id => NATIVE_IDENTIT
   assert.ok(bound.reasons.includes(REASON.NATIVE_IDENTITY_UNVERIFIED));
 });
 
-test('N5. owner/self-review: de owner opent de PR zelf en tekent zijn eigen receipt => SELF_REVIEW', () => {
-  // De owner is hier de GEMETEN bouwer. Zijn transportactor staat wél in de allowlist, dus het
-  // receipt wordt geselecteerd en niet als ruis weggefilterd — en faalt dan mechanisch op
-  // SELF_REVIEW. Dat is het scherpe geval: een toegestane identiteit die zichzelf goedkeurt.
+test('N5. op owner-autorisatie geldt GEEN builder-zelfreviewregel — dat is de hele scheiding', () => {
+  // Regressie op de gemeten blokkade: de ownergate hergebruikte het reviewerreceipt, inclusief
+  // `SELF_REVIEW`. Omdat PR-auteur en owner op deze repository dezelfde identiteit zijn, kon de
+  // eigenaar zijn eigen gevoelige PR structureel niet autoriseren. De owner is geen reviewer.
   const ownerIsBuilder = { ...NATIVE_CONTEXT, builder_actor: 'rvanhooijdonk-png' };
-  const selfReceipt = ownerReceiptEnvelope({ builder_actor: 'rvanhooijdonk-png' });
-  const r = evaluateShield({
-    nativeEvidence: [], ownerReceipts: [selfReceipt], sensitivePathsTouched: true,
-    context: ownerIsBuilder, policy: NATIVE_POLICY,
-  });
-  assert.equal(r.decision, 'NO_GO');
-  assert.ok(r.reasons.includes(REASON.SELF_REVIEW));
+  const r = evaluateOwnerApprovals([ownerApprovalEnvelope()], ownerIsBuilder, NATIVE_POLICY.owner_gate);
+  assert.deepEqual(r, { decision: 'GO', reasons: [] });
+  assert.ok(!r.reasons.includes(REASON.SELF_REVIEW));
 });
 
-test('N5a. een niet-allowlisted actor die zich als owner voordoet is ruis, geen SELF_REVIEW', () => {
-  // Spiegelgeval van N5: dezelfde vorm, maar de bouwer staat niet in de ownerallowlist. Zijn
-  // receipt wordt vóór elke inhoudelijke toets als ruis verworpen — de uitslag blijft NO_GO, maar
-  // op NO_RECEIPTS. Zo kan een willekeurige commenter geen redencodes injecteren.
-  const selfReceipt = ownerReceiptEnvelope({ reviewer_actor: NATIVE_CONTEXT.builder_actor });
+test('N5a. een niet-allowlisted actor die zich als owner voordoet is ruis, geen redencode-injectie', () => {
+  // Een willekeurige commenter mag geen redencodes kunnen injecteren: zijn blok wordt vóór elke
+  // inhoudelijke toets als ruis verworpen. De uitslag blijft NO_GO, maar op OWNER_APPROVAL_MISSING.
+  const spoof = ownerApprovalEnvelope({}, NATIVE_CONTEXT.builder_actor);
   const r = evaluateShield({
-    nativeEvidence: [], ownerReceipts: [selfReceipt], sensitivePathsTouched: true,
+    nativeEvidence: [], ownerApprovals: [spoof], sensitivePathsTouched: true, filesComplete: true,
     context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
   });
   assert.equal(r.decision, 'NO_GO');
-  assert.ok(r.reasons.includes(REASON.NO_RECEIPTS));
+  assert.ok(r.reasons.includes(REASON.OWNER_APPROVAL_MISSING));
   assert.ok(!r.reasons.includes(REASON.SELF_REVIEW));
+});
+
+test('N5c. de owner kan nooit een ontbrekende vendor vervangen, ook niet met een geldig blok', () => {
+  const r = evaluateShield({
+    nativeEvidence: [extractGeminiNativeEvidence(geminiReview(), [], resolved(), NATIVE_POLICY)],
+    ownerApprovals: [ownerApprovalEnvelope()], sensitivePathsTouched: true, filesComplete: true,
+    context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
+  });
+  assert.equal(r.decision, 'NO_GO');
+  assert.ok(r.reasons.includes(REASON.INSUFFICIENT_GO), 'Codex ontbreekt en blijft ontbreken');
 });
 
 test('N5b. self-review op native bewijs zelf (defensief, ook al is de bot nooit de bouwer)', () => {
@@ -518,16 +567,40 @@ test('N7. verkeerde/ontbrekende task-id op de PR => TASK_MISMATCH', () => {
   assert.ok(bound.reasons.includes(REASON.TASK_MISMATCH));
 });
 
-test('N8. dubbel ownerreceipt (dezelfde UUID) => NO_GO via het generieke receiptschema', () => {
-  const dupUuid = '00000000-0000-4000-8000-000000000097';
-  const r = evaluateShield({
-    nativeEvidence: [],
-    ownerReceipts: [ownerReceiptEnvelope({ receipt_uuid: dupUuid }), ownerReceiptEnvelope({ receipt_uuid: dupUuid })],
-    sensitivePathsTouched: true,
-    context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
-  });
-  assert.equal(r.decision, 'NO_GO');
-  assert.ok(r.reasons.includes(REASON.DUPLICATE_UUID));
+test('N8. elk veld van de owner-autorisatie wordt tegen de gemeten waarheid gelegd', () => {
+  const gate = NATIVE_POLICY.owner_gate;
+  const geval = (overrides, actor) => evaluateOwnerApprovals(
+    [ownerApprovalEnvelope(overrides, actor)], NATIVE_CONTEXT, gate,
+  );
+  assert.deepEqual(geval({}), { decision: 'GO', reasons: [] });
+
+  assert.ok(geval({ decision: 'REJECT' }).reasons.includes(REASON.OWNER_APPROVAL_NOT_APPROVE));
+  assert.ok(geval({ task_id: 'EEN_ANDERE_TAAK' }).reasons.includes(REASON.OWNER_APPROVAL_TASK_MISMATCH));
+  assert.ok(geval({ tree_sha: NATIVE_OLD_TREE }).reasons.includes(REASON.OWNER_APPROVAL_TREE_MISMATCH));
+  assert.ok(geval({ schema: 'IETS_ANDERS' }).reasons.includes(REASON.OWNER_APPROVAL_SCHEMA_MISMATCH));
+  assert.ok(geval({ head_sha: 'kort' }).reasons.includes(REASON.BAD_SHA_FORMAT));
+  // Een onbekend veld mag nooit securitysemantiek toevoegen of overschrijven.
+  assert.ok(geval({ reviewer_actor: 'iemand' }).reasons.includes(REASON.OWNER_APPROVAL_UNKNOWN_FIELD));
+  // Een geldige autorisatie van een auteur BUITEN de allowlist is ruis, geen goedkeuring.
+  const buiten = geval({}, 'aanvaller');
+  assert.equal(buiten.decision, 'NO_GO');
+  assert.deepEqual(buiten.reasons, [REASON.OWNER_APPROVAL_MISSING]);
+});
+
+test('N8a. een owner-autorisatie voor een VORIGE head geldt nooit opnieuw', () => {
+  const stale = evaluateOwnerApprovals(
+    [ownerApprovalEnvelope({ head_sha: NATIVE_OLD_HEAD })], NATIVE_CONTEXT, NATIVE_POLICY.owner_gate,
+  );
+  assert.equal(stale.decision, 'NO_GO');
+  assert.ok(stale.reasons.includes(REASON.OWNER_APPROVAL_STALE_HEAD));
+  assert.ok(stale.reasons.includes(REASON.OWNER_APPROVAL_MISSING));
+});
+
+test('N8b. het owner-blok wordt letterlijk uit een machineblok gelezen, nooit uit proza', () => {
+  assert.equal(extractOwnerApprovalFromBody('Wat mij betreft akkoord, APPROVE!'), null);
+  assert.equal(extractOwnerApprovalFromBody('```autocoding-owner-approval-v1\n{kapot\n```'), null);
+  const body = `Akkoord.\n\n\`\`\`autocoding-owner-approval-v1\n${JSON.stringify(ownerApproval())}\n\`\`\`\n`;
+  assert.deepEqual(extractOwnerApprovalFromBody(body), ownerApproval());
 });
 
 test('N9. Gemini COMMENTED zonder terminal marker => NATIVE_TERMINAL_MARKER_MISSING', () => {
@@ -552,41 +625,42 @@ test('N10. gewijzigde allowlist: wildcard-vendoractor in policy => UNSAFE_POLICY
   );
 });
 
-test('N11. ontbrekend ownerbewijs op een gevoelig pad => OWNER_GATE_REQUIRED', () => {
+test('N11. ontbrekende owner-autorisatie op een gevoelig pad => OWNER_GATE_REQUIRED', () => {
   const codex = extractCodexNativeEvidence(codexComment(), resolved(), NATIVE_POLICY);
   const gemini = extractGeminiNativeEvidence(geminiReview(), [], resolved(), NATIVE_POLICY);
   const r = evaluateShield({
-    nativeEvidence: [codex, gemini], ownerReceipts: [], sensitivePathsTouched: true,
-    context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
+    nativeEvidence: [codex, gemini], ownerApprovals: [], sensitivePathsTouched: true,
+    filesComplete: true, context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
   });
   assert.equal(r.decision, 'NO_GO');
   assert.ok(r.reasons.includes(REASON.OWNER_GATE_REQUIRED));
-  assert.ok(r.reasons.includes(REASON.NO_RECEIPTS));
+  assert.ok(r.reasons.includes(REASON.OWNER_APPROVAL_MISSING));
 });
 
-test('N12. stale ownerbewijs op een gevoelig pad => OWNER_GATE_REQUIRED + STALE_HEAD', () => {
+test('N12. stale owner-autorisatie op een gevoelig pad => OWNER_GATE_REQUIRED + STALE', () => {
   const codex = extractCodexNativeEvidence(codexComment(), resolved(), NATIVE_POLICY);
   const gemini = extractGeminiNativeEvidence(geminiReview(), [], resolved(), NATIVE_POLICY);
-  const staleOwner = ownerReceiptEnvelope({ head_sha: NATIVE_OLD_HEAD });
+  const staleOwner = ownerApprovalEnvelope({ head_sha: NATIVE_OLD_HEAD });
   const r = evaluateShield({
-    nativeEvidence: [codex, gemini], ownerReceipts: [staleOwner], sensitivePathsTouched: true,
-    context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
+    nativeEvidence: [codex, gemini], ownerApprovals: [staleOwner], sensitivePathsTouched: true,
+    filesComplete: true, context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
   });
   assert.equal(r.decision, 'NO_GO');
   assert.ok(r.reasons.includes(REASON.OWNER_GATE_REQUIRED));
+  assert.ok(r.reasons.includes(REASON.OWNER_APPROVAL_STALE_HEAD));
 });
 
-test('N13. gespoofd ownerbewijs (transportactor buiten de allowlist) => OWNER_GATE_REQUIRED + NO_RECEIPTS', () => {
+test('N13. gespoofde owner-autorisatie (auteur buiten de allowlist) => OWNER_GATE_REQUIRED', () => {
   const codex = extractCodexNativeEvidence(codexComment(), resolved(), NATIVE_POLICY);
   const gemini = extractGeminiNativeEvidence(geminiReview(), [], resolved(), NATIVE_POLICY);
-  const spoofedOwner = ownerReceiptEnvelope({ reviewer_actor: 'aanvaller' });
+  const spoofedOwner = ownerApprovalEnvelope({}, 'aanvaller');
   const r = evaluateShield({
-    nativeEvidence: [codex, gemini], ownerReceipts: [spoofedOwner], sensitivePathsTouched: true,
-    context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
+    nativeEvidence: [codex, gemini], ownerApprovals: [spoofedOwner], sensitivePathsTouched: true,
+    filesComplete: true, context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
   });
   assert.equal(r.decision, 'NO_GO');
   assert.ok(r.reasons.includes(REASON.OWNER_GATE_REQUIRED));
-  assert.ok(r.reasons.includes(REASON.NO_RECEIPTS));
+  assert.ok(r.reasons.includes(REASON.OWNER_APPROVAL_MISSING));
 });
 
 test('N14. echte Gemini-bevindingsbadge blokkeert, ook bij state COMMENTED => NATIVE_FINDINGS_PRESENT', () => {
@@ -605,12 +679,14 @@ test('N15. Gemini CHANGES_REQUESTED/DISMISSED/PENDING telt nooit als terminal GO
   }
 });
 
-test('N16. Codex zonder succestekst (bevindingen) => NO_GO_VERDICT_PRESENT, nooit impliciet GO', () => {
+test('N16. Codex zonder canonieke succesvorm => NATIVE_TERMINAL_MARKER_MISSING, nooit impliciet GO', () => {
+  // Gemeten vorm van een Codex-ronde MET bevindingen. Deze tekst is geen canonieke succesvorm, en
+  // "geen inline-opmerking gezien" mag daarom nooit als GO gelden.
   const withFindings = codexComment({ body: 'Codex Review: 2 comment(s) generated.\n\n**Reviewed commit:** `b9df1f8398`\n' });
   const evidence = extractCodexNativeEvidence(withFindings, resolved(), NATIVE_POLICY);
   const bound = bindNativeEvidence(evidence, NATIVE_CONTEXT);
   assert.equal(bound.valid, false);
-  assert.ok(bound.reasons.includes(REASON.NO_GO_VERDICT_PRESENT));
+  assert.ok(bound.reasons.includes(REASON.NATIVE_TERMINAL_MARKER_MISSING));
 });
 
 test('N17. ontbrekend native bewijs => NO_RECEIPTS + INSUFFICIENT_GO, nooit impliciet GO', () => {
@@ -666,16 +742,26 @@ test('N22. onresolveerbaar bewijs van een gepinde bot blijft staan en faalt gesl
   assert.ok(r.reasons.includes(REASON.INSUFFICIENT_GO));
 });
 
-test('N23. de owner telt nooit als reviewvendor: een ownerreceipt vervangt Codex of Gemini niet', () => {
-  const ownerAsCodex = ownerReceiptEnvelope({ reviewer_vendor: 'codex' });
-  const r = evaluateShield({
-    nativeEvidence: [], ownerReceipts: [ownerAsCodex], sensitivePathsTouched: true,
-    context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
+test('N23. de owner telt nooit als reviewvendor: een owner-autorisatie vervangt Codex of Gemini niet', () => {
+  // Het owner-schema kent geen vendorveld: wie er een probeert bij te schrijven, maakt het blok
+  // ongeldig in plaats van zichzelf tot leverancier te promoveren.
+  const asVendor = ownerApprovalEnvelope({ reviewer_vendor: 'codex' });
+  const withVendor = evaluateShield({
+    nativeEvidence: [], ownerApprovals: [asVendor], sensitivePathsTouched: true,
+    filesComplete: true, context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
   });
-  assert.equal(r.decision, 'NO_GO');
-  // Het native pad heeft nog steeds nul bewijs; het ownerreceipt raakt dat pad niet.
-  assert.ok(r.reasons.includes(REASON.INSUFFICIENT_GO));
-  assert.ok(r.reasons.includes(REASON.NO_RECEIPTS));
+  assert.equal(withVendor.decision, 'NO_GO');
+  assert.ok(withVendor.reasons.includes(REASON.OWNER_APPROVAL_UNKNOWN_FIELD));
+
+  // En zelfs een volledig geldige owner-autorisatie laat het native pad onaangeroerd leeg.
+  const valid = evaluateShield({
+    nativeEvidence: [], ownerApprovals: [ownerApprovalEnvelope()], sensitivePathsTouched: true,
+    filesComplete: true, context: NATIVE_CONTEXT, policy: NATIVE_POLICY,
+  });
+  assert.equal(valid.decision, 'NO_GO');
+  assert.ok(valid.reasons.includes(REASON.INSUFFICIENT_GO));
+  assert.ok(valid.reasons.includes(REASON.NO_RECEIPTS));
+  assert.ok(!valid.reasons.includes(REASON.OWNER_GATE_REQUIRED), 'de ownerpoort zelf is wél voldaan');
 });
 
 test('N24. policy waarin owner en reviewvendor elkaar kunnen vervangen => UNSAFE_POLICY', () => {
@@ -772,24 +858,33 @@ const NATIVE_CONTEXT = Object.freeze({
   task_id: 'AUTOCODING_LIVE_GATE_COMPLETION_V1',
 });
 
+// De numerieke bot-ID's zijn gemeten op PR #74 (reviews 4998216880 en 4998213986): Codex
+// 199175422, Gemini 176961590. Een login is hernoembaar, een user-ID niet.
+const CODEX_USER_ID = 199175422;
+const GEMINI_USER_ID = 176961590;
+
 const NATIVE_POLICY = Object.freeze({
   native_review: Object.freeze({
     required_vendors: Object.freeze(['codex', 'gemini']),
     codex: Object.freeze({
       actor: 'chatgpt-codex-connector[bot]',
+      user_id: CODEX_USER_ID,
+      user_type: 'Bot',
       app_id: 1144995,
-      success_marker: "Codex Review: Didn't find any major issues. :tada:",
+      terminal_success_markers: Object.freeze(["Codex Review: Didn't find any major issues. :tada:"]),
     }),
     gemini: Object.freeze({
       actor: 'gemini-code-assist[bot]',
+      user_id: GEMINI_USER_ID,
+      user_type: 'Bot',
       allowed_states: Object.freeze(['COMMENTED', 'APPROVED']),
-      terminal_marker: '## Code Review',
+      terminal_success_markers: Object.freeze(['## Code Review']),
     }),
   }),
   owner_gate: Object.freeze({
+    schema: 'AUTOCODING_OWNER_APPROVAL_V1',
     sensitive_path_globs: Object.freeze(['.github/workflows/', 'CONTROL/AUTOCODING/']),
-    required_distinct_vendors: 1,
-    allowed_reviewer_actors: Object.freeze({ owner: Object.freeze(['rvanhooijdonk-png']) }),
+    allowed_owner_actors: Object.freeze(['rvanhooijdonk-png']),
   }),
 });
 
@@ -799,7 +894,7 @@ function resolved(headSha = NATIVE_HEAD, treeSha = NATIVE_TREE) {
 
 // Letterlijk PR #72, comment 5376132338 (chatgpt-codex-connector[bot], GitHub App 1144995).
 const CODEX_SUCCESS_COMMENT = Object.freeze({
-  user: Object.freeze({ login: 'chatgpt-codex-connector[bot]', type: 'Bot' }),
+  user: Object.freeze({ login: 'chatgpt-codex-connector[bot]', id: CODEX_USER_ID, type: 'Bot' }),
   performed_via_github_app: Object.freeze({ id: 1144995 }),
   body: 'Codex Review: Didn\'t find any major issues. :tada:\n\n**Reviewed commit:** `b9df1f8398`\n\n'
     + '<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n'
@@ -822,7 +917,7 @@ function codexComment(overrides = {}) {
 // Zelfde structuurmarker als in PR #73's vier echte Gemini-reviews ("## Code Review\n\n...").
 function geminiReview(overrides = {}) {
   return {
-    user: { login: 'gemini-code-assist[bot]', type: 'Bot' },
+    user: { login: 'gemini-code-assist[bot]', id: GEMINI_USER_ID, type: 'Bot' },
     state: 'COMMENTED',
     commit_id: NATIVE_HEAD,
     body: '## Code Review\n\nDeze PR is representatief schoon: geen openstaande bevindingen.',
@@ -835,21 +930,18 @@ const GEMINI_FINDING_COMMENT_BODY = '![security-critical](https://www.gstatic.co
   + '![critical](https://www.gstatic.com/codereviewagent/critical.svg)\n\n'
   + '### Critical Security Vulnerability: Denial of Service (DoS) via Raw Duplicate Checks';
 
-function ownerReceiptEnvelope(overrides = {}) {
+function ownerApproval(overrides = {}) {
   return {
-    receipt: {
-      schema: RECEIPT_SCHEMA,
-      task_id: NATIVE_CONTEXT.task_id,
-      reviewer_actor: 'rvanhooijdonk-png',
-      reviewer_vendor: 'owner',
-      receipt_uuid: '00000000-0000-4000-8000-000000000099',
-      head_sha: NATIVE_HEAD,
-      tree_sha: NATIVE_TREE,
-      verdict: 'GO',
-      checks_executed: ['owner-review'],
-      builder_actor: NATIVE_CONTEXT.builder_actor,
-      ...overrides,
-    },
-    transport_actor: overrides.reviewer_actor ?? 'rvanhooijdonk-png',
+    schema: OWNER_APPROVAL_SCHEMA,
+    task_id: NATIVE_CONTEXT.task_id,
+    head_sha: NATIVE_HEAD,
+    tree_sha: NATIVE_TREE,
+    decision: 'APPROVE',
+    ...overrides,
   };
+}
+
+// Het blok draagt zelf GEEN actorveld: de dragende auteur komt uitsluitend uit de GitHub-API.
+function ownerApprovalEnvelope(overrides = {}, transport_actor = 'rvanhooijdonk-png') {
+  return { approval: ownerApproval(overrides), transport_actor };
 }

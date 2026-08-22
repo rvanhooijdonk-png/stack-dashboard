@@ -7,17 +7,21 @@
  * de JSON op met `gh api` (uitsluitend `GET`, `contents/pull-requests/issues: read`) en geeft de
  * bestanden door; daardoor is deze hele laag deterministisch testbaar met vaste fixtures.
  *
- * Drie dingen worden hier mechanisch GEMETEN in plaats van geloofd:
+ * Vier dingen worden hier mechanisch GEMETEN in plaats van geloofd:
  *
  *   1. Head en tree. Een Codex-comment noemt een AFGEKORTE commit ("`b9df1f8398`"). Die tekst is een
  *      claim. Hij wordt geresolveerd tegen de commit-lijst van de PR zelf (`/pulls/{n}/commits`,
  *      aangevuld met het opgehaalde head-commit-object) — de enige commits die bij deze PR horen.
  *      Precies één prefixtreffer telt; nul of meerdere treffers leveren géén resolutie op, en
- *      onopgelost bewijs faalt verderop gesloten op STALE_HEAD.
- *   2. Gevoelige paden. Uit `/pulls/{n}/files`, niet uit de PR-tekst. Een leeg of ontbrekend
+ *      onopgelost bewijs faalt verderop gesloten op STALE_HEAD. Voor een REVIEW is er geen tekst
+ *      nodig: `review.commit_id` is een API-veld en gaat voor.
+ *   2. Volledigheid van het diff-zicht. `/pulls/{n}/files` levert maximaal 3000 bestanden. Het
+ *      werkelijk verzamelde aantal wordt tegen `pr.changed_files` gelegd; elke ongelijkheid,
+ *      overschrijding of ontbrekende telling is een blinde vlek — geen schone PR.
+ *   3. Gevoelige paden. Uit `/pulls/{n}/files`, niet uit de PR-tekst. Een leeg of ontbrekend
  *      bestandsantwoord geldt als gevoelig: onbekend zicht is nooit een vrijstelling.
- *   3. Transportidentiteit. `user.login`, `user.type` en `performed_via_github_app.id` komen van
- *      GitHub, niet uit een comment-lichaam, en zijn dus niet door een auteur te zetten.
+ *   4. Transportidentiteit. `user.login`, `user.id`, `user.type` en `performed_via_github_app.id`
+ *      komen van GitHub, niet uit een comment-lichaam, en zijn dus niet door een auteur te zetten.
  *
  * Er wordt niets uit deze bestanden gelogd: de beslisser hierna schrijft uitsluitend redencodes.
  */
@@ -25,12 +29,19 @@
 import { pathToFileURL } from 'node:url';
 
 import {
-  extractCodexNativeEvidence, extractGeminiNativeEvidence, extractReceiptFromCommentBody,
-  codexReviewedCommitRef,
+  extractCodexNativeEvidence, extractCodexReviewEvidence, extractGeminiNativeEvidence,
+  extractOwnerApprovalFromBody, codexReviewedCommitRef,
 } from './verify-review-gate.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const REF_RE = /^[0-9a-f]{7,40}$/;
+
+/**
+ * Harde bovengrens van `GET /repos/{o}/{r}/pulls/{n}/files`: GitHub levert nooit meer dan 3000
+ * bestanden, ook niet met `--paginate`. Een PR die eroverheen gaat is per definitie niet volledig
+ * gemeten en kan dus nooit "raakt geen gevoelig pad" opleveren.
+ */
+export const FILES_API_LIMIT = 3000;
 
 /**
  * `gh api --paginate --slurp` levert een array van pagina's; een enkele call levert één array.
@@ -76,10 +87,34 @@ export function resolveCommitRef(ref, commitIndex) {
   return found;
 }
 
-/** Leest de gedeclareerde task-id uit het PR-lichaam. Ontbreekt hij, dan blijft hij leeg. */
+/**
+ * Leest de gedeclareerde task-id uit het PR-lichaam. Ontbreekt hij, dan blijft hij leeg.
+ * GitHub levert PR-lichamen met CRLF-regeleindes; `$` in JS-multiline matcht alleen vóór `\n`, dus
+ * de trailing `\r` wordt hier expliciet toegestaan. Zonder dat faalde elke CRLF-PR stil op
+ * TASK_MISMATCH.
+ */
 export function extractTaskId(prBody) {
   if (typeof prBody !== 'string') return '';
-  return prBody.match(/^task_id=(\S+)$/m)?.[1] ?? '';
+  return prBody.match(/^task_id=(\S+)[ \t\r]*$/m)?.[1] ?? '';
+}
+
+/**
+ * Meet of de bestandsoogst volledig is. `pr.changed_files` is de door GitHub zelf gerapporteerde
+ * telling; wijkt het verzamelde aantal daarvan af, ontbreekt de telling, of raakt een van beide de
+ * 3000-grens, dan is het diff-zicht onbetrouwbaar. Dit is bewust géén boolean-only functie: de
+ * gemeten aantallen blijven beschikbaar voor tests.
+ */
+export function measureFilesCompleteness(changedFiles, prChangedFiles) {
+  const collected = flattenPages(changedFiles)
+    .map((f) => f?.filename)
+    .filter((n) => typeof n === 'string' && n.length > 0)
+    .length;
+  const expected = Number.isInteger(prChangedFiles) && prChangedFiles >= 0 ? prChangedFiles : null;
+  const complete = expected !== null
+    && expected > 0
+    && collected === expected
+    && collected <= FILES_API_LIMIT;
+  return { complete, collected, expected };
 }
 
 /**
@@ -116,9 +151,11 @@ export function groupReviewComments(reviewComments) {
  * De volledige adapter: ruwe GitHub-antwoorden in, `{ context, shieldInput }` uit.
  *
  * Native bewijs komt uitsluitend van de twee gepinde vendorbots (de extractors geven `null` voor
- * elke andere auteur, dus publieke ruis en proza produceren geen bewijsstuk). Ownerreceipts komen
- * uit het letterlijke machineblok in een comment- of reviewlichaam; hun `transport_actor` is de
- * door GitHub geleverde auteur, nooit een zelfgerapporteerd veld.
+ * elke andere auteur, dus publieke ruis en proza produceren geen bewijsstuk). Beide vendors worden
+ * op BEIDE werkelijke GitHub-vormen uitgelezen: Codex levert een schone ronde als issuecomment en
+ * bevindingen als review-met-inline-comments; Gemini levert altijd een review. Owner-autorisaties
+ * komen uit het letterlijke `autocoding-owner-approval-v1`-blok in een comment- of reviewlichaam;
+ * hun `transport_actor` is de door GitHub geleverde auteur, nooit een zelfgerapporteerd veld.
  */
 export function buildShieldInput({
   pr, headCommit, prCommits, issueComments, reviews, reviewComments, changedFiles, policy,
@@ -144,25 +181,35 @@ export function buildShieldInput({
     if (evidence) nativeEvidence.push(evidence);
   }
   for (const review of reviewList) {
-    const resolved = resolveCommitRef(review?.commit_id, commitIndex);
-    const evidence = extractGeminiNativeEvidence(
-      review, commentsByReview.get(review?.id) ?? [], resolved, policy,
-    );
-    if (evidence) nativeEvidence.push(evidence);
+    const inline = commentsByReview.get(review?.id) ?? [];
+    // `commit_id` is een API-veld en gaat vóór elke tekstclaim in het reviewlichaam; ontbreekt het,
+    // dan valt de Codex-review terug op zijn eigen "Reviewed commit"-regel, die alsnog mechanisch
+    // tegen de PR-commits geresolveerd wordt.
+    const resolved = resolveCommitRef(review?.commit_id, commitIndex)
+      ?? resolveCommitRef(codexReviewedCommitRef(review?.body), commitIndex);
+    for (const evidence of [
+      extractCodexReviewEvidence(review, inline, resolved, policy),
+      extractGeminiNativeEvidence(review, inline, resolved, policy),
+    ]) {
+      if (evidence) nativeEvidence.push(evidence);
+    }
   }
 
-  const ownerReceipts = [...comments, ...reviewList].flatMap((item) => {
-    const receipt = extractReceiptFromCommentBody(item?.body);
-    if (!receipt) return [];
-    return [{ receipt, transport_actor: typeof item?.user?.login === 'string' ? item.user.login : '' }];
+  const ownerApprovals = [...comments, ...reviewList].flatMap((item) => {
+    const approval = extractOwnerApprovalFromBody(item?.body);
+    if (!approval) return [];
+    return [{ approval, transport_actor: typeof item?.user?.login === 'string' ? item.user.login : '' }];
   });
+
+  const files = measureFilesCompleteness(changedFiles, pr?.changed_files);
 
   return {
     context,
     shieldInput: {
       nativeEvidence,
-      ownerReceipts,
+      ownerApprovals,
       sensitivePathsTouched: touchesSensitivePaths(changedFiles, policy?.owner_gate?.sensitive_path_globs),
+      filesComplete: files.complete,
     },
   };
 }
@@ -184,11 +231,15 @@ async function runCli() {
     return;
   }
 
-  // Een ontbrekend of kapot ruw antwoord mag nooit stilzwijgend "niets gevonden" betekenen: dat zou
-  // exact op een schone PR lijken. De adapter stopt hier hard, vóór er een beslissing wordt genomen.
+  // Lees- en schrijffouten zijn verschillende defecten en krijgen daarom verschillende redencodes.
+  // Een ontbrekend of kapot RUW antwoord mag nooit stilzwijgend "niets gevonden" betekenen: dat zou
+  // exact op een schone PR lijken. Een mislukte SCHRIJFACTIE zegt daarentegen niets over het bewijs
+  // en moet niet als onleesbare invoer worden gerapporteerd — dat stuurde de diagnose de verkeerde
+  // kant op.
+  let built;
   try {
     const read = (name) => JSON.parse(readFileSync(join(rawDir, `${name}.json`), 'utf8'));
-    const { context, shieldInput } = buildShieldInput({
+    built = buildShieldInput({
       pr: read('pr'),
       headCommit: read('head-commit'),
       prCommits: read('pr-commits'),
@@ -198,10 +249,17 @@ async function runCli() {
       changedFiles: read('files'),
       policy: JSON.parse(readFileSync(policyPath, 'utf8')),
     });
-    writeFileSync(outContext, JSON.stringify(context));
-    writeFileSync(outShieldInput, JSON.stringify(shieldInput));
   } catch {
     console.log('COLLECT_RAW_INPUT_UNREADABLE');
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    writeFileSync(outContext, JSON.stringify(built.context));
+    writeFileSync(outShieldInput, JSON.stringify(built.shieldInput));
+  } catch {
+    console.log('COLLECT_OUTPUT_UNWRITABLE');
     process.exitCode = 1;
   }
 }

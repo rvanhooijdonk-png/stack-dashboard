@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process';
 
 import {
   buildShieldInput, buildCommitIndex, resolveCommitRef, extractTaskId, touchesSensitivePaths,
-  groupReviewComments, flattenPages,
+  groupReviewComments, flattenPages, measureFilesCompleteness, FILES_API_LIMIT,
 } from '../scripts/autocoding/collect-shield-input.mjs';
 import { evaluateShield, REASON } from '../scripts/autocoding/verify-review-gate.mjs';
 
@@ -56,14 +56,15 @@ test('A1. de adapter meet head, tree, bouwer en task-id uit de API, niet uit PR-
   });
 });
 
-test('A2. de volledige fixtureset levert precies vier bewijsstukken op — proza en spoof vallen weg', () => {
+test('A2. de volledige fixtureset levert precies vijf bewijsstukken op — proza en spoof vallen weg', () => {
   const { shieldInput } = buildShieldInput(fixtureInput());
-  // Vijf issue-comments en drie reviews in de fixture; alleen de twee echte Codex-comments en de
-  // twee echte Gemini-reviews zijn bewijs, waarvan er per vendor één naar de vorige head wijst.
-  assert.equal(shieldInput.nativeEvidence.length, 4);
+  // Vijf issue-comments en vier reviews in de fixture. Bewijs zijn: de twee echte Codex-comments,
+  // de twee echte Gemini-reviews en de echte Codex-REVIEW met bevindingen. Per vendor wijst een
+  // deel daarvan naar de vorige head. Proza, spoof en de menselijke review leveren niets op.
+  assert.equal(shieldInput.nativeEvidence.length, 5);
   assert.deepEqual(
     shieldInput.nativeEvidence.map((e) => e.vendor).sort(),
-    ['codex', 'codex', 'gemini', 'gemini'],
+    ['codex', 'codex', 'codex', 'gemini', 'gemini'],
   );
   for (const e of shieldInput.nativeEvidence) {
     assert.ok(['chatgpt-codex-connector[bot]', 'gemini-code-assist[bot]'].includes(e.claimed_actor));
@@ -81,7 +82,7 @@ test('A4. de afgekorte Codex-commit wordt tegen de PR-commits geresolveerd, nooi
   const { shieldInput } = buildShieldInput(fixtureInput());
   const codex = shieldInput.nativeEvidence.filter((e) => e.vendor === 'codex');
   const heads = codex.map((e) => e.resolved_head_sha).sort();
-  assert.deepEqual(heads, [PREV_HEAD, HEAD].sort());
+  assert.deepEqual(heads, [PREV_HEAD, PREV_HEAD, HEAD].sort());
   const current = codex.find((e) => e.resolved_head_sha === HEAD);
   assert.equal(current.resolved_tree_sha, TREE);
   assert.equal(current.verdict, 'GO');
@@ -102,14 +103,17 @@ test('A6. zonder het actuele Codex-comment blijft alleen stale bewijs over => no
   assert.ok(r.reasons.includes(REASON.INSUFFICIENT_GO));
 });
 
-test('A7. de gewijzigde workflow markeert de PR als gevoelig en eist het ownerreceipt', () => {
+test('A7. de gewijzigde workflow markeert de PR als gevoelig en eist de owner-autorisatie', () => {
   const { shieldInput } = buildShieldInput(fixtureInput());
   assert.equal(shieldInput.sensitivePathsTouched, true);
-  assert.equal(shieldInput.ownerReceipts.length, 1);
-  assert.equal(shieldInput.ownerReceipts[0].transport_actor, 'rvanhooijdonk-png');
+  assert.equal(shieldInput.ownerApprovals.length, 1);
+  assert.equal(shieldInput.ownerApprovals[0].transport_actor, 'rvanhooijdonk-png');
+  // Het blok draagt zelf geen actorveld: er valt niets te verzinnen, de auteur komt uit de API.
+  assert.deepEqual(Object.keys(shieldInput.ownerApprovals[0].approval).sort(),
+    ['decision', 'head_sha', 'schema', 'task_id', 'tree_sha']);
 });
 
-test('A8. zonder ownerreceipt is dezelfde gevoelige PR rood', () => {
+test('A8. zonder owner-autorisatie is dezelfde gevoelige PR rood', () => {
   const comments = flattenPages(raw('issue-comments'));
   const zonderOwner = [comments.filter((c) => c.user.login !== 'rvanhooijdonk-png')];
   const { context, shieldInput } = buildShieldInput(fixtureInput({ issueComments: zonderOwner }));
@@ -140,6 +144,9 @@ test('A10. een lege API-oogst is nooit groen', () => {
   assert.equal(r.decision, 'NO_GO');
   assert.ok(r.reasons.includes(REASON.NO_RECEIPTS));
   assert.ok(r.reasons.includes(REASON.OWNER_GATE_REQUIRED));
+  // Geen bestandslijst is ook geen VOLLEDIGE bestandslijst: dat is een eigen grond, geen bijvangst.
+  assert.equal(shieldInput.filesComplete, false);
+  assert.ok(r.reasons.includes(REASON.FILES_INCOMPLETE));
 });
 
 test('A11. een dubbelzinnige of onbekende commit-prefix resolveert niet', () => {
@@ -174,6 +181,21 @@ test('A13. task-id komt uit een exacte regel, niet uit vrije tekst', () => {
   assert.equal(extractTaskId('de task_id=ABC staat midden in een zin'), '');
   assert.equal(extractTaskId('task_id= ABC'), '');
   assert.equal(extractTaskId(undefined), '');
+});
+
+test('A13b. regelafsluiting: CRLF blijft werken en trailing witruimte wist de task-id niet meer', () => {
+  // GEMETEN, niet aangenomen: `$` matcht in JS-multiline OOK vóór een `\r`, dus een kale CRLF-PR
+  // werkte al. Wat wél stil faalde is een regel met trailing spatie/tab — dan matchte de oude
+  // `/^task_id=(\S+)$/m` niet, en het gevolg was geen foutmelding maar een LEGE task-id, en dus
+  // TASK_MISMATCH met een reden die naar de reviewer wees in plaats van naar de parser.
+  assert.equal(extractTaskId('intro\r\ntask_id=ABC\r\nslot\r\n'), 'ABC');
+  assert.equal(extractTaskId('task_id=ABC\r\n'), 'ABC');
+  assert.equal(extractTaskId('task_id=ABC\r'), 'ABC');
+  assert.equal(extractTaskId('task_id=ABC  \r\n'), 'ABC', 'trailing spaties wisten de task-id niet');
+  assert.equal(extractTaskId('task_id=ABC\t\n'), 'ABC', 'trailing tab evenmin');
+  // Een CR MIDDEN in de waarde eindigt de regel: `A\rB` is twee regels, dus de waarde is `A`.
+  // Dat is geen defect maar de regeldefinitie zelf, en het blijft ongewijzigd.
+  assert.equal(extractTaskId('task_id=A\rB\r\n'), 'A');
 });
 
 test('A14. gevoelige paden: prefixmatch, met fail-closed bij ontbrekend zicht', () => {
@@ -265,4 +287,107 @@ test('A19. de adapter lekt geen bewijsinhoud naar stdout', () => {
   ], { encoding: 'utf8' });
   assert.equal(collect.stdout, '');
   assert.equal(collect.stderr, '');
+});
+
+test('A20. de bestandsoogst wordt tegen pr.changed_files gelegd, niet aangenomen', () => {
+  // `/pulls/{n}/files` levert maximaal 3000 bestanden. Zonder deze meting ziet een afgekapte oogst
+  // er precies zo uit als een kleine, schone PR — en zou een gevoelig pad buiten beeld kunnen vallen.
+  const two = [[{ filename: 'a' }, { filename: 'b' }]];
+  assert.deepEqual(measureFilesCompleteness(two, 2), { complete: true, collected: 2, expected: 2 });
+  assert.equal(measureFilesCompleteness(two, 3).complete, false, 'minder verzameld dan gemeld');
+  assert.equal(measureFilesCompleteness(two, 1).complete, false, 'meer verzameld dan gemeld');
+  assert.equal(measureFilesCompleteness(two, undefined).complete, false, 'geen telling is geen zicht');
+  assert.equal(measureFilesCompleteness(two, null).complete, false);
+  assert.equal(measureFilesCompleteness(two, '2').complete, false, 'een string is geen telling');
+  assert.equal(measureFilesCompleteness([], 0).complete, false, 'een PR zonder bestanden is geen bewijs');
+  // Exact op de grens is nog volledig; erboven is per definitie afgekapt.
+  const many = (n) => [Array.from({ length: n }, (_, i) => ({ filename: `f${i}` }))];
+  assert.equal(measureFilesCompleteness(many(FILES_API_LIMIT), FILES_API_LIMIT).complete, true);
+  assert.equal(measureFilesCompleteness(many(FILES_API_LIMIT + 1), FILES_API_LIMIT + 1).complete, false);
+  // Een entry zonder bruikbare naam telt niet mee en veroorzaakt dus een ongelijkheid.
+  assert.equal(measureFilesCompleteness([[{ filename: 'a' }, { status: 'added' }]], 2).complete, false);
+});
+
+test('A21. afgekapte bestandsdata is NO_GO én gevoelig — nooit een ownergate-vrijstelling', () => {
+  const pr = { ...raw('pr'), changed_files: 4000 };
+  const { context, shieldInput } = buildShieldInput(fixtureInput({ pr }));
+  assert.equal(shieldInput.filesComplete, false);
+  const r = evaluateShield({ ...shieldInput, context, policy: POLICY });
+  assert.equal(r.decision, 'NO_GO');
+  assert.ok(r.reasons.includes(REASON.FILES_INCOMPLETE));
+
+  // En zelfs met een niet-gevoelige bestandslijst blijft de ownergate gelden zolang het zicht
+  // onvolledig is: onbekend is nooit onschuldig.
+  const onzichtbaar = buildShieldInput(fixtureInput({
+    pr, changedFiles: [[{ filename: 'docs/README.md' }]],
+  }));
+  assert.equal(onzichtbaar.shieldInput.sensitivePathsTouched, false);
+  const zonderOwner = evaluateShield({
+    ...onzichtbaar.shieldInput, ownerApprovals: [], context: onzichtbaar.context, policy: POLICY,
+  });
+  assert.ok(zonderOwner.reasons.includes(REASON.OWNER_GATE_REQUIRED));
+  assert.ok(zonderOwner.reasons.includes(REASON.FILES_INCOMPLETE));
+});
+
+test('A22. de Codex-REVIEW met inline bevindingen wordt als bewijs verzameld, niet gemist', () => {
+  // Gemeten op PR #74: Codex leverde bevindingen als `pull_request_review` met inline comments,
+  // terwijl de adapter Codex alleen uit issuecomments haalde. Die ronde was daardoor onzichtbaar.
+  const { shieldInput } = buildShieldInput(fixtureInput());
+  const review = shieldInput.nativeEvidence.find(
+    (e) => e.vendor === 'codex' && e.extra_reasons.includes(REASON.NATIVE_FINDINGS_PRESENT),
+  );
+  assert.ok(review, 'de Codex-review moet een bewijsstuk opleveren');
+  assert.equal(review.verdict, 'NO_GO');
+  assert.equal(review.identity_verified, true, 'reviews dragen geen app-id; login/id/type zijn gepind');
+  assert.equal(review.resolved_head_sha, PREV_HEAD, 'commit_id is een API-veld en gaat voor');
+});
+
+test('A23. een Codex-review met bevindingen op de ACTUELE head maakt die vendorronde rood', () => {
+  const reviews = flattenPages(raw('reviews')).map(
+    (r) => (r.user.login === 'chatgpt-codex-connector[bot]' ? { ...r, commit_id: HEAD } : r),
+  );
+  const { context, shieldInput } = buildShieldInput(fixtureInput({ reviews: [reviews] }));
+  const r = evaluateShield({ ...shieldInput, context, policy: POLICY });
+  assert.equal(r.decision, 'NO_GO');
+  assert.ok(r.reasons.includes(REASON.NATIVE_FINDINGS_PRESENT));
+  // Het schone Codex-issuecomment op dezelfde head heft de bevindingen niet op.
+  assert.ok(shieldInput.nativeEvidence.some(
+    (e) => e.vendor === 'codex' && e.verdict === 'GO' && e.resolved_head_sha === HEAD,
+  ));
+});
+
+test('A24. een gespoofde bot-identiteit met de juiste login faalt op de numerieke user-ID', () => {
+  // Een login is hernoembaar, een numerieke user-ID niet. Beide routes (issuecomment én review)
+  // moeten daarop pinnen, anders is er een route waarlangs een hernoemd account bewijs levert.
+  const spoof = (item) => (item.user.login === 'chatgpt-codex-connector[bot]'
+    ? { ...item, user: { ...item.user, id: 1 } } : item);
+  const { context, shieldInput } = buildShieldInput(fixtureInput({
+    issueComments: [flattenPages(raw('issue-comments')).map(spoof)],
+    reviews: [flattenPages(raw('reviews')).map(spoof)],
+  }));
+  const codex = shieldInput.nativeEvidence.filter((e) => e.vendor === 'codex' && e.identity_verified);
+  assert.equal(codex.length, 0, 'een verkeerde user-ID levert nooit een geverifieerde identiteit op');
+  const r = evaluateShield({ ...shieldInput, context, policy: POLICY });
+  assert.equal(r.decision, 'NO_GO');
+  assert.ok(r.reasons.includes(REASON.NATIVE_IDENTITY_UNVERIFIED));
+});
+
+test('A25. de adapter scheidt een leesfout van een schrijffout', () => {
+  // Beide faalden eerder onder dezelfde code. Een onleesbaar API-antwoord en een niet-schrijfbaar
+  // uitvoerpad zijn verschillende defecten; ze in één code samenvatten stuurt de diagnose weg van
+  // de oorzaak.
+  const dir = mkdtempSync(join(tmpdir(), 'shield-adapter-'));
+  const rawDir = join(dir, 'raw');
+  mkdirSync(rawDir);
+  cpSync(FIXTURES, rawDir, { recursive: true });
+
+  const unwritable = spawnSync(process.execPath, [
+    'scripts/autocoding/collect-shield-input.mjs', '--raw', rawDir, '--policy',
+    'CONTROL/AUTOCODING/policy.v1.json',
+    '--out-context', join(dir, 'bestaat-niet', 'c.json'),
+    '--out-shield-input', join(dir, 's.json'),
+  ], { encoding: 'utf8' });
+  assert.equal(unwritable.status, 1);
+  assert.match(unwritable.stdout, /COLLECT_OUTPUT_UNWRITABLE/);
+  assert.doesNotMatch(unwritable.stdout, /COLLECT_RAW_INPUT_UNREADABLE/);
 });

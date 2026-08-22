@@ -56,7 +56,21 @@ export const REASON = Object.freeze({
   NATIVE_TERMINAL_MARKER_MISSING: 'NATIVE_TERMINAL_MARKER_MISSING',
   NATIVE_FINDINGS_PRESENT: 'NATIVE_FINDINGS_PRESENT',
   NATIVE_STATE_NOT_ALLOWED: 'NATIVE_STATE_NOT_ALLOWED',
+  // Zicht op de diff zelf. `/pulls/{n}/files` levert maximaal 3000 bestanden; een onvolledige oogst
+  // is geen schone PR maar een blinde vlek, en krijgt daarom een eigen vaste categorie.
+  FILES_INCOMPLETE: 'FILES_INCOMPLETE',
+  // Owner-autorisatie (AUTOCODING_OWNER_APPROVAL_V1) — een eigen poort, geen reviewvendor. Deze
+  // codes zijn bewust apart van de reviewredenen: een ownerprobleem mag nooit als vendorprobleem
+  // gelezen worden, en andersom evenmin.
   OWNER_GATE_REQUIRED: 'OWNER_GATE_REQUIRED',
+  OWNER_APPROVAL_MISSING: 'OWNER_APPROVAL_MISSING',
+  OWNER_APPROVAL_SCHEMA_MISMATCH: 'OWNER_APPROVAL_SCHEMA_MISMATCH',
+  OWNER_APPROVAL_UNKNOWN_FIELD: 'OWNER_APPROVAL_UNKNOWN_FIELD',
+  OWNER_APPROVAL_ACTOR_NOT_ALLOWED: 'OWNER_APPROVAL_ACTOR_NOT_ALLOWED',
+  OWNER_APPROVAL_STALE_HEAD: 'OWNER_APPROVAL_STALE_HEAD',
+  OWNER_APPROVAL_TREE_MISMATCH: 'OWNER_APPROVAL_TREE_MISMATCH',
+  OWNER_APPROVAL_TASK_MISMATCH: 'OWNER_APPROVAL_TASK_MISMATCH',
+  OWNER_APPROVAL_NOT_APPROVE: 'OWNER_APPROVAL_NOT_APPROVE',
 });
 
 function isNonEmptyString(v) {
@@ -297,35 +311,95 @@ export function codexReviewedCommitRef(body) {
   return body.match(CODEX_COMMIT_RE)?.[1] ?? null;
 }
 
+function positiveInteger(v) {
+  return Number.isInteger(v) && v > 0;
+}
+
 /**
- * Zet één ruwe `chatgpt-codex-connector[bot]`-issuecomment om naar genormaliseerd native bewijs.
- * `resolved` is het resultaat van het door de caller (workflow) mechanisch opgezocht commit-object
- * voor de in de comment genoemde korte SHA — deze functie vertrouwt geen zelfgerapporteerde SHA.
- * Geeft `null` als het comment niet van de gepinde vendoractor komt (geen bewijs, geen ruis).
+ * Toetst de identiteit van de drager (issuecomment of review) tegen de GEPINDE vendoridentiteit.
+ * Alle drie de velden komen van GitHub, niet uit het lichaam: `user.login`, de numerieke `user.id`
+ * en `user.type`. De numerieke ID is de sterkste van de drie — een login is hernoembaar, een
+ * user-ID niet.
+ *
+ * `performed_via_github_app` bestaat alleen op issuecomments; reviews dragen dat veld niet (gemeten
+ * op PR #74, review 4998216880). Op de commentroute is het daarom VERPLICHT en moet het exact de
+ * gepinde app-ID zijn; op de reviewroute mag het ontbreken, maar áls het er staat moet het kloppen.
  */
-export function extractCodexNativeEvidence(comment, resolved, policy) {
+function nativeIdentityVerified(carrier, cfg, { requireApp }) {
+  const user = carrier?.user;
+  if (user?.login !== cfg.actor) return false;
+  if (!positiveInteger(cfg.user_id) || user?.id !== cfg.user_id) return false;
+  if (!isNonEmptyString(cfg.user_type) || user?.type !== cfg.user_type) return false;
+  const app = carrier?.performed_via_github_app;
+  if (requireApp) return positiveInteger(cfg.app_id) && app?.id === cfg.app_id;
+  if (app === undefined || app === null) return true;
+  return positiveInteger(cfg.app_id) && app?.id === cfg.app_id;
+}
+
+/**
+ * Toetst of een lichaam met een van de gepinde canonieke terminale succesvormen begint. De lijst is
+ * een gesloten allowlist van letterlijke prefixen uit de policy; een lege of ontbrekende lijst
+ * betekent "geen enkele vorm is succes", nooit "alles is succes". Voorafgaande witruimte wordt
+ * genegeerd (GitHub levert reviewlichamen soms met een leidende newline); dat kan een
+ * bevindingenlichaam nooit op een succesmarker laten lijken.
+ */
+function matchesTerminalSuccessMarker(body, markers) {
+  if (typeof body !== 'string') return false;
+  if (!Array.isArray(markers) || markers.length === 0) return false;
+  const trimmed = body.trimStart();
+  return markers.some((marker) => isNonEmptyString(marker) && trimmed.startsWith(marker));
+}
+
+/**
+ * De gedeelde kern voor Codex-bewijs, ongeacht of het via een issuecomment of via een
+ * pull-request-review binnenkwam. GO vereist alle drie: gepinde identiteit (door `bindNativeEvidence`
+ * getoetst), een canonieke terminale succesvorm, en NUL inline bevindingen. Afwezigheid van
+ * bevindingen is uitdrukkelijk géén GO op zichzelf — Codex plaatst bij een schone review helemaal
+ * geen review, dus "geen bevindingen" is even goed verenigbaar met "nooit gedraaid".
+ */
+function codexEvidence(carrier, inlineComments, resolved, policy, requireApp) {
   const cfg = policy?.native_review?.codex;
   if (!cfg || !isNonEmptyString(cfg.actor)) return null;
-  const login = comment?.user?.login;
+  const login = carrier?.user?.login;
   if (login !== cfg.actor) return null;
-  const body = comment?.body;
-  const identity_verified = comment?.performed_via_github_app?.id === cfg.app_id;
+
   const extra_reasons = [];
-  let verdict = 'NO_GO';
-  if (typeof body === 'string' && isNonEmptyString(cfg.success_marker) && body.startsWith(cfg.success_marker)) {
-    if (codexReviewedCommitRef(body)) verdict = 'GO';
+  if (!matchesTerminalSuccessMarker(carrier?.body, cfg.terminal_success_markers)) {
+    extra_reasons.push(REASON.NATIVE_TERMINAL_MARKER_MISSING);
   }
-  if (verdict !== 'GO') extra_reasons.push(REASON.NO_GO_VERDICT_PRESENT);
+  const comments = Array.isArray(inlineComments) ? inlineComments : [];
+  if (comments.length > 0) extra_reasons.push(REASON.NATIVE_FINDINGS_PRESENT);
+
   return {
     vendor: 'codex',
     claimed_actor: login,
     transport_actor: login,
-    identity_verified,
-    verdict,
+    identity_verified: nativeIdentityVerified(carrier, cfg, { requireApp }),
+    verdict: extra_reasons.length === 0 ? 'GO' : 'NO_GO',
     extra_reasons,
     resolved_head_sha: resolved?.head_sha ?? '',
     resolved_tree_sha: resolved?.tree_sha ?? '',
   };
+}
+
+/**
+ * Zet één ruwe `chatgpt-codex-connector[bot]`-ISSUECOMMENT om naar genormaliseerd native bewijs.
+ * `resolved` is het door de caller mechanisch opgezochte commit-object voor de in de comment
+ * genoemde korte SHA — deze functie vertrouwt geen zelfgerapporteerde SHA. Geeft `null` als het
+ * comment niet van de gepinde vendoractor komt (geen bewijs, geen ruis).
+ */
+export function extractCodexNativeEvidence(comment, resolved, policy) {
+  return codexEvidence(comment, [], resolved, policy, true);
+}
+
+/**
+ * Zet één ruwe `chatgpt-codex-connector[bot]`-PULL-REQUEST-REVIEW om naar genormaliseerd native
+ * bewijs. Codex levert bevindingen als review met inline comments (gemeten op PR #74, review
+ * 4998216880) — die vorm moet dus ondersteund worden, fail-closed: elke inline bevinding maakt deze
+ * vendorronde NO_GO, en proza zonder canonieke succesvorm is nooit GO.
+ */
+export function extractCodexReviewEvidence(review, inlineComments, resolved, policy) {
+  return codexEvidence(review, inlineComments, resolved, policy, false);
 }
 
 /**
@@ -340,26 +414,24 @@ export function extractGeminiNativeEvidence(review, inlineComments, resolved, po
   if (!cfg || !isNonEmptyString(cfg.actor)) return null;
   const login = review?.user?.login;
   if (login !== cfg.actor) return null;
-  const identity_verified = review?.user?.type === 'Bot';
-  const body = review?.body;
   const extra_reasons = [];
-  const stateAllowed = Array.isArray(cfg.allowed_states) && cfg.allowed_states.includes(review?.state);
-  if (!stateAllowed) extra_reasons.push(REASON.NATIVE_STATE_NOT_ALLOWED);
-  const hasTerminalMarker = typeof body === 'string' && isNonEmptyString(cfg.terminal_marker)
-    && body.startsWith(cfg.terminal_marker);
-  if (!hasTerminalMarker) extra_reasons.push(REASON.NATIVE_TERMINAL_MARKER_MISSING);
+  if (!(Array.isArray(cfg.allowed_states) && cfg.allowed_states.includes(review?.state))) {
+    extra_reasons.push(REASON.NATIVE_STATE_NOT_ALLOWED);
+  }
+  if (!matchesTerminalSuccessMarker(review?.body, cfg.terminal_success_markers)) {
+    extra_reasons.push(REASON.NATIVE_TERMINAL_MARKER_MISSING);
+  }
   // Gemini's ernstvocabulaire is hier niet volledig gemeten, dus wordt het niet geïnterpreteerd:
   // elke inline reviewcomment telt als bevinding, ongeacht badge of tekst. "Schoon" is uitsluitend
   // nul reviewcomments op deze review — dat is de fail-closed lezing.
   const comments = Array.isArray(inlineComments) ? inlineComments : [];
   if (comments.length > 0) extra_reasons.push(REASON.NATIVE_FINDINGS_PRESENT);
-  const verdict = extra_reasons.length === 0 ? 'GO' : 'NO_GO';
   return {
     vendor: 'gemini',
     claimed_actor: login,
     transport_actor: login,
-    identity_verified,
-    verdict,
+    identity_verified: nativeIdentityVerified(review, cfg, { requireApp: false }),
+    verdict: extra_reasons.length === 0 ? 'GO' : 'NO_GO',
     extra_reasons,
     resolved_head_sha: resolved?.head_sha ?? '',
     resolved_tree_sha: resolved?.tree_sha ?? '',
@@ -395,10 +467,14 @@ export function bindNativeEvidence(evidence, rawContext) {
 }
 
 /**
- * Weigert een policy waarvan de gepinde native-vendoractor wildcard of leeg is — nooit fail-open.
+ * Weigert een policy waarvan de gepinde native-vendoridentiteit onvolledig, wildcard of leeg is —
+ * nooit fail-open. Elke vendor moet een letterlijke actor, een positief-gehele numerieke user-ID,
+ * een user-type en minstens één letterlijke terminale succesmarker dragen; de commentroute vereist
+ * bovendien een positief-gehele app-ID.
+ *
  * Weigert bovendien elke policy waarin de ownergate en de reviewvendors elkaar kunnen vervangen:
- * een owner-vendornaam of owner-actor die ook als vereiste reviewvendor of vendoractor voorkomt,
- * zou één identiteit twee onafhankelijke poorten laten passeren.
+ * een owneractor die ook als vendoractor voorkomt zou één identiteit twee onafhankelijke poorten
+ * laten passeren.
  */
 export function assertNativeVendorsSafe(policy) {
   const nr = policy?.native_review;
@@ -407,22 +483,26 @@ export function assertNativeVendorsSafe(policy) {
     throw new Error(REASON.UNSAFE_POLICY);
   }
 
-  const ownerMap = policy?.owner_gate?.allowed_reviewer_actors;
-  const ownerVendors = new Set(ownerMap && typeof ownerMap === 'object' && !Array.isArray(ownerMap)
-    ? Object.keys(ownerMap) : []);
-  const ownerActors = new Set(Object.values(ownerMap ?? {})
-    .flatMap((actors) => Array.isArray(actors) ? actors : []));
+  const ownerActors = new Set(ownerActorList(policy?.owner_gate));
 
   const seenVendors = new Set();
   for (const vendor of nr.required_vendors) {
     if (!isNonEmptyString(vendor) || vendor === '*') throw new Error(REASON.UNSAFE_POLICY);
     if (seenVendors.has(vendor)) throw new Error(REASON.UNSAFE_POLICY);
     seenVendors.add(vendor);
-    if (ownerVendors.has(vendor)) throw new Error(REASON.UNSAFE_POLICY);
     const cfg = nr[vendor];
     if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(REASON.UNSAFE_POLICY);
     if (!isNonEmptyString(cfg.actor) || cfg.actor === '*') throw new Error(REASON.UNSAFE_POLICY);
     if (ownerActors.has(cfg.actor)) throw new Error(REASON.UNSAFE_POLICY);
+    if (!positiveInteger(cfg.user_id)) throw new Error(REASON.UNSAFE_POLICY);
+    if (!isNonEmptyString(cfg.user_type) || cfg.user_type === '*') throw new Error(REASON.UNSAFE_POLICY);
+    if ('app_id' in cfg && !positiveInteger(cfg.app_id)) throw new Error(REASON.UNSAFE_POLICY);
+    if (!Array.isArray(cfg.terminal_success_markers) || cfg.terminal_success_markers.length === 0) {
+      throw new Error(REASON.UNSAFE_POLICY);
+    }
+    for (const marker of cfg.terminal_success_markers) {
+      if (!isNonEmptyString(marker) || marker === '*') throw new Error(REASON.UNSAFE_POLICY);
+    }
   }
 }
 
@@ -466,18 +546,166 @@ export function evaluateNativeReview(evidenceItems, rawContext, rawPolicy) {
   return { decision: reasons.size === 0 ? 'GO' : 'NO_GO', reasons: Array.from(reasons) };
 }
 
+// --- Owner-autorisatie (AUTOCODING_OWNER_APPROVAL_V1) ---------------------------------------------
+//
+// Owner-autorisatie is GEEN review. De eigenaar is geen Codex/Gemini-vendor, kan een ontbrekende
+// vendor nooit vervangen, en mag daarom ook niet door reviewerlogica lopen. Dat is niet alleen
+// principieel: de gemeten PR-auteur en de toegestane owner zijn op deze repository dezelfde
+// GitHub-identiteit (`rvanhooijdonk-png`), dus de reviewer-zelfreviewregel maakte ownergoedkeuring
+// structureel onmogelijk. Het schema hieronder is daarom klein, exact en zonder builder-velden:
+// alleen "deze eigenaar autoriseert exact deze task op exact deze head/tree".
+
+export const OWNER_APPROVAL_SCHEMA = 'AUTOCODING_OWNER_APPROVAL_V1';
+
+const OWNER_APPROVAL_FIELDS = new Set(['schema', 'task_id', 'head_sha', 'tree_sha', 'decision']);
+
 /**
- * De volledige Shield-uitspraak: native tweevendorbewijs, plus — alléén als de diff gevoelige paden
- * raakt (`.github/workflows/**`, `CONTROL/AUTOCODING/**`) — een apart OWNER_GATE-receipt (hergebruikt
- * het generieke receiptschema hierboven, met `policy.owner_gate` als zijn eigen kleine policy). De
- * owneractor telt nooit mee als een van de twee vereiste vendors — dat receipt heeft vendor `"owner"`,
- * nooit `"codex"`/`"gemini"`, dus `evaluateNativeReview` en dit receipt kunnen elkaar niet vervangen.
+ * Haalt een owner-autorisatie uit een comment-/reviewlichaam. Alleen een letterlijk fenced blok met
+ * infostring `autocoding-owner-approval-v1` telt; proza ("wat mij betreft akkoord") nooit.
  */
-export function evaluateShield({ nativeEvidence, ownerReceipts, sensitivePathsTouched, context, policy }) {
+export function extractOwnerApprovalFromBody(body) {
+  if (typeof body !== 'string') return null;
+  const match = body.match(/```autocoding-owner-approval-v1\s*\n([\s\S]*?)```/i);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1].trim());
+  } catch {
+    return null;
+  }
+}
+
+function ownerActorList(gate) {
+  const actors = gate?.allowed_owner_actors;
+  return Array.isArray(actors) ? actors.filter((a) => isNonEmptyString(a)) : [];
+}
+
+/**
+ * Weigert een ownergate die niet exact is. Wordt ALTIJD bij het laden gedraaid, ook wanneer de diff
+ * geen gevoelig pad raakt: een kapotte ownergate mag niet pas zichtbaar worden op het moment dat hij
+ * nodig is.
+ */
+export function assertOwnerGateSafe(policy) {
+  const gate = policy?.owner_gate;
+  if (!gate || typeof gate !== 'object' || Array.isArray(gate)) throw new Error(REASON.UNSAFE_POLICY);
+  if (gate.schema !== OWNER_APPROVAL_SCHEMA) throw new Error(REASON.UNSAFE_POLICY);
+
+  const globs = gate.sensitive_path_globs;
+  if (!Array.isArray(globs) || globs.length === 0) throw new Error(REASON.UNSAFE_POLICY);
+  for (const glob of globs) {
+    if (!isNonEmptyString(glob) || glob === '*') throw new Error(REASON.UNSAFE_POLICY);
+  }
+
+  const actors = gate.allowed_owner_actors;
+  if (!Array.isArray(actors) || actors.length === 0) throw new Error(REASON.UNSAFE_POLICY);
+  for (const actor of actors) {
+    if (!isNonEmptyString(actor) || actor === '*') throw new Error(REASON.UNSAFE_POLICY);
+  }
+}
+
+/**
+ * Evalueert één owner-autorisatie tegen de gemeten waarheid. De dragende GitHub-auteur
+ * (`transport_actor`) komt uitsluitend uit de API; het blok zelf draagt geen actorveld, juist zodat
+ * er niets te verzinnen valt. Geen zelfreviewregel: de eigenaar mág de PR-auteur zijn.
+ */
+export function evaluateOwnerApproval(envelope, rawContext, rawGate) {
+  const context = rawContext ?? {};
+  const gate = rawGate ?? {};
+  const reasons = [];
+  const add = (r) => { if (!reasons.includes(r)) reasons.push(r); };
+
+  const approval = envelope?.approval;
+  const transportActor = envelope?.transport_actor;
+  if (typeof approval !== 'object' || approval === null || Array.isArray(approval)) {
+    return { valid: false, reasons: [REASON.OWNER_APPROVAL_SCHEMA_MISMATCH] };
+  }
+
+  for (const key of Object.keys(approval)) {
+    if (!OWNER_APPROVAL_FIELDS.has(key)) add(REASON.OWNER_APPROVAL_UNKNOWN_FIELD);
+  }
+  if (approval.schema !== OWNER_APPROVAL_SCHEMA) add(REASON.OWNER_APPROVAL_SCHEMA_MISMATCH);
+  if (!isNonEmptyString(approval.task_id)) add(REASON.OWNER_APPROVAL_SCHEMA_MISMATCH);
+  if (!SHA_RE.test(approval.head_sha) || !SHA_RE.test(approval.tree_sha)) add(REASON.BAD_SHA_FORMAT);
+  if (reasons.length > 0) return { valid: false, reasons };
+
+  if (!ownerActorList(gate).includes(transportActor)) add(REASON.OWNER_APPROVAL_ACTOR_NOT_ALLOWED);
+  if (!isNonEmptyString(context.task_id) || approval.task_id !== context.task_id) {
+    add(REASON.OWNER_APPROVAL_TASK_MISMATCH);
+  }
+  if (!SHA_RE.test(context.pr_head_sha) || approval.head_sha !== context.pr_head_sha) {
+    add(REASON.OWNER_APPROVAL_STALE_HEAD);
+  }
+  if (!SHA_RE.test(context.pr_tree_sha) || approval.tree_sha !== context.pr_tree_sha) {
+    add(REASON.OWNER_APPROVAL_TREE_MISMATCH);
+  }
+  if (approval.decision !== 'APPROVE') add(REASON.OWNER_APPROVAL_NOT_APPROVE);
+
+  return { valid: reasons.length === 0, reasons };
+}
+
+/**
+ * Evalueert de volledige set owner-autorisaties voor één PR-head. Eén geldige autorisatie van een
+ * allowlisted eigenaar op de actuele head/tree/task is genoeg; nul is nooit genoeg. Autorisaties van
+ * een auteur buiten de allowlist zijn ruis: ze kunnen geen reden en geen blokkade injecteren.
+ */
+export function evaluateOwnerApprovals(envelopes, rawContext, rawGate) {
+  const context = rawContext ?? {};
+  const gate = rawGate ?? {};
+  const list = (Array.isArray(envelopes) ? envelopes : []).filter((e) => e != null);
+  const allowed = new Set(ownerActorList(gate));
+  const trusted = list.filter((e) => allowed.has(e?.transport_actor));
+  if (trusted.length === 0) {
+    return { decision: 'NO_GO', reasons: [REASON.OWNER_APPROVAL_MISSING] };
+  }
+
+  // Alleen een GOED GEVORMDE autorisatie voor een andere head is een afgesloten ronde; een malformed
+  // blok blijft geselecteerd en faalt gesloten op zijn eigen categorie.
+  const current = trusted.filter((e) => {
+    const head = e?.approval?.head_sha;
+    return !(SHA_RE.test(head) && SHA_RE.test(context.pr_head_sha) && head !== context.pr_head_sha);
+  });
+  if (current.length === 0) {
+    return {
+      decision: 'NO_GO',
+      reasons: [REASON.OWNER_APPROVAL_MISSING, REASON.OWNER_APPROVAL_STALE_HEAD],
+    };
+  }
+
+  const evaluated = current.map((e) => evaluateOwnerApproval(e, context, gate));
+  if (evaluated.some((e) => e.valid)) return { decision: 'GO', reasons: [] };
+  const reasons = new Set();
+  for (const e of evaluated) for (const r of e.reasons) reasons.add(r);
+  return { decision: 'NO_GO', reasons: Array.from(reasons) };
+}
+
+/**
+ * De volledige Shield-uitspraak.
+ *
+ *  - Native tweevendorbewijs (Codex én Gemini) is altijd vereist.
+ *  - `filesComplete` is de gemeten volledigheid van `/pulls/{n}/files` tegen `pr.changed_files`.
+ *    Onvolledig zicht is een eigen NO_GO-grond ÉN maakt de PR gevoelig: bij een blinde vlek wordt de
+ *    ownergate juist wél geëist, nooit overgeslagen.
+ *  - De ownergate is een afzonderlijke poort met een eigen schema en een eigen allowlist. Hij telt
+ *    nooit als vendor en kan een ontbrekende vendor nooit vervangen.
+ *
+ * De ownergate-policy wordt altijd gevalideerd, ook op een niet-gevoelige PR.
+ */
+export function evaluateShield({
+  nativeEvidence, ownerApprovals, sensitivePathsTouched, filesComplete, context, policy,
+}) {
+  try {
+    assertOwnerGateSafe(policy);
+  } catch {
+    return { decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] };
+  }
+
   const nativeResult = evaluateNativeReview(nativeEvidence, context, policy);
   const reasons = new Set(nativeResult.reasons);
-  if (sensitivePathsTouched) {
-    const ownerResult = evaluateReceipts(ownerReceipts, context, policy?.owner_gate);
+
+  const filesAreComplete = filesComplete === true;
+  if (!filesAreComplete) reasons.add(REASON.FILES_INCOMPLETE);
+
+  if (sensitivePathsTouched || !filesAreComplete) {
+    const ownerResult = evaluateOwnerApprovals(ownerApprovals, context, policy?.owner_gate);
     if (ownerResult.decision !== 'GO') {
       reasons.add(REASON.OWNER_GATE_REQUIRED);
       for (const r of ownerResult.reasons) reasons.add(r);
@@ -518,35 +746,21 @@ async function runCli() {
     return;
   }
 
-  // De shield-route (native reviewbewijs + optioneel ownergate) heeft zijn eigen policyveiligheid
-  // (`assertNativeVendorsSafe`); de oudere generieke-receiptroute blijft op `assertPolicyIsSafe` staan.
-  // Beide falen gesloten op UNSAFE_POLICY, nooit fail-open.
-  let result;
-  if (shieldInputPath) {
-    try {
-      assertNativeVendorsSafe(policy);
-    } catch {
-      console.log(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] }));
-      process.exitCode = 1;
-      return;
-    }
-    result = evaluateShield({
+  // Geen policyvalidatie meer op CLI-niveau: `evaluateShield` (via `assertOwnerGateSafe` en
+  // `evaluateNativeReview` -> `assertNativeVendorsSafe`) en `evaluateReceipts` (via
+  // `assertPolicyIsSafe`) valideren allebei zelf en geven UNSAFE_POLICY terug in plaats van te
+  // gooien. Een tweede try/catch hier voegde geen enkele weigering toe en suggereerde ten onrechte
+  // dat de fail-closed garantie aan de CLI hing in plaats van aan de centrale evaluatoren.
+  const result = shieldInputPath
+    ? evaluateShield({
       nativeEvidence: shieldInput?.nativeEvidence,
-      ownerReceipts: shieldInput?.ownerReceipts,
+      ownerApprovals: shieldInput?.ownerApprovals,
       sensitivePathsTouched: Boolean(shieldInput?.sensitivePathsTouched),
+      filesComplete: shieldInput?.filesComplete === true,
       context,
       policy,
-    });
-  } else {
-    try {
-      assertPolicyIsSafe(policy);
-    } catch {
-      console.log(JSON.stringify({ decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] }));
-      process.exitCode = 1;
-      return;
-    }
-    result = evaluateReceipts(receipts, context, policy);
-  }
+    })
+    : evaluateReceipts(receipts, context, policy);
   console.log(JSON.stringify(result));
   process.exitCode = result.decision === 'GO' ? 0 : 1;
 }

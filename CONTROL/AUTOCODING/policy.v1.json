@@ -1,24 +1,27 @@
 {
   "schema": "AUTOCODING_SHIELD_POLICY_V1",
   "live_receipt_gate_enabled": false,
+  "live_status_context": "autocoding-shield-live-receipts",
   "native_review": {
     "required_vendors": ["codex", "gemini"],
     "codex": {
       "actor": "chatgpt-codex-connector[bot]",
+      "user_id": 199175422,
+      "user_type": "Bot",
       "app_id": 1144995,
-      "success_marker": "Codex Review: Didn't find any major issues. :tada:"
+      "terminal_success_markers": ["Codex Review: Didn't find any major issues. :tada:"]
     },
     "gemini": {
       "actor": "gemini-code-assist[bot]",
+      "user_id": 176961590,
+      "user_type": "Bot",
       "allowed_states": ["COMMENTED", "APPROVED"],
-      "terminal_marker": "## Code Review"
+      "terminal_success_markers": ["## Code Review"]
     }
   },
   "owner_gate": {
+    "schema": "AUTOCODING_OWNER_APPROVAL_V1",
     "sensitive_path_globs": [".github/workflows/", "CONTROL/AUTOCODING/"],
-    "required_distinct_vendors": 1,
-    "allowed_reviewer_actors": {
-      "owner": ["rvanhooijdonk-png"]
-    }
+    "allowed_owner_actors": ["rvanhooijdonk-png"]
   }
 }

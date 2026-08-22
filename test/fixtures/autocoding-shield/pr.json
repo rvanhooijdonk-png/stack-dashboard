@@ -1,7 +1,15 @@
 {
   "number": 74,
-  "user": { "login": "claude2-cloud", "type": "User" },
+  "user": {
+    "login": "claude2-cloud",
+    "type": "User"
+  },
   "body": "Autocoding live-gate completion.\n\ntask_id=AUTOCODING_STACK_DASHBOARD_LIVE_GATE_COMPLETION_PR_V1\n\nbase=2af69bc6259caf5c2f1e03a2c59e56c810ac9831\n",
-  "head": { "sha": "b9df1f8398aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-  "base": { "sha": "2af69bc6259caf5c2f1e03a2c59e56c810ac9831" }
+  "head": {
+    "sha": "b9df1f8398aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "base": {
+    "sha": "2af69bc6259caf5c2f1e03a2c59e56c810ac9831"
+  },
+  "changed_files": 2
 }

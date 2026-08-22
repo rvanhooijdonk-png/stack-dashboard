@@ -1,18 +1,26 @@
 name: autocoding-shield
 
-# Twee gescheiden jobs, bewust twee verschillende checknamen:
+# Twee gescheiden jobs, bewust twee verschillende checknamen, plus EEN derde naam die geen job is:
 #
-#   autocoding-shield            — draait UITSLUITEND op `pull_request`, checkt de PR-head uit en
-#                                  voert PR-headcode uit (validator-tests, secretscan). Dit is de
-#                                  stabiele checknaam. Comment- en review-events raken hem niet, dus
-#                                  een comment kan een kandidaat nooit vals groen maken.
-#   autocoding-shield-live-gate  — draait op alle drie de events, checkt de DEFAULT BRANCH uit en
-#                                  voert nooit PR-headcode uit. Leest de PR uitsluitend read-only via
-#                                  de GitHub-API. Dit is het pad waarop de live poort later required
-#                                  wordt; PR-headcode kan onder deze naam geen status produceren.
+#   autocoding-shield                  — draait UITSLUITEND op `pull_request`, checkt de PR-head uit en
+#                                        voert PR-headcode uit (validator-tests, secretscan). Read-only.
+#                                        Comment- en review-events raken hem niet, dus een comment kan
+#                                        een kandidaat nooit vals groen maken.
+#   autocoding-shield-live-gate        — draait op alle drie de events, checkt de DEFAULT BRANCH uit en
+#                                        voert nooit PR-headcode uit. Leest de PR uitsluitend read-only
+#                                        via de GitHub-API en publiceert de uitspraak.
+#   autocoding-shield-live-receipts    — GEEN job maar de commitstatus-context waaronder die uitspraak
+#                                        wordt gepubliceerd. Dit is de naam die later required wordt.
 #
-# Nooit `pull_request_target`: geen enkele job krijgt schrijfrechten of secrets in een context waarin
-# PR-head-inhoud iets kan sturen.
+# Waarom die derde naam bestaat: een Actions-run die door `issue_comment` of `pull_request_review`
+# wordt getriggerd hangt aan de default-branch-SHA, niet aan de PR-head. De checknaam van zo'n run
+# verschijnt daarom NOOIT op de PR-head, en een eerder groene check op die head blijft staan — ook
+# nadat het bewijs waarop hij groen werd verwijderd, bewerkt of dismissed is. Door de uitspraak als
+# expliciete commitstatus op de via de API GEMETEN head te schrijven, overschrijft elke eventsoort de
+# vorige uitspraak op precies dezelfde commit.
+#
+# Nooit `pull_request_target`. De enige schrijfscope in dit bestand is `statuses: write`, uitsluitend
+# op de trusted default-branch-job; die job voert geen PR-headcode uit.
 
 on:
   pull_request:
@@ -47,8 +55,10 @@ jobs:
           set -euo pipefail
           if [ -f scripts/autocoding/verify-review-gate.mjs ] && \
              [ -f scripts/autocoding/collect-shield-input.mjs ] && \
+             [ -f scripts/autocoding/publish-live-status.mjs ] && \
              [ -f test/autocoding-review-gate.test.mjs ] && \
              [ -f test/autocoding-shield-adapter.test.mjs ] && \
+             [ -f test/autocoding-live-status.test.mjs ] && \
              [ -f CONTROL/AUTOCODING/policy.v1.json ]; then
             echo 'gate_files=true' >> "$GITHUB_OUTPUT"
           else
@@ -58,7 +68,9 @@ jobs:
 
       - name: Validator- en adaptertests
         if: steps.bootstrap.outputs.gate_files == 'true'
-        run: node --test test/autocoding-review-gate.test.mjs test/autocoding-shield-adapter.test.mjs
+        run: >-
+          node --test test/autocoding-review-gate.test.mjs
+          test/autocoding-shield-adapter.test.mjs test/autocoding-live-status.test.mjs
 
       - name: Branchdiff op secrets toetsen
         env:
@@ -78,6 +90,10 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
+      # De enige schrijfscope in dit bestand. Alleen deze job heeft hem, en deze job checkt de
+      # default branch uit: PR-headcode kan er dus niet bij. Geen `contents: write`, geen
+      # `actions: write`, geen secrets.
+      statuses: write
     steps:
       - name: Bepaal PR-nummer
         id: pr
@@ -103,6 +119,7 @@ jobs:
           set -euo pipefail
           if [ -f scripts/autocoding/verify-review-gate.mjs ] && \
              [ -f scripts/autocoding/collect-shield-input.mjs ] && \
+             [ -f scripts/autocoding/publish-live-status.mjs ] && \
              [ -f CONTROL/AUTOCODING/policy.v1.json ]; then
             echo 'trusted_gate_files=true' >> "$GITHUB_OUTPUT"
           else
@@ -110,26 +127,49 @@ jobs:
             echo 'BOOTSTRAP_TRUSTED_GATE_FILES_NOT_ON_DEFAULT_BRANCH'
           fi
 
-      - name: Live receiptpoort
+      - name: Bepaal poortstand en statuscontext
+        id: enabled
         if: steps.bootstrap.outputs.trusted_gate_files == 'true'
+        run: |
+          set -euo pipefail
+          enabled="$(node -p "JSON.parse(require('fs').readFileSync('CONTROL/AUTOCODING/policy.v1.json','utf8')).live_receipt_gate_enabled === true")"
+          context="$(node -p "String(JSON.parse(require('fs').readFileSync('CONTROL/AUTOCODING/policy.v1.json','utf8')).live_status_context || '')")"
+          if [ "$enabled" != true ]; then
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'BOOTSTRAP_RECEIPT_GATE_DISABLED'
+            exit 0
+          fi
+          test -n "$context"
+          echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          echo "status_context=$context" >> "$GITHUB_OUTPUT"
+
+      # De momentopname. `pr.json` wordt met herhaalpogingen opgehaald omdat de gemeten head de drager
+      # is van de hele publicatie: zonder head is er geen commit om de uitspraak op te schrijven.
+      # Uitsluitend read-only GET's. Geen enkel veld hieruit wordt gelogd.
+      - name: Meet de PR-head en verzamel de momentopname
+        id: snapshot
+        if: steps.enabled.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
           set -euo pipefail
-          enabled="$(node -p "JSON.parse(require('fs').readFileSync('CONTROL/AUTOCODING/policy.v1.json','utf8')).live_receipt_gate_enabled === true")"
-          if [ "$enabled" != true ]; then
-            echo 'BOOTSTRAP_RECEIPT_GATE_DISABLED'
-            exit 0
-          fi
-
           raw="$RUNNER_TEMP/raw"
           mkdir -p "$raw"
 
-          # Uitsluitend read-only GET's. Geen enkel veld hieruit wordt gelogd.
-          gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" > "$raw/pr.json"
+          for attempt in 1 2 3; do
+            if gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" > "$raw/pr.json"; then break; fi
+            if [ "$attempt" = 3 ]; then
+              echo '::error::PR_SNAPSHOT_UNAVAILABLE'
+              exit 1
+            fi
+            sleep 5
+          done
+
           head_sha="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const s=(p.head||{}).sha;if(!/^[0-9a-f]{40}$/.test(s||""))process.exit(1);process.stdout.write(s)' "$raw/pr.json")"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
           gh api "repos/$REPOSITORY/git/commits/$head_sha" > "$raw/head-commit.json"
           gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PR_NUMBER/commits" > "$raw/pr-commits.json"
           gh api --paginate --slurp "repos/$REPOSITORY/issues/$PR_NUMBER/comments" > "$raw/issue-comments.json"
@@ -137,8 +177,16 @@ jobs:
           gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PR_NUMBER/comments" > "$raw/review-comments.json"
           gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PR_NUMBER/files" > "$raw/files.json"
 
+      # De uitspraak zelf. `continue-on-error` is bewust: een NO_GO mag deze stap niet laten
+      # ontploffen vóór de publicatie, want de publicatie IS de poort. Rood worden gebeurt hierna.
+      - name: Beslis over de gemeten head
+        id: gate
+        if: steps.snapshot.outputs.head_sha != ''
+        continue-on-error: true
+        run: |
+          set -euo pipefail
           node scripts/autocoding/collect-shield-input.mjs \
-            --raw "$raw" \
+            --raw "$RUNNER_TEMP/raw" \
             --policy CONTROL/AUTOCODING/policy.v1.json \
             --out-context "$RUNNER_TEMP/context.json" \
             --out-shield-input "$RUNNER_TEMP/shield-input.json"
@@ -146,4 +194,28 @@ jobs:
           node scripts/autocoding/verify-review-gate.mjs \
             --shield-input "$RUNNER_TEMP/shield-input.json" \
             --context "$RUNNER_TEMP/context.json" \
-            --policy CONTROL/AUTOCODING/policy.v1.json
+            --policy CONTROL/AUTOCODING/policy.v1.json > "$RUNNER_TEMP/gate-result.json"
+
+      # Publiceert ALTIJD, op de gemeten head, onder de vaste context. `success` uitsluitend bij een
+      # bewezen GO; elke NO_GO, parsefout, truncatie, ontbrekend bewijs of uitvoeringsfout wordt
+      # `failure` op diezelfde head. De stap eindigt non-zero bij `failure`, zodat de run ook rood is.
+      - name: Publiceer de uitspraak als commitstatus op de gemeten PR-head
+        if: always() && steps.snapshot.outputs.head_sha != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
+          STATUS_CONTEXT: ${{ steps.enabled.outputs.status_context }}
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
+        run: |
+          set -euo pipefail
+          execution_error=''
+          if [ "$GATE_OUTCOME" != 'success' ] && [ "$GATE_OUTCOME" != 'failure' ]; then
+            execution_error='GATE_EXECUTION_ERROR'
+          fi
+          node scripts/autocoding/publish-live-status.mjs \
+            --repository "$REPOSITORY" \
+            --head-sha "$HEAD_SHA" \
+            --status-context "$STATUS_CONTEXT" \
+            --gate-result "$RUNNER_TEMP/gate-result.json" \
+            --execution-error "$execution_error"

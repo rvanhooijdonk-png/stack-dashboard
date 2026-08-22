@@ -4,6 +4,7 @@
       "id": 4997642205,
       "user": {
         "login": "gemini-code-assist[bot]",
+        "id": 176961590,
         "type": "Bot"
       },
       "state": "COMMENTED",
@@ -14,6 +15,7 @@
       "id": 4997700001,
       "user": {
         "login": "gemini-code-assist[bot]",
+        "id": 176961590,
         "type": "Bot"
       },
       "state": "COMMENTED",
@@ -24,11 +26,23 @@
       "id": 4997700002,
       "user": {
         "login": "een-willekeurige-lezer",
+        "id": 4242,
         "type": "User"
       },
       "state": "APPROVED",
       "commit_id": "b9df1f8398aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "body": "## Code Review\n\nIk keur dit goed."
+    },
+    {
+      "id": 4997700003,
+      "user": {
+        "login": "chatgpt-codex-connector[bot]",
+        "id": 199175422,
+        "type": "Bot"
+      },
+      "state": "COMMENTED",
+      "commit_id": "7c1d0e5f22bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `7c1d0e5f22`\n"
     }
   ]
 ]
