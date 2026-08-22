@@ -44,28 +44,44 @@
 // organisaties. De `merge_queue`-tak is daarmee niet fout, maar op dit object ONBEREIKBAAR: hij levert
 // er eeuwig `SERVER_MERGE_QUEUE_PROOF_MISSING`, en dus nooit een finalisatie.
 //
-// Daarom draagt de policy sinds V23 één EXPLICIETE serverpoortmodus, `server_gate_mode`:
+// V24 — CODEX1-P1 OP V23: EEN STRIKTE RULESET IS GEEN VEILIGE AUTOMATISCHE MERGE. V23 antwoordde op
+// die onbereikbaarheid met een tweede EFFECTMODUS, `STRICT_STATUS_CHECKS`: een actieve, strikte
+// ruleset lezen en daarna GitHubs standaard `PUT .../pulls/{n}/merge` doen. De review op die stand
+// wees uit dat die belofte niet waargemaakt kan worden. Wat een strikte `required_status_checks`-regel
+// serverkant afdwingt is precies één ding: dat de branch up-to-date is en dat de VEREISTE CONTEXTEN
+// groen zijn. Wat zij NIET afdwingt is ons EIGEN bewijs: het native tweevendorreviewbewijs en het
+// ownercomment zijn voor GitHub geen mergevoorwaarde maar gewone reviewdraden en gewone comments. Een
+// INGETROKKEN review of een BEWERKT ownerblok tussen meting B en de merge-PUT laat de head-sha
+// ongemoeid en laat de vereiste check groen — en die PUT slaagt dan alsnog. De TOCTOU-opening die V19
+// sloot stond in V23 dus weer open; smaller, maar open. Een derde clientmeting verkleint dat venster
+// alleen en sluit het niet, en is daarom geen reparatie.
 //
-//   - `MERGE_QUEUE`          — de V19..V22-tak hierboven. Blijft ongewijzigd bestaan als DORMANTE
-//                              legacy voor een organisatie-object; op dit repository onbereikbaar.
-//   - `STRICT_STATUS_CHECKS` — de persoonlijke-repositorymodus. Wat GitHub hier WEL kan afdwingen is
-//                              een ACTIEVE ruleset met een `pull_request`-regel plus een
-//                              `required_status_checks`-regel met STRICT policy. Strict betekent
-//                              letterlijk: de branch moet up-to-date zijn met de base én elke
-//                              vereiste context moet groen zijn, en GitHub toetst dat OP HET MOMENT
-//                              VAN DE MERGE — serverkant, na ons verzoek, niet ervoor.
+// De reparatie is niet nog een meting maar het WEGHALEN VAN HET AUTOMATISCHE EFFECT. Sinds V24 kent
+// `server_gate_mode` twee standen, en `STRICT_STATUS_CHECKS` is er geen van meer:
 //
-// In die modus is het effect GitHubs standaard, ATOMAIRE `PUT /repos/{o}/{r}/pulls/{n}/merge` met de
-// exact hermeten head-sha en de mergemethode uit de policy. Dat is een eerlijke, kleinere belofte dan
-// de wachtrij: GitHub vergelijkt bij die aanroep zelf alleen de head-sha, maar WEIGERT hem daarnaast
-// wanneer de ruleset op dat moment niet is voldaan (405/409). De rest van de dekking komt uit deze
-// code: de tweede volledige hermeting vlak vóór het effect draagt sinds V23 óók de LIVE base-head
-// (`git/ref/heads/{base_ref}`) en de door GitHub berekende mergebaarheid (`mergeable`,
-// `mergeable_state`), zodat een base-verschuiving, een conflict of een weggevallen vereiste tussen de
-// twee metingen de vingerafdruk breekt en er nul verzoeken volgen.
+//   - `MERGE_QUEUE`       — de V19..V22-tak hierboven, ONGEWIJZIGD. Dormante legacy voor een
+//                           organisatie-object; op dit persoonlijke repository onbereikbaar.
+//   - `MANUAL_OWNER_GATE` — de persoonlijke-repositorystand. Alles wat geautomatiseerd KAN worden
+//                           blijft geautomatiseerd: bouwen, reviewen, testen, hermeten, driftdetectie
+//                           en het volledige oordeel. Alleen de laatste handeling niet. Het effect van
+//                           deze stand is mechanisch NUL mergeverzoeken — `mergePullRequest` eindigt
+//                           er fail-closed op `OWNER_MERGE_REQUIRED` — en wat de finalizer oplevert is
+//                           een MERGEPAKKET: een bewezen GO die de eigenaar zelf uitvoert.
+//
+// `STRICT_STATUS_CHECKS` is niet stilzwijgend verdwenen maar EXPLICIET GEWEIGERD
+// (`REJECTED_SERVER_GATE_MODE`): een policy die die stand nog draagt is `FINALIZER_POLICY_UNSAFE` en
+// komt niet tot een oordeel, laat staan tot een verzoek. De klassieke `PUT .../pulls/{n}/merge` komt
+// in dit bestand niet meer voor: er is geen aanroeppad meer dat hem kan bereiken.
+//
+// EERLIJK OVER WAT DIT NIET IS. Dit is GEEN volledige klasse-B-automerge. Een persoonlijk repository
+// kent geen merge queue en geen native goedkeuring door een bot-reviewer; de enige serverkant
+// autoriteit die er te krijgen is, is de required-status-check, en die draagt ons reviewbewijs niet.
+// Volledig automatisch mergen vereist server-native autorisatie, en die vereist naar alle
+// waarschijnlijkheid een ORGANISATIE-object met merge queue en native required reviews. Zolang dat er
+// niet is, is de eigenaar de laatste handeling — en zegt deze code dat ook zo.
 //
 // De merge-groupcode (`autocoding-merge-group-gate`, `required_merge_queue_checks`) blijft in
-// `MERGE_QUEUE`-modus staan, maar is in `STRICT_STATUS_CHECKS` GEEN vereiste check, geen event en
+// `MERGE_QUEUE`-modus staan, maar is in `MANUAL_OWNER_GATE` GEEN vereiste check, geen event en
 // geen bewijsbron: die poort draait per ontwerp uitsluitend op een `merge_group`-commit, en die
 // bestaat op dit object niet.
 //
@@ -114,23 +130,37 @@ const MERGE_QUEUE_RULES_PAGE_BUDGET = 4;
 export const MERGE_FINALIZER_SCHEMA = 'AUTOCODING_MERGE_FINALIZER_V1';
 
 /**
- * DE SERVERPOORTMODUS (V23). Gesloten en verplicht: de policy MOET er precies één noemen, want de
- * modus bepaalt zowel welk bewijs de base-branch moet dragen als welk effect er hoogstens kan volgen.
- * Een ontbrekende of onbekende waarde is `FINALIZER_POLICY_UNSAFE` — nooit een stilzwijgende
- * terugval op de een of de ander.
+ * DE SERVERPOORTMODUS (V23, herzien in V24). Gesloten en verplicht: de policy MOET er precies één
+ * noemen, want de modus bepaalt zowel welk bewijs de base-branch moet dragen als welk effect er
+ * hoogstens kan volgen. Een ontbrekende, onbekende of GEWEIGERDE waarde is `FINALIZER_POLICY_UNSAFE`
+ * — nooit een stilzwijgende terugval op de een of de ander.
  *
- *   MERGE_QUEUE          — actieve `merge_queue`-regel op de base; effect is uitsluitend een
- *                          INSCHRIJVING (`merge-async`, `merge_action: "merge_queue"`). Vereist een
- *                          repository van een ORGANISATIE; op een persoonlijk object weigert GitHub
- *                          zo'n ruleset met HTTP 422, en blijft deze modus dus eeuwig NO_GO.
- *   STRICT_STATUS_CHECKS — actieve ruleset met een `pull_request`-regel die de mergemethode van de
- *                          policy toestaat, plus een `required_status_checks`-regel met STRICT policy
- *                          die de vereiste context aan de gepinde producent-app bindt; effect is
- *                          GitHubs standaard atomaire `PUT .../pulls/{n}/merge` op exact de hermeten
- *                          head-sha.
+ *   MERGE_QUEUE       — actieve `merge_queue`-regel op de base; effect is uitsluitend een
+ *                       INSCHRIJVING (`merge-async`, `merge_action: "merge_queue"`). Vereist een
+ *                       repository van een ORGANISATIE; op een persoonlijk object weigert GitHub zo'n
+ *                       ruleset met HTTP 422, en blijft deze modus dus eeuwig NO_GO.
+ *   MANUAL_OWNER_GATE — de persoonlijke-repositorystand (V24). Het oordeel is volledig automatisch en
+ *                       even streng als in de andere tak; het EFFECT is mechanisch nul mergeverzoeken
+ *                       en hoogstens een MERGEPAKKET dat de eigenaar zelf uitvoert.
  */
 export const SERVER_GATE_MODE = Object.freeze({
   MERGE_QUEUE: 'MERGE_QUEUE',
+  MANUAL_OWNER_GATE: 'MANUAL_OWNER_GATE',
+});
+
+/**
+ * DE GEWEIGERDE STANDEN (V24). `STRICT_STATUS_CHECKS` staat hier met naam en toenaam in plaats van
+ * simpelweg te ontbreken, en dat is opzet: een verwijderde naam is niet te onderscheiden van een
+ * typefout, en zou bij de eerstvolgende poging hem terug te zetten geen enkel spoor van de reden
+ * dragen. Een policy die deze stand noemt is UNSAFE — zie `assertMergeFinalizerPolicySafe` — en komt
+ * dus nooit tot een oordeel of een verzoek.
+ *
+ * De grond staat voluit in de kopnotitie: een strikte `required_status_checks`-regel dwingt serverkant
+ * uitsluitend een up-to-date branch en groene VEREISTE CONTEXTEN af, nooit ons eigen review- en
+ * ownerbewijs. Dat bewijs kan tussen de laatste meting en de merge-PUT verdwijnen zonder dat de
+ * head-sha of de check verandert, en de merge slaagt dan alsnog.
+ */
+export const REJECTED_SERVER_GATE_MODE = Object.freeze({
   STRICT_STATUS_CHECKS: 'STRICT_STATUS_CHECKS',
 });
 
@@ -194,15 +224,14 @@ export const FINALIZE_REASON = Object.freeze({
   REQUIRED_STATUS_CHECKS_RULE_MISSING: 'REQUIRED_STATUS_CHECKS_RULE_MISSING',
   REQUIRED_STATUS_CHECKS_CONTEXT_MISSING: 'REQUIRED_STATUS_CHECKS_CONTEXT_MISSING',
   REQUIRED_CHECK_APP_ID_MISMATCH: 'REQUIRED_CHECK_APP_ID_MISMATCH',
-  // V23 — de deelgronden van `STRICT_STATUS_CHECKS`, op DEZELFDE begrensde, complete
-  // `rules/branches/{base_ref}`-meting. `SERVER_STRICT_RULESET_PROOF_MISSING` is de stand waarin dat
-  // eindpunt een LEGE regelset teruggeeft: geen enkele actieve regel op deze branch — precies wat een
-  // ruleset met `enforcement=disabled` oplevert, want zo'n ruleset draagt hier niets bij. De drie
-  // andere gronden onderscheiden WELK deel van de actieve samenstelling ontbrak.
-  SERVER_STRICT_RULESET_PROOF_MISSING: 'SERVER_STRICT_RULESET_PROOF_MISSING',
-  PULL_REQUEST_RULE_MISSING: 'PULL_REQUEST_RULE_MISSING',
-  PULL_REQUEST_MERGE_METHOD_NOT_ALLOWED: 'PULL_REQUEST_MERGE_METHOD_NOT_ALLOWED',
-  STRICT_STATUS_CHECKS_POLICY_DISABLED: 'STRICT_STATUS_CHECKS_POLICY_DISABLED',
+  // V24 — HIER STONDEN DE VIER DEELGRONDEN VAN `STRICT_STATUS_CHECKS`
+  // (`SERVER_STRICT_RULESET_PROOF_MISSING`, `PULL_REQUEST_RULE_MISSING`,
+  // `PULL_REQUEST_MERGE_METHOD_NOT_ALLOWED`, `STRICT_STATUS_CHECKS_POLICY_DISABLED`). Ze zijn met de
+  // modus zelf verdwenen en niet zomaar ongebruikt blijven staan: een redencode die geen enkel pad
+  // meer kan zetten is geen reserve maar een valse belofte in een log dat juist gesloten hoort te
+  // zijn. De grond van hun verdwijnen staat in de kopnotitie (V24) en de naam van de geweigerde
+  // modus staat in `REJECTED_SERVER_GATE_MODE`, zodat de reden vindbaar blijft zonder dat er dode
+  // literalen achterblijven.
   // V23 — de LIVE base-branch en de door GitHub berekende mergebaarheid. Beide zijn nieuw gemeten
   // velden en horen bij BEIDE modi: ze binden de beslissing aan de stand van de doelbranch zelf, niet
   // alleen aan het basispunt dat in de pull request staat opgeslagen.
@@ -259,14 +288,16 @@ export const FINALIZE_ERROR = Object.freeze({
   MERGE_RESULT_MISMATCH: 'MERGE_RESULT_MISMATCH',
   MERGE_POLL_EXHAUSTED: 'MERGE_POLL_EXHAUSTED',
   MERGE_POLL_TRANSPORT_ERROR: 'MERGE_POLL_TRANSPORT_ERROR',
-  // V23 — uitsluitend van de standaard atomaire `PUT .../pulls/{n}/merge` in
-  // `STRICT_STATUS_CHECKS`. `MERGE_HEAD_MISMATCH` is daar de 409: GitHub meldt daarmee dat de
-  // meegegeven `sha` NIET meer de head is — de enige voorwaarde die die aanroep zelf toetst, en
-  // precies waarom hij hier alleen bruikbaar is bovenop een serverkant afgedwongen ruleset.
-  // `MERGE_RESULT_NOT_MERGED` is een 200 waarvan het lichaam geen `merged: true` draagt: ook daar
-  // is de statuscode alleen niet het bewijs.
-  MERGE_HEAD_MISMATCH: 'MERGE_HEAD_MISMATCH',
-  MERGE_RESULT_NOT_MERGED: 'MERGE_RESULT_NOT_MERGED',
+  // V24 — DE ENIGE UITKOMST VAN `MANUAL_OWNER_GATE`, en met opzet een BLOKKADE en geen `ok`. Dit is
+  // geen fout en geen weigering van GitHub: er is geen verzoek geweest. Het oordeel was GO, het
+  // effect is een mergepakket, en de laatste handeling ligt bij de eigenaar. `requests: 0` hoort bij
+  // deze code als een eigenschap en niet als toeval — zie `mergePullRequest`, dat in deze stand
+  // terugkeert vóór er ook maar een transportfunctie wordt uitgezocht.
+  //
+  // Hier stonden tot V23 `MERGE_HEAD_MISMATCH` en `MERGE_RESULT_NOT_MERGED`, de codes van de
+  // klassieke `PUT .../pulls/{n}/merge`. Die aanroep bestaat in dit bestand niet meer; hun codes
+  // dus ook niet.
+  OWNER_MERGE_REQUIRED: 'OWNER_MERGE_REQUIRED',
 });
 
 /**
@@ -318,7 +349,8 @@ function defaultSleep(ms) {
  *   1  `git/ref/heads/{base_ref}` — de LIVE base-head (V23)
  *   4  `rules/branches/{base_ref}` maal `MERGE_QUEUE_RULES_PAGE_BUDGET` pagina's — het
  *      serverpoortbewijs (V19, Codex `3835523940`; sinds V20 zelf ook begrensd gepagineerd,
- *      scope-item 6; sinds V23 draagt dezelfde meting ook de `STRICT_STATUS_CHECKS`-samenstelling)
+ *      scope-item 6; de meting blijft in BEIDE standen staan, want de regelset zit in de
+ *      vingerafdruk en een ruleset die tussen A en B verandert is drift)
  *  20  vijf bewijslijsten maal `LIST_PAGE_BUDGET` pagina's
  *   4  `commits/{sha}/check-runs` maal `CHECKS_PAGE_BUDGET` pagina's
  *  --
@@ -337,9 +369,10 @@ export const FINALIZER_MEASUREMENT_REQUEST_BUDGET = 1 + 1 + 1 + MERGE_QUEUE_RULE
  */
 export const FINALIZER_PER_CANDIDATE_REQUEST_BUDGET = (2 * FINALIZER_MEASUREMENT_REQUEST_BUDGET) + 1
   + MERGE_ASYNC_POLL_BUDGET;
-// De pollpost blijft in deze som staan ook al kent `STRICT_STATUS_CHECKS` geen polling: het budget
-// moet het DUURSTE pad dragen, en dat is de `MERGE_QUEUE`-tak. Een modus die minder kost mag nooit
-// het plafond verlagen waartegen de aanroeper zijn resterende quotum afmeet.
+// De pollpost blijft in deze som staan ook al polt `MANUAL_OWNER_GATE` niet — die stand doet zelfs
+// helemaal geen verzoek: het budget moet het DUURSTE pad dragen, en dat is de `MERGE_QUEUE`-tak. Een
+// modus die minder kost mag nooit het plafond verlagen waartegen de aanroeper zijn resterende quotum
+// afmeet.
 
 /**
  * De begroting van een hele finalizerronde, inclusief de kandidatenlijst die eraan voorafgaat. Bij
@@ -396,6 +429,12 @@ export function assertMergeFinalizerPolicySafe(policy) {
   // V23 — de serverpoortmodus is VERPLICHT en gesloten. Zonder deze waarde zou de beslisser moeten
   // raden welk bewijs de base-branch hoort te dragen en welk effect er hoogstens mag volgen, en dat
   // zijn precies de twee dingen die niemand mag afleiden uit een ontbrekend veld.
+  //
+  // V24 — de GEWEIGERDE standen worden EERST getoetst, vóór de allowlist. Het resultaat is hetzelfde
+  // — `FINALIZER_POLICY_UNSAFE` — maar de volgorde legt vast dat `STRICT_STATUS_CHECKS` een
+  // uitdrukkelijk verworpen stand is en niet een naam die toevallig ontbreekt. Wie hem terugzet, moet
+  // deze regel weghalen en komt daarmee langs de grond die eronder staat.
+  if (Object.values(REJECTED_SERVER_GATE_MODE).includes(cfg.server_gate_mode)) fail();
   if (!Object.values(SERVER_GATE_MODE).includes(cfg.server_gate_mode)) fail();
   if (!ALLOWED_MERGE_METHODS.includes(cfg.merge_method)) fail();
 
@@ -608,95 +647,52 @@ function evaluateEnqueuePrecondition(rules, cfg) {
 }
 
 /**
- * Of één `pull_request`-regel de mergemethode van de policy TOESTAAT. Fail-closed op afwezigheid:
- * een regel zonder leesbare `allowed_merge_methods` bewijst niets over de toegestane methode, en een
- * ontbrekend veld mag nooit als "alles mag" worden gelezen. GitHub levert deze lijst in kleine
- * letters (`squash`) terwijl de `merge_queue`-regel haar methode in hoofdletters draagt (`SQUASH`);
- * de vergelijking is daarom hoofdletterongevoelig, net als bij `activeMergeQueueMethod`.
+ * DE STAND `MANUAL_OWNER_GATE` (V24) — GEEN serverpoorteis, en dat is een uitspraak en geen gat.
+ *
+ * De serverpoort bestaat in dit bestand om precies één reden: een AUTOMATISCHE merge moet, op het
+ * moment dat hij werkelijk gebeurt, nog worden herbeoordeeld door een autoriteit die niet wij zijn.
+ * In deze stand gebeurt die merge niet automatisch. Het effect is mechanisch nul verzoeken
+ * (`mergePullRequest` eindigt hier op `OWNER_MERGE_REQUIRED` vóór er een transportfunctie wordt
+ * uitgezocht), en de laatste handeling is die van de eigenaar, in GitHubs eigen interface, met alle
+ * bescherming die daar op dat moment geldt. Er valt hier dus geen venster te bewaken: er is geen
+ * verzoek dat een venster opent.
+ *
+ * Een rulesetEIS zou hier bovendien de fout van V23 in spiegelbeeld herhalen. Ze zou deze stand op
+ * dit object even onbereikbaar maken als de wachtrijtak — ruleset 21205251 staat `disabled`, en
+ * `rules/branches` levert daardoor een LEGE regelset — zonder ook maar iets veiliger te maken, want
+ * wat zij zou afdwingen (up-to-date branch, groene vereiste context) dekt ons review- en ownerbewijs
+ * nu juist niet.
+ *
+ * Wat deze stand WEL bewaakt staat onverkort overeind en staat buiten deze functie: de reviewwet, de
+ * ownerautorisatie, de PR-binding, de vereiste checks op de EIGEN head, GitHubs eigen
+ * mergebaarheid, de live base-head en de driftvergelijking tussen de twee metingen. Een GO betekent
+ * hier dus exact wat hij zegt — het bewijs is compleet — en niets meer dan dat.
  */
-function ruleAllowsMergeMethod(rule, mergeMethod) {
-  const toegestaan = rule?.parameters?.allowed_merge_methods;
-  if (!Array.isArray(toegestaan) || toegestaan.length === 0) return false;
-  return toegestaan.some(
-    (m) => typeof m === 'string' && m.toUpperCase() === mergeMethod.toUpperCase(),
-  );
-}
-
-/**
- * DE STRICT-STATUS-CHECKS-VOORWAARDE (V23) — de persoonlijke-repositorymodus. Eén conjunctie, gemeten
- * op DEZELFDE begrensde, complete `rules/branches/{base_ref}`-meting als de merge-queue-tak, nooit op
- * een tweede of latere meting:
- *
- *   1. de regelset is niet LEEG. Een lege lijst betekent: geen enkele ACTIEVE regel op deze branch —
- *      exact wat een ruleset met `enforcement=disabled` oplevert, want dit eindpunt geeft uitsluitend
- *      regels terug die op dit moment werkelijk gelden. Dat is de huidige, gemeten stand van dit
- *      repository, en dus terecht NO_GO;
- *   2. er is een actieve `pull_request`-regel, en ELKE actieve `pull_request`-regel staat de
- *      mergemethode van de policy toe. `every` en niet `some`: meerdere regels gelden allemaal
- *      tegelijk, dus is de werkelijk toegestane verzameling hun DOORSNEDE — één regel die `squash`
- *      niet toestaat, verbiedt hem;
- *   3. er is een actieve `required_status_checks`-regel, en minstens één daarvan draagt
- *      `strict_required_status_checks_policy: true`. Dat woord "strict" is de hele reden dat deze
- *      modus bestaat: het dwingt GitHub om vlak vóór de merge te eisen dat de branch UP-TO-DATE is
- *      met de base én dat elke vereiste context daar groen staat — serverkant, na ons verzoek;
- *   4. elke naam uit `cfg.required_checks` staat als context in een STRIKTE regel — een context op
- *      een niet-strikte regel telt hier niet mee, want die draagt de up-to-date-eis niet — met een
- *      `integration_id` die exact `cfg.required_check_app_id` is. Een contextnaam is geen namespace:
- *      zonder die app-binding zou elke publiceerder die een gelijknamige check kan aanmaken aan de
- *      vereiste voldoen.
- *
- * `cfg.required_checks` en NIET `cfg.required_merge_queue_checks`: `autocoding-merge-group-gate`
- * draait per ontwerp uitsluitend op een `merge_group`-commit, en die bestaat zonder merge queue niet.
- * Die poort is in deze modus dus geen vereiste check, geen event en geen bewijsbron — hem hier tóch
- * eisen zou een voorwaarde opleggen die op dit object onvervulbaar is, en de modus daarmee even
- * onbereikbaar maken als de tak die hij vervangt.
- *
- * Cumulatief zoals de rest van dit bestand: elke ontbrekende of foute deeleis krijgt haar eigen
- * redencode, in plaats van te stoppen bij de eerste.
- */
-function evaluateStrictGatePrecondition(rules, cfg) {
-  const reasons = new Set();
-  if (rules.length === 0) reasons.add(FINALIZE_REASON.SERVER_STRICT_RULESET_PROOF_MISSING);
-
-  const prRegels = rules.filter((rule) => rule?.type === 'pull_request');
-  if (prRegels.length === 0) {
-    reasons.add(FINALIZE_REASON.PULL_REQUEST_RULE_MISSING);
-  } else if (!prRegels.every((rule) => ruleAllowsMergeMethod(rule, cfg.merge_method))) {
-    reasons.add(FINALIZE_REASON.PULL_REQUEST_MERGE_METHOD_NOT_ALLOWED);
-  }
-
-  const checkRegels = rules.filter((rule) => rule?.type === 'required_status_checks');
-  const strikt = checkRegels.filter(
-    (rule) => rule?.parameters?.strict_required_status_checks_policy === true,
-  );
-  if (checkRegels.length === 0) {
-    reasons.add(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_RULE_MISSING);
-  } else if (strikt.length === 0) {
-    reasons.add(FINALIZE_REASON.STRICT_STATUS_CHECKS_POLICY_DISABLED);
-  }
-
-  const contexten = requiredStatusCheckContexts(strikt);
-  for (const naam of cfg.required_checks) {
-    const item = contexten.get(naam);
-    if (!item) {
-      reasons.add(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_CONTEXT_MISSING);
-      continue;
-    }
-    if (!Number.isInteger(item.integration_id) || item.integration_id !== cfg.required_check_app_id) {
-      reasons.add(FINALIZE_REASON.REQUIRED_CHECK_APP_ID_MISMATCH);
-    }
-  }
-  return reasons;
+function evaluateManualOwnerGatePrecondition() {
+  return new Set();
 }
 
 /**
  * De serverpoortvoorwaarde van de GEKOZEN modus, op de al platgemaakte regelset. Eén plaats waar de
  * modus wordt vertakt, zodat geen van beide takken per ongeluk de andere kan aanvullen of vervangen.
+ *
+ * V24 — een expliciete `switch` met een FAIL-CLOSED default in plaats van de ternair van V23. Een
+ * ternair heeft geen derde uitkomst: hij geeft elke onbekende stand stilzwijgend aan de tak die
+ * toevallig in de `else` staat. Dat is precies het soort stille terugval dat deze poort nergens mag
+ * hebben, ook niet op een pad dat `assertMergeFinalizerPolicySafe` vandaag onbereikbaar maakt.
  */
 function evaluateServerGatePrecondition(rules, cfg) {
-  return cfg.server_gate_mode === SERVER_GATE_MODE.STRICT_STATUS_CHECKS
-    ? evaluateStrictGatePrecondition(rules, cfg)
-    : evaluateEnqueuePrecondition(rules, cfg);
+  switch (cfg.server_gate_mode) {
+    case SERVER_GATE_MODE.MERGE_QUEUE:
+      return evaluateEnqueuePrecondition(rules, cfg);
+    case SERVER_GATE_MODE.MANUAL_OWNER_GATE:
+      return evaluateManualOwnerGatePrecondition();
+    default:
+      // Onbereikbaar zolang de policyvalidatie vóór dit punt draait — en juist daarom fail-closed en
+      // niet weggelaten: een derde stand die er ooit doorheen glipt mag nooit de tak van een van
+      // deze twee erven.
+      return new Set([FINALIZE_REASON.FINALIZER_POLICY_UNSAFE]);
+  }
 }
 
 function digest(value) {
@@ -766,9 +762,11 @@ function canonicalMeasurement(measurement) {
         return `required_status_checks|${
           rule?.parameters?.strict_required_status_checks_policy === true}|${contexten}`;
       }
-      // V23 — de `pull_request`-regel draagt in `STRICT_STATUS_CHECKS` de toegestane mergemethoden.
-      // Zonder dit veld zou een regelset die alleen van toegestane METHODE verandert buiten de
-      // driftvergelijking blijven, terwijl precies dat de voorwaarde omdraait.
+      // De `pull_request`-regel draagt de toegestane mergemethoden. Sinds V24 hangt er geen
+      // beslissing meer aan — de eigenaarsstand stelt geen rulesetEIS — maar hij blijft in de
+      // vingerafdruk: een regelset die tussen de twee metingen van toegestane METHODE verandert, is
+      // een base-branch die onder de pull request is veranderd, en dat hoort drift te zijn ook als
+      // deze poort er zelf niets van vindt.
       if (rule?.type === 'pull_request') {
         const methoden = Array.isArray(rule?.parameters?.allowed_merge_methods)
           ? rule.parameters.allowed_merge_methods.map((m) => tekst(m)).sort().join(',')
@@ -925,12 +923,17 @@ export function resolveFinalization({ pullRequest, measurement, policy }) {
   }
   if (tekst(pr.mergeable_state) !== 'clean') add(FINALIZE_REASON.MERGEABLE_STATE_NOT_CLEAN);
 
-  // HET SERVERPOORTBEWIJS. Zonder serverkant autoriteit op deze base — een ACTIEVE `merge_queue`-regel
-  // in `MERGE_QUEUE`, of een ACTIEVE strikte ruleset in `STRICT_STATUS_CHECKS` — is er niets dat de
-  // merge op het moment dat het er echt toe doet nog herbeoordeelt, en blijft elk effect een
-  // ongedekte belofte. Dit is geen ruleset die hier wordt aangemaakt — alleen gelezen bewijs dat er
-  // elders al één bestaat. Beide modi lezen DEZELFDE meting: `measurement.mergeQueueRules` draagt de
-  // naam van zijn eerste gebruik, maar is de generieke `rules/branches/{base_ref}`-uitkomst.
+  // HET SERVERPOORTBEWIJS EN DE REGELSETMETING. In `MERGE_QUEUE` is dit de dragende voorwaarde:
+  // zonder een ACTIEVE `merge_queue`-regel op deze base is er niets dat de merge herbeoordeelt op het
+  // moment dat het er echt toe doet, en blijft elk effect een ongedekte belofte. In
+  // `MANUAL_OWNER_GATE` stelt de poort geen rulesetEIS — zie `evaluateManualOwnerGatePrecondition`
+  // voor waarom die eis daar niets zou toevoegen — maar wordt de regelset nog steeds VOLLEDIG
+  // gemeten. Dat is geen restant: de regelset zit in de vingerafdruk, dus een ruleset die tussen de
+  // twee metingen verandert is `MEASUREMENT_DRIFT`, in beide standen.
+  //
+  // Dit is geen ruleset die hier wordt aangemaakt — alleen gelezen bewijs dat er elders al één
+  // bestaat. `measurement.mergeQueueRules` draagt de naam van zijn eerste gebruik, maar is de
+  // generieke `rules/branches/{base_ref}`-uitkomst.
   //
   // Sinds V20 (scope-item 6) is deze lijst zelf ook begrensd gepagineerd, net als de vijf
   // bewijslijsten en de check-runs: `measurement.mergeQueueRules` is een array-van-pagina's, en moet
@@ -1104,28 +1107,32 @@ async function fetchMergeAsyncResult({
 }
 
 /**
- * HET EFFECT — DE GEDEELDE POORT EN DE ENIGE VERTAKKING (V23). Deze functie doet zelf geen enkel
+ * HET EFFECT — DE GEDEELDE POORT EN DE ENIGE VERTAKKING (V24). Deze functie doet zelf geen enkel
  * verzoek. Zij weigert eerst, in vaste volgorde en vóór ELK netwerkverkeer, alles wat niet exact
  * klopt — de uitgeschakelde vlag, een onexacte policy, een onbruikbaar repository, PR-nummer of sha,
  * een mergemethode die niet die van de policy is — en kiest daarna op grond van `server_gate_mode`
  * precies één tak:
  *
- *   `MERGE_QUEUE`          → `enqueueInMergeQueue`, de V19..V22-inschrijving via `merge-async`;
- *   `STRICT_STATUS_CHECKS` → `mergeUnderStrictStatusChecks`, GitHubs standaard atomaire
- *                            `PUT .../pulls/{n}/merge` (V23, persoonlijk repository).
+ *   `MANUAL_OWNER_GATE` → NIETS. Terminaal `OWNER_MERGE_REQUIRED` met `requests: 0`, vóór er een
+ *                         transportfunctie wordt uitgezocht, laat staan gebruikt. Dit is de stand van
+ *                         dit persoonlijke repository, en de reden dat hij bestaat staat in de
+ *                         kopnotitie (V24): een strikte ruleset kan ons review- en ownerbewijs
+ *                         serverkant niet afdwingen, dus mag er hier geen automatische merge zijn;
+ *   `MERGE_QUEUE`       → `enqueueInMergeQueue`, de V19..V22-inschrijving via `merge-async`.
  *
- * Er is geen pad dat beide takken raakt, geen pad dat de modus ergens anders dan uit de policy haalt,
- * en geen pad dat bij een uitgeschakelde vlag nog een tak bereikt: met `merge_finalizer_enabled:
- * false` eindigt elke aanroep hier op `FINALIZER_DISABLED` met `requests: 0`, hoe exact de rest van de
- * argumenten ook is.
+ * Er is geen derde tak, geen pad dat beide raakt, geen pad dat de modus ergens anders dan uit de
+ * policy haalt, en — sinds V24 — geen pad in dit hele bestand dat de klassieke
+ * `PUT .../pulls/{n}/merge` nog aanroept. Met `merge_finalizer_enabled: false` eindigt elke aanroep
+ * bovendien al bij de eerste regel op `FINALIZER_DISABLED` met `requests: 0`, hoe exact de rest van
+ * de argumenten ook is.
  *
  * `resolveFinalization` heeft vóór dit punt bewezen dat de base van deze pull request het bewijs van
  * DEZELFDE modus draagt; zonder dat bewijs is de uitkomst allang `NO_GO` en wordt deze functie niet
  * met een GO-resultaat aangeroepen.
  *
  * V22 — Gemini1-bevinding `5000494458`: `sleepImpl` wordt hier alleen doorgegeven, niet gebruikt. De
- * wachttijd hoort bij het pollen van de queue-tak; de strict-tak polt niet en kent dus ook geen
- * wachttijd.
+ * wachttijd hoort bij het pollen van de queue-tak; de eigenaarsstand doet geen enkel verzoek en kent
+ * dus ook geen wachttijd.
  */
 export async function mergePullRequest({
   repository, pullRequest, sha, mergeMethod, policy, token, fetchImpl, sleepImpl,
@@ -1152,20 +1159,26 @@ export async function mergePullRequest({
     return { ok: false, blocked: FINALIZE_ERROR.MERGE_METHOD_NOT_ALLOWED, requests: 0 };
   }
 
+  // DE ENIGE VERTAKKING VAN HET EFFECT (V24), en zij staat VÓÓR de keuze van de transportfunctie.
+  // Dat is opzet: in `MANUAL_OWNER_GATE` mag de uitkomst niet afhangen van de vraag of er toevallig
+  // een `fetch` beschikbaar is. Er is geen verzoek — niet één, en niet onder welke omstandigheid dan
+  // ook — en de code hoort dat te zeggen op een plaats waar geen enkele omgevingsfactor er nog
+  // tussen kan komen.
+  const modus = policy.merge_finalizer.server_gate_mode;
+  if (modus === SERVER_GATE_MODE.MANUAL_OWNER_GATE) {
+    return { ok: false, blocked: FINALIZE_ERROR.OWNER_MERGE_REQUIRED, requests: 0 };
+  }
+  if (modus !== SERVER_GATE_MODE.MERGE_QUEUE) {
+    // Onbereikbaar zolang de policyvalidatie hierboven draait, en om dezelfde reden als in
+    // `evaluateServerGatePrecondition` tóch geschreven: een onbekende stand krijgt nooit de tak van
+    // een bekende.
+    return { ok: false, blocked: FINALIZE_REASON.FINALIZER_POLICY_UNSAFE, requests: 0 };
+  }
+
   const doFetch = fetchImpl ?? globalThis.fetch;
   const wacht = typeof sleepImpl === 'function' ? sleepImpl : defaultSleep;
   if (typeof doFetch !== 'function') {
     return { ok: false, blocked: FINALIZE_ERROR.MERGE_TRANSPORT_ERROR, requests: 0 };
-  }
-
-  // DE ENIGE VERTAKKING VAN HET EFFECT (V23). Beide takken zijn hierboven al door precies dezelfde
-  // weigeringen gegaan; wat hierna verschilt is uitsluitend WELK eindpunt er hoogstens één keer wordt
-  // aangeroepen. Er bestaat geen pad dat beide doet, en geen pad dat de modus uit iets anders dan de
-  // policy afleidt.
-  if (policy.merge_finalizer.server_gate_mode === SERVER_GATE_MODE.STRICT_STATUS_CHECKS) {
-    return mergeUnderStrictStatusChecks({
-      repository, pullRequest, sha, mergeMethod, token, doFetch,
-    });
   }
   return enqueueInMergeQueue({ repository, pullRequest, sha, mergeMethod, token, doFetch, wacht });
 }
@@ -1262,92 +1275,6 @@ async function enqueueInMergeQueue({
     return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESULT_MISMATCH, status, requests };
   }
   return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESULT_NOT_ENQUEUED, status, requests };
-}
-
-/**
- * DE `STRICT_STATUS_CHECKS`-TAK (V23) — GitHubs standaard, ATOMAIRE merge. Precies één verzoek,
- * `PUT /repos/{o}/{r}/pulls/{n}/merge`, met een lichaam dat uitsluitend de exact hermeten VOLLEDIGE
- * head-sha en de mergemethode uit de policy draagt. Geen branchnaam, geen afgekorte sha, geen
- * event-sha, geen commit-titel of -tekst: alles wat niet gemeten is, hoort niet in dit lichaam.
- *
- * WAT DEZE AANROEP ZELF TOETST, EN WAT NIET. GitHub vergelijkt hier alleen of `sha` nog de actuele
- * head is (anders 409). Een base-verschuiving of een ingetrokken review ziet díé vergelijking niet —
- * dat was in V19 precies de reden om deze aanroep te verlaten. Wat hem in deze modus tóch draagbaar
- * maakt, staat NIET in deze functie maar eromheen:
- *
- *   - `resolveFinalization` heeft vóór dit punt bewezen dat de base een ACTIEVE ruleset draagt met
- *     een `pull_request`-regel en een STRIKTE `required_status_checks`-regel op de gepinde app. Die
- *     ruleset dwingt GitHub af op het moment van DEZE aanroep, serverkant: is de branch achterop
- *     geraakt of is de vereiste check niet meer groen, dan weigert GitHub de merge (405) in plaats
- *     van hem uit te voeren;
- *   - de tweede volledige hermeting vlak vóór dit punt draagt de live base-head en GitHubs eigen
- *     `mergeable`/`mergeable_state`, zodat een verschoven base, een conflict of een weggevallen
- *     vereiste de vingerafdruk breekt vóór er één byte over het netwerk gaat.
- *
- * Elke statuscode is TERMINAAL — er is geen retrylus, op geen enkele code. En een 200 alleen is geen
- * bewijs: het lichaam moet `merged: true` met een volledige merge-sha dragen, anders is de uitkomst
- * `MERGE_RESULT_NOT_MERGED` respectievelijk `MERGE_RESPONSE_INVALID`.
- */
-async function mergeUnderStrictStatusChecks({
-  repository, pullRequest, sha, mergeMethod, token, doFetch,
-}) {
-  let response;
-  try {
-    response = await doFetch(
-      `https://api.github.com/repos/${repository}/pulls/${pullRequest}/merge`,
-      {
-        method: 'PUT',
-        headers: {
-          accept: 'application/vnd.github+json',
-          authorization: `Bearer ${token}`,
-          'content-type': 'application/json',
-          'user-agent': 'autocoding-shield',
-          'x-github-api-version': '2022-11-28',
-        },
-        body: JSON.stringify({ sha, merge_method: mergeMethod }),
-      },
-    );
-  } catch {
-    // Zoals in de andere tak: elke transportfout wordt tot één categorie gereduceerd. De
-    // exceptietekst wordt niet gelezen en niet gelogd — daar staan URL's, headers en soms tokens in.
-    return { ok: false, blocked: FINALIZE_ERROR.MERGE_TRANSPORT_ERROR, requests: 1 };
-  }
-  const status = response?.status ?? 0;
-  if (status === 403) return { ok: false, blocked: FINALIZE_ERROR.MERGE_FORBIDDEN, status, requests: 1 };
-  if (status === 404) {
-    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESOURCE_NOT_FOUND, status, requests: 1 };
-  }
-  // 405 — GitHub weigert de merge zelf: niet mergebaar, of de ruleset op de base is op DIT moment
-  // niet voldaan. Dat is de serverkant weigering waar deze modus op rust, en dus geen fout van ons.
-  if (status === 405) return { ok: false, blocked: FINALIZE_ERROR.MERGE_NOT_READY, status, requests: 1 };
-  // 409 — de meegegeven `sha` is niet meer de head. De enige voorwaarde die deze aanroep zelf toetst.
-  if (status === 409) {
-    return { ok: false, blocked: FINALIZE_ERROR.MERGE_HEAD_MISMATCH, status, requests: 1 };
-  }
-  if (status === 422) return { ok: false, blocked: FINALIZE_ERROR.MERGE_REJECTED, status, requests: 1 };
-  if (status !== 200) {
-    return { ok: false, blocked: FINALIZE_ERROR.MERGE_STATUS_UNEXPECTED, status, requests: 1 };
-  }
-
-  let raw;
-  try {
-    raw = await response.json();
-  } catch {
-    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESPONSE_INVALID, status, requests: 1 };
-  }
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESPONSE_INVALID, status, requests: 1 };
-  }
-  if (raw.merged !== true) {
-    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESULT_NOT_MERGED, status, requests: 1 };
-  }
-  // De sha in het antwoord is de MERGE-COMMIT, niet de aangevraagde head — hij hoort dus niet gelijk
-  // te zijn aan `sha`, alleen een volledige, leesbare commit-sha te wezen. Is hij dat niet, dan is het
-  // lichaam onleesbaar en niet een geslaagde merge.
-  if (!SHA_RE.test(typeof raw.sha === 'string' ? raw.sha : '')) {
-    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESPONSE_INVALID, status, requests: 1 };
-  }
-  return { ok: true, status, requests: 1, effect: 'MERGED' };
 }
 
 /** Vlaggen zonder waarde. Hun POSITIE in argv mag niets aan de betekenis van de rest veranderen. */
@@ -1452,9 +1379,19 @@ export function readMeasurement(rawDir, readFile) {
  *      omgeslagen check — en volgt er `MEASUREMENT_DRIFT` en geen merge;
  *   4. pas dán het effect, met de sha uit meting B: de nieuwste die daadwerkelijk is beoordeeld.
  *
- * rc 0 uitsluitend bij een WERKELIJK uitgevoerde merge, of bij `--dry-run` op een bewezen GO. Elke
- * andere uitkomst geeft rc 1. De uitvoer is één JSON-regel met uitsluitend de gesloten uitkomstvorm
- * en redencodes — geen SHA's, geen paden, geen API-teksten.
+ * WAT "EFFECT" IN `MANUAL_OWNER_GATE` BETEKENT (V24). In die stand doet stap 4 geen enkel verzoek:
+ * `mergePullRequest` keert er terminaal terug met `OWNER_MERGE_REQUIRED`. Dat is geen mislukking maar
+ * de OPLEVERING van deze stand — het MERGEPAKKET: een volledig bewezen GO op een hermeten pull
+ * request, met de laatste handeling bij de eigenaar. De uitvoerregel meldt dat als
+ * `effect: "OWNER_MERGE_PACKAGE"`.
+ *
+ * rc 0 bij precies drie uitkomsten, en bij geen enkele andere: een WERKELIJK uitgevoerde merge, een
+ * `--dry-run` op een bewezen GO, en een opgeleverd eigenaarspakket. Omdat die drie niet dezelfde
+ * betekenis hebben, draagt ELKE GO-regel sinds V24 het veld `merge_performed`: alleen een echt
+ * uitgevoerd effect zet dat op `true`. Een aanroeper die uitsluitend de exitcode leest, kan een
+ * pakket dus nooit voor een merge aanzien zonder dat veld te negeren. Elke andere uitkomst geeft
+ * rc 1. De uitvoer blijft één JSON-regel met uitsluitend de gesloten uitkomstvorm en redencodes —
+ * geen SHA's, geen paden, geen API-teksten.
  */
 export async function runFinalize(argv, { readFile, fetchImpl, sleepImpl } = {}) {
   const meld = (uitkomst) => console.log(JSON.stringify(uitkomst));
@@ -1502,6 +1439,10 @@ export async function runFinalize(argv, { readFile, fetchImpl, sleepImpl } = {})
       reasons: [],
       finalization_class: beslissingB.finalization_class,
       effect: 'DRY_RUN',
+      // Een dry run mergt per definitie niets. Het veld staat er niet als versiering maar omdat het
+      // op ELKE GO-regel hoort te staan: een veld dat soms ontbreekt, wordt door een lezer stilletjes
+      // als `false` óf als `true` gelezen, en welke van de twee is dan een gok.
+      merge_performed: false,
     });
     return 0;
   }
@@ -1516,6 +1457,25 @@ export async function runFinalize(argv, { readFile, fetchImpl, sleepImpl } = {})
     fetchImpl,
     sleepImpl,
   });
+  // V24 — HET EIGENAARSPAKKET. `OWNER_MERGE_REQUIRED` is de enige `blocked`-code die geen weigering
+  // meldt maar een OPLEVERING: het oordeel was GO, de hermeting hield stand, en de stand
+  // `MANUAL_OWNER_GATE` heeft daarna bewust nul verzoeken gedaan. Dat als NO_GO melden zou de
+  // uitkomst van deze modus permanent op rood zetten en daarmee precies het signaal onbruikbaar
+  // maken dat een echte weigering zou moeten dragen.
+  if (!effect.ok && effect.blocked === FINALIZE_ERROR.OWNER_MERGE_REQUIRED) {
+    meld({
+      decision: FINALIZE_DECISION.GO,
+      reasons: [],
+      finalization_class: beslissingB.finalization_class,
+      effect: 'OWNER_MERGE_PACKAGE',
+      merge_performed: false,
+      // Wat de eigenaar hierna zelf doet, in zijn eigen naam en in GitHubs eigen interface. De regel
+      // draagt geen sha en geen pad: het PR-nummer stond al in de aanroep, en de rest is te lezen op
+      // de pull request zelf.
+      owner_action: FINALIZE_ERROR.OWNER_MERGE_REQUIRED,
+    });
+    return 0;
+  }
   if (!effect.ok) {
     meld({
       decision: FINALIZE_DECISION.NO_GO,
@@ -1529,9 +1489,11 @@ export async function runFinalize(argv, { readFile, fetchImpl, sleepImpl } = {})
     finalization_class: beslissingB.finalization_class,
     // De naam van het effect komt uit het effect zelf, nooit uit een aanname hier. `MERGE_QUEUED`
     // betekent: de inschrijving in GitHubs wachtrij is BEWEZEN aanvaard, niet dat het mergen al is
-    // gebeurd — dat gebeurt later, binnen die wachtrij. `MERGED` (V23,
-    // `STRICT_STATUS_CHECKS`) betekent dat GitHub de merge werkelijk heeft uitgevoerd.
+    // gebeurd — dat gebeurt later, binnen die wachtrij.
     effect: effect.effect,
+    // Er is werkelijk een effect uitgevoerd. Dit is de enige plaats in dit bestand waar dit veld
+    // `true` wordt.
+    merge_performed: true,
   });
   return 0;
 }

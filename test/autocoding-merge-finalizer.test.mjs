@@ -31,6 +31,7 @@ import {
   resolveRequiredChecks, measurementFingerprint, resolveFinalization, mergePullRequest,
   parseFinalizeArgs, FINALIZE_VALUE_OPTIONS, FINALIZE_BOOLEAN_FLAGS, MEASUREMENT_FILES,
   readMeasurement, runFinalize, hasActiveMergeQueueRule, SERVER_GATE_MODE,
+  REJECTED_SERVER_GATE_MODE,
 } from '../scripts/autocoding/finalize-merge.mjs';
 import {
   CANDIDATE_REASON, CANDIDATE_VALUE_OPTIONS, selectFinalizationCandidates,
@@ -52,7 +53,6 @@ const BASE = '2af69bc6259caf5c2f1e03a2c59e56c810ac9831';
 const BASE_HEAD = 'f414ba1655bf37296f6a9ef405978029c8c19d80';
 // De sha van de MERGE-COMMIT die GitHub in de STRICT-tak teruggeeft — nooit gelijk aan de head die
 // is aangevraagd.
-const MERGE_COMMIT = '7'.repeat(40);
 const ANDERE_BASE = '9'.repeat(40);
 const TASK = 'AUTOCODING_STACK_DASHBOARD_LIVE_GATE_COMPLETION_PR_V1';
 const PR_A = 74;
@@ -91,12 +91,20 @@ function policy(overrides = {}, finalizerOverrides = {}) {
 }
 
 /**
- * De policy zoals hij in de repository STAAT — `server_gate_mode: STRICT_STATUS_CHECKS`, de
- * persoonlijke-repositorymodus van V23 — met uitsluitend de activatievlag omgezet. Dit is de default
- * van `beslis`/`draai`: de baan die op dit object werkelijk bereikbaar is, wordt ook werkelijk
- * getest.
+ * De policy zoals hij in de repository STAAT — sinds V24 `server_gate_mode: MANUAL_OWNER_GATE`, de
+ * eigenaarsstand voor dit persoonlijke repository — met uitsluitend de activatievlag omgezet. Dit is
+ * de default van `beslis`/`draai`: de baan die op dit object werkelijk bereikbaar is, wordt ook
+ * werkelijk getest.
  */
-const POLICY_STRICT = policy({ merge_finalizer_enabled: true });
+const POLICY_MANUAL = policy({ merge_finalizer_enabled: true });
+
+/**
+ * De GEWEIGERDE stand van V23. Geen enkele test mag hem als werkende modus gebruiken — hij staat hier
+ * uitsluitend om te bewijzen dat hij nergens meer doorheen komt (O1).
+ */
+const POLICY_GEWEIGERD = policy(
+  { merge_finalizer_enabled: true }, { server_gate_mode: 'STRICT_STATUS_CHECKS' },
+);
 
 /**
  * De DORMANTE legacy-modus, sinds V23 expliciet gezet in plaats van geërfd uit het bestand. Op dit
@@ -197,7 +205,7 @@ function meting(overrides = {}) {
   };
 }
 
-function beslis(overrides = {}, p = POLICY_STRICT, nummer = PR_A) {
+function beslis(overrides = {}, p = POLICY_MANUAL, nummer = PR_A) {
   return resolveFinalization({ pullRequest: nummer, measurement: meting(overrides), policy: p });
 }
 
@@ -231,24 +239,6 @@ function antwoordFetch(status, lichaam) {
         details: { merge_action: 'merge_queue', expected_head_sha: verzoek.sha ?? '' },
       };
     })();
-    return { status, json: async () => inhoud };
-  }, { aanroepen: impl.aanroepen });
-}
-
-/**
- * Een `fetch` voor de STRICT-tak (V23). Op de `PUT .../pulls/{n}/merge` één vaste status, en bij 200
- * — zonder expliciet `lichaam` — het antwoord dat GitHub daar werkelijk teruggeeft: `merged: true`
- * met de sha van de MERGE-COMMIT. Die sha is met opzet een ANDERE dan de aangevraagde head: het
- * antwoord beschrijft de commit die zojuist is ontstaan, niet de commit die is meegegeven.
- */
-function mergeAntwoordFetch(status, lichaam) {
-  const impl = verbodenFetch();
-  return Object.assign(async (url, init) => {
-    impl.aanroepen.push({ url, init });
-    if (status !== 200) return { status };
-    const inhoud = lichaam !== undefined
-      ? lichaam
-      : { merged: true, sha: MERGE_COMMIT, message: 'Pull Request successfully merged' };
     return { status, json: async () => inhoud };
   }, { aanroepen: impl.aanroepen });
 }
@@ -423,7 +413,7 @@ test('M7. de beslissing over A hangt van GEEN ENKELE andere pull request af', ()
   // En de vorm van de aanroep laat geen ruimte voor zo'n lijst: een meegegeven open-PR-lijst wordt
   // niet gelezen en kan de uitkomst dus niet kleuren.
   const metRuis = resolveFinalization({
-    pullRequest: PR_A, measurement: meting(), policy: POLICY_STRICT,
+    pullRequest: PR_A, measurement: meting(), policy: POLICY_MANUAL,
     openPulls: [[{ number: PR_B, head: { sha: HEAD } }]],
   });
   assert.deepEqual(metRuis, a);
@@ -1381,7 +1371,7 @@ function schrijfPolicy(p) {
 const lees = (pad) => readFileSync(pad, 'utf8');
 
 /** Draait de CLI en vangt de ENE uitvoerregel op, zodat de logvorm zelf toetsbaar is. */
-async function draai({ a, b = a, p = POLICY_STRICT, nummer = PR_A, dryRun = true, fetchImpl }) {
+async function draai({ a, b = a, p = POLICY_MANUAL, nummer = PR_A, dryRun = true, fetchImpl }) {
   const argv = [
     '--repository', 'rvanhooijdonk-png/stack-dashboard',
     '--pull-request', String(nummer),
@@ -1408,7 +1398,13 @@ test('M24. een bewezen GO in DRY RUN eindigt op rc 0 en nul verzoeken', async ()
   const { rc, uitkomst } = await draai({ a: meting(), fetchImpl });
   assert.equal(rc, 0);
   assert.deepEqual(uitkomst, {
-    decision: FINALIZE_DECISION.GO, reasons: [], finalization_class: 'A', effect: 'DRY_RUN',
+    decision: FINALIZE_DECISION.GO,
+    reasons: [],
+    finalization_class: 'A',
+    effect: 'DRY_RUN',
+    // V24 — elke GO-regel draagt dit veld, en alleen een WERKELIJK uitgevoerd effect zet het op
+    // `true`. Een dry run niet, en een eigenaarspakket (O5) evenmin.
+    merge_performed: false,
   });
   assert.equal(fetchImpl.aanroepen.length, 0);
 });
@@ -1530,7 +1526,13 @@ test('M29. bij een GEACTIVEERDE finalizer draagt de merge de sha van de HERMETIN
   });
   assert.equal(rc, 0);
   assert.deepEqual(uitkomst, {
-    decision: FINALIZE_DECISION.GO, reasons: [], finalization_class: 'A', effect: 'MERGE_QUEUED',
+    decision: FINALIZE_DECISION.GO,
+    reasons: [],
+    finalization_class: 'A',
+    effect: 'MERGE_QUEUED',
+    // De enige uitkomst in dit hele bestand waar dit veld `true` is: er is werkelijk een verzoek
+    // gedaan en aanvaard.
+    merge_performed: true,
   });
   assert.equal(fetchImpl.aanroepen.length, 1);
   const body = JSON.parse(fetchImpl.aanroepen[0].init.body);
@@ -1564,12 +1566,20 @@ test('M30. de uitvoerregel draagt uitsluitend gesloten codes — geen sha, pad o
  * Laadt de ECHTE finalizer met één gewijzigd fragment. Dezelfde vorm als `mutantVanDePublisher` in
  * de statustest: de mutant leeft buiten de repository, dus worden zijn relatieve imports absoluut.
  */
-function mutantVanDeFinalizer(naam, oud, nieuw) {
+function mutantVanDeFinalizer(naam, oud, nieuw, opties = {}) {
   const bron = readFileSync(FINALIZER, 'utf8');
-  assert.equal(bron.split(oud).length - 1, 1, 'het mutatieanker moet precies één keer voorkomen');
+  // V24: een mutant mag uit MEER dan één vervanging bestaan. Dat is nodig om te toetsen wat er
+  // gebeurt als iemand een verdediging niet half maar heel terugdraait (MUT7b: de weigering weg én
+  // de verworpen stand terug). Elk anker blijft afzonderlijk uniek — een anker dat twee of nul keer
+  // voorkomt zou een mutant opleveren die iets anders muteert dan de test beweert.
+  const vervangingen = [[oud, nieuw], ...(opties.extra ?? [])];
   const dir = mkdtempSync(join(tmpdir(), `finalize-merge-${naam}-`));
   const pad = join(dir, `finalize-merge.${naam}.mjs`);
-  let tekst = bron.replace(oud, nieuw);
+  let tekst = bron;
+  for (const [van, naartoe] of vervangingen) {
+    assert.equal(tekst.split(van).length - 1, 1, 'het mutatieanker moet precies één keer voorkomen');
+    tekst = tekst.replace(van, naartoe);
+  }
   for (const buur of [
     'verify-review-gate.mjs', 'collect-shield-input.mjs', 'select-live-gate-targets.mjs',
   ]) {
@@ -1682,85 +1692,92 @@ test('MUT5. een finalizer die de VLAG negeert, gaat rood op nul verzoeken', asyn
     '  if (false) {\n'
       + '    return { ok: false, blocked: FINALIZE_ERROR.FINALIZER_DISABLED, requests: 0 };\n  }',
   );
-  // Het policybestand draait sinds V23 in `STRICT_STATUS_CHECKS`, dus hoort hier het antwoord van de
-  // standaard merge-endpoint — deze mutant meet de VLAG, niet de tak.
-  const fetchImpl = mergeAntwoordFetch(200);
+  // Deze mutant meet de VLAG, niet de tak — en dus wordt hij op de enige tak gemeten die werkelijk
+  // een verzoek doet: de wachtrij. Het bestandspolicy staat sinds V24 in `MANUAL_OWNER_GATE` en doet
+  // ook zónder vlag nul verzoeken (O4), zodat die stand hier niets over de vlag zou bewijzen.
+  const fetchImpl = antwoordFetch(202);
+  const uitAan = { ...POLICY_QUEUE, merge_finalizer_enabled: false };
   const uitkomst = await gemuteerd.mergePullRequest({
     repository: 'a/b', pullRequest: PR_A, sha: HEAD,
-    mergeMethod: POLICY_BESTAND.merge_finalizer.merge_method, policy: POLICY_BESTAND,
+    mergeMethod: uitAan.merge_finalizer.merge_method, policy: uitAan,
     token: 'x', fetchImpl,
   });
   assert.equal(uitkomst.ok, true);
   assert.equal(fetchImpl.aanroepen.length, 1);
-  // M18 eist precies het omgekeerde op hetzelfde policybestand.
+  // M18 eist precies het omgekeerde op een policy met de vlag uit.
   assert.throws(() => assert.equal(fetchImpl.aanroepen.length, 0), /AssertionError/);
+  const echt = await mergePullRequest({
+    repository: 'a/b', pullRequest: PR_A, sha: HEAD,
+    mergeMethod: uitAan.merge_finalizer.merge_method, policy: uitAan, token: 'x', fetchImpl,
+  });
+  assert.deepEqual(echt, { ok: false, blocked: FINALIZE_ERROR.FINALIZER_DISABLED, requests: 0 });
 });
 
-// --- De persoonlijke-repositorymodus (V23) --------------------------------------------------------
+// --- De eigenaarsstand `MANUAL_OWNER_GATE` (V24) -------------------------------------------------
 
 /**
- * De regelset zoals `rules/branches/{base_ref}` hem oplevert voor `STRICT_STATUS_CHECKS`, met precies
- * één verschuifbaar onderdeel per aanroep. GitHub geeft daar UITSLUITEND ACTIEVE regels terug: een
- * ruleset met `enforcement: disabled` staat er domweg niet in, en is hier dus een LEGE lijst — niet
- * een lijst met een uit-vlag erin. Er zit met opzet GEEN `merge_queue`-regel in: die is op een
- * persoonlijk repository onaanmaakbaar (HTTP 422, merge queues zijn organisatie-only), en de nieuwe
- * modus mag er daarom nergens op leunen.
+ * De regelset zoals `rules/branches/main` hem op DIT repository vandaag werkelijk oplevert: LEEG.
+ * Ruleset 21205251 staat `disabled`, en dat eindpunt geeft uitsluitend ACTIEVE regels terug — een
+ * uitgezette ruleset staat er domweg niet in, en is hier dus geen lijst met een uit-vlag maar een
+ * lege lijst.
+ *
+ * Elke test in deze reeks meet op die stand. Dat is het hele punt van V24: de eigenaarsstand moet
+ * werken op het object zoals het IS, niet op een ruleset die er niet staat. Wat de vorige stand
+ * (`STRICT_STATUS_CHECKS`) op precies deze meting deed — eeuwig NO_GO, of erger: mergen op bewijs dat
+ * GitHub niet afdwingt — is nu onbereikbaar (O1, O2).
  */
-function striktRegelset(overrides = {}) {
-  const prRegels = overrides.prRegels ?? [{ allowed_merge_methods: ['squash'] }];
-  const contexten = overrides.contexten ?? [{ context: CHECK, integration_id: 15368 }];
-  // Met opzet GEEN parameterdefault: `strictPolicy: undefined` is een te toetsen STAND — de vlag die
-  // GitHub weglaat — en mag hier niet stilletjes `true` worden.
-  const strikt = 'strictPolicy' in overrides ? overrides.strictPolicy : true;
-  const regels = prRegels.map((parameters) => ({ type: 'pull_request', parameters }));
-  if (overrides.zonderCheckRegel !== true) {
-    regels.push({
-      type: 'required_status_checks',
-      parameters: {
-        strict_required_status_checks_policy: strikt,
-        required_status_checks: contexten,
-      },
-    });
+function eigenaarsMeting(overrides = {}) {
+  return meting({ mergeQueueRules: [], ...overrides });
+}
+
+test('O1. `STRICT_STATUS_CHECKS` is een GEWEIGERDE stand: geen oordeel, geen verzoek, nooit '
+  + 'een merge', async () => {
+  // De kern van de V24-reparatie. Codex1-P1 op V23: een strikte required-status-checks-regel dwingt
+  // serverkant alleen een up-to-date branch en groene VEREISTE CONTEXTEN af — nooit ons eigen
+  // reviewbewijs of het ownercomment. Dat bewijs kan tussen meting B en de merge-PUT verdwijnen
+  // zonder dat de head-sha of de check verandert, en de PUT slaagt dan alsnog. De stand is daarom
+  // niet verzwaard maar VERWORPEN.
+  assert.deepEqual(Object.values(SERVER_GATE_MODE).sort(), ['MANUAL_OWNER_GATE', 'MERGE_QUEUE']);
+  assert.deepEqual(Object.values(REJECTED_SERVER_GATE_MODE), ['STRICT_STATUS_CHECKS']);
+  // De twee verzamelingen mogen elkaar nooit raken: een stand die tegelijk toegestaan en geweigerd
+  // is, zou de volgorde van twee toetsen tot een veiligheidseigenschap maken.
+  for (const geweigerd of Object.values(REJECTED_SERVER_GATE_MODE)) {
+    assert.equal(Object.values(SERVER_GATE_MODE).includes(geweigerd), false, geweigerd);
   }
-  return regels;
-}
 
-/** Een meting die in de STRICT-modus GO oplevert, met een regelset zonder één merge-queue-spoor. */
-function striktMeting(overrides = {}, regelsetOverrides = {}) {
-  return meting({ mergeQueueRules: striktRegelset(regelsetOverrides), ...overrides });
-}
-
-test('S1. de STRICT-modus draagt GO op een ruleset ZONDER wachtrij en ZONDER merge-group-check', () => {
-  // De kern van V23: op dit persoonlijke repository BESTAAT er geen `merge_queue`-regel en geen
-  // `autocoding-merge-group-gate`-context, en toch is er volwaardig serverkant gezag — een actieve
-  // ruleset met een pull-request-regel en een strikte required-status-checkspolitiek op `CHECK`,
-  // geproduceerd door app 15368. Die combinatie, en alleen die, opent hier de poort.
-  const uitkomst = resolveFinalization({
-    pullRequest: PR_A, measurement: striktMeting(), policy: POLICY_STRICT,
+  // 1. de policy komt niet langs de validatie...
+  assert.throws(() => assertMergeFinalizerPolicySafe(POLICY_GEWEIGERD), /FINALIZER_POLICY_UNSAFE/);
+  // 2. ...dus komt er geen oordeel, ook niet op een meting die ALLES draagt wat V23 vroeg (een
+  //    actieve pull-request-regel én een strikte, app-gebonden required-status-checks-regel).
+  assert.deepEqual(
+    resolveFinalization({ pullRequest: PR_A, measurement: meting(), policy: POLICY_GEWEIGERD }),
+    { decision: FINALIZE_DECISION.NO_GO, reasons: [FINALIZE_REASON.FINALIZER_POLICY_UNSAFE] },
+  );
+  // 3. ...en geen effect: nul verzoeken, met de vlag AAN en elk argument exact.
+  const fetchImpl = verbodenFetch();
+  const effect = await mergePullRequest({
+    repository: 'rvanhooijdonk-png/stack-dashboard', pullRequest: PR_A, sha: HEAD,
+    mergeMethod: 'squash', policy: POLICY_GEWEIGERD, token: 'geheim', fetchImpl,
   });
+  assert.deepEqual(effect, {
+    ok: false, blocked: FINALIZE_REASON.FINALIZER_POLICY_UNSAFE, requests: 0,
+  });
+  assert.equal(fetchImpl.aanroepen.length, 0);
+  // 4. ...en ook niet via de CLI, met een bewezen GO-meting en zonder dry run.
+  const { rc, uitkomst } = await draai({
+    a: meting(), p: POLICY_GEWEIGERD, dryRun: false, fetchImpl,
+  });
+  assert.equal(rc, 1);
   assert.deepEqual(uitkomst, {
-    decision: FINALIZE_DECISION.GO,
-    reasons: [],
-    finalization_class: 'A',
-    merge: {
-      pull_request: PR_A,
-      sha: HEAD,
-      merge_method: 'squash',
-      server_gate_mode: 'STRICT_STATUS_CHECKS',
-    },
+    decision: FINALIZE_DECISION.NO_GO, reasons: [FINALIZE_REASON.FINALIZER_POLICY_UNSAFE],
   });
+  assert.equal(fetchImpl.aanroepen.length, 0);
 
-  // DEZELFDE meting in de dormante legacy-modus is NO_GO: de merge-group-poort en de wachtrijregel
-  // ontbreken er. De twee modi delen dus geen enkele bewijsgrond — de nieuwe leunt niet stiekem op
-  // het wachtrijspoor, en de oude wordt door de nieuwe niet verzwakt.
-  const inWachtrijmodus = resolveFinalization({
-    pullRequest: PR_A, measurement: striktMeting(), policy: POLICY_QUEUE,
-  });
-  assert.equal(inWachtrijmodus.decision, FINALIZE_DECISION.NO_GO);
-  assert.ok(inWachtrijmodus.reasons.includes(FINALIZE_REASON.SERVER_MERGE_QUEUE_PROOF_MISSING));
-
-  // En de modus is een GESLOTEN keuze: een onbekende of ontbrekende stand is UNSAFE, geen default.
-  for (const stand of [undefined, '', 'STRICT', 'strict_status_checks', 'DIRECT_MERGE', 15368]) {
+  // En de modus blijft een GESLOTEN keuze: onbekend, leeg, ontbrekend of net-anders-geschreven is
+  // even onveilig als de verworpen stand zelf. Er is nergens een default.
+  for (const stand of [
+    undefined, '', 'STRICT', 'strict_status_checks', 'DIRECT_MERGE', 'MANUAL', 15368,
+  ]) {
     const gebrekkig = policy({ merge_finalizer_enabled: true }, { server_gate_mode: stand });
     assert.throws(
       () => assertMergeFinalizerPolicySafe(gebrekkig),
@@ -1773,161 +1790,234 @@ test('S1. de STRICT-modus draagt GO op een ruleset ZONDER wachtrij en ZONDER mer
       JSON.stringify(stand),
     );
   }
-  assert.deepEqual(
-    Object.values(SERVER_GATE_MODE).sort(),
-    ['MERGE_QUEUE', 'STRICT_STATUS_CHECKS'],
-  );
 });
 
-test('S2. GEEN ACTIEVE RULESET — of enforcement uit — is NO_GO, en nooit een directe merge', () => {
-  // `rules/branches` levert alleen actieve regels: een uitgezette ruleset ziet er van hier af
-  // IDENTIEK uit aan geen ruleset. Beide moeten dus dezelfde poort dichtdoen. Dit is exact de stand
-  // van ruleset 21205251 op dit repository vandaag.
-  const leeg = beslis({ mergeQueueRules: [] });
-  assert.equal(leeg.decision, FINALIZE_DECISION.NO_GO);
-  assert.ok(leeg.reasons.includes(FINALIZE_REASON.SERVER_STRICT_RULESET_PROOF_MISSING));
-  assert.ok(leeg.reasons.includes(FINALIZE_REASON.PULL_REQUEST_RULE_MISSING));
-  assert.ok(leeg.reasons.includes(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_RULE_MISSING));
+test('O2. de KLASSIEKE merge-aanroep bestaat niet meer in de bron — er is geen pad meer heen', () => {
+  const bron = readFileSync(FINALIZER, 'utf8');
 
-  // Een lege PAGINA-lijst is hetzelfde niets, en een onleesbare meting is geen lege meting.
-  assert.ok(
-    beslis({ mergeQueueRules: [[]] }).reasons
-      .includes(FINALIZE_REASON.SERVER_STRICT_RULESET_PROOF_MISSING),
-  );
-  assert.ok(
-    beslis({ mergeQueueRules: null }).reasons
-      .includes(FINALIZE_REASON.MERGE_QUEUE_RULES_UNREADABLE),
-  );
+  // ELKE letterlijke GitHub-URL in dit bestand, zonder uitzondering. `PUT .../pulls/{n}/merge` is de
+  // aanroep die V19 sloot en die V23 terugbracht; hij hoort hier niet meer te staan, en deze toets
+  // leest dat niet af aan een afwezig fragment maar aan de VOLLEDIGE verzameling.
+  const urls = new Set([...bron.matchAll(/https:\/\/api\.github\.com\/[^`]*/g)].map((m) => m[0]));
+  assert.deepEqual([...urls].sort(), [
+    'https://api.github.com/repos/${repository}/pulls/${pullRequest}/merge-async',
+    'https://api.github.com/repos/${repository}/pulls/${pullRequest}/merge-async/${uuid}',
+  ]);
 
-  // Regels die er wel staan maar van een ANDER type zijn, dragen niets: geen enkele niet-genoemde
-  // regelsoort mag als serverpoortbewijs meetellen.
-  const vreemd = beslis({
+  // De foutcodes van die aanroep zijn met hem meegegaan. Een code die geen enkel pad meer kan zetten
+  // is geen reserve maar een valse belofte in een log dat gesloten hoort te zijn.
+  for (const dood of [
+    'MERGE_HEAD_MISMATCH', 'MERGE_RESULT_NOT_MERGED',
+    'SERVER_STRICT_RULESET_PROOF_MISSING', 'PULL_REQUEST_RULE_MISSING',
+    'PULL_REQUEST_MERGE_METHOD_NOT_ALLOWED', 'STRICT_STATUS_CHECKS_POLICY_DISABLED',
+  ]) {
+    assert.equal(Object.hasOwn(FINALIZE_ERROR, dood), false, dood);
+    assert.equal(Object.hasOwn(FINALIZE_REASON, dood), false, dood);
+  }
+  // En het effect dat erbij hoorde bestaat evenmin: `MERGED` was de naam van een merge die dit
+  // bestand zelf uitvoerde.
+  assert.equal(bron.includes("effect: 'MERGED'"), false);
+});
+
+test('O3. de eigenaarsstand draagt GO op de stand van VANDAAG — een LEGE regelset', () => {
+  // Precies de meting waarop `STRICT_STATUS_CHECKS` eeuwig strandde: ruleset 21205251 staat uit, dus
+  // `rules/branches` levert niets. De eigenaarsstand stelt daar geen rulesetEIS tegenover, want zij
+  // doet geen enkel verzoek dat een serverpoort zou moeten bewaken — de laatste handeling is die van
+  // de eigenaar, in GitHubs eigen interface.
+  const uitkomst = resolveFinalization({
+    pullRequest: PR_A, measurement: eigenaarsMeting(), policy: POLICY_MANUAL,
+  });
+  assert.deepEqual(uitkomst, {
+    decision: FINALIZE_DECISION.GO,
+    reasons: [],
+    finalization_class: 'A',
+    merge: {
+      pull_request: PR_A,
+      sha: HEAD,
+      merge_method: 'squash',
+      server_gate_mode: 'MANUAL_OWNER_GATE',
+    },
+  });
+
+  // DEZELFDE meting in de dormante legacy-modus is NO_GO: daar is de wachtrijregel de dragende
+  // voorwaarde, en die bestaat op een persoonlijk repository niet. De twee standen delen dus geen
+  // enkele bewijsgrond — de nieuwe leunt nergens op het wachtrijspoor, en de oude wordt door de
+  // nieuwe niet verzwakt.
+  const inWachtrijmodus = resolveFinalization({
+    pullRequest: PR_A, measurement: eigenaarsMeting(), policy: POLICY_QUEUE,
+  });
+  assert.equal(inWachtrijmodus.decision, FINALIZE_DECISION.NO_GO);
+  assert.ok(inWachtrijmodus.reasons.includes(FINALIZE_REASON.SERVER_MERGE_QUEUE_PROOF_MISSING));
+  assert.ok(inWachtrijmodus.reasons.includes(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_RULE_MISSING));
+});
+
+test('O4. het EFFECT van de eigenaarsstand is mechanisch NUL mergeverzoeken', async () => {
+  const fetchImpl = verbodenFetch();
+  const uitkomst = await mergePullRequest({
+    repository: 'rvanhooijdonk-png/stack-dashboard', pullRequest: PR_A, sha: HEAD,
+    mergeMethod: 'squash', policy: POLICY_MANUAL, token: 'geheim', fetchImpl,
+  });
+  // Geen `ok`, en toch geen mislukking: dit is de terminale uitkomst van deze stand.
+  assert.deepEqual(uitkomst, {
+    ok: false, blocked: FINALIZE_ERROR.OWNER_MERGE_REQUIRED, requests: 0,
+  });
+  assert.equal(fetchImpl.aanroepen.length, 0);
+
+  // De uitkomst hangt van GEEN ENKELE omgevingsfactor af. Zonder `fetchImpl` valt deze functie
+  // normaal terug op `globalThis.fetch`; in deze stand keert ze terug vóór ze daar überhaupt naar
+  // kijkt. Een `fetch` die bij aanroep ontploft bewijst dat verschil.
+  const echteFetch = globalThis.fetch;
+  let aangeraakt = 0;
+  globalThis.fetch = () => { aangeraakt += 1; throw new Error('verboden'); };
+  try {
+    assert.deepEqual(
+      await mergePullRequest({
+        repository: 'a/b', pullRequest: PR_A, sha: HEAD, mergeMethod: 'squash',
+        policy: POLICY_MANUAL, token: 'geheim',
+      }),
+      { ok: false, blocked: FINALIZE_ERROR.OWNER_MERGE_REQUIRED, requests: 0 },
+    );
+  } finally {
+    globalThis.fetch = echteFetch;
+  }
+  assert.equal(aangeraakt, 0);
+
+  // Ook met de twee ANDERE vlaggen aan blijft het nul: geen enkele vlag opent in deze stand een
+  // verzoek, want er is geen verzoek om te openen.
+  const allesAan = policy(
+    {
+      merge_finalizer_enabled: true,
+      class_b_auto_merge_enabled: true,
+      live_receipt_gate_enabled: true,
+    },
+  );
+  assert.deepEqual(
+    await mergePullRequest({
+      repository: 'a/b', pullRequest: PR_A, sha: HEAD, mergeMethod: 'squash',
+      policy: allesAan, token: 'geheim', fetchImpl,
+    }),
+    { ok: false, blocked: FINALIZE_ERROR.OWNER_MERGE_REQUIRED, requests: 0 },
+  );
+  assert.equal(fetchImpl.aanroepen.length, 0);
+
+  // En de VLAG blijft de eerste poort: met `merge_finalizer_enabled: false` — de stand van het
+  // bestand — is de code `FINALIZER_DISABLED` en niet `OWNER_MERGE_REQUIRED`. De volgorde van die
+  // twee is geen detail: zij zegt dat de finalizer uitstaat, niet dat hij een pakket klaarlegt.
+  assert.deepEqual(
+    await mergePullRequest({
+      repository: 'a/b', pullRequest: PR_A, sha: HEAD, mergeMethod: 'squash',
+      policy: POLICY_BESTAND, token: 'geheim', fetchImpl,
+    }),
+    { ok: false, blocked: FINALIZE_ERROR.FINALIZER_DISABLED, requests: 0 },
+  );
+  assert.equal(fetchImpl.aanroepen.length, 0);
+});
+
+test('O5. de CLI levert in de eigenaarsstand een MERGEPAKKET op, en nooit een merge', async () => {
+  const fetchImpl = verbodenFetch();
+  const { rc, uitkomst } = await draai({
+    a: eigenaarsMeting(), p: POLICY_MANUAL, dryRun: false, fetchImpl,
+  });
+  // rc 0, want dit IS de oplevering van deze stand — maar de regel zegt onmiskenbaar dat er niets is
+  // gemerged. Een aanroeper die alleen de exitcode leest, kan het pakket niet voor een merge aanzien
+  // zonder `merge_performed` te negeren.
+  assert.equal(rc, 0);
+  assert.deepEqual(uitkomst, {
+    decision: FINALIZE_DECISION.GO,
+    reasons: [],
+    finalization_class: 'A',
+    effect: 'OWNER_MERGE_PACKAGE',
+    merge_performed: false,
+    owner_action: 'OWNER_MERGE_REQUIRED',
+  });
+  assert.equal(fetchImpl.aanroepen.length, 0);
+  // Het pakket draagt geen sha, geen pad en geen API-tekst — dezelfde reductie als elke andere
+  // uitvoerregel (M30).
+  const { regel } = await draai({ a: eigenaarsMeting(), p: POLICY_MANUAL, dryRun: false, fetchImpl });
+  assert.equal(/[0-9a-f]{40}/.test(regel), false, regel);
+  assert.equal(regel.includes('/tmp'), false, regel);
+
+  // Een pakket bestaat ALLEEN na een bewezen GO op beide metingen. Drift, een ingetrokken review of
+  // een uitgezette vlag leveren geen pakket maar een NO_GO — anders zou "pakket" niets betekenen.
+  const gedreven = await draai({
+    a: eigenaarsMeting(),
+    b: eigenaarsMeting({ checkRuns: [[checkRun({ conclusion: 'failure' })]] }),
+    p: POLICY_MANUAL,
+    dryRun: false,
+    fetchImpl,
+  });
+  assert.equal(gedreven.rc, 1);
+  assert.equal(gedreven.uitkomst.decision, FINALIZE_DECISION.NO_GO);
+  assert.equal(gedreven.uitkomst.effect, undefined);
+
+  const uit = await draai({
+    a: eigenaarsMeting(), p: POLICY_BESTAND, dryRun: false, fetchImpl,
+  });
+  assert.equal(uit.rc, 1);
+  assert.ok(uit.uitkomst.reasons.includes(FINALIZE_REASON.FINALIZER_DISABLED));
+  assert.equal(uit.uitkomst.effect, undefined);
+  assert.equal(fetchImpl.aanroepen.length, 0);
+});
+
+test('O6. de WACHTRIJTAK blijft naast de eigenaarsstand volledig intact', async () => {
+  // Dezelfde meting, twee standen, twee verschillende werelden — en de legacy-tak doet nog exact wat
+  // hij sinds V19 deed: precies één inschrijving op `merge-async`, nooit een directe merge.
+  const queueFetch = antwoordFetch(202);
+  const inQueue = await draai({ a: meting(), p: POLICY_QUEUE, dryRun: false, fetchImpl: queueFetch });
+  assert.equal(inQueue.rc, 0);
+  assert.deepEqual(inQueue.uitkomst, {
+    decision: FINALIZE_DECISION.GO,
+    reasons: [],
+    finalization_class: 'A',
+    effect: 'MERGE_QUEUED',
+    merge_performed: true,
+  });
+  assert.equal(queueFetch.aanroepen.length, 1);
+  assert.ok(queueFetch.aanroepen[0].url.endsWith(`/pulls/${PR_A}/merge-async`));
+  assert.equal(JSON.parse(queueFetch.aanroepen[0].init.body).merge_action, 'merge_queue');
+
+  const eigenaarFetch = verbodenFetch();
+  const inEigenaar = await draai({
+    a: meting(), p: POLICY_MANUAL, dryRun: false, fetchImpl: eigenaarFetch,
+  });
+  assert.equal(inEigenaar.rc, 0);
+  assert.equal(inEigenaar.uitkomst.effect, 'OWNER_MERGE_PACKAGE');
+  assert.equal(eigenaarFetch.aanroepen.length, 0);
+
+  // En de inschrijvingsvoorwaarde van die tak is niet meeversoepeld: haal één deel uit de regelset en
+  // de wachtrijtak sluit, terwijl de eigenaarsstand op diezelfde meting GO blijft. De twee oordelen
+  // zijn onafhankelijk.
+  const zonderQueueRegel = meting({
     mergeQueueRules: [
-      { type: 'deletion' }, { type: 'non_fast_forward' }, { type: 'creation' },
-      { type: 'required_signatures' }, { type: 'merge_queue' },
+      { type: 'pull_request', parameters: { allowed_merge_methods: ['squash'] } },
+      {
+        type: 'required_status_checks',
+        parameters: {
+          strict_required_status_checks_policy: true,
+          required_status_checks: [
+            { context: CHECK, integration_id: 15368 },
+            { context: CHECK_MG, integration_id: 15368 },
+          ],
+        },
+      },
     ],
   });
-  assert.ok(vreemd.reasons.includes(FINALIZE_REASON.PULL_REQUEST_RULE_MISSING));
-  assert.ok(vreemd.reasons.includes(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_RULE_MISSING));
-});
-
-test('S3. zonder PULL-REQUEST-REGEL, of met een regel die squash niet toestaat, is er geen GO', () => {
-  const zonderPr = beslis({ mergeQueueRules: striktRegelset({ prRegels: [] }) });
-  assert.equal(zonderPr.decision, FINALIZE_DECISION.NO_GO);
-  assert.ok(zonderPr.reasons.includes(FINALIZE_REASON.PULL_REQUEST_RULE_MISSING));
-
-  // De mergemethode uit de policy MOET in de regel staan. Anders zou GitHub het verzoek weigeren of
-  // — erger — een andere methode kiezen dan waarop is besloten.
-  for (const toegestaan of [['merge'], ['rebase'], ['merge', 'rebase'], [], undefined, 'squash']) {
-    const uitkomst = beslis({
-      mergeQueueRules: striktRegelset({ prRegels: [{ allowed_merge_methods: toegestaan }] }),
-    });
-    assert.equal(uitkomst.decision, FINALIZE_DECISION.NO_GO, JSON.stringify(toegestaan));
-    assert.ok(
-      uitkomst.reasons.includes(FINALIZE_REASON.PULL_REQUEST_MERGE_METHOD_NOT_ALLOWED),
-      JSON.stringify(toegestaan),
-    );
-  }
-
-  // Hoofdlettergevoeligheid mag de uitkomst niet bepalen: GitHub levert deze lijst in kleine letters
-  // en de policy schrijft `squash`, maar een regelset die `SQUASH` teruggeeft is dezelfde regelset.
-  assert.equal(
-    beslis({
-      mergeQueueRules: striktRegelset({ prRegels: [{ allowed_merge_methods: ['SQUASH'] }] }),
-    }).decision,
-    FINALIZE_DECISION.GO,
+  assert.ok(
+    resolveFinalization({ pullRequest: PR_A, measurement: zonderQueueRegel, policy: POLICY_QUEUE })
+      .reasons.includes(FINALIZE_REASON.SERVER_MERGE_QUEUE_PROOF_MISSING),
   );
-
-  // TWEE pull-request-regels op dezelfde branch stapelen: GitHub past ze allebei toe, dus telt de
-  // DOORSNEDE. Eén regel die squash verbiedt sluit de poort, ook als de andere hem toestaat.
-  const doorsnede = beslis({
-    mergeQueueRules: striktRegelset({
-      prRegels: [{ allowed_merge_methods: ['squash'] }, { allowed_merge_methods: ['merge'] }],
-    }),
-  });
-  assert.ok(doorsnede.reasons.includes(FINALIZE_REASON.PULL_REQUEST_MERGE_METHOD_NOT_ALLOWED));
-});
-
-test('S4. een NIET-STRIKTE required-status-checkspolitiek is geen serverpoort', () => {
-  // Zonder `strict` mag GitHub een pull request mergen die achterloopt op de base: de check is dan
-  // groen op een boom die na de merge niet meer bestaat. Dat is precies het gat dat deze modus dicht
-  // moet houden, want zij heeft geen wachtrij die de base opnieuw beoordeelt.
-  for (const stand of [false, undefined, null, 'true', 1]) {
-    const uitkomst = beslis({ mergeQueueRules: striktRegelset({ strictPolicy: stand }) });
-    assert.equal(uitkomst.decision, FINALIZE_DECISION.NO_GO, JSON.stringify(stand));
-    assert.ok(
-      uitkomst.reasons.includes(FINALIZE_REASON.STRICT_STATUS_CHECKS_POLICY_DISABLED),
-      JSON.stringify(stand),
-    );
-  }
-
-  // Ontbreekt de regel helemaal, dan is dat een ANDERE reden dan een uitgezette politiek.
-  const geenRegel = beslis({ mergeQueueRules: striktRegelset({ zonderCheckRegel: true }) });
-  assert.ok(geenRegel.reasons.includes(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_RULE_MISSING));
   assert.equal(
-    geenRegel.reasons.includes(FINALIZE_REASON.STRICT_STATUS_CHECKS_POLICY_DISABLED),
-    false,
-  );
-
-  // En de contexten van een NIET-strikte regel tellen niet mee: `CHECK` staat er wel in, maar in de
-  // verkeerde regel. De poort valt dan op BEIDE gronden om.
-  const losseContext = beslis({ mergeQueueRules: striktRegelset({ strictPolicy: false }) });
-  assert.ok(losseContext.reasons.includes(FINALIZE_REASON.STRICT_STATUS_CHECKS_POLICY_DISABLED));
-  assert.ok(losseContext.reasons.includes(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_CONTEXT_MISSING));
-});
-
-test('S5. de context `autocoding-shield` moet met NAME in de strikte regel staan', () => {
-  for (const contexten of [
-    [],
-    [{ context: 'iets-anders', integration_id: 15368 }],
-    [{ context: CHECK_MG, integration_id: 15368 }],
-    [{ context: 'autocoding-shield-diagnostic', integration_id: 15368 }],
-    [{ context: 'Autocoding-Shield', integration_id: 15368 }],
-    [{ context: ` ${CHECK} `, integration_id: 15368 }],
-    [{ integration_id: 15368 }],
-  ]) {
-    const uitkomst = beslis({ mergeQueueRules: striktRegelset({ contexten }) });
-    assert.equal(uitkomst.decision, FINALIZE_DECISION.NO_GO, JSON.stringify(contexten));
-    assert.ok(
-      uitkomst.reasons.includes(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_CONTEXT_MISSING),
-      JSON.stringify(contexten),
-    );
-  }
-
-  // De DIAGNOSTISCHE context is nadrukkelijk geen vervanger: hij mag naast de echte staan, maar
-  // opent nooit iets. Staat alleen de echte erin, dan is de poort open.
-  assert.equal(
-    beslis({
-      mergeQueueRules: striktRegelset({
-        contexten: [
-          { context: 'autocoding-shield-diagnostic', integration_id: 15368 },
-          { context: CHECK, integration_id: 15368 },
-        ],
-      }),
-    }).decision,
+    resolveFinalization({ pullRequest: PR_A, measurement: zonderQueueRegel, policy: POLICY_MANUAL })
+      .decision,
     FINALIZE_DECISION.GO,
   );
 });
 
-test('S6. de vereiste context moet aan APP-ID 15368 gebonden zijn — niet aan een naam alleen', () => {
-  // Zonder app-binding kan iedere andere app, of een gebruiker met een token, een check-run met
-  // dezelfde naam publiceren. De naam is dan geen bewijs van herkomst meer.
-  for (const id of [undefined, null, 0, 15369, 1144995, '15368', 15368.0001, true]) {
-    const uitkomst = beslis({
-      mergeQueueRules: striktRegelset({ contexten: [{ context: CHECK, integration_id: id }] }),
-    });
-    // Een niet-geheel getal, een tekst of een boolean is geen app-id en strandt net zo goed.
-    assert.equal(uitkomst.decision, FINALIZE_DECISION.NO_GO, JSON.stringify(id));
-    assert.ok(
-      uitkomst.reasons.includes(FINALIZE_REASON.REQUIRED_CHECK_APP_ID_MISMATCH),
-      JSON.stringify(id),
-    );
-  }
-});
-
-test('S7. een INCOMPLETE ruleset-, check- of reviewmeting is nooit een geslaagde meting', () => {
+test('O7. een INCOMPLETE ruleset-, check- of reviewmeting is nooit een geslaagde meting', () => {
   // Drie afkappingen, drie eigen redencodes. Een lijst die op de paginagrens is afgebroken LIJKT
-  // telkens op de gunstige uitkomst: geen tegenstem, geen ontbrekende check, geen extra regel.
+  // telkens op de gunstige uitkomst: geen tegenstem, geen ontbrekende check, geen extra regel. Dat de
+  // eigenaarsstand geen rulesetEIS stelt, maakt de regelsetMETING niet vrijblijvend: zij zit in de
+  // vingerafdruk, dus een afkapping erin is een onbetrouwbare driftvergelijking.
   const afgekapteRegels = beslis({ mergeQueueRulesComplete: false });
   assert.equal(afgekapteRegels.decision, FINALIZE_DECISION.NO_GO);
   assert.ok(afgekapteRegels.reasons.includes(FINALIZE_REASON.MERGE_QUEUE_RULES_INCOMPLETE));
@@ -1940,13 +2030,20 @@ test('S7. een INCOMPLETE ruleset-, check- of reviewmeting is nooit een geslaagde
   assert.equal(afgekaptBewijs.decision, FINALIZE_DECISION.NO_GO);
   assert.ok(afgekaptBewijs.reasons.includes(FINALIZE_REASON.EVIDENCE_INCOMPLETE));
 
-  // Een afkapping die de regels WEL compleet noemt maar de regelset zelf mist, blijft dubbel dicht.
-  const beide = beslis({ mergeQueueRules: [], mergeQueueRulesComplete: false });
-  assert.ok(beide.reasons.includes(FINALIZE_REASON.MERGE_QUEUE_RULES_INCOMPLETE));
-  assert.ok(beide.reasons.includes(FINALIZE_REASON.SERVER_STRICT_RULESET_PROOF_MISSING));
+  // Een ONLEESBARE regelsetmeting is iets anders dan een lege: leeg is de gemeten stand van vandaag
+  // (O3), onleesbaar is een meting die niet is gelukt — en die sluit de poort in BEIDE standen.
+  assert.ok(
+    beslis({ mergeQueueRules: null }).reasons
+      .includes(FINALIZE_REASON.MERGE_QUEUE_RULES_UNREADABLE),
+  );
+  assert.ok(
+    resolveFinalization({
+      pullRequest: PR_A, measurement: meting({ mergeQueueRules: null }), policy: POLICY_QUEUE,
+    }).reasons.includes(FINALIZE_REASON.MERGE_QUEUE_RULES_UNREADABLE),
+  );
 });
 
-test('S8. de LIVE BASE-HEAD moet gemeten zijn, en verschuift hij, dan gebeurt er niets', async () => {
+test('O8. de LIVE BASE-HEAD moet gemeten zijn, en verschuift hij, dan gebeurt er niets', async () => {
   for (const kapot of [
     undefined, null, {}, { object: {} }, { object: { sha: '' } },
     { object: { sha: 'f414ba1' } }, { object: { sha: BASE_HEAD.toUpperCase() } },
@@ -1960,19 +2057,19 @@ test('S8. de LIVE BASE-HEAD moet gemeten zijn, en verschuift hij, dan gebeurt er
   }
 
   // DE TWEEDE READBACK. Beide metingen zijn op zichzelf GO — de base is alleen ÉÉN COMMIT
-  // opgeschoven tussen meting A en meting B. Zonder wachtrij is dit de enige plek waar die
-  // verschuiving nog gezien wordt, en zij moet nul verzoeken opleveren.
+  // opgeschoven tussen meting A en meting B. Er volgt dan geen pakket en geen verzoek: een pakket op
+  // een verschoven base zou de eigenaar een oordeel voorleggen dat niet meer over deze base gaat.
   const fetchImpl = verbodenFetch();
-  const verschovenBase = meting({
+  const verschovenBase = eigenaarsMeting({
     baseHead: { ref: 'refs/heads/main', object: { sha: 'a'.repeat(40), type: 'commit' } },
   });
   assert.equal(
-    resolveFinalization({ pullRequest: PR_A, measurement: verschovenBase, policy: POLICY_STRICT })
+    resolveFinalization({ pullRequest: PR_A, measurement: verschovenBase, policy: POLICY_MANUAL })
       .decision,
     FINALIZE_DECISION.GO,
   );
   const { rc, uitkomst } = await draai({
-    a: meting(), b: verschovenBase, dryRun: false, fetchImpl,
+    a: eigenaarsMeting(), b: verschovenBase, dryRun: false, fetchImpl,
   });
   assert.equal(rc, 1);
   assert.deepEqual(uitkomst, {
@@ -1981,7 +2078,7 @@ test('S8. de LIVE BASE-HEAD moet gemeten zijn, en verschuift hij, dan gebeurt er
   assert.equal(fetchImpl.aanroepen.length, 0);
 });
 
-test('S9. alleen GitHubs eigen oordeel `mergeable: true` MET `clean` telt', () => {
+test('O9. alleen GitHubs eigen oordeel `mergeable: true` MET `clean` telt', () => {
   // `mergeable: null` betekent "nog niet berekend" — een ONTBREKENDE meting, geen negatieve, en dus
   // een eigen redencode. Wie die twee samenvouwt, leest een onbekende stand als een bekende.
   for (const stand of [null, undefined, 'true', 1]) {
@@ -2007,25 +2104,31 @@ test('S9. alleen GitHubs eigen oordeel `mergeable: true` MET `clean` telt', () =
   }
 });
 
-test('S10. een VERSCHOVEN PR-head tussen de twee metingen levert nul verzoeken op', async () => {
-  const fetchImpl = verbodenFetch();
-  const verschoven = meting({
-    pr: { ...meting().pr, head: { sha: '5'.repeat(40) } },
-    headCommit: { sha: '5'.repeat(40), tree: { sha: TREE } },
+test('O10. een VERSCHOVEN PR-head tussen de twee metingen levert nul verzoeken en geen pakket op',
+  async () => {
+    const fetchImpl = verbodenFetch();
+    const verschoven = eigenaarsMeting({
+      pr: { ...meting().pr, head: { sha: '5'.repeat(40) } },
+      headCommit: { sha: '5'.repeat(40), tree: { sha: TREE } },
+    });
+    const { rc, uitkomst } = await draai({
+      a: eigenaarsMeting(), b: verschoven, dryRun: false, fetchImpl,
+    });
+    assert.equal(rc, 1);
+    assert.equal(uitkomst.decision, FINALIZE_DECISION.NO_GO);
+    assert.equal(uitkomst.effect, undefined);
+    assert.equal(fetchImpl.aanroepen.length, 0);
+
+    // Ook de omgekeerde volgorde — de OUDE head in de hermeting — is drift en geen herstel.
+    const terug = await draai({
+      a: verschoven, b: eigenaarsMeting(), dryRun: false, fetchImpl,
+    });
+    assert.equal(terug.rc, 1);
+    assert.equal(terug.uitkomst.decision, FINALIZE_DECISION.NO_GO);
+    assert.equal(fetchImpl.aanroepen.length, 0);
   });
-  const { rc, uitkomst } = await draai({ a: meting(), b: verschoven, dryRun: false, fetchImpl });
-  assert.equal(rc, 1);
-  assert.equal(uitkomst.decision, FINALIZE_DECISION.NO_GO);
-  assert.equal(fetchImpl.aanroepen.length, 0);
 
-  // Ook de omgekeerde volgorde — de OUDE head in de hermeting — is drift en geen herstel.
-  const terug = await draai({ a: verschoven, b: meting(), dryRun: false, fetchImpl });
-  assert.equal(terug.rc, 1);
-  assert.equal(terug.uitkomst.decision, FINALIZE_DECISION.NO_GO);
-  assert.equal(fetchImpl.aanroepen.length, 0);
-});
-
-test('S11. een RODE, STALE of ONTBREKENDE vereiste check sluit de poort in de STRICT-modus', () => {
+test('O11. een RODE, STALE of ONTBREKENDE vereiste check sluit de poort in de eigenaarsstand', () => {
   const ontbreekt = beslis({ checkRuns: [[checkRun({ name: 'iets-anders' })]] });
   assert.ok(ontbreekt.reasons.includes(FINALIZE_REASON.REQUIRED_CHECK_MISSING));
 
@@ -2042,12 +2145,20 @@ test('S11. een RODE, STALE of ONTBREKENDE vereiste check sluit de poort in de ST
   const loopt = beslis({ checkRuns: [[checkRun({ status: 'in_progress', conclusion: null })]] });
   assert.ok(loopt.reasons.includes(FINALIZE_REASON.REQUIRED_CHECK_NOT_GREEN));
 
-  // De MERGE-GROUP-check is in deze modus GEEN vereiste check: zijn afwezigheid mag de poort niet
+  // De MERGE-GROUP-check is in deze stand GEEN vereiste check: zijn afwezigheid mag de poort niet
   // sluiten, en dat is precies wat een dormante legacy-eis onderscheidt van een levende.
-  assert.equal(beslis({ checkRuns: [[checkRun()]] }).decision, FINALIZE_DECISION.GO);
+  assert.equal(
+    resolveFinalization({
+      pullRequest: PR_A, measurement: eigenaarsMeting({ checkRuns: [[checkRun()]] }),
+      policy: POLICY_MANUAL,
+    }).decision,
+    FINALIZE_DECISION.GO,
+  );
 });
 
-test('S12. de reviewwet en de ownerautorisatie gelden in de STRICT-modus ONVERKORT', () => {
+test('O12. de reviewwet en de ownerautorisatie gelden in de eigenaarsstand ONVERKORT', () => {
+  // Dit is de kern van wat de eigenaarsstand WEL bewaakt. Een pakket zegt: dit bewijs is compleet.
+  // Zou de reviewwet hier zachter zijn dan in de wachtrijtak, dan zou dat pakket niets betekenen.
   const zonderVendors = beslis({ issueComments: [[]], reviews: [[]], reviewComments: [[]] });
   assert.equal(zonderVendors.decision, FINALIZE_DECISION.NO_GO);
   assert.ok(zonderVendors.reasons.includes(FINALIZE_REASON.REVIEW_GATE_NO_GO));
@@ -2076,23 +2187,26 @@ test('S12. de reviewwet en de ownerautorisatie gelden in de STRICT-modus ONVERKO
   assert.ok(opAndereBase.reasons.includes(FINALIZE_REASON.MERGE_AUTHORIZATION_MISSING));
 });
 
-test('S13. met de LIVE VLAGGEN uit — de stand van dit repository — is het aantal '
+test('O13. met de LIVE VLAGGEN uit — de stand van dit repository — is het aantal '
   + 'mergeverzoeken EXACT NUL', async () => {
-  // Het bestand zoals het in de repository staat: de modus is omgezet, de drie vlaggen niet.
-  assert.equal(POLICY_BESTAND.merge_finalizer.server_gate_mode, 'STRICT_STATUS_CHECKS');
+  // Het bestand zoals het in de repository staat: de modus is sinds V24 de eigenaarsstand, en de drie
+  // vlaggen staan onveranderd uit.
+  assert.equal(POLICY_BESTAND.merge_finalizer.server_gate_mode, 'MANUAL_OWNER_GATE');
   for (const vlag of [
     'live_receipt_gate_enabled', 'merge_finalizer_enabled', 'class_b_auto_merge_enabled',
   ]) {
     assert.equal(POLICY_BESTAND[vlag], false, vlag);
   }
 
-  // De CLI met een BEWEZEN GO-meting, zonder dry run: rood vóór het transport.
+  // De CLI met een BEWEZEN GO-meting, zonder dry run: rood vóór het transport, en géén pakket — een
+  // uitgezette finalizer levert niets op, ook geen eigenaarsopdracht.
   const fetchImpl = verbodenFetch();
   const { rc, uitkomst } = await draai({
-    a: striktMeting(), p: POLICY_BESTAND, dryRun: false, fetchImpl,
+    a: eigenaarsMeting(), p: POLICY_BESTAND, dryRun: false, fetchImpl,
   });
   assert.equal(rc, 1);
   assert.ok(uitkomst.reasons.includes(FINALIZE_REASON.FINALIZER_DISABLED));
+  assert.equal(uitkomst.effect, undefined);
 
   // En de transportfunctie zelf, rechtstreeks aangeroepen met alles wat klopt, doet er evenmin één.
   const direct = await mergePullRequest({
@@ -2102,114 +2216,82 @@ test('S13. met de LIVE VLAGGEN uit — de stand van dit repository — is het aa
   assert.deepEqual(direct, {
     ok: false, blocked: FINALIZE_ERROR.FINALIZER_DISABLED, requests: 0,
   });
-
-  // Ook de twee ANDERE vlaggen aanzetten verandert er niets aan: alleen `merge_finalizer_enabled`
-  // opent deze baan, en die staat uit.
-  const halfAan = policy({ live_receipt_gate_enabled: true, class_b_auto_merge_enabled: true });
-  const halve = await mergePullRequest({
-    repository: 'rvanhooijdonk-png/stack-dashboard', pullRequest: PR_A, sha: HEAD,
-    mergeMethod: 'squash', policy: halfAan, token: 'geheim', fetchImpl,
-  });
-  assert.equal(halve.ok, false);
   assert.equal(fetchImpl.aanroepen.length, 0);
 });
 
-test('S14. het STANDAARD mergeverzoek is exact één PUT op `/pulls/{n}/merge`, en gaat nooit '
-  + 'naar GitHub', async () => {
-  // Het enige effect van deze modus, volledig geconstrueerd en opgevangen door een `fetch` die het
-  // verzoek NIET verzendt. Wat hier wordt getoetst is de vorm van dat ene verzoek.
-  const fetchImpl = mergeAntwoordFetch(200);
-  const uitkomst = await mergePullRequest({
-    repository: 'rvanhooijdonk-png/stack-dashboard',
-    pullRequest: PR_A,
-    sha: HEAD,
-    mergeMethod: POLICY_STRICT.merge_finalizer.merge_method,
-    policy: POLICY_STRICT,
-    token: 'geheim',
-    fetchImpl,
-  });
-  assert.deepEqual(uitkomst, { ok: true, status: 200, requests: 1, effect: 'MERGED' });
-  assert.equal(fetchImpl.aanroepen.length, 1);
-
-  const [{ url, init }] = fetchImpl.aanroepen;
-  assert.equal(
-    url,
-    `https://api.github.com/repos/rvanhooijdonk-png/stack-dashboard/pulls/${PR_A}/merge`,
+test('MUT7. een finalizer die de EIGENAARSSTAND als wachtrijstand behandelt, doet wél een '
+  + 'verzoek', async () => {
+  // De mutatie is precies de reparatie van V24 teruggedraaid: `MANUAL_OWNER_GATE` valt niet meer
+  // terminaal uit, maar zakt door naar de transporttak.
+  const gemuteerd = await mutantVanDeFinalizer(
+    'eigenaarsstand-zakt-door-naar-transport',
+    '  if (modus === SERVER_GATE_MODE.MANUAL_OWNER_GATE) {\n'
+      + '    return { ok: false, blocked: FINALIZE_ERROR.OWNER_MERGE_REQUIRED, requests: 0 };\n'
+      + '  }\n'
+      + '  if (modus !== SERVER_GATE_MODE.MERGE_QUEUE) {',
+    '  if (modus !== SERVER_GATE_MODE.MERGE_QUEUE\n'
+      + '    && modus !== SERVER_GATE_MODE.MANUAL_OWNER_GATE) {',
   );
-  assert.equal(init.method, 'PUT');
-  // Geen spoor van de wachtrijbaan: geen `merge-async`, geen `merge_action`.
-  assert.equal(url.includes('merge-async'), false);
-  assert.equal(init.body.includes('merge_action'), false);
+  const fetchImpl = antwoordFetch(202);
+  const uitkomst = await gemuteerd.mergePullRequest({
+    repository: 'a/b', pullRequest: PR_A, sha: HEAD, mergeMethod: 'squash',
+    policy: POLICY_MANUAL, token: 'geheim', fetchImpl,
+  });
+  // De mutant vraagt in de eigenaarsstand een inschrijving aan. O4 eist nul verzoeken en de code
+  // `OWNER_MERGE_REQUIRED`; beide toetsen breken hier.
+  assert.equal(uitkomst.ok, true);
+  assert.equal(fetchImpl.aanroepen.length, 1);
+  assert.throws(() => assert.equal(fetchImpl.aanroepen.length, 0), /AssertionError/);
 
-  const body = JSON.parse(init.body);
-  assert.deepEqual(Object.keys(body).sort(), ['merge_method', 'sha']);
-  assert.equal(body.sha, HEAD);
-  assert.equal(body.merge_method, 'squash');
-  assert.equal(init.headers['x-github-api-version'], '2022-11-28');
-  assert.equal(init.headers.accept, 'application/vnd.github+json');
-
-  // Een 200 ALLEEN is geen bewijs: het lichaam moet de merge werkelijk melden, met een volledige
-  // sha van de merge-commit erin.
-  for (const [lichaam, code] of [
-    [{ merged: false, sha: MERGE_COMMIT }, FINALIZE_ERROR.MERGE_RESULT_NOT_MERGED],
-    [{ sha: MERGE_COMMIT }, FINALIZE_ERROR.MERGE_RESULT_NOT_MERGED],
-    [{ merged: 'true', sha: MERGE_COMMIT }, FINALIZE_ERROR.MERGE_RESULT_NOT_MERGED],
-    [{ merged: true }, FINALIZE_ERROR.MERGE_RESPONSE_INVALID],
-    [{ merged: true, sha: '7777777' }, FINALIZE_ERROR.MERGE_RESPONSE_INVALID],
-    [[], FINALIZE_ERROR.MERGE_RESPONSE_INVALID],
-    [null, FINALIZE_ERROR.MERGE_RESPONSE_INVALID],
-  ]) {
-    const mager = mergeAntwoordFetch(200, lichaam);
-    const streng = await mergePullRequest({
+  // De echte code op exact dezelfde invoer.
+  const schoon = antwoordFetch(202);
+  assert.deepEqual(
+    await mergePullRequest({
       repository: 'a/b', pullRequest: PR_A, sha: HEAD, mergeMethod: 'squash',
-      policy: POLICY_STRICT, token: 'x', fetchImpl: mager,
-    });
-    assert.deepEqual(streng, { ok: false, blocked: code, status: 200, requests: 1 });
-  }
-
-  // Elke weigering van GitHub is TERMINAAL en draagt haar eigen gesloten code — er volgt nooit een
-  // tweede poging. 405 is de belangrijkste: dat is de ruleset die op DAT moment nee zegt.
-  for (const [status, code] of [
-    [403, FINALIZE_ERROR.MERGE_FORBIDDEN],
-    [404, FINALIZE_ERROR.MERGE_RESOURCE_NOT_FOUND],
-    [405, FINALIZE_ERROR.MERGE_NOT_READY],
-    [409, FINALIZE_ERROR.MERGE_HEAD_MISMATCH],
-    [422, FINALIZE_ERROR.MERGE_REJECTED],
-    [500, FINALIZE_ERROR.MERGE_STATUS_UNEXPECTED],
-    [202, FINALIZE_ERROR.MERGE_STATUS_UNEXPECTED],
-  ]) {
-    const weigert = mergeAntwoordFetch(status);
-    const geweigerd = await mergePullRequest({
-      repository: 'a/b', pullRequest: PR_A, sha: HEAD, mergeMethod: 'squash',
-      policy: POLICY_STRICT, token: 'x', fetchImpl: weigert,
-    });
-    assert.deepEqual(geweigerd, { ok: false, blocked: code, status, requests: 1 });
-    assert.equal(weigert.aanroepen.length, 1, String(status));
-  }
+      policy: POLICY_MANUAL, token: 'geheim', fetchImpl: schoon,
+    }),
+    { ok: false, blocked: FINALIZE_ERROR.OWNER_MERGE_REQUIRED, requests: 0 },
+  );
+  assert.equal(schoon.aanroepen.length, 0);
 });
 
-test('MUT7. een finalizer ZONDER de strikte rulesetcontrole gaat rood op een lege regelset', async () => {
+test('MUT7b. zelfs met de WEIGERING WEGGEHAALD én `STRICT_STATUS_CHECKS` teruggezet als '
+  + 'toegestane stand komt er geen merge', async () => {
+  // Twee mutaties tegelijk — de zwaarste vorm van de vraag "kan die stand ooit nog mergen?". De
+  // policyvalidatie laat hem door en de stand staat weer in de toegestane verzameling.
   const gemuteerd = await mutantVanDeFinalizer(
-    'zonder-strikte-ruleset',
-    '  return cfg.server_gate_mode === SERVER_GATE_MODE.STRICT_STATUS_CHECKS\n'
-      + '    ? evaluateStrictGatePrecondition(rules, cfg)\n'
-      + '    : evaluateEnqueuePrecondition(rules, cfg);',
-    '  return new Set();',
+    'strict-stand-hersteld-en-weigering-weg',
+    '  if (Object.values(REJECTED_SERVER_GATE_MODE).includes(cfg.server_gate_mode)) fail();',
+    '',
+    {
+      extra: [[
+        "  MANUAL_OWNER_GATE: 'MANUAL_OWNER_GATE',\n});",
+        "  MANUAL_OWNER_GATE: 'MANUAL_OWNER_GATE',\n"
+          + "  STRICT_STATUS_CHECKS: 'STRICT_STATUS_CHECKS',\n});",
+      ]],
+    },
   );
-  // Zonder die controle draagt een repository ZONDER enige actieve ruleset — de stand van vandaag —
-  // een GO, en zou de finalizer werkelijk een merge aanvragen op een base zonder serverpoort.
-  const leeg = meting({ mergeQueueRules: [] });
-  const uitkomst = gemuteerd.resolveFinalization({
-    pullRequest: PR_A, measurement: leeg, policy: POLICY_STRICT,
-  });
-  assert.equal(uitkomst.decision, FINALIZE_DECISION.GO);
-  // De toets uit S2 breekt daarop.
-  assert.throws(
-    () => assert.ok(uitkomst.reasons.includes(FINALIZE_REASON.SERVER_STRICT_RULESET_PROOF_MISSING)),
-    /AssertionError/,
+  // De validatie klaagt niet meer...
+  assert.doesNotThrow(() => gemuteerd.assertMergeFinalizerPolicySafe(POLICY_GEWEIGERD));
+  // ...en tóch blijft het oordeel NO_GO en het aantal verzoeken nul. Niet door een tweede vangnet,
+  // maar omdat er GEEN KLASSIEKE MERGE-AANROEP MEER BESTAAT om naartoe te vallen (O2): de switch in
+  // `evaluateServerGatePrecondition` kent de stand niet, en `mergePullRequest` heeft voor een stand
+  // die geen wachtrij is geen enkele tak.
+  const fetchImpl = verbodenFetch();
+  assert.deepEqual(
+    gemuteerd.resolveFinalization({
+      pullRequest: PR_A, measurement: meting(), policy: POLICY_GEWEIGERD,
+    }),
+    { decision: FINALIZE_DECISION.NO_GO, reasons: [FINALIZE_REASON.FINALIZER_POLICY_UNSAFE] },
   );
-  const echt = resolveFinalization({ pullRequest: PR_A, measurement: leeg, policy: POLICY_STRICT });
-  assert.equal(echt.decision, FINALIZE_DECISION.NO_GO);
+  assert.deepEqual(
+    await gemuteerd.mergePullRequest({
+      repository: 'a/b', pullRequest: PR_A, sha: HEAD, mergeMethod: 'squash',
+      policy: POLICY_GEWEIGERD, token: 'geheim', fetchImpl,
+    }),
+    { ok: false, blocked: FINALIZE_REASON.FINALIZER_POLICY_UNSAFE, requests: 0 },
+  );
+  assert.equal(fetchImpl.aanroepen.length, 0);
 });
 
 test('MUT8. een finalizer die de BASE-HEAD niet HERMEET, mergt op een verschoven base', async () => {
@@ -2223,7 +2305,7 @@ test('MUT8. een finalizer die de BASE-HEAD niet HERMEET, mergt op een verschoven
   const verschovenBase = meting({
     baseHead: { ref: 'refs/heads/main', object: { sha: 'a'.repeat(40), type: 'commit' } },
   });
-  const fetchImpl = mergeAntwoordFetch(200);
+  const fetchImpl = antwoordFetch(202);
   const origineel = console.log;
   console.log = () => {};
   let rc;
@@ -2231,13 +2313,13 @@ test('MUT8. een finalizer die de BASE-HEAD niet HERMEET, mergt op een verschoven
     rc = await gemuteerd.runFinalize([
       '--repository', 'a/b', '--pull-request', String(PR_A),
       '--raw', schrijfMeting(meting()), '--raw-recheck', schrijfMeting(verschovenBase),
-      '--policy', schrijfPolicy(POLICY_STRICT),
+      '--policy', schrijfPolicy(POLICY_QUEUE),
     ], { readFile: lees, fetchImpl });
   } finally {
     console.log = origineel;
   }
-  // De mutant merget terwijl de base onder de pull request is weggeschoven. S8 eist nul verzoeken;
-  // die toets breekt hier.
+  // De mutant schrijft in terwijl de base onder de pull request is weggeschoven. O8 eist nul
+  // verzoeken; die toets breekt hier.
   assert.equal(rc, 0);
   assert.equal(fetchImpl.aanroepen.length, 1);
   assert.throws(() => assert.equal(fetchImpl.aanroepen.length, 0), /AssertionError/);

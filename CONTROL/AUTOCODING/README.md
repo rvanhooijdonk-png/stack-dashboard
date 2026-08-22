@@ -614,49 +614,63 @@ vereiste check-runs op precies deze head, en sinds V23 bovendien de LIVE head va
 negatieve — `MERGEABILITY_UNMEASURED` — en alleen `mergeable_state: "clean"` telt; `behind`,
 `unstable`, `blocked` en `dirty` zijn stuk voor stuk `NO_GO`.
 
-**Twee serverpoortmodi, één gesloten keuze (V23).** `merge_finalizer.server_gate_mode` bepaalt WAT
-er als serverkant autoriteit geldt en WELK effect daarbij hoort. De waarde komt uit een gesloten
-verzameling — `MERGE_QUEUE` of `STRICT_STATUS_CHECKS` — en een ontbrekende, lege of onbekende stand is
-`FINALIZER_POLICY_UNSAFE`: er is geen stilzwijgende default. De aanleiding is gemeten, niet
-verondersteld: `rvanhooijdonk-png/stack-dashboard` is een repository met `owner_type=User`, en GitHub
-weigert daar een ruleset met een `merge_queue`-regel met HTTP 422 — merge queues bestaan alleen op
-organisaties. Ruleset `21205251` ("Autocoding shield") staat daarom op `enforcement=disabled` en heeft
-geen runtime-effect. De `MERGE_QUEUE`-modus is op dit object dus structureel onbereikbaar; hij blijft
-als DORMANTE legacy bestaan voor een organisatie-object en wordt volledig doorgemeten, maar hij is in
-de nieuwe modus geen vereiste check, geen event en geen bewijsbron.
+**Twee standen, één gesloten keuze — en één VERWORPEN stand (V24).**
+`merge_finalizer.server_gate_mode` bepaalt WAT er als serverkant autoriteit geldt en WELK effect
+daarbij hoort. De waarde komt uit een gesloten verzameling — `MERGE_QUEUE` of `MANUAL_OWNER_GATE` —
+en een ontbrekende, lege of onbekende stand is `FINALIZER_POLICY_UNSAFE`: er is geen stilzwijgende
+default. Daarnaast bestaat een aparte, GESLOTEN verzameling `REJECTED_SERVER_GATE_MODE` met
+`STRICT_STATUS_CHECKS` erin; een policy die die stand draagt is onveilig en wordt afgewezen vóór de
+toets op de toegestane verzameling. Dat is met opzet geen stille verwijdering: wie de stand terugzet,
+moet die weigering eerst weghalen en komt daarmee langs de grond die eronder staat.
 
-**`STRICT_STATUS_CHECKS` — de persoonlijke-repositorymodus.** GO is hier alleen mogelijk wanneer
-DEZELFDE begrensde, COMPLETE meting van `GET /repos/{owner}/{repo}/rules/branches/{base_ref}` — dat
-eindpunt levert uitsluitend ACTIEVE regels, dus een uitgezette ruleset staat er domweg niet in — een
-regelcompositie aantoont met alle vier de onderdelen tegelijk: (1) een `pull_request`-regel, (2)
-waarvan de `allowed_merge_methods` de mergemethode uit de policy dekt (bij twee zulke regels telt de
-DOORSNEDE, want GitHub past ze allebei toe), (3) een `required_status_checks`-regel met
-`strict_required_status_checks_policy: true`, en (4) daarin de context `autocoding-shield` gebonden aan
-`integration_id` `15368`, de GitHub Actions-app. Contexten uit een NIET-strikte regel tellen niet mee.
-Ontbreekt er iets, dan draagt de uitkomst welk deel:
-`SERVER_STRICT_RULESET_PROOF_MISSING` (geen enkele actieve regel), `PULL_REQUEST_RULE_MISSING`,
-`PULL_REQUEST_MERGE_METHOD_NOT_ALLOWED`, `REQUIRED_STATUS_CHECKS_RULE_MISSING`,
-`STRICT_STATUS_CHECKS_POLICY_DISABLED`, `REQUIRED_STATUS_CHECKS_CONTEXT_MISSING` of
-`REQUIRED_CHECK_APP_ID_MISMATCH`. Het strikte deel is precies wat de wachtrij hier vervangt: zonder
-`strict` mag GitHub een pull request mergen die achterloopt op de base, en dan hangt de groene check
-aan een boom die na de merge niet meer bestaat.
+De aanleiding voor de gesloten keuze is gemeten, niet verondersteld: `rvanhooijdonk-png/stack-dashboard`
+is een repository met `owner_type=User`, en GitHub weigert daar een ruleset met een `merge_queue`-regel
+met HTTP 422 — merge queues bestaan alleen op organisaties. Ruleset `21205251` ("Autocoding shield")
+staat op `enforcement=disabled` en heeft geen runtime-effect. De `MERGE_QUEUE`-modus is op dit object
+dus structureel onbereikbaar; hij blijft als DORMANTE legacy ONGEWIJZIGD bestaan voor een toekomstig
+organisatie-object en wordt volledig doorgemeten, maar hij is in de actieve stand geen vereiste check,
+geen event en geen bewijsbron.
 
-**Het effect van `STRICT_STATUS_CHECKS` is GitHubs standaard atomaire merge.** Precies één
-`PUT /repos/{owner}/{repo}/pulls/{number}/merge`, met een lichaam dat exact twee sleutels draagt: de
-hermeten volledige `sha` en de `merge_method` uit de policy. Geen `merge_action`, geen branchnaam,
-geen afgekorte of bezorgde SHA. GitHub herbeoordeelt op dat moment zelf de base en de vereiste check
-en weigert met 405 als de ruleset op DAT moment niet voldaan is; 409 betekent dat de meegegeven `sha`
-niet meer de head is. Elke statuscode is terminaal — 403 `MERGE_FORBIDDEN`, 404
-`MERGE_RESOURCE_NOT_FOUND`, 405 `MERGE_NOT_READY`, 409 `MERGE_HEAD_MISMATCH`, 422 `MERGE_REJECTED`,
-alles anders `MERGE_STATUS_UNEXPECTED` — en een 200 alléén is geen bewijs: het lichaam moet
-`merged: true` met een volledige merge-sha dragen, anders is de uitkomst `MERGE_RESULT_NOT_MERGED`
-respectievelijk `MERGE_RESPONSE_INVALID`. Wat de wachtrij hier niet meer doet, doet de TWEEDE METING:
-de live base-head zit sinds V23 in de vingerafdruk, dus een base die tussen de beslissing en het
-effect één commit opschuift is `MEASUREMENT_DRIFT` en nul verzoeken — precies de verschuiving die de
-klassieke `PUT .../merge` zelf niet ziet.
+**Waarom `STRICT_STATUS_CHECKS` is VERWORPEN (Codex1-P1 op V23).** V23 wilde de merge zelf doen onder
+een strikte `required_status_checks`-regel, in de veronderstelling dat GitHub daarmee ons bewijs
+bewaakte. Dat doet die regel niet. Hij dwingt precies twee dingen af: dat de branch niet achterloopt op
+de base, en dat de VEREISTE CONTEXTEN groen zijn. Ons zwaarste bewijs — de twee vendorreviews en de
+ownerautorisatie — bestaat voor GitHub uit gewone reviewthreads en issue-comments, en daar heeft geen
+enkele ruleset weet van. Dat bewijs kon dus tussen meting B en de merge-PUT worden ingetrokken of
+bewerkt ZONDER dat de head-sha of de check meebewoog, en de PUT zou alsnog slagen. Een derde meting
+zou dat niet repareren maar alleen het venster verkleinen; de reparatie is daarom het automatische
+effect zelf weghalen. De klassieke `PUT /repos/{owner}/{repo}/pulls/{number}/merge` staat sinds V24
+niet meer in `finalize-merge.mjs` — de enige letterlijke merge-URL's in dat bestand zijn de
+`merge-async`-URL's van de dormante wachtrijtak, en `test/autocoding-merge-finalizer.test.mjs` (O2)
+toetst dat op de VOLLEDIGE verzameling URL's in de bron, niet op een afwezig fragment.
+
+**`MANUAL_OWNER_GATE` — de eigenaarsstand, en wat die eerlijk gezegd wél en niet is.** In deze stand
+gebeurt alles wat geautomatiseerd KAN worden ook automatisch: bouwen, meten, hermeten, de reviewpoort
+op beide vendors, de ownerautorisatie gebonden aan PR-nummer/head/boom/base/task, de vereiste
+check-runs op precies deze head, de live base-head, GitHubs eigen `mergeable`/`mergeable_state` en de
+driftvergelijking over beide metingen. Is dat bewijs compleet en groen, dan is het resultaat een
+MERGEPAKKET: `effect: "OWNER_MERGE_PACKAGE"`, `merge_performed: false`, `owner_action:
+"OWNER_MERGE_REQUIRED"`, exitcode 0 — een oplevering, en onmiskenbaar géén merge. De merge zelf doet de
+eigenaar, in GitHubs eigen interface.
+
+Deze stand stelt bewust GEEN rulesetEIS. Dat is een uitspraak en geen gat: een serverpoort bewaakt een
+VERZOEK, en deze stand doet er nul. Een ruleset eisen die op dit object niet actief kan zijn, zou de
+stand net zo onbereikbaar maken als de wachtrijtak — precies de fout van V23 — zonder één byte extra
+veiligheid. `mergePullRequest` eindigt hier terminaal met `OWNER_MERGE_REQUIRED` en `requests: 0`, en
+doet dat vóór er ook maar naar een `fetch`-implementatie wordt gekeken, zodat de uitkomst niet van de
+omgeving kan afhangen. Ook met alle drie de vlaggen AAN blijft het aantal mergeverzoeken nul.
+
+**Dit is dus NIET volledige klasse-B-automerge, en dat verschil moet zichtbaar blijven.** Op een
+persoonlijk repository bestaat geen serverkant afdwingbare autorisatie voor ons soort bewijs: geen
+merge queue (organisatie-only), en native required reviews kunnen wél reviewers eisen maar niet ONZE
+vendor- en ownersemantiek. Volledige automerge vraagt daarom hoogstwaarschijnlijk een
+ORGANISATIE-object met (a) een merge queue als laatste beoordelaar en (b) NATIVE required approvals
+waar GitHub zelf op toetst, zodat het intrekken van bewijs serverkant een merge tegenhoudt in plaats
+van alleen bij ons. Zolang dat er niet is, is de eerlijke stand: automatisch bouwen, reviewen en
+testen — merge door de eigenaar.
 
 **Het effect van `MERGE_QUEUE` is één verzoek, en dat verzoek is uitsluitend een inschrijving.**
-`mergePullRequest` doet in die modus sinds V19 (Codex `3835523940`, P1) niet meer de klassieke `PUT .../pulls/{number}/merge`, maar
+`mergePullRequest` doet in die modus sinds V19 (Codex `3835523940`, P1) niet de klassieke `PUT .../pulls/{number}/merge`, maar
 `PUT /repos/{owner}/{repo}/pulls/{number}/merge-async` met `merge_action: "merge_queue"`, de hermeten
 volledige `sha` en een `merge_method` uit een vaste allowlist. Geen branchnaam, geen afgekorte SHA,
 geen event-SHA, en geen ander `merge_action` — `direct_merge` en `default` zijn nooit toegestaan,
@@ -666,7 +680,11 @@ een sha256 over een genormaliseerde projectie met alleen digests van teksten, no
 sinds V19 inclusief het merge-queue-bewijs zelf). Bij drift, een ingetrokken review, een nieuwe
 bevinding, gewijzigde checks, ontbrekend bewijs of onleesbaarheid: nul mergeverzoeken. De statuscodes
 van `merge-async` (400/403/404/409/422) zijn stuk voor stuk terminaal — er wordt nooit opnieuw
-geprobeerd.
+geprobeerd. V24 heeft aan deze tak niets veranderd; O6 toetst dat naast elkaar op dezelfde meting.
+
+De driftvergelijking geldt in BEIDE standen even hard. In de wachtrijtak blokkeert zij de
+inschrijving, in de eigenaarsstand het pakket: een pakket op verschoven bewijs zou de eigenaar een
+verlopen oordeel voorleggen, en dat is precies de fout die V24 repareert.
 
 **Waarom `direct_merge` niet kan bestaan — het merge-queue-bewijs (modus `MERGE_QUEUE`).** De klassieke `PUT .../merge` was
 alleen op de head-sha geconditioneerd: GitHub vergelijkt uitsluitend of de meegegeven `sha` nog de
@@ -689,14 +707,18 @@ vandaag ELKE kandidaat klasse A.
 
 **Waarom een echte merge nu mechanisch onmogelijk is**, op vier onafhankelijke plaatsen: de
 poortstap in de workflow stopt op de uitgeschakelde vlag vóór het eerste API-verzoek; de
-kandidatenlijst blijft daardoor leeg en de matrix draait nul jobs; `resolveFinalization` eist het
-serverpoortbewijs van de gekozen modus vóór elk GO-oordeel — en dat bewijs bestaat vandaag niet, want
-ruleset `21205251` staat uit; en `mergePullRequest` weigert bovendien in de code zelf vóór elk
-netwerkverkeer. `test/autocoding-merge-finalizer.test.mjs` meet dat af, inclusief mutanten die
+kandidatenlijst blijft daardoor leeg en de matrix draait nul jobs; de actieve stand
+`MANUAL_OWNER_GATE` kent in `mergePullRequest` geen enkele tak die een merge aanvraagt en eindigt
+terminaal met `OWNER_MERGE_REQUIRED` en `requests: 0`; en de klassieke merge-aanroep bestaat sinds V24
+niet meer in de bron, dus ook een weggehaalde vlag of een teruggezette verworpen stand levert er geen.
+(Vóór V24 stond hier als derde grond het serverpoortbewijs van de gekozen modus; die grond hing aan een
+uitgezette ruleset en is vervangen door een grond die niet van configuratie afhangt.) `test/autocoding-merge-finalizer.test.mjs` meet dat af, inclusief mutanten die
 respectievelijk de `sha` uit het lichaam halen, de PR-binding weglaten, de ownerbinding versoepelen,
-de driftvergelijking overslaan, het merge-queue-bewijs overslaan, de vlag negeren, de strikte
-rulesetcontrole weghalen of de base-head uit de tweede readback laten vallen — de laatste twee zijn de
-V23-mutanten, en beide moeten rood zijn.
+de driftvergelijking overslaan, het merge-queue-bewijs overslaan, de vlag negeren, de eigenaarsstand
+naar het transport laten doorzakken of de base-head uit de tweede readback laten vallen. Daar komt in
+V24 een DUBBELE mutant bij (MUT7b): de weigering van `STRICT_STATUS_CHECKS` weggehaald ÉN die stand
+teruggezet in de toegestane verzameling — en zelfs dan blijft het oordeel `NO_GO` met nul verzoeken,
+omdat er geen klassieke merge-aanroep meer bestaat om naartoe te vallen.
 
 **Kandidaatselectie roteert op tijdslot, niet op een vaste voorkeur.** `3835523942` (P2) beschreef
 dat een vaste PREFIX van de open-PR-lijst (`.slice(0, candidate_limit)`) alles ná die prefix voor
@@ -730,17 +752,18 @@ Activering is een **afzonderlijke latere PR** die precies drie dingen doet, in d
    die per pull request beslist en zijn uitkomst nergens als herbruikbaar artefact achterlaat.
 
 **Het serverpoortbewijs is een AFZONDERLIJKE, toekomstige activatiestap, geen onderdeel van deze PR.**
-`resolveFinalization` LEEST `GET /repos/{owner}/{repo}/rules/branches/{base_ref}` en eist daar de
-compositie van de gekozen modus in — maar deze pull request bouwt, activeert of wijzigt géén
-GitHub-ruleset, branch-protection of merge-queue-instelling. Op dit repository staat ruleset
-`21205251` op `enforcement=disabled` en levert die meting dus een LEGE lijst; in de sinds V23 gezette
-modus `STRICT_STATUS_CHECKS` blijft de uitkomst daarom `SERVER_STRICT_RULESET_PROOF_MISSING` (in de
-dormante `MERGE_QUEUE`-modus: `SERVER_MERGE_QUEUE_PROOF_MISSING`) totdat een afzonderlijke, latere
-activatie-PR aantoont dat de repository zelf een ACTIEVE ruleset draagt met een pull-request-regel die
-squash toestaat en een strikte required-status-checkspolitiek op `autocoding-shield` van app `15368`. Die activatie is bewust buiten deze scope gehouden: het aanmaken van een
-ruleset is een onomkeerbare configuratiewijziging die eigen goedkeuring, een eigen fixture-bewijs en
-een eigen Codex-/Gemini-consult verdient, los van de code die hier alleen leert er bewijs voor te
-lezen.
+`resolveFinalization` LEEST `GET /repos/{owner}/{repo}/rules/branches/{base_ref}` — maar deze pull
+request bouwt, activeert of wijzigt géén GitHub-ruleset, branch-protection of merge-queue-instelling.
+Op dit repository staat ruleset `21205251` op `enforcement=disabled` en levert die meting dus een LEGE
+lijst. In de actieve stand `MANUAL_OWNER_GATE` is dat geen blokkade: die stand stelt geen rulesetEIS,
+want zij doet geen verzoek. In de dormante `MERGE_QUEUE`-modus blijft de uitkomst
+`SERVER_MERGE_QUEUE_PROOF_MISSING` totdat een afzonderlijke, latere activatie op een
+ORGANISATIE-object aantoont dat de base een ACTIEVE `merge_queue`-regel draagt. Die activatie is
+bewust buiten deze scope gehouden: het aanmaken van een ruleset is een onomkeerbare
+configuratiewijziging die eigen goedkeuring, een eigen fixture-bewijs en een eigen Codex-/Gemini-consult
+verdient, los van de code die hier alleen leert er bewijs voor te lezen. De regelsetmeting blijft in
+BEIDE standen wel gewoon meetellen in de vingerafdruk, dus een afgekapte of onleesbare meting is ook in
+de eigenaarsstand `NO_GO`.
 
 Een generieke regel "alle wijzigingen moeten via een PR" mag niet stilzwijgend worden geactiveerd.
 `.github/workflows/doorstroom.yml` en `.github/workflows/waarnemer.yml` bevatten jobs met
