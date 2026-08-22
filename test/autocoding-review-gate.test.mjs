@@ -357,84 +357,108 @@ test('CLI behoudt PARSE_ERROR voor syntactisch kapotte JSON', () => {
   assert.deepEqual(JSON.parse(cli.stdout), { decision: 'NO_GO', reasons: [REASON.PARSE_ERROR] });
 });
 
+const PR_SHIELD_PATH = '.github/workflows/autocoding-shield.yml';
+const LIVE_GATE_PATH = '.github/workflows/autocoding-shield-live-gate.yml';
+
+/** Alleen de werkelijke YAML; toelichtende commentaarregels mogen elke naam noemen. */
+function yamlOnly(path) {
+  return readFileSync(path, 'utf8').split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
+}
+
 test('workflow-eventmatrix houdt bootstrap-events groen en live gate uit', () => {
-  const workflow = readFileSync('.github/workflows/autocoding-shield.yml', 'utf8');
+  const shield = yamlOnly(PR_SHIELD_PATH);
+  const liveGate = yamlOnly(LIVE_GATE_PATH);
   const policy = JSON.parse(readFileSync('CONTROL/AUTOCODING/policy.v1.json', 'utf8'));
-  for (const event of ['pull_request:', 'issue_comment:', 'pull_request_review:']) {
-    assert.ok(workflow.includes(event), `event ontbreekt: ${event}`);
+
+  // De read-only shield kent uitsluitend het pull_request-event; de trusted writer kent het juist
+  // NOOIT, want op dat event draait GitHub de door de PR VOORGESTELDE workflowdefinitie.
+  assert.match(shield, /^on:\n {2}pull_request:$/m);
+  assert.ok(!shield.includes('issue_comment'), 'de PR-shield reageert niet op comments');
+  assert.ok(!shield.includes('pull_request_review'), 'de PR-shield reageert niet op reviews');
+  for (const event of ['issue_comment:', 'pull_request_review:']) {
+    assert.ok(liveGate.includes(event), `trusted event ontbreekt: ${event}`);
   }
-  assert.match(workflow, /BOOTSTRAP_TRUSTED_GATE_FILES_NOT_ON_DEFAULT_BRANCH/);
-  assert.match(workflow, /BOOTSTRAP_RECEIPT_GATE_DISABLED/);
-  assert.match(workflow, /Bepaal poortstand en statuscontext\n\s+id: enabled\n\s+if: steps\.bootstrap\.outputs\.trusted_gate_files == 'true'/);
+  assert.ok(!/^ {2}pull_request(_target)?:$/m.test(liveGate), 'de trusted writer heeft geen PR-event');
+
+  assert.match(liveGate, /BOOTSTRAP_TRUSTED_GATE_FILES_NOT_ON_DEFAULT_BRANCH/);
+  assert.match(liveGate, /BOOTSTRAP_RECEIPT_GATE_DISABLED/);
+  assert.match(liveGate, /Bepaal poortstand en statuscontext\n\s+id: enabled\n\s+if: steps\.bootstrap\.outputs\.trusted_gate_files == 'true'/);
+
   // De poort blijft in deze PR uit, en de statuscontext waaronder hij later publiceert is geen jobnaam.
   assert.equal(policy.live_receipt_gate_enabled, false);
   assert.equal(policy.live_status_context, 'autocoding-shield-live-receipts');
-  assert.ok(!/^ {2}autocoding-shield-live-receipts:$/m.test(workflow), 'de statuscontext is geen jobnaam');
+  assert.ok(!/^ {2}autocoding-shield-live-receipts:$/m.test(liveGate), 'de statuscontext is geen jobnaam');
 });
 
-test('W1. de stabiele checknaam draait alleen op pull_request; comment/review-events kunnen hem niet groen maken', () => {
-  const workflow = readFileSync('.github/workflows/autocoding-shield.yml', 'utf8');
-  // De job `autocoding-shield` is de stabiele checknaam. Zijn enige toegangsvoorwaarde moet het
-  // pull_request-event zijn: anders zou een issue_comment onder diezelfde naam succes schrijven.
-  assert.match(workflow, /^ {2}autocoding-shield:\n {4}if: github\.event_name == 'pull_request'$/m);
-  // De live poort draait onder een EIGEN, andere jobnaam.
-  assert.match(workflow, /^ {2}autocoding-shield-live-gate:$/m);
-
+test('W1. de stabiele checknaam draait alleen op pull_request en heeft geen API-rechten', () => {
+  const shield = yamlOnly(PR_SHIELD_PATH);
+  // Er is precies één job in dit bestand, en dat is de stabiele checknaam.
+  assert.deepEqual(shield.match(/^ {2}[a-z][a-z0-9-]*:$/gm), ['  autocoding-shield:']);
   // De job die PR-headcode uitvoert leest zelf niets uit de GitHub-API en krijgt daar ook geen
   // rechten voor: alleen `contents: read` om de head te kunnen uitchecken.
-  const start = workflow.indexOf('\n  autocoding-shield:');
-  const headJob = workflow.slice(start, workflow.indexOf('\n  autocoding-shield-live-gate:'));
-  assert.ok(headJob.length > 0);
-  assert.ok(!headJob.includes('gh api'), 'de PR-head-job mag de API niet bevragen');
-  assert.ok(!headJob.includes('pull-requests: read'), 'de PR-head-job heeft die scope niet nodig');
-  assert.ok(!headJob.includes('issues: read'), 'de PR-head-job heeft die scope niet nodig');
-  assert.ok(!headJob.includes('GH_TOKEN'), 'de PR-head-job krijgt geen token');
+  assert.ok(!shield.includes('gh api'), 'de PR-head-job mag de API niet bevragen');
+  assert.ok(!shield.includes('pull-requests: read'), 'de PR-head-job heeft die scope niet nodig');
+  assert.ok(!shield.includes('issues: read'), 'de PR-head-job heeft die scope niet nodig');
+  assert.ok(!shield.includes('GH_TOKEN'), 'de PR-head-job krijgt geen token');
+});
+
+test('W1b. de statuswriter staat in een APART bestand; PR-voorgestelde YAML krijgt nooit statuses: write', () => {
+  // Dit is de kern van de reparatie. Een `pull_request`-run gebruikt de workflowdefinitie uit de PR
+  // zelf. Zolang de schrijfscope in datzelfde bestand stond, kon een same-repo branch de stappen
+  // vervangen en de receiptstatus zelf groen schrijven — het uitchecken van de default branch
+  // beschermt de scripts, niet de YAML die job en tokenpermissies definieert.
+  const shield = yamlOnly(PR_SHIELD_PATH);
+  assert.ok(!/:\s*write\b/.test(shield), 'de PR-shield mag geen enkele schrijfscope dragen');
+  assert.match(shield, /^permissions: \{\}$/m);
+
+  const liveGate = yamlOnly(LIVE_GATE_PATH);
+  assert.deepEqual(liveGate.match(/^ {2}[a-z][a-z0-9-]*:$/gm), ['  autocoding-shield-live-gate:']);
+  assert.deepEqual(
+    liveGate.split('\n').filter((line) => /^\s+[a-z-]+:\s*write\b/.test(line)).map((l) => l.trim()),
+    ['statuses: write'],
+  );
+  assert.match(liveGate, /^permissions: \{\}$/m);
 });
 
 test('W2. de live poort voert nooit PR-headcode uit en checkt uitsluitend de default branch uit', () => {
-  const workflow = readFileSync('.github/workflows/autocoding-shield.yml', 'utf8');
-  const liveGate = workflow.slice(workflow.indexOf('\n  autocoding-shield-live-gate:'));
-  assert.ok(liveGate.length > 0);
+  const liveGate = yamlOnly(LIVE_GATE_PATH);
   assert.match(liveGate, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
   assert.ok(
     !/ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/.test(liveGate),
     'de live-gate-job mag de PR-head niet uitchecken',
   );
   assert.ok(!liveGate.includes('node --test'), 'de live-gate-job mag geen PR-headtests draaien');
+  assert.ok(!/actions\/(cache|download-artifact)/.test(liveGate), 'geen PR-artifacts of -cache');
+  // Per-PR serialisatie blijft staan, met een eigen groep naast die van de read-only shield.
+  assert.match(liveGate, /^ {2}group: autocoding-shield-live-gate-/m);
+  assert.match(yamlOnly(PR_SHIELD_PATH), /^ {2}group: autocoding-shield-/m);
 });
 
-test('W3. geen pull_request_target, geen schrijfrechten, geen secrets in de shieldworkflow', () => {
-  const workflow = readFileSync('.github/workflows/autocoding-shield.yml', 'utf8');
-  // Toelichtende commentaarregels mogen deze namen noemen; het gaat om de werkelijke YAML.
-  const yaml = workflow.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
-  assert.ok(!yaml.includes('pull_request_target'), 'pull_request_target is verboden');
-
-  // De ENIGE toegestane schrijfscope is `statuses: write`, en uitsluitend op de trusted job die de
-  // default branch uitcheckt. Elke andere write-scope, en dezelfde scope op de PR-head-job, is fout.
-  const writeScopes = yaml.split('\n').filter((line) => /^\s+[a-z-]+:\s*write\b/.test(line));
-  assert.deepEqual(writeScopes.map((l) => l.trim()), ['statuses: write']);
-  const headJobYaml = yaml.slice(yaml.indexOf('\n  autocoding-shield:'), yaml.indexOf('\n  autocoding-shield-live-gate:'));
-  assert.ok(!/:\s*write\b/.test(headJobYaml), 'de PR-head-job mag geen enkele schrijfscope hebben');
-  const liveGateYaml = yaml.slice(yaml.indexOf('\n  autocoding-shield-live-gate:'));
-  assert.match(liveGateYaml, /^\s+statuses: write$/m);
-  assert.ok(!/contents:\s*write/.test(yaml), 'geen contents: write');
-  assert.ok(!/actions:\s*write/.test(yaml), 'geen actions: write');
-  assert.ok(!/pull-requests:\s*write/.test(yaml), 'geen pull-requests: write');
-  assert.ok(!/secrets\./.test(yaml), 'de workflow mag geen secrets lezen');
-  assert.ok(!yaml.includes('workflow_dispatch'), 'geen handmatige trigger op dit pad');
-  // Elke API-aanroep is een read-only GET: geen -X/--method, geen -f/--field payloads.
-  for (const line of yaml.split('\n').filter((l) => l.includes('gh api'))) {
-    assert.ok(!/(^|\s)(-X|--method|-f |--field|--input)/.test(line), `niet read-only: ${line.trim()}`);
+test('W3. geen pull_request_target, geen secrets, uitsluitend read-only GETs', () => {
+  for (const path of [PR_SHIELD_PATH, LIVE_GATE_PATH]) {
+    const yaml = yamlOnly(path);
+    assert.ok(!yaml.includes('pull_request_target'), `pull_request_target is verboden: ${path}`);
+    assert.ok(!/contents:\s*write/.test(yaml), `geen contents: write: ${path}`);
+    assert.ok(!/actions:\s*write/.test(yaml), `geen actions: write: ${path}`);
+    assert.ok(!/pull-requests:\s*write/.test(yaml), `geen pull-requests: write: ${path}`);
+    assert.ok(!/id-token:\s*write/.test(yaml), `geen id-token: write: ${path}`);
+    assert.ok(!/secrets\./.test(yaml), `de workflow mag geen secrets lezen: ${path}`);
+    assert.ok(!yaml.includes('workflow_dispatch'), `geen handmatige trigger op dit pad: ${path}`);
+    assert.ok(!yaml.includes('environment:'), `geen environment op dit pad: ${path}`);
+    // Elke API-aanroep is een read-only GET: geen -X/--method, geen -f/--field payloads.
+    for (const line of yaml.split('\n').filter((l) => l.includes('gh api'))) {
+      assert.ok(!/(^|\s)(-X|--method|-f |--field|--input)/.test(line), `niet read-only: ${line.trim()}`);
+    }
   }
 });
 
 test('W4. de live poort roept adapter én beslisser aan, niet één van beide', () => {
-  const workflow = readFileSync('.github/workflows/autocoding-shield.yml', 'utf8');
-  assert.match(workflow, /node scripts\/autocoding\/collect-shield-input\.mjs/);
-  assert.match(workflow, /node scripts\/autocoding\/verify-review-gate\.mjs \\\n\s+--shield-input/);
+  const liveGate = readFileSync(LIVE_GATE_PATH, 'utf8');
+  assert.match(liveGate, /node scripts\/autocoding\/collect-shield-input\.mjs/);
+  assert.match(liveGate, /node scripts\/autocoding\/verify-review-gate\.mjs \\\n\s+--shield-input/);
   // Zonder deze bestanden op de default branch is er geen poort: de bootstrapcheck moet ze allebei
   // noemen, anders zou een halve checkout stilzwijgend als "poort actief" gelden.
-  assert.match(workflow, /-f scripts\/autocoding\/collect-shield-input\.mjs/);
+  assert.match(liveGate, /-f scripts\/autocoding\/collect-shield-input\.mjs/);
 });
 
 test('N1. echte Codex-successtekst + representatief schone Gemini-review, actuele head/tree => GO', () => {
@@ -671,13 +695,16 @@ test('N14. echte Gemini-bevindingsbadge blokkeert, ook bij state COMMENTED => NA
   assert.ok(bound.reasons.includes(REASON.NATIVE_FINDINGS_PRESENT));
 });
 
-test('N15. Gemini CHANGES_REQUESTED/DISMISSED/PENDING telt nooit als terminal GO', () => {
-  for (const state of ['CHANGES_REQUESTED', 'DISMISSED', 'PENDING']) {
+test('N15. Gemini CHANGES_REQUESTED/DISMISSED/PENDING levert geen actief bewijsstuk op', () => {
+  for (const state of ['CHANGES_REQUESTED', 'DISMISSED', 'PENDING', 'ONBEKEND', '', undefined]) {
     const evidence = extractGeminiNativeEvidence(geminiReview({ state }), [], resolved(), NATIVE_POLICY);
-    const bound = bindNativeEvidence(evidence, NATIVE_CONTEXT);
-    assert.equal(bound.valid, false, state);
-    assert.ok(bound.reasons.includes(REASON.NATIVE_STATE_NOT_ALLOWED), state);
+    assert.equal(evidence, null, String(state));
   }
+  // En zonder actief bewijs is er geen GO: de vendor mist gewoon zijn vereiste ronde.
+  const codex = extractCodexNativeEvidence(codexComment(), resolved(), NATIVE_POLICY);
+  const r = evaluateNativeReview([codex], NATIVE_CONTEXT, NATIVE_POLICY);
+  assert.equal(r.decision, 'NO_GO');
+  assert.ok(r.reasons.includes(REASON.INSUFFICIENT_GO));
 });
 
 test('N16. Codex zonder canonieke succesvorm => NATIVE_TERMINAL_MARKER_MISSING, nooit impliciet GO', () => {
@@ -1009,6 +1036,7 @@ const NATIVE_POLICY = Object.freeze({
       user_id: CODEX_USER_ID,
       user_type: 'Bot',
       app_id: 1144995,
+      allowed_states: Object.freeze(['COMMENTED']),
       terminal_success_markers: Object.freeze(["Codex Review: Didn't find any major issues. :tada:"]),
     }),
     gemini: Object.freeze({
@@ -1096,4 +1124,89 @@ function ownerApprovalEnvelope(overrides = {}, transport_actor = 'rvanhooijdonk-
 /** Dezelfde autorisatie, maar gedragen door een pull-request-review met een expliciete state. */
 function ownerApprovalReview(state, overrides = {}, transport_actor = 'rvanhooijdonk-png') {
   return ownerApprovalEnvelope(overrides, transport_actor, { source: 'review', review_state: state });
+}
+
+
+// --- Ingetrokken reviewbewijs (Codex-reviewroute) -------------------------------------------------
+//
+// Codex P2, inline 3834611209. Een dismissed Codex-review met inline bevindingen bleef als HUIDIG
+// NO_GO-bewijs meetellen: GitHub laat lichaam én inline comments letterlijk staan en zet alleen
+// `state` op `DISMISSED`. De reden `NATIVE_FINDINGS_PRESENT` bleef daardoor voor altijd in de
+// actuele bewijsset hangen, zodat geen enkele latere schone ronde de PR nog groen kon krijgen.
+
+test('N30. een DISMISSED Codex-review levert geen enkel bewijsstuk op, ook niet met inline bevindingen', () => {
+  const dismissed = extractCodexReviewEvidence(
+    codexReview({ state: 'DISMISSED' }), ['P1: kapotte grens'], resolved(), NATIVE_POLICY,
+  );
+  assert.equal(dismissed, null);
+});
+
+test('N30a. geen enkele niet-actieve of onbekende reviewstate levert Codex-reviewbewijs op', () => {
+  for (const state of ['DISMISSED', 'PENDING', 'CHANGES_REQUESTED', 'APPROVED', 'ONBEKEND', '', null, undefined]) {
+    const evidence = extractCodexReviewEvidence(
+      codexReview({ state }), [], resolved(), NATIVE_POLICY,
+    );
+    assert.equal(evidence, null, String(state));
+  }
+  // Alleen de werkelijk door de bot gebruikte, allowlisted actieve state telt.
+  assert.notEqual(extractCodexReviewEvidence(codexReview(), [], resolved(), NATIVE_POLICY), null);
+});
+
+test('N30b. dismissal haalt het bewijs uit de selectie: een nieuwe schone ronde telt daarna normaal', () => {
+  const gemini = extractGeminiNativeEvidence(geminiReview(), [], resolved(), NATIVE_POLICY);
+
+  // Vóór de reparatie bleef de ingetrokken ronde als NO_GO-bewijs staan; nu verdwijnt hij.
+  const dismissed = extractCodexReviewEvidence(
+    codexReview({ state: 'DISMISSED' }), ['P1: kapotte grens'], resolved(), NATIVE_POLICY,
+  );
+  assert.equal(dismissed, null);
+
+  // Uitsluitend de dismissal levert géén GO op — er is dan simpelweg geen Codex-ronde.
+  const zonderCodex = evaluateNativeReview([dismissed, gemini], NATIVE_CONTEXT, NATIVE_POLICY);
+  assert.equal(zonderCodex.decision, 'NO_GO');
+  assert.ok(zonderCodex.reasons.includes(REASON.INSUFFICIENT_GO));
+
+  // En daarna telt een nieuwe, actuele, schone Codex-ronde gewoon weer mee.
+  const verse = extractCodexNativeEvidence(codexComment(), resolved(), NATIVE_POLICY);
+  const daarna = evaluateNativeReview([dismissed, verse, gemini], NATIVE_CONTEXT, NATIVE_POLICY);
+  assert.deepEqual(daarna, { decision: 'GO', reasons: [] });
+});
+
+test('N30c. een ACTIEVE Codex-review met inline bevindingen blijft gewoon blokkeren', () => {
+  const evidence = extractCodexReviewEvidence(
+    codexReview(), ['P1: kapotte grens'], resolved(), NATIVE_POLICY,
+  );
+  const bound = bindNativeEvidence(evidence, NATIVE_CONTEXT);
+  assert.equal(bound.valid, false);
+  assert.ok(bound.reasons.includes(REASON.NATIVE_FINDINGS_PRESENT));
+});
+
+test('N30d. een vendorpolicy zonder of met een niet-actieve statelijst => UNSAFE_POLICY', () => {
+  const withCodexStates = (allowed_states) => ({
+    ...NATIVE_POLICY,
+    native_review: {
+      ...NATIVE_POLICY.native_review,
+      codex: { ...NATIVE_POLICY.native_review.codex, allowed_states },
+    },
+  });
+  for (const allowed of [undefined, [], ['DISMISSED'], ['COMMENTED', 'DISMISSED'], ['PENDING'], ['*']]) {
+    assert.throws(() => assertNativeVendorsSafe(withCodexStates(allowed)), /UNSAFE_POLICY/, String(allowed));
+    const r = evaluateNativeReview([], NATIVE_CONTEXT, withCodexStates(allowed));
+    assert.deepEqual(r, { decision: 'NO_GO', reasons: [REASON.UNSAFE_POLICY] });
+  }
+  assert.doesNotThrow(() => assertNativeVendorsSafe(withCodexStates(['COMMENTED', 'APPROVED'])));
+});
+
+/**
+ * De gemeten vorm van een Codex-PULL-REQUEST-REVIEW (PR #74, review 4998216880). Een reviewobject
+ * draagt géén `performed_via_github_app`, wél een `state` en een `commit_id`.
+ */
+function codexReview(overrides = {}) {
+  return {
+    user: { login: 'chatgpt-codex-connector[bot]', id: CODEX_USER_ID, type: 'Bot' },
+    state: 'COMMENTED',
+    commit_id: NATIVE_HEAD,
+    body: "Codex Review: Didn't find any major issues. :tada:",
+    ...overrides,
+  };
 }

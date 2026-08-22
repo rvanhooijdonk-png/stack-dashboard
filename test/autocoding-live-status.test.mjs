@@ -19,7 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { buildShieldInput } from '../scripts/autocoding/collect-shield-input.mjs';
 import { evaluateShield, REASON } from '../scripts/autocoding/verify-review-gate.mjs';
 import {
-  describeReasons, resolvePublication, publishStatus, runPublish,
+  describeReasons, resolvePublication, publishStatus, runPublish, parsePublishArgs,
   PUBLISH_ERROR, DESCRIPTION_LIMIT, STATUS_CONTEXT_RE,
 } from '../scripts/autocoding/publish-live-status.mjs';
 
@@ -388,21 +388,24 @@ test('L11. de CLI als losse binary schrijft geen stderr en lekt geen argumenten'
 });
 
 test('L12. de workflow publiceert altijd, op de gemeten head, met de enige schrijfscope in de stack', () => {
-  const workflow = readFileSync('.github/workflows/autocoding-shield.yml', 'utf8');
-  const yaml = workflow.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
-  const liveGate = yaml.slice(yaml.indexOf('\n  autocoding-shield-live-gate:'));
-  const headJob = yaml.slice(yaml.indexOf('\n  autocoding-shield:'), yaml.indexOf('\n  autocoding-shield-live-gate:'));
+  const strip = (path) => readFileSync(path, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+  // De statuswriter staat in een APART bestand dat door geen enkele PR-gecontroleerde event start.
+  const liveGate = strip('.github/workflows/autocoding-shield-live-gate.yml');
+  const prShield = strip('.github/workflows/autocoding-shield.yml');
 
   // De statuscontext is bewust geen jobnaam: zo kan de required check nooit samenvallen met een
   // Actions-run die aan de default-branch-SHA hangt.
-  assert.ok(!yaml.includes(`  ${CONTEXT_NAME}:`), 'de statuscontext mag geen jobnaam zijn');
+  assert.ok(!liveGate.includes(`  ${CONTEXT_NAME}:`), 'de statuscontext mag geen jobnaam zijn');
   assert.notEqual(CONTEXT_NAME, 'autocoding-shield');
   assert.notEqual(CONTEXT_NAME, 'autocoding-shield-live-gate');
 
-  // Alleen de trusted job mag statussen schrijven, en die job checkt de default branch uit.
+  // Alleen de trusted job mag statussen schrijven, en die job checkt de default branch uit. Het
+  // PR-bestand — de enige dat op een `pull_request`-event zijn eigen voorgestelde definitie draait —
+  // heeft geen enkele schrijfscope, dus is er geen event waarop PR-YAML `statuses: write` krijgt.
   assert.match(liveGate, /^\s+statuses: write$/m);
-  assert.ok(!/:\s*write\b/.test(headJob), 'de PR-head-job heeft geen schrijfscope');
-  assert.equal(yaml.split('\n').filter((l) => /^\s+[a-z-]+:\s*write\b/.test(l)).length, 1);
+  assert.ok(!/:\s*write\b/.test(prShield), 'de PR-shield heeft geen schrijfscope');
+  assert.ok(!/^ {2}pull_request(_target)?:$/m.test(liveGate), 'de trusted writer kent geen PR-event');
+  assert.equal(liveGate.split('\n').filter((l) => /^\s+[a-z-]+:\s*write\b/.test(l)).length, 1);
 
   // De publicatie draait ook als de poortstap zelf ontplofte, en uitsluitend op de GEMETEN head.
   assert.match(liveGate, /if: always\(\) && steps\.snapshot\.outputs\.head_sha != ''/);
@@ -414,4 +417,112 @@ test('L12. de workflow publiceert altijd, op de gemeten head, met de enige schri
   );
   assert.match(liveGate, /continue-on-error: true/);
   assert.match(liveGate, /node scripts\/autocoding\/publish-live-status\.mjs/);
+});
+
+
+// --- Argumentparser -------------------------------------------------------------------------------
+//
+// Gemini medium, review 4998403781, inline 3834607793. `runPublish()` las argv in VASTE PAREN. Eén
+// losse booleaanse vlag middenin de lijst verschoof daardoor elk volgend key/valuepaar met één plek:
+// `--head-sha` kreeg de waarde van `--status-context`, en de laatste sleutel verloor zijn waarde.
+// Dat gebeurde STIL — de vlaggen bleven herkenbaar, alleen de bindingen klopten niet meer.
+
+test('L13. --dry-run is positie-onafhankelijk: begin, midden en einde binden identiek', () => {
+  const paren = [
+    ['--repository', 'rvanhooijdonk-png/stack-dashboard'],
+    ['--head-sha', HEAD],
+    ['--status-context', CONTEXT_NAME],
+    ['--gate-result', '/tmp/gate-result.json'],
+  ];
+  const vlak = paren.flat();
+  const verwacht = {
+    '--repository': 'rvanhooijdonk-png/stack-dashboard',
+    '--head-sha': HEAD,
+    '--status-context': CONTEXT_NAME,
+    '--gate-result': '/tmp/gate-result.json',
+  };
+
+  // Elke invoegpositie op een paargrens — begin, alle tussenposities, einde.
+  for (let i = 0; i <= paren.length; i += 1) {
+    const argv = [...paren.slice(0, i).flat(), '--dry-run', ...paren.slice(i).flat()];
+    const parsed = parsePublishArgs(argv);
+    assert.equal(parsed.ok, true, `positie ${i}`);
+    assert.equal(parsed.dryRun, true, `positie ${i}`);
+    assert.deepEqual(Object.fromEntries(parsed.values), verwacht, `positie ${i}`);
+  }
+
+  // Het scherpe geval uit de bevinding: de vlag MIDDEN IN een paar-lijst. De oude paarlezing
+  // (`i += 2`) las hier `--head-sha` als waarde van `--dry-run` en verschoof alles daarna.
+  const middenin = ['--repository', 'rvanhooijdonk-png/stack-dashboard', '--dry-run',
+    '--head-sha', HEAD, '--status-context', CONTEXT_NAME, '--gate-result', '/tmp/gate-result.json'];
+  const oud = new Map();
+  for (let i = 0; i < middenin.length; i += 2) oud.set(middenin[i], middenin[i + 1]);
+  // De vlag op een ONEVEN positie schuift alles erna een plek op: `--head-sha` belandt als WAARDE
+  // van `--dry-run` en verdwijnt als sleutel, terwijl de gemeten head zelf sleutel wordt.
+  assert.equal(oud.get('--dry-run'), '--head-sha', 'de oude paarlezing verschoof daadwerkelijk');
+  assert.equal(oud.get('--head-sha'), undefined, 'de gemeten head raakte kwijt');
+  assert.equal(oud.get(HEAD), '--status-context');
+  // De nieuwe parser bindt elke sleutel aan zijn eigen waarde, ongeacht waar de vlag staat.
+  assert.equal(parsePublishArgs(middenin).values.get('--head-sha'), HEAD);
+  assert.equal(parsePublishArgs(middenin).values.get('--status-context'), CONTEXT_NAME);
+  assert.equal(parsePublishArgs(middenin).values.get('--gate-result'), '/tmp/gate-result.json');
+
+  // En zonder de vlag is `dryRun` gewoon false.
+  assert.equal(parsePublishArgs(vlak).dryRun, false);
+});
+
+test('L13a. onbekende, dubbele en waardeloze argumenten eindigen fail-closed', () => {
+  const goed = ['--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', HEAD,
+    '--status-context', CONTEXT_NAME, '--gate-result', '/tmp/gate-result.json'];
+  assert.equal(parsePublishArgs(goed).ok, true);
+
+  const fout = [
+    ['--head-sha'],                                   // sleutel zonder waarde, aan het einde
+    [...goed, '--execution-error'],                   // idem, na een geldige lijst
+    ['--head-sha', '--status-context', CONTEXT_NAME], // waarde is zelf een sleutel
+    ['--head-sha', '--dry-run'],                      // waarde is zelf een vlag
+    ['--onbekend', 'x'],                              // onbekende sleutel
+    ['--dry-runs'],                                   // bijna-vlag
+    [...goed, 'losse-waarde'],                        // positioneel argument zonder sleutel
+    ['--head-sha', HEAD, '--head-sha', HEAD],         // dubbele sleutel
+    [...goed, '--dry-run', '--dry-run'],              // dubbele vlag
+    [42],                                             // niet-string token
+  ];
+  for (const argv of fout) {
+    const parsed = parsePublishArgs(argv);
+    assert.equal(parsed.ok, false, JSON.stringify(argv));
+    assert.equal(parsed.error, PUBLISH_ERROR.ARGUMENTS_INVALID, JSON.stringify(argv));
+  }
+});
+
+test('L13b. runPublish weigert kapotte argv en publiceert dan niets', async () => {
+  const logged = [];
+  const original = console.log;
+  console.log = (line) => logged.push(String(line));
+  let touched = false;
+  const fetchImpl = async () => { touched = true; return { status: 201 }; };
+  try {
+    const rc = await runPublish(
+      ['--repository', 'rvanhooijdonk-png/stack-dashboard', '--onbekend', 'x'],
+      { fetchImpl, readFile: () => JSON.stringify({ decision: 'GO', reasons: [] }) },
+    );
+    assert.equal(rc, 1);
+    assert.equal(touched, false, 'een kapotte aanroep bereikt de API nooit');
+    assert.equal(logged.at(-1), `LIVE_STATUS_NOT_PUBLISHABLE_${PUBLISH_ERROR.ARGUMENTS_INVALID}`);
+  } finally {
+    console.log = original;
+  }
+});
+
+test('L13c. de vorm die de workflow werkelijk doorgeeft blijft geldig, inclusief lege --execution-error', () => {
+  // De workflow geeft `--execution-error ""` door zodra er geen uitvoeringsfout is. De lege string is
+  // dus een LEGITIEME waarde; ontbreken is iets anders dan leeg zijn.
+  const workflowVorm = ['--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', HEAD,
+    '--status-context', CONTEXT_NAME, '--gate-result', '/tmp/gate-result.json',
+    '--execution-error', ''];
+  const parsed = parsePublishArgs(workflowVorm);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.dryRun, false);
+  assert.equal(parsed.values.get('--execution-error'), '');
+  assert.equal(parsed.values.get('--head-sha'), HEAD);
 });

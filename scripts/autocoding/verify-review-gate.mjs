@@ -55,7 +55,6 @@ export const REASON = Object.freeze({
   NATIVE_IDENTITY_UNVERIFIED: 'NATIVE_IDENTITY_UNVERIFIED',
   NATIVE_TERMINAL_MARKER_MISSING: 'NATIVE_TERMINAL_MARKER_MISSING',
   NATIVE_FINDINGS_PRESENT: 'NATIVE_FINDINGS_PRESENT',
-  NATIVE_STATE_NOT_ALLOWED: 'NATIVE_STATE_NOT_ALLOWED',
   // Zicht op de diff zelf. `/pulls/{n}/files` levert maximaal 3000 bestanden; een onvolledige oogst
   // is geen schone PR maar een blinde vlek, en krijgt daarom een eigen vaste categorie.
   FILES_INCOMPLETE: 'FILES_INCOMPLETE',
@@ -338,6 +337,35 @@ function nativeIdentityVerified(carrier, cfg, { requireApp }) {
 }
 
 /**
+ * De reviewstates waarin een pull-request-review ACTIEF bewijs is. Gesloten en niet door beleid te
+ * verruimen: `DISMISSED` (ingetrokken), `PENDING` (nog niet ingediend) en `CHANGES_REQUESTED` (geen
+ * afgeronde ronde) kunnen hier per definitie niet in vallen, hoe de policy ook wordt bewerkt.
+ *
+ * Waarom intrekken bewijs moet WEGHALEN in plaats van rood te maken: wie een review dismisst, laat
+ * het lichaam én de inline bevindingen letterlijk staan; GitHub verandert alleen `state`. Zolang zo'n
+ * review als NO_GO-bewijs bleef meetellen, bleef zijn reden (`NATIVE_FINDINGS_PRESENT`) in de
+ * actuele bewijsset hangen — en kon geen enkele nieuwe, schone review de PR ooit nog groen krijgen.
+ * Ingetrokken bewijs verdwijnt daarom volledig uit de selectie. Dat kan nooit een `GO` opleveren: een
+ * vendor zonder actief bewijs mist gewoon zijn vereiste `GO` en levert `INSUFFICIENT_GO`.
+ */
+export const NATIVE_REVIEW_ACTIVE_STATES = Object.freeze(['COMMENTED', 'APPROVED']);
+
+/**
+ * Toetst of een pull-request-review in een actieve, door de vendorpolicy toegestane state staat.
+ * Ontbrekende, lege, onbekende of niet-allowlisted states leveren `false` — fail-closed, nooit
+ * "waarschijnlijk nog geldig". Geldt uitsluitend voor de REVIEW-route; de Codex-issuecommentroute
+ * draagt geen state en wordt hier niet langs geleid.
+ */
+export function nativeReviewStateIsActive(review, cfg) {
+  const allowed = cfg?.allowed_states;
+  if (!Array.isArray(allowed) || allowed.length === 0) return false;
+  const state = review?.state;
+  return isNonEmptyString(state)
+    && allowed.includes(state)
+    && NATIVE_REVIEW_ACTIVE_STATES.includes(state);
+}
+
+/**
  * Toetst of een lichaam met een van de gepinde canonieke terminale succesvormen begint. De lijst is
  * een gesloten allowlist van letterlijke prefixen uit de policy; een lege of ontbrekende lijst
  * betekent "geen enkele vorm is succes", nooit "alles is succes". Voorafgaande witruimte wordt
@@ -400,6 +428,10 @@ export function extractCodexNativeEvidence(comment, resolved, policy) {
  * vendorronde NO_GO, en proza zonder canonieke succesvorm is nooit GO.
  */
 export function extractCodexReviewEvidence(review, inlineComments, resolved, policy) {
+  const cfg = policy?.native_review?.codex;
+  // Een ingetrokken (`DISMISSED`), nog niet ingediende (`PENDING`) of anderszins niet-actieve review
+  // is GEEN bewijsstuk — ook geen negatief. Zie `NATIVE_REVIEW_ACTIVE_STATES`.
+  if (!nativeReviewStateIsActive(review, cfg)) return null;
   return codexEvidence(review, inlineComments, resolved, policy, false);
 }
 
@@ -415,10 +447,10 @@ export function extractGeminiNativeEvidence(review, inlineComments, resolved, po
   if (!cfg || !isNonEmptyString(cfg.actor)) return null;
   const login = review?.user?.login;
   if (login !== cfg.actor) return null;
+  // Zelfde regel als op de Codex-reviewroute: ingetrokken of niet-actief reviewbewijs verdwijnt uit
+  // de selectie in plaats van er als permanente NO_GO-reden in te blijven hangen.
+  if (!nativeReviewStateIsActive(review, cfg)) return null;
   const extra_reasons = [];
-  if (!(Array.isArray(cfg.allowed_states) && cfg.allowed_states.includes(review?.state))) {
-    extra_reasons.push(REASON.NATIVE_STATE_NOT_ALLOWED);
-  }
   if (!matchesTerminalSuccessMarker(review?.body, cfg.terminal_success_markers)) {
     extra_reasons.push(REASON.NATIVE_TERMINAL_MARKER_MISSING);
   }
@@ -498,6 +530,15 @@ export function assertNativeVendorsSafe(policy) {
     if (!positiveInteger(cfg.user_id)) throw new Error(REASON.UNSAFE_POLICY);
     if (!isNonEmptyString(cfg.user_type) || cfg.user_type === '*') throw new Error(REASON.UNSAFE_POLICY);
     if ('app_id' in cfg && !positiveInteger(cfg.app_id)) throw new Error(REASON.UNSAFE_POLICY);
+    // De reviewroute bestaat voor BEIDE vendors, dus beide moeten een begrensde actieve-statelijst
+    // declareren. Een policy die `DISMISSED`, `PENDING` of `CHANGES_REQUESTED` probeert toe te laten
+    // is onveilig, niet "ruimer afgesteld".
+    if (!Array.isArray(cfg.allowed_states) || cfg.allowed_states.length === 0) {
+      throw new Error(REASON.UNSAFE_POLICY);
+    }
+    for (const state of cfg.allowed_states) {
+      if (!NATIVE_REVIEW_ACTIVE_STATES.includes(state)) throw new Error(REASON.UNSAFE_POLICY);
+    }
     if (!Array.isArray(cfg.terminal_success_markers) || cfg.terminal_success_markers.length === 0) {
       throw new Error(REASON.UNSAFE_POLICY);
     }

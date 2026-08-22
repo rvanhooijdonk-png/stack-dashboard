@@ -1,0 +1,13 @@
+[
+  [
+    {
+      "filename": ".github/workflows/gate.yml",
+      "previous_filename": "docs/archief/gate.yml",
+      "status": "renamed"
+    },
+    {
+      "filename": "docs/README.md",
+      "status": "modified"
+    }
+  ]
+]

@@ -51,6 +51,7 @@ export const PUBLISH_ERROR = Object.freeze({
   STATUS_TRANSPORT_ERROR: 'STATUS_TRANSPORT_ERROR',
   UNRECOGNISED_REASON: 'UNRECOGNISED_REASON',
   UNSPECIFIED: 'UNSPECIFIED',
+  ARGUMENTS_INVALID: 'ARGUMENTS_INVALID',
 });
 
 const KNOWN_CODES = new Set([...Object.values(REASON), ...Object.values(PUBLISH_ERROR)]);
@@ -182,19 +183,71 @@ export async function publishStatus({ repository, publication, token, fetchImpl 
   return { ok: response?.status === 201, status: response?.status ?? 0 };
 }
 
+/** Vlaggen zonder waarde. Hun POSITIE in argv mag niets aan de betekenis van de rest veranderen. */
+export const PUBLISH_BOOLEAN_FLAGS = Object.freeze(['--dry-run']);
+
+/** Sleutels die precies één waarde nemen. Een lege waarde is geldig; een ontbrekende nooit. */
+export const PUBLISH_VALUE_OPTIONS = Object.freeze([
+  '--repository', '--head-sha', '--status-context', '--gate-result', '--execution-error',
+]);
+
+/**
+ * Parst argv token voor token in plaats van in VASTE PAREN.
+ *
+ * De paarlezing (`for (i = 0; i < argv.length; i += 2)`) was positieafhankelijk: één losse
+ * booleaanse vlag middenin de lijst verschoof elk volgend key/valuepaar met één plek, waardoor
+ * `--head-sha` de waarde van `--status-context` kreeg en de laatste sleutel zijn waarde verloor. Dat
+ * verschoof STIL — de vlaggen bleven herkenbaar, alleen de bindingen klopten niet meer.
+ *
+ * Deze parser is daarom positie-onafhankelijk én fail-closed: een onbekend argument, een dubbel
+ * opgegeven sleutel of vlag, een sleutel zonder waarde en een waarde die zelf een bekende sleutel of
+ * vlag is, leveren allemaal een weigering op in plaats van een stilzwijgende herinterpretatie.
+ */
+export function parsePublishArgs(argv) {
+  const list = Array.isArray(argv) ? argv : [];
+  const flags = new Set(PUBLISH_BOOLEAN_FLAGS);
+  const options = new Set(PUBLISH_VALUE_OPTIONS);
+  const values = new Map();
+  const seenFlags = new Set();
+  const reject = { ok: false, error: PUBLISH_ERROR.ARGUMENTS_INVALID };
+
+  for (let i = 0; i < list.length; i += 1) {
+    const token = list[i];
+    if (typeof token !== 'string') return reject;
+    if (flags.has(token)) {
+      if (seenFlags.has(token)) return reject;
+      seenFlags.add(token);
+      continue;
+    }
+    if (!options.has(token)) return reject;
+    if (values.has(token)) return reject;
+    i += 1;
+    const value = list[i];
+    // De lege string is een LEGITIEME waarde: de workflow geeft `--execution-error ""` door zodra er
+    // geen uitvoeringsfout is. Ontbreken is iets anders dan leeg zijn.
+    if (typeof value !== 'string') return reject;
+    if (flags.has(value) || options.has(value)) return reject;
+    values.set(token, value);
+  }
+  return { ok: true, values, dryRun: seenFlags.has('--dry-run') };
+}
+
 /**
  * De CLI-lus. Geeft rc 0 uitsluitend als er een `success`-status is gepubliceerd; elke andere
  * uitkomst geeft rc 1, zodat de job zelf ook rood wordt en er geen stille groene run bestaat.
  */
 export async function runPublish(argv, { fetchImpl, readFile } = {}) {
-  const args = new Map();
-  for (let i = 0; i < argv.length; i += 2) args.set(argv[i], argv[i + 1]);
+  const parsed = parsePublishArgs(argv);
+  if (!parsed.ok) {
+    console.log(`LIVE_STATUS_NOT_PUBLISHABLE_${PUBLISH_ERROR.ARGUMENTS_INVALID}`);
+    return 1;
+  }
+  const { values: args, dryRun } = parsed;
 
   const repository = args.get('--repository') ?? '';
   const headSha = args.get('--head-sha') ?? '';
   const statusContext = args.get('--status-context') ?? '';
   const resultPath = args.get('--gate-result') ?? '';
-  const dryRun = argv.includes('--dry-run');
   let executionError = args.get('--execution-error') ?? '';
 
   let gateResult = null;

@@ -18,8 +18,11 @@
  *   2. Volledigheid van het diff-zicht. `/pulls/{n}/files` levert maximaal 3000 bestanden. Het
  *      werkelijk verzamelde aantal wordt tegen `pr.changed_files` gelegd; elke ongelijkheid,
  *      overschrijding of ontbrekende telling is een blinde vlek — geen schone PR.
- *   3. Gevoelige paden. Uit `/pulls/{n}/files`, niet uit de PR-tekst. Een leeg of ontbrekend
- *      bestandsantwoord geldt als gevoelig: onbekend zicht is nooit een vrijstelling.
+ *   3. Gevoelige paden. Uit `/pulls/{n}/files`, niet uit de PR-tekst, en per bestandsvermelding op
+ *      ALLE paden die eraan hangen: bij een rename dus ook `previous_filename`. Alleen `filename`
+ *      lezen liet een rename van `.github/workflows/gate.yml` naar een onbeschermd pad de gevoelige
+ *      BRON verliezen. Een leeg, ontbrekend of onbruikbaar bestandsantwoord geldt als gevoelig:
+ *      onbekend zicht is nooit een vrijstelling.
  *   4. Transportidentiteit. `user.login`, `user.id`, `user.type` en `performed_via_github_app.id`
  *      komen van GitHub, niet uit een comment-lichaam, en zijn dus niet door een auteur te zetten.
  *
@@ -118,23 +121,53 @@ export function measureFilesCompleteness(changedFiles, prChangedFiles) {
 }
 
 /**
+ * Alle paden waaronder één bestandsvermelding in de diff kan vallen.
+ *
+ * Een RENAME raakt TWEE paden. GitHub zet het nieuwe pad in `filename` en het oude in
+ * `previous_filename`; alleen `filename` lezen betekende dat een rename van
+ * `.github/workflows/gate.yml` naar een onbeschermd pad de gevoelige BRON kwijtraakte en de
+ * ownergate oversloeg — terwijl juist het weghalen van een workflow de zwaarste wijziging is. Beide
+ * richtingen tellen daarom: gevoelig → onbeschermd én onbeschermd → gevoelig.
+ *
+ * Geeft `null` bij bestandsdata die niet bruikbaar is (ontbrekend of leeg `filename`, of een
+ * aanwezig maar ongeldig `previous_filename`). De caller leest dat als fail-closed, niet als "niets
+ * gevonden".
+ */
+export function pathsOfChangedFile(file) {
+  if (!file || typeof file !== 'object' || Array.isArray(file)) return null;
+  const filename = file.filename;
+  if (typeof filename !== 'string' || filename.length === 0) return null;
+  const previous = file.previous_filename;
+  if (previous === undefined || previous === null) return [filename];
+  if (typeof previous !== 'string' || previous.length === 0) return null;
+  return [filename, previous];
+}
+
+/**
  * Bepaalt of de PR een gevoelig pad raakt. De vergelijking is LETTERLIJKE prefixmatching, geen
  * glob-expansie: `CONTROL/AUTOCODING/` dekt alles onder die map, `*` of `**` dekt niets. Daarom
  * wordt elke prefix eerst door `isSafeSensitivePrefix` gehaald — een patroonachtige waarde zou
  * anders geruisloos nergens op matchen en de ownergate stil uitschakelen.
  *
- * Fail-closed: zonder bruikbare bestandslijst — leeg, ontbrekend of zonder ENKELE veilige prefix —
- * geldt de PR als gevoelig, zodat de ownergate juist dán geldt.
+ * Elke bestandsvermelding wordt op AL zijn paden getoetst, dus ook op `previous_filename` bij een
+ * rename.
+ *
+ * Fail-closed op drie manieren: zonder ENKELE veilige prefix, zonder bestandslijst, en bij een
+ * bestandsvermelding waarvan de padvelden onbruikbaar zijn, geldt de PR als gevoelig — dan geldt de
+ * ownergate juist wél.
  */
 export function touchesSensitivePaths(changedFiles, sensitivePathPrefixes) {
   const raw = Array.isArray(sensitivePathPrefixes) ? sensitivePathPrefixes : [];
   const prefixes = raw.filter((prefix) => isSafeSensitivePrefix(prefix));
   if (prefixes.length === 0) return true;
-  const names = flattenPages(changedFiles)
-    .map((f) => f?.filename)
-    .filter((n) => typeof n === 'string' && n.length > 0);
-  if (names.length === 0) return true;
-  return names.some((name) => prefixes.some((prefix) => name.startsWith(prefix)));
+  const files = flattenPages(changedFiles);
+  if (files.length === 0) return true;
+  for (const file of files) {
+    const paths = pathsOfChangedFile(file);
+    if (paths === null) return true;
+    if (paths.some((path) => prefixes.some((prefix) => path.startsWith(prefix)))) return true;
+  }
+  return false;
 }
 
 /**

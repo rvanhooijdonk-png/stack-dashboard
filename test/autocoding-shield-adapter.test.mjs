@@ -227,6 +227,66 @@ test('A14a. een patroonachtige prefix matcht niet stilzwijgend niets maar maakt 
   );
 });
 
+test('A14c. een RENAME telt op beide paden: `previous_filename` verbergt de gevoelige bron niet', () => {
+  // Codex P1, inline 3834611208. De classificatie las alleen `filename`. Bij een rename van
+  // `.github/workflows/gate.yml` naar een onbeschermd pad staat de GEVOELIGE bron in
+  // `previous_filename` — en dan sloeg de ownergate over, precies bij de zwaarste wijziging die er
+  // is: een workflow weghalen.
+  const prefixes = POLICY.owner_gate.sensitive_path_prefixes;
+
+  const weg = raw('files-renamed-away');
+  const naartoe = raw('files-renamed-into');
+  assert.equal(flattenPages(weg)[0].status, 'renamed');
+  assert.equal(flattenPages(naartoe)[0].status, 'renamed');
+
+  // Beide richtingen zijn gevoelig.
+  assert.equal(touchesSensitivePaths(weg, prefixes), true, 'gevoelig => onbeschermd');
+  assert.equal(touchesSensitivePaths(naartoe, prefixes), true, 'onbeschermd => gevoelig');
+
+  // Het defect zelf, expliciet gereproduceerd: op alleen `filename` gelezen was de wegrename schoon.
+  const alleenFilename = [flattenPages(weg).map(({ filename }) => ({ filename }))];
+  assert.equal(touchesSensitivePaths(alleenFilename, prefixes), false);
+});
+
+test('A14d. de rename gaat door de volledige adapter heen en sluit de ownergate', () => {
+  const zonderOwner = [
+    flattenPages(raw('issue-comments')).filter((c) => c.user.login !== 'rvanhooijdonk-png'),
+  ];
+  for (const fixture of ['files-renamed-away', 'files-renamed-into']) {
+    const pr = { ...raw('pr'), changed_files: 2 };
+    const { context, shieldInput } = buildShieldInput(
+      fixtureInput({ pr, changedFiles: raw(fixture), issueComments: zonderOwner }),
+    );
+    assert.equal(shieldInput.sensitivePathsTouched, true, fixture);
+    const r = evaluateShield({ ...shieldInput, context, policy: POLICY });
+    assert.equal(r.decision, 'NO_GO', fixture);
+    assert.ok(r.reasons.includes(REASON.OWNER_GATE_REQUIRED), fixture);
+  }
+});
+
+test('A14e. onbruikbare padvelden in een bestandsvermelding blijven fail-closed', () => {
+  const prefixes = POLICY.owner_gate.sensitive_path_prefixes;
+  // Een aanwezig maar ongeldig `previous_filename` is GEEN "dan maar alleen filename lezen".
+  for (const kapot of [
+    [[{ filename: 'docs/README.md', previous_filename: '' }]],
+    [[{ filename: 'docs/README.md', previous_filename: 42 }]],
+    [[{ filename: 'docs/README.md', previous_filename: {} }]],
+    [[{ filename: '' }]],
+    [[{ filename: 42 }]],
+    [[{}]],
+    [[null]],
+    [['docs/README.md']],
+    [[{ filename: 'docs/README.md' }, { status: 'renamed' }]],
+  ]) {
+    assert.equal(touchesSensitivePaths(kapot, prefixes), true, JSON.stringify(kapot));
+  }
+  // `previous_filename: null` is de normale vorm voor een niet-hernoemd bestand en blijft schoon.
+  assert.equal(
+    touchesSensitivePaths([[{ filename: 'docs/README.md', previous_filename: null }]], prefixes),
+    false,
+  );
+});
+
 test('A14b. de adapter geeft de DRAGER van een owner-autorisatie door, inclusief reviewstate', () => {
   // Een review draagt een state die na een dismiss verandert zonder dat het lichaam meebeweegt.
   // De adapter mag die state dus niet weggooien: de validator kan een ingetrokken autorisatie

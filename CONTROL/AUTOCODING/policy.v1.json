@@ -9,6 +9,7 @@
       "user_id": 199175422,
       "user_type": "Bot",
       "app_id": 1144995,
+      "allowed_states": ["COMMENTED"],
       "terminal_success_markers": ["Codex Review: Didn't find any major issues. :tada:"]
     },
     "gemini": {
