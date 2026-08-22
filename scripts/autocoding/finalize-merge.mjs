@@ -37,6 +37,38 @@
 // dat allang voorbij kon zijn; met `merge_queue` is GitHub zelf de laatste beoordelaar, op het
 // moment dat het er echt toe doet.
 //
+// V23 — DE PERSOONLIJKE-REPOSITORYMETING. De V19-constructie hierboven rust op één aanname die op
+// DIT object niet houdbaar bleek: dat de base-branch een `merge_queue`-regel KAN dragen. Gemeten
+// stand van `rvanhooijdonk-png/stack-dashboard`: publiek, `owner_type=User`, en GitHub weigert er een
+// ruleset met `merge_queue` met HTTP 422 — merge queues bestaan uitsluitend op repositories van
+// organisaties. De `merge_queue`-tak is daarmee niet fout, maar op dit object ONBEREIKBAAR: hij levert
+// er eeuwig `SERVER_MERGE_QUEUE_PROOF_MISSING`, en dus nooit een finalisatie.
+//
+// Daarom draagt de policy sinds V23 één EXPLICIETE serverpoortmodus, `server_gate_mode`:
+//
+//   - `MERGE_QUEUE`          — de V19..V22-tak hierboven. Blijft ongewijzigd bestaan als DORMANTE
+//                              legacy voor een organisatie-object; op dit repository onbereikbaar.
+//   - `STRICT_STATUS_CHECKS` — de persoonlijke-repositorymodus. Wat GitHub hier WEL kan afdwingen is
+//                              een ACTIEVE ruleset met een `pull_request`-regel plus een
+//                              `required_status_checks`-regel met STRICT policy. Strict betekent
+//                              letterlijk: de branch moet up-to-date zijn met de base én elke
+//                              vereiste context moet groen zijn, en GitHub toetst dat OP HET MOMENT
+//                              VAN DE MERGE — serverkant, na ons verzoek, niet ervoor.
+//
+// In die modus is het effect GitHubs standaard, ATOMAIRE `PUT /repos/{o}/{r}/pulls/{n}/merge` met de
+// exact hermeten head-sha en de mergemethode uit de policy. Dat is een eerlijke, kleinere belofte dan
+// de wachtrij: GitHub vergelijkt bij die aanroep zelf alleen de head-sha, maar WEIGERT hem daarnaast
+// wanneer de ruleset op dat moment niet is voldaan (405/409). De rest van de dekking komt uit deze
+// code: de tweede volledige hermeting vlak vóór het effect draagt sinds V23 óók de LIVE base-head
+// (`git/ref/heads/{base_ref}`) en de door GitHub berekende mergebaarheid (`mergeable`,
+// `mergeable_state`), zodat een base-verschuiving, een conflict of een weggevallen vereiste tussen de
+// twee metingen de vingerafdruk breekt en er nul verzoeken volgen.
+//
+// De merge-groupcode (`autocoding-merge-group-gate`, `required_merge_queue_checks`) blijft in
+// `MERGE_QUEUE`-modus staan, maar is in `STRICT_STATUS_CHECKS` GEEN vereiste check, geen event en
+// geen bewijsbron: die poort draait per ontwerp uitsluitend op een `merge_group`-commit, en die
+// bestaat op dit object niet.
+//
 // SCHEIDING VAN BESLISSING EN EFFECT. `resolveFinalization` is puur: geen netwerk, geen bestanden,
 // geen klok. Zij levert een gesloten uitkomst — `FINALIZE_GO` of `FINALIZE_NO_GO` met redencodes
 // uit een vaste verzameling. `mergePullRequest` is de enige plaats met transport, doet precies één
@@ -82,6 +114,27 @@ const MERGE_QUEUE_RULES_PAGE_BUDGET = 4;
 export const MERGE_FINALIZER_SCHEMA = 'AUTOCODING_MERGE_FINALIZER_V1';
 
 /**
+ * DE SERVERPOORTMODUS (V23). Gesloten en verplicht: de policy MOET er precies één noemen, want de
+ * modus bepaalt zowel welk bewijs de base-branch moet dragen als welk effect er hoogstens kan volgen.
+ * Een ontbrekende of onbekende waarde is `FINALIZER_POLICY_UNSAFE` — nooit een stilzwijgende
+ * terugval op de een of de ander.
+ *
+ *   MERGE_QUEUE          — actieve `merge_queue`-regel op de base; effect is uitsluitend een
+ *                          INSCHRIJVING (`merge-async`, `merge_action: "merge_queue"`). Vereist een
+ *                          repository van een ORGANISATIE; op een persoonlijk object weigert GitHub
+ *                          zo'n ruleset met HTTP 422, en blijft deze modus dus eeuwig NO_GO.
+ *   STRICT_STATUS_CHECKS — actieve ruleset met een `pull_request`-regel die de mergemethode van de
+ *                          policy toestaat, plus een `required_status_checks`-regel met STRICT policy
+ *                          die de vereiste context aan de gepinde producent-app bindt; effect is
+ *                          GitHubs standaard atomaire `PUT .../pulls/{n}/merge` op exact de hermeten
+ *                          head-sha.
+ */
+export const SERVER_GATE_MODE = Object.freeze({
+  MERGE_QUEUE: 'MERGE_QUEUE',
+  STRICT_STATUS_CHECKS: 'STRICT_STATUS_CHECKS',
+});
+
+/**
  * De gesloten uitkomstvorm. Twee waarden, meer bestaan er niet. Een aanroeper die iets anders ziet
  * heeft geen derde uitkomst maar een kapotte beslisser, en hoort dat als NO_GO te behandelen.
  */
@@ -98,7 +151,7 @@ export const ALLOWED_MERGE_METHODS = Object.freeze(['merge', 'squash', 'rebase']
 
 /** De sleutels die het finalizerblok in de policy mag dragen. Alles daarbuiten is UNSAFE. */
 const MERGE_FINALIZER_FIELDS = new Set([
-  'schema', 'merge_method', 'allowed_base_refs', 'allowed_builder_actors',
+  'schema', 'server_gate_mode', 'merge_method', 'allowed_base_refs', 'allowed_builder_actors',
   'required_checks', 'required_merge_queue_checks', 'required_check_app_id', 'candidate_limit',
 ]);
 
@@ -141,6 +194,22 @@ export const FINALIZE_REASON = Object.freeze({
   REQUIRED_STATUS_CHECKS_RULE_MISSING: 'REQUIRED_STATUS_CHECKS_RULE_MISSING',
   REQUIRED_STATUS_CHECKS_CONTEXT_MISSING: 'REQUIRED_STATUS_CHECKS_CONTEXT_MISSING',
   REQUIRED_CHECK_APP_ID_MISMATCH: 'REQUIRED_CHECK_APP_ID_MISMATCH',
+  // V23 — de deelgronden van `STRICT_STATUS_CHECKS`, op DEZELFDE begrensde, complete
+  // `rules/branches/{base_ref}`-meting. `SERVER_STRICT_RULESET_PROOF_MISSING` is de stand waarin dat
+  // eindpunt een LEGE regelset teruggeeft: geen enkele actieve regel op deze branch — precies wat een
+  // ruleset met `enforcement=disabled` oplevert, want zo'n ruleset draagt hier niets bij. De drie
+  // andere gronden onderscheiden WELK deel van de actieve samenstelling ontbrak.
+  SERVER_STRICT_RULESET_PROOF_MISSING: 'SERVER_STRICT_RULESET_PROOF_MISSING',
+  PULL_REQUEST_RULE_MISSING: 'PULL_REQUEST_RULE_MISSING',
+  PULL_REQUEST_MERGE_METHOD_NOT_ALLOWED: 'PULL_REQUEST_MERGE_METHOD_NOT_ALLOWED',
+  STRICT_STATUS_CHECKS_POLICY_DISABLED: 'STRICT_STATUS_CHECKS_POLICY_DISABLED',
+  // V23 — de LIVE base-branch en de door GitHub berekende mergebaarheid. Beide zijn nieuw gemeten
+  // velden en horen bij BEIDE modi: ze binden de beslissing aan de stand van de doelbranch zelf, niet
+  // alleen aan het basispunt dat in de pull request staat opgeslagen.
+  BASE_HEAD_UNMEASURED: 'BASE_HEAD_UNMEASURED',
+  MERGEABILITY_UNMEASURED: 'MERGEABILITY_UNMEASURED',
+  PULL_REQUEST_NOT_MERGEABLE: 'PULL_REQUEST_NOT_MERGEABLE',
+  MERGEABLE_STATE_NOT_CLEAN: 'MERGEABLE_STATE_NOT_CLEAN',
   BUILDER_ACTOR_NOT_ALLOWED: 'BUILDER_ACTOR_NOT_ALLOWED',
   TASK_ID_UNMEASURED: 'TASK_ID_UNMEASURED',
   EVIDENCE_INCOMPLETE: 'EVIDENCE_INCOMPLETE',
@@ -190,6 +259,14 @@ export const FINALIZE_ERROR = Object.freeze({
   MERGE_RESULT_MISMATCH: 'MERGE_RESULT_MISMATCH',
   MERGE_POLL_EXHAUSTED: 'MERGE_POLL_EXHAUSTED',
   MERGE_POLL_TRANSPORT_ERROR: 'MERGE_POLL_TRANSPORT_ERROR',
+  // V23 — uitsluitend van de standaard atomaire `PUT .../pulls/{n}/merge` in
+  // `STRICT_STATUS_CHECKS`. `MERGE_HEAD_MISMATCH` is daar de 409: GitHub meldt daarmee dat de
+  // meegegeven `sha` NIET meer de head is — de enige voorwaarde die die aanroep zelf toetst, en
+  // precies waarom hij hier alleen bruikbaar is bovenop een serverkant afgedwongen ruleset.
+  // `MERGE_RESULT_NOT_MERGED` is een 200 waarvan het lichaam geen `merged: true` draagt: ook daar
+  // is de statuscode alleen niet het bewijs.
+  MERGE_HEAD_MISMATCH: 'MERGE_HEAD_MISMATCH',
+  MERGE_RESULT_NOT_MERGED: 'MERGE_RESULT_NOT_MERGED',
 });
 
 /**
@@ -238,15 +315,16 @@ function defaultSleep(ms) {
  *
  *   1  `pulls/{n}`
  *   1  `git/commits/{sha}`
+ *   1  `git/ref/heads/{base_ref}` — de LIVE base-head (V23)
  *   4  `rules/branches/{base_ref}` maal `MERGE_QUEUE_RULES_PAGE_BUDGET` pagina's — het
- *      merge-queue-bewijs (V19, Codex `3835523940`; sinds V20 zelf ook begrensd gepagineerd,
- *      scope-item 6)
+ *      serverpoortbewijs (V19, Codex `3835523940`; sinds V20 zelf ook begrensd gepagineerd,
+ *      scope-item 6; sinds V23 draagt dezelfde meting ook de `STRICT_STATUS_CHECKS`-samenstelling)
  *  20  vijf bewijslijsten maal `LIST_PAGE_BUDGET` pagina's
  *   4  `commits/{sha}/check-runs` maal `CHECKS_PAGE_BUDGET` pagina's
  *  --
- *  30
+ *  31
  */
-export const FINALIZER_MEASUREMENT_REQUEST_BUDGET = 1 + 1 + MERGE_QUEUE_RULES_PAGE_BUDGET
+export const FINALIZER_MEASUREMENT_REQUEST_BUDGET = 1 + 1 + 1 + MERGE_QUEUE_RULES_PAGE_BUDGET
   + (5 * LIST_PAGE_BUDGET) + CHECKS_PAGE_BUDGET;
 
 /**
@@ -259,6 +337,9 @@ export const FINALIZER_MEASUREMENT_REQUEST_BUDGET = 1 + 1 + MERGE_QUEUE_RULES_PA
  */
 export const FINALIZER_PER_CANDIDATE_REQUEST_BUDGET = (2 * FINALIZER_MEASUREMENT_REQUEST_BUDGET) + 1
   + MERGE_ASYNC_POLL_BUDGET;
+// De pollpost blijft in deze som staan ook al kent `STRICT_STATUS_CHECKS` geen polling: het budget
+// moet het DUURSTE pad dragen, en dat is de `MERGE_QUEUE`-tak. Een modus die minder kost mag nooit
+// het plafond verlagen waartegen de aanroeper zijn resterende quotum afmeet.
 
 /**
  * De begroting van een hele finalizerronde, inclusief de kandidatenlijst die eraan voorafgaat. Bij
@@ -312,6 +393,10 @@ export function assertMergeFinalizerPolicySafe(policy) {
     if (!MERGE_FINALIZER_FIELDS.has(key)) fail();
   }
   if (cfg.schema !== MERGE_FINALIZER_SCHEMA) fail();
+  // V23 — de serverpoortmodus is VERPLICHT en gesloten. Zonder deze waarde zou de beslisser moeten
+  // raden welk bewijs de base-branch hoort te dragen en welk effect er hoogstens mag volgen, en dat
+  // zijn precies de twee dingen die niemand mag afleiden uit een ontbrekend veld.
+  if (!Object.values(SERVER_GATE_MODE).includes(cfg.server_gate_mode)) fail();
   if (!ALLOWED_MERGE_METHODS.includes(cfg.merge_method)) fail();
 
   const bases = cfg.allowed_base_refs;
@@ -522,6 +607,98 @@ function evaluateEnqueuePrecondition(rules, cfg) {
   return reasons;
 }
 
+/**
+ * Of één `pull_request`-regel de mergemethode van de policy TOESTAAT. Fail-closed op afwezigheid:
+ * een regel zonder leesbare `allowed_merge_methods` bewijst niets over de toegestane methode, en een
+ * ontbrekend veld mag nooit als "alles mag" worden gelezen. GitHub levert deze lijst in kleine
+ * letters (`squash`) terwijl de `merge_queue`-regel haar methode in hoofdletters draagt (`SQUASH`);
+ * de vergelijking is daarom hoofdletterongevoelig, net als bij `activeMergeQueueMethod`.
+ */
+function ruleAllowsMergeMethod(rule, mergeMethod) {
+  const toegestaan = rule?.parameters?.allowed_merge_methods;
+  if (!Array.isArray(toegestaan) || toegestaan.length === 0) return false;
+  return toegestaan.some(
+    (m) => typeof m === 'string' && m.toUpperCase() === mergeMethod.toUpperCase(),
+  );
+}
+
+/**
+ * DE STRICT-STATUS-CHECKS-VOORWAARDE (V23) — de persoonlijke-repositorymodus. Eén conjunctie, gemeten
+ * op DEZELFDE begrensde, complete `rules/branches/{base_ref}`-meting als de merge-queue-tak, nooit op
+ * een tweede of latere meting:
+ *
+ *   1. de regelset is niet LEEG. Een lege lijst betekent: geen enkele ACTIEVE regel op deze branch —
+ *      exact wat een ruleset met `enforcement=disabled` oplevert, want dit eindpunt geeft uitsluitend
+ *      regels terug die op dit moment werkelijk gelden. Dat is de huidige, gemeten stand van dit
+ *      repository, en dus terecht NO_GO;
+ *   2. er is een actieve `pull_request`-regel, en ELKE actieve `pull_request`-regel staat de
+ *      mergemethode van de policy toe. `every` en niet `some`: meerdere regels gelden allemaal
+ *      tegelijk, dus is de werkelijk toegestane verzameling hun DOORSNEDE — één regel die `squash`
+ *      niet toestaat, verbiedt hem;
+ *   3. er is een actieve `required_status_checks`-regel, en minstens één daarvan draagt
+ *      `strict_required_status_checks_policy: true`. Dat woord "strict" is de hele reden dat deze
+ *      modus bestaat: het dwingt GitHub om vlak vóór de merge te eisen dat de branch UP-TO-DATE is
+ *      met de base én dat elke vereiste context daar groen staat — serverkant, na ons verzoek;
+ *   4. elke naam uit `cfg.required_checks` staat als context in een STRIKTE regel — een context op
+ *      een niet-strikte regel telt hier niet mee, want die draagt de up-to-date-eis niet — met een
+ *      `integration_id` die exact `cfg.required_check_app_id` is. Een contextnaam is geen namespace:
+ *      zonder die app-binding zou elke publiceerder die een gelijknamige check kan aanmaken aan de
+ *      vereiste voldoen.
+ *
+ * `cfg.required_checks` en NIET `cfg.required_merge_queue_checks`: `autocoding-merge-group-gate`
+ * draait per ontwerp uitsluitend op een `merge_group`-commit, en die bestaat zonder merge queue niet.
+ * Die poort is in deze modus dus geen vereiste check, geen event en geen bewijsbron — hem hier tóch
+ * eisen zou een voorwaarde opleggen die op dit object onvervulbaar is, en de modus daarmee even
+ * onbereikbaar maken als de tak die hij vervangt.
+ *
+ * Cumulatief zoals de rest van dit bestand: elke ontbrekende of foute deeleis krijgt haar eigen
+ * redencode, in plaats van te stoppen bij de eerste.
+ */
+function evaluateStrictGatePrecondition(rules, cfg) {
+  const reasons = new Set();
+  if (rules.length === 0) reasons.add(FINALIZE_REASON.SERVER_STRICT_RULESET_PROOF_MISSING);
+
+  const prRegels = rules.filter((rule) => rule?.type === 'pull_request');
+  if (prRegels.length === 0) {
+    reasons.add(FINALIZE_REASON.PULL_REQUEST_RULE_MISSING);
+  } else if (!prRegels.every((rule) => ruleAllowsMergeMethod(rule, cfg.merge_method))) {
+    reasons.add(FINALIZE_REASON.PULL_REQUEST_MERGE_METHOD_NOT_ALLOWED);
+  }
+
+  const checkRegels = rules.filter((rule) => rule?.type === 'required_status_checks');
+  const strikt = checkRegels.filter(
+    (rule) => rule?.parameters?.strict_required_status_checks_policy === true,
+  );
+  if (checkRegels.length === 0) {
+    reasons.add(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_RULE_MISSING);
+  } else if (strikt.length === 0) {
+    reasons.add(FINALIZE_REASON.STRICT_STATUS_CHECKS_POLICY_DISABLED);
+  }
+
+  const contexten = requiredStatusCheckContexts(strikt);
+  for (const naam of cfg.required_checks) {
+    const item = contexten.get(naam);
+    if (!item) {
+      reasons.add(FINALIZE_REASON.REQUIRED_STATUS_CHECKS_CONTEXT_MISSING);
+      continue;
+    }
+    if (!Number.isInteger(item.integration_id) || item.integration_id !== cfg.required_check_app_id) {
+      reasons.add(FINALIZE_REASON.REQUIRED_CHECK_APP_ID_MISMATCH);
+    }
+  }
+  return reasons;
+}
+
+/**
+ * De serverpoortvoorwaarde van de GEKOZEN modus, op de al platgemaakte regelset. Eén plaats waar de
+ * modus wordt vertakt, zodat geen van beide takken per ongeluk de andere kan aanvullen of vervangen.
+ */
+function evaluateServerGatePrecondition(rules, cfg) {
+  return cfg.server_gate_mode === SERVER_GATE_MODE.STRICT_STATUS_CHECKS
+    ? evaluateStrictGatePrecondition(rules, cfg)
+    : evaluateEnqueuePrecondition(rules, cfg);
+}
+
 function digest(value) {
   return createHash('sha256').update(typeof value === 'string' ? value : '').digest('hex');
 }
@@ -586,7 +763,17 @@ function canonicalMeasurement(measurement) {
         const contexten = lijst
           .map((item) => `${tekst(item?.context)}:${getal(item?.integration_id)}`)
           .sort().join(',');
-        return `required_status_checks|${contexten}`;
+        return `required_status_checks|${
+          rule?.parameters?.strict_required_status_checks_policy === true}|${contexten}`;
+      }
+      // V23 — de `pull_request`-regel draagt in `STRICT_STATUS_CHECKS` de toegestane mergemethoden.
+      // Zonder dit veld zou een regelset die alleen van toegestane METHODE verandert buiten de
+      // driftvergelijking blijven, terwijl precies dat de voorwaarde omdraait.
+      if (rule?.type === 'pull_request') {
+        const methoden = Array.isArray(rule?.parameters?.allowed_merge_methods)
+          ? rule.parameters.allowed_merge_methods.map((m) => tekst(m)).sort().join(',')
+          : '';
+        return `pull_request|${methoden}`;
       }
       return `${tekst(rule?.type)}|`;
     }).sort()
@@ -603,12 +790,20 @@ function canonicalMeasurement(measurement) {
       base_ref: tekst(pr?.base?.ref),
       user_login: tekst(pr?.user?.login),
       changed_files: getal(pr?.changed_files),
+      // V23 — de door GITHUB berekende mergebaarheid. Drie onderscheiden waarden en geen twee:
+      // `null` is "nog niet berekend" en mag nooit met `false` samenvallen, anders zou een meting die
+      // van onbekend naar niet-mergebaar kantelt buiten de driftvergelijking blijven.
+      mergeable: typeof pr?.mergeable === 'boolean' ? pr.mergeable : null,
+      mergeable_state: tekst(pr?.mergeable_state),
       body: digest(pr?.body),
     },
     head_commit: {
       sha: tekst(measurement?.headCommit?.sha),
       tree_sha: tekst(measurement?.headCommit?.tree?.sha),
     },
+    // V23 — waar de BASE-BRANCH op dit moment werkelijk staat. Beweegt die tussen de twee metingen,
+    // dan verschilt de vingerafdruk en volgt er geen effect.
+    base_head: { sha: tekst(measurement?.baseHead?.object?.sha) },
     evidence_complete: measurement?.evidenceComplete === true,
     checks_complete: measurement?.checksComplete === true,
     merge_queue_rules_complete: measurement?.mergeQueueRulesComplete === true,
@@ -704,10 +899,38 @@ export function resolveFinalization({ pullRequest, measurement, policy }) {
     add(FINALIZE_REASON.BASE_REF_NOT_ALLOWED);
   }
 
-  // Het merge-queue-bewijs. Zonder een ACTIEVE `merge_queue`-regel op deze base is er geen
-  // serverkant autoriteit die de merge later herbeoordeelt, en blijft een inschrijving net zo'n
-  // ongedekte belofte als de klassieke directe merge dat was. Dit is geen ruleset die hier wordt
-  // aangemaakt — alleen gelezen bewijs dat er elders al één bestaat.
+  // V23 — DE LIVE BASE-HEAD. `pr.base.sha` is het basispunt dat in de pull request staat opgeslagen
+  // en zegt niets over waar de base-branch NU staat; die wordt sinds V23 apart gemeten
+  // (`GET /repos/{o}/{r}/git/ref/heads/{base_ref}`, gelezen als `measurement.baseHead`). Er wordt
+  // hier bewust GEEN gelijkheid met `pr.base.sha` geëist: die twee mogen legitiem verschillen zodra
+  // de base één commit verder is, en een gelijkheidseis op een veld met onzekere semantiek zou een
+  // poort zijn die soms per ongeluk sluit in plaats van altijd om de juiste reden. Wat deze meting
+  // WEL doet: zij zit in de vingerafdruk, dus een base die tussen meting A en B beweegt is
+  // `MEASUREMENT_DRIFT` en nul verzoeken — precies de base-verschuiving die de klassieke
+  // `PUT .../merge` zelf niet ziet.
+  if (!SHA_RE.test(tekst(measurement?.baseHead?.object?.sha))) {
+    add(FINALIZE_REASON.BASE_HEAD_UNMEASURED);
+  }
+
+  // V23 — DE MERGEBAARHEID, zoals GITHUB die berekent. `mergeable` is asynchroon: `null` betekent
+  // "nog niet berekend", en dat is een ONTBREKENDE meting, geen negatieve. Alleen `mergeable === true`
+  // MET `mergeable_state === 'clean'` telt: `clean` is de enige stand waarin GitHub zelf zegt dat er
+  // niets meer tegenhoudt — geen conflict, geen achterstand op de base onder een strikte regel, geen
+  // openstaande vereiste. `unstable`, `behind`, `blocked`, `dirty` en `unknown` zijn stuk voor stuk
+  // NO_GO.
+  if (typeof pr.mergeable !== 'boolean') {
+    add(FINALIZE_REASON.MERGEABILITY_UNMEASURED);
+  } else if (pr.mergeable !== true) {
+    add(FINALIZE_REASON.PULL_REQUEST_NOT_MERGEABLE);
+  }
+  if (tekst(pr.mergeable_state) !== 'clean') add(FINALIZE_REASON.MERGEABLE_STATE_NOT_CLEAN);
+
+  // HET SERVERPOORTBEWIJS. Zonder serverkant autoriteit op deze base — een ACTIEVE `merge_queue`-regel
+  // in `MERGE_QUEUE`, of een ACTIEVE strikte ruleset in `STRICT_STATUS_CHECKS` — is er niets dat de
+  // merge op het moment dat het er echt toe doet nog herbeoordeelt, en blijft elk effect een
+  // ongedekte belofte. Dit is geen ruleset die hier wordt aangemaakt — alleen gelezen bewijs dat er
+  // elders al één bestaat. Beide modi lezen DEZELFDE meting: `measurement.mergeQueueRules` draagt de
+  // naam van zijn eerste gebruik, maar is de generieke `rules/branches/{base_ref}`-uitkomst.
   //
   // Sinds V20 (scope-item 6) is deze lijst zelf ook begrensd gepagineerd, net als de vijf
   // bewijslijsten en de check-runs: `measurement.mergeQueueRules` is een array-van-pagina's, en moet
@@ -720,7 +943,7 @@ export function resolveFinalization({ pullRequest, measurement, policy }) {
     if (measurement?.mergeQueueRulesComplete !== true) {
       add(FINALIZE_REASON.MERGE_QUEUE_RULES_INCOMPLETE);
     }
-    for (const r of evaluateEnqueuePrecondition(flattenPages(measurement.mergeQueueRules), cfg)) {
+    for (const r of evaluateServerGatePrecondition(flattenPages(measurement.mergeQueueRules), cfg)) {
       add(r);
     }
   }
@@ -780,12 +1003,13 @@ export function resolveFinalization({ pullRequest, measurement, policy }) {
       pull_request: gemeten,
       sha: context.pr_head_sha,
       merge_method: cfg.merge_method,
+      server_gate_mode: cfg.server_gate_mode,
     },
   };
 }
 
 /**
- * HET EFFECT. Precies één verzoek, en alleen dit verzoek:
+ * DE `MERGE_QUEUE`-TAK VAN HET EFFECT. Precies één verzoek, en alleen dit verzoek:
  * `PUT /repos/{o}/{r}/pulls/{n}/merge-async` met `merge_action: "merge_queue"`. Geen ander
  * `merge_action` is ooit toegestaan — niet `direct_merge`, niet `default` — want beide zouden GitHub
  * kunnen laten kiezen voor een directe merge buiten de wachtrij om, en dat is precies de aanroep die
@@ -880,42 +1104,28 @@ async function fetchMergeAsyncResult({
 }
 
 /**
- * HET EFFECT. Precies één schrijvend verzoek — de `PUT`— gevolgd door hoogstens
- * `MERGE_ASYNC_POLL_BUDGET` LEZENDE pollpogingen op hetzelfde asynchrone verzoek. Geen ander
- * `merge_action` is ooit toegestaan — niet `direct_merge`, niet `default` — want beide zouden GitHub
- * kunnen laten kiezen voor een directe merge buiten de wachtrij om, en dat is precies de aanroep die
- * V19 sluit (zie de kopnotitie, Codex `3835523940`). `resolveFinalization` heeft vóór dit punt al
- * bewezen dat de base van deze pull request een actieve `merge_queue`-regel draagt; zonder dat bewijs
- * is de uitkomst allang `NO_GO` en wordt deze functie niet met een GO-resultaat aangeroepen.
+ * HET EFFECT — DE GEDEELDE POORT EN DE ENIGE VERTAKKING (V23). Deze functie doet zelf geen enkel
+ * verzoek. Zij weigert eerst, in vaste volgorde en vóór ELK netwerkverkeer, alles wat niet exact
+ * klopt — de uitgeschakelde vlag, een onexacte policy, een onbruikbaar repository, PR-nummer of sha,
+ * een mergemethode die niet die van de policy is — en kiest daarna op grond van `server_gate_mode`
+ * precies één tak:
  *
- * V20 — CODEX/CLAUDE4-bevinding: een 200/202 op de eerste aanroep is GEEN bewijs van inschrijving,
- * alleen bewijs dat GitHub het VERZOEK heeft aanvaard. Het echte antwoord staat in het LICHAAM
- * (`status`/`details`), en de documentatie laat zien dat het eerste lichaam vaak nog `"pending"` is
- * — geen `"enqueued"`. Dit bestand leest dat lichaam nu VOLLEDIG en polt, begrensd, door tot een
- * TERMINALE status (`enqueued`/`merged`/`failed`) voordat het een uitspraak doet. `MERGE_QUEUED`
- * volgt uitsluitend uit `isProvenQueueEnrollment`: een terminale `"enqueued"` met de juiste
- * `merge_action` en een `expected_head_sha` die exact de aangevraagde sha is. `failed`, `merged`,
- * een uitgeput pollbudget, of een lichaam dat niet aan het schema voldoet, leveren ALLEMAAL een
- * NO_GO — geen van die vormen wordt ooit als succes gelezen.
+ *   `MERGE_QUEUE`          → `enqueueInMergeQueue`, de V19..V22-inschrijving via `merge-async`;
+ *   `STRICT_STATUS_CHECKS` → `mergeUnderStrictStatusChecks`, GitHubs standaard atomaire
+ *                            `PUT .../pulls/{n}/merge` (V23, persoonlijk repository).
  *
- * Wat er NIET in het lichaam van de PUT mag, en waarom:
+ * Er is geen pad dat beide takken raakt, geen pad dat de modus ergens anders dan uit de policy haalt,
+ * en geen pad dat bij een uitgeschakelde vlag nog een tak bereikt: met `merge_finalizer_enabled:
+ * false` eindigt elke aanroep hier op `FINALIZER_DISABLED` met `requests: 0`, hoe exact de rest van de
+ * argumenten ook is.
  *
- *   - een BRANCHNAAM. Een branch beweegt; tussen beslissing en aanroep kan er een commit bij zijn
- *     gekomen en dan schrijft GitHub iets in de wachtrij wat niemand heeft gezien;
- *   - een AFGEKORTE SHA. Zeven tekens zijn geen identiteit maar een prefix, en GitHub zou hem
- *     weigeren of — erger — oplossen;
- *   - een SHA UIT EEN EVENTPAYLOAD. Die is bezorgd, niet gemeten.
+ * `resolveFinalization` heeft vóór dit punt bewezen dat de base van deze pull request het bewijs van
+ * DEZELFDE modus draagt; zonder dat bewijs is de uitkomst allang `NO_GO` en wordt deze functie niet
+ * met een GO-resultaat aangeroepen.
  *
- * De `sha` uit `resolveFinalization` is de VOLLEDIGE, zelf gemeten head, en bindt de inschrijving
- * aan exact die commit. Elke HTTP-statuscode buiten 200/202 blijft TERMINAAL zoals voorheen — er is
- * op die codes geen retrylus. De pollgrens hierboven geldt uitsluitend voor het LEZEN van het
- * resultaat van een reeds aanvaard verzoek, niet voor het opnieuw INDIENEN van een geweigerd verzoek.
- *
- * V22 — Gemini1-bevinding `5000494458`: tussen twee pollpogingen zit nu een AANTOONBARE wachttijd
- * (`MERGE_ASYNC_POLL_DELAY_MS` via `wacht`/`sleepImpl`), zodat dit bestand GitHub niet in een strakke
- * lus bevraagt. Die wachttijd is dependency-injected — `mergePullRequest` accepteert een eigen
- * `sleepImpl` — precies zodat een test hem kan meten (hoevaak, met welke duur) zonder hem
- * daadwerkelijk uit te zitten.
+ * V22 — Gemini1-bevinding `5000494458`: `sleepImpl` wordt hier alleen doorgegeven, niet gebruikt. De
+ * wachttijd hoort bij het pollen van de queue-tak; de strict-tak polt niet en kent dus ook geen
+ * wachttijd.
  */
 export async function mergePullRequest({
   repository, pullRequest, sha, mergeMethod, policy, token, fetchImpl, sleepImpl,
@@ -948,6 +1158,26 @@ export async function mergePullRequest({
     return { ok: false, blocked: FINALIZE_ERROR.MERGE_TRANSPORT_ERROR, requests: 0 };
   }
 
+  // DE ENIGE VERTAKKING VAN HET EFFECT (V23). Beide takken zijn hierboven al door precies dezelfde
+  // weigeringen gegaan; wat hierna verschilt is uitsluitend WELK eindpunt er hoogstens één keer wordt
+  // aangeroepen. Er bestaat geen pad dat beide doet, en geen pad dat de modus uit iets anders dan de
+  // policy afleidt.
+  if (policy.merge_finalizer.server_gate_mode === SERVER_GATE_MODE.STRICT_STATUS_CHECKS) {
+    return mergeUnderStrictStatusChecks({
+      repository, pullRequest, sha, mergeMethod, token, doFetch,
+    });
+  }
+  return enqueueInMergeQueue({ repository, pullRequest, sha, mergeMethod, token, doFetch, wacht });
+}
+
+/**
+ * DE `MERGE_QUEUE`-TAK — ongewijzigd sinds V22, en op een persoonlijk repository onbereikbaar. Precies
+ * één schrijvend verzoek (de `PUT` op `merge-async`) gevolgd door hoogstens `MERGE_ASYNC_POLL_BUDGET`
+ * LEZENDE pollpogingen op datzelfde asynchrone verzoek.
+ */
+async function enqueueInMergeQueue({
+  repository, pullRequest, sha, mergeMethod, token, doFetch, wacht,
+}) {
   let response;
   try {
     response = await doFetch(
@@ -1034,6 +1264,92 @@ export async function mergePullRequest({
   return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESULT_NOT_ENQUEUED, status, requests };
 }
 
+/**
+ * DE `STRICT_STATUS_CHECKS`-TAK (V23) — GitHubs standaard, ATOMAIRE merge. Precies één verzoek,
+ * `PUT /repos/{o}/{r}/pulls/{n}/merge`, met een lichaam dat uitsluitend de exact hermeten VOLLEDIGE
+ * head-sha en de mergemethode uit de policy draagt. Geen branchnaam, geen afgekorte sha, geen
+ * event-sha, geen commit-titel of -tekst: alles wat niet gemeten is, hoort niet in dit lichaam.
+ *
+ * WAT DEZE AANROEP ZELF TOETST, EN WAT NIET. GitHub vergelijkt hier alleen of `sha` nog de actuele
+ * head is (anders 409). Een base-verschuiving of een ingetrokken review ziet díé vergelijking niet —
+ * dat was in V19 precies de reden om deze aanroep te verlaten. Wat hem in deze modus tóch draagbaar
+ * maakt, staat NIET in deze functie maar eromheen:
+ *
+ *   - `resolveFinalization` heeft vóór dit punt bewezen dat de base een ACTIEVE ruleset draagt met
+ *     een `pull_request`-regel en een STRIKTE `required_status_checks`-regel op de gepinde app. Die
+ *     ruleset dwingt GitHub af op het moment van DEZE aanroep, serverkant: is de branch achterop
+ *     geraakt of is de vereiste check niet meer groen, dan weigert GitHub de merge (405) in plaats
+ *     van hem uit te voeren;
+ *   - de tweede volledige hermeting vlak vóór dit punt draagt de live base-head en GitHubs eigen
+ *     `mergeable`/`mergeable_state`, zodat een verschoven base, een conflict of een weggevallen
+ *     vereiste de vingerafdruk breekt vóór er één byte over het netwerk gaat.
+ *
+ * Elke statuscode is TERMINAAL — er is geen retrylus, op geen enkele code. En een 200 alleen is geen
+ * bewijs: het lichaam moet `merged: true` met een volledige merge-sha dragen, anders is de uitkomst
+ * `MERGE_RESULT_NOT_MERGED` respectievelijk `MERGE_RESPONSE_INVALID`.
+ */
+async function mergeUnderStrictStatusChecks({
+  repository, pullRequest, sha, mergeMethod, token, doFetch,
+}) {
+  let response;
+  try {
+    response = await doFetch(
+      `https://api.github.com/repos/${repository}/pulls/${pullRequest}/merge`,
+      {
+        method: 'PUT',
+        headers: {
+          accept: 'application/vnd.github+json',
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+          'user-agent': 'autocoding-shield',
+          'x-github-api-version': '2022-11-28',
+        },
+        body: JSON.stringify({ sha, merge_method: mergeMethod }),
+      },
+    );
+  } catch {
+    // Zoals in de andere tak: elke transportfout wordt tot één categorie gereduceerd. De
+    // exceptietekst wordt niet gelezen en niet gelogd — daar staan URL's, headers en soms tokens in.
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_TRANSPORT_ERROR, requests: 1 };
+  }
+  const status = response?.status ?? 0;
+  if (status === 403) return { ok: false, blocked: FINALIZE_ERROR.MERGE_FORBIDDEN, status, requests: 1 };
+  if (status === 404) {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESOURCE_NOT_FOUND, status, requests: 1 };
+  }
+  // 405 — GitHub weigert de merge zelf: niet mergebaar, of de ruleset op de base is op DIT moment
+  // niet voldaan. Dat is de serverkant weigering waar deze modus op rust, en dus geen fout van ons.
+  if (status === 405) return { ok: false, blocked: FINALIZE_ERROR.MERGE_NOT_READY, status, requests: 1 };
+  // 409 — de meegegeven `sha` is niet meer de head. De enige voorwaarde die deze aanroep zelf toetst.
+  if (status === 409) {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_HEAD_MISMATCH, status, requests: 1 };
+  }
+  if (status === 422) return { ok: false, blocked: FINALIZE_ERROR.MERGE_REJECTED, status, requests: 1 };
+  if (status !== 200) {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_STATUS_UNEXPECTED, status, requests: 1 };
+  }
+
+  let raw;
+  try {
+    raw = await response.json();
+  } catch {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESPONSE_INVALID, status, requests: 1 };
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESPONSE_INVALID, status, requests: 1 };
+  }
+  if (raw.merged !== true) {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESULT_NOT_MERGED, status, requests: 1 };
+  }
+  // De sha in het antwoord is de MERGE-COMMIT, niet de aangevraagde head — hij hoort dus niet gelijk
+  // te zijn aan `sha`, alleen een volledige, leesbare commit-sha te wezen. Is hij dat niet, dan is het
+  // lichaam onleesbaar en niet een geslaagde merge.
+  if (!SHA_RE.test(typeof raw.sha === 'string' ? raw.sha : '')) {
+    return { ok: false, blocked: FINALIZE_ERROR.MERGE_RESPONSE_INVALID, status, requests: 1 };
+  }
+  return { ok: true, status, requests: 1, effect: 'MERGED' };
+}
+
 /** Vlaggen zonder waarde. Hun POSITIE in argv mag niets aan de betekenis van de rest veranderen. */
 export const FINALIZE_BOOLEAN_FLAGS = Object.freeze(['--dry-run']);
 
@@ -1096,6 +1412,10 @@ export const MEASUREMENT_FILES = Object.freeze({
   changedFiles: 'files.json',
   checkRuns: 'check-runs.json',
   mergeQueueRules: 'merge-queue-rules.json',
+  // V23 — `GET /repos/{o}/{r}/git/ref/heads/{base_ref}`: waar de BASE-BRANCH op meetmoment staat.
+  // Bewust het smalste eindpunt dat die vraag beantwoordt — één object met `object.sha`, geen
+  // commitlichaam, geen bestandslijst.
+  baseHead: 'base-head.json',
 });
 
 /**
@@ -1207,9 +1527,11 @@ export async function runFinalize(argv, { readFile, fetchImpl, sleepImpl } = {})
     decision: FINALIZE_DECISION.GO,
     reasons: [],
     finalization_class: beslissingB.finalization_class,
-    // `ok` betekent hier `200`/`202` op `merge-async`: de inschrijving is AANVAARD, niet dat het
-    // mergen zelf al heeft plaatsgevonden — dat gebeurt later, binnen GitHubs eigen wachtrij.
-    effect: 'MERGE_QUEUED',
+    // De naam van het effect komt uit het effect zelf, nooit uit een aanname hier. `MERGE_QUEUED`
+    // betekent: de inschrijving in GitHubs wachtrij is BEWEZEN aanvaard, niet dat het mergen al is
+    // gebeurd — dat gebeurt later, binnen die wachtrij. `MERGED` (V23,
+    // `STRICT_STATUS_CHECKS`) betekent dat GitHub de merge werkelijk heeft uitgevoerd.
+    effect: effect.effect,
   });
   return 0;
 }

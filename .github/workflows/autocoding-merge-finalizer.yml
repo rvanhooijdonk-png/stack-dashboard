@@ -11,28 +11,39 @@ name: autocoding-merge-finalizer
 # probeerde af te vangen is offsetgepagineerd en dus geen atomaire momentopname.
 #
 # De bevoegdheid is daarom verhuisd naar dit bestand: één plaats die de PULL REQUEST ZELF hermeet en,
-# indien geactiveerd, uitsluitend díé pull request kan laten INSCHRIJVEN in GitHubs eigen merge queue
-# — `PUT /repos/{owner}/{repo}/pulls/{number}/merge-async` met `merge_action: "merge_queue"` en de
-# exact gemeten volledige `sha`. Er is geen artefact meer dat een tweede pull request kan oppakken:
-# het nummer staat in het pad, de sha in het lichaam.
+# indien geactiveerd, uitsluitend díé pull request kan afronden. Er is geen artefact meer dat een
+# tweede pull request kan oppakken: het nummer staat in het pad, de sha in het lichaam.
 #
-# V19 — CODEX `3835523940` (P1). Een directe merge-aanroep (`PUT .../merge`, of `merge-async` met
-# `merge_action: "direct_merge"`/`"default"`) is nooit meer bereikbaar: `finalize-merge.mjs` eist
-# vóór elk effect bewijs dat de base van deze pull request een ACTIEVE `merge_queue`-regel draagt
+# V23 — DE SERVERPOORTMODUS. `CONTROL/AUTOCODING/policy.v1.json` noemt sinds V23 expliciet één
+# `server_gate_mode`. Gemeten stand van dit object: `rvanhooijdonk-png/stack-dashboard` is een
+# PERSOONLIJK repository (`owner_type=User`), en GitHub weigert daar een ruleset met `merge_queue`
+# met HTTP 422 — merge queues bestaan uitsluitend op repositories van organisaties. De
+# `MERGE_QUEUE`-tak blijft daarom als dormante legacy bestaan, en de actieve modus is
+# `STRICT_STATUS_CHECKS`: de finalizer eist dan een ACTIEVE ruleset op de base met een
+# `pull_request`-regel die de mergemethode van de policy toestaat plus een STRIKTE
+# `required_status_checks`-regel die `autocoding-shield` aan de gepinde producent-app bindt, en het
+# effect is GitHubs standaard atomaire `PUT /repos/{owner}/{repo}/pulls/{number}/merge` op exact de
+# hermeten volledige `sha`. Die ruleset wordt hier UITSLUITEND GELEZEN, nooit aangemaakt of gewijzigd.
+#
+# V19 — CODEX `3835523940` (P1). `finalize-merge.mjs` eist vóór elk effect bewijs dat de base van deze
+# pull request de serverkant autoriteit van de GEKOZEN modus draagt
 # (`GET /repos/{owner}/{repo}/rules/branches/{base_ref}`, hieronder gemeten als
-# `merge-queue-rules.json`). Zonder dat bewijs is de uitkomst `NO_GO`, met nul verzoeken. Het
-# werkelijke mergen gebeurt bij een geslaagde inschrijving niet op dit moment, maar later, binnen
-# GitHubs eigen wachtrij — die herbeoordeelt de doelbranch vlak vóór het echte mergen opnieuw, als
-# serverkant autoriteit. Dat VERKLEINT de opening die de klassieke `PUT .../merge` open liet — die
-# was alleen op de head-sha geconditioneerd, zag een basisretarget of een ingetrokken
-# eigenaarsreview tussen hermeting en aanroep dus niet — tot het smalle venster tussen deze
-# inschrijving en GitHubs eigen herbeoordeling; het sluit dat venster niet atomisch, want de
-# `GET rules/branches/{base_ref}`-meting en de inschrijvings-PUT zijn zelf twee aparte verzoeken.
-# Wat resteert is hoe ver GitHub die herbeoordeling zelf doorvoert — dat is precies het bewijs dat
-# de aparte, toekomstige activatiestap moet leveren, niet deze pull request. Deze pull request
-# BOUWT, ACTIVEERT of WIJZIGT geen GitHub-ruleset of branch-protection — dat bewijs wordt
-# uitsluitend gelezen, nooit aangemaakt; of een repository daadwerkelijk zo'n regel draagt is een
-# afzonderlijke, toekomstige activatiestap.
+# `merge-queue-rules.json`, plus sinds V23 de live base-head en GitHubs eigen `mergeable`). Zonder dat
+# bewijs is de uitkomst `NO_GO`, met nul verzoeken.
+#
+# In `MERGE_QUEUE` gebeurt het werkelijke mergen bij een geslaagde inschrijving niet op dit moment,
+# maar later, binnen GitHubs eigen wachtrij, die de doelbranch vlak vóór het echte mergen opnieuw
+# beoordeelt. In `STRICT_STATUS_CHECKS` bestaat die wachtrij niet, en komt de serverkant
+# herbeoordeling van de RULESET zelf: GitHub toetst de `pull_request`-regel en de STRIKTE
+# required-status-checks-regel op het moment van de merge-aanroep, en weigert die aanroep (405)
+# wanneer de branch achterloopt op de base of de vereiste check niet groen is. Wat in beide modi
+# NIET atomisch is, is het venster tussen onze laatste meting en het verzoek — daarom draagt de
+# hermeting sinds V23 ook de live base-head en GitHubs eigen `mergeable`/`mergeable_state`, en
+# blokkeert elk verschil met de eerste meting vóór er één byte over het netwerk gaat.
+#
+# Deze pull request BOUWT, ACTIVEERT of WIJZIGT geen GitHub-ruleset of branch-protection — dat bewijs
+# wordt uitsluitend gelezen, nooit aangemaakt; of een repository daadwerkelijk zo'n ruleset draagt is
+# een afzonderlijke, toekomstige activatiestap.
 #
 # WAT DEZE WORKFLOW NOOIT DOET: PR-code uitchecken, PR-scripts draaien, PR-headpolicy lezen,
 # artifacts of cache lezen, secrets lezen, statussen schrijven, een branch aanraken, of op een ander
@@ -288,6 +299,15 @@ jobs:
             # zet `rules=false`, en `finalize-merge.mjs` behandelt dat expliciet als onvolledig bewijs
             # in plaats van als een branch zonder regels.
             base_ref="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const r=((p||{}).base||{}).ref;if(typeof r!=="string"||r.length===0)process.exit(1);process.stdout.write(r)' "$doel/pr.json")" || return 1
+
+            # V23 — de LIVE BASE-HEAD. `pr.json` draagt met `base.sha` het basispunt van deze pull
+            # request, niet de plaats waar de base-branch NU staat. Dat verschil is precies wat de
+            # klassieke `PUT .../merge` zelf niet ziet, dus wordt de branch apart gemeten. Bewust het
+            # SMALSTE eindpunt dat die vraag beantwoordt: één object met `object.sha`, geen
+            # commitlichaam en geen bestandslijst. Onleesbaar maakt de hele meting onleesbaar, dezelfde
+            # lijn als bij `head_sha` en `base_ref`.
+            gh api "repos/$REPOSITORY/git/ref/heads/$base_ref" > "$doel/base-head.json" || return 1
+
             gh_bounded_pages "repos/$REPOSITORY/rules/branches/$base_ref" \
               "$doel/merge-queue-rules.json" "$GH_BOUNDED_RULES_PAGES" "$doel/pages-merge-queue-rules"
             rc=$?
