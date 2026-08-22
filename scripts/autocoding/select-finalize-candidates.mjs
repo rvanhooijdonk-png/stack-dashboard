@@ -22,6 +22,7 @@ import {
   assertMergeFinalizerPolicySafe,
 } from './finalize-merge.mjs';
 import { flattenPages } from './collect-shield-input.mjs';
+import { pathToFileURL } from 'node:url';
 import {
   SHARED_HOURLY_REQUEST_QUOTA, QUOTA_RESERVE, SELECTION_PAGE_BUDGET, parseCounter,
   scheduleSlotOf, selectScheduleBucket, scheduleBucketVisit, selectBucketWindow,
@@ -236,7 +237,7 @@ export function runSelectCandidates(argv, { readFile, writeFile } = {}) {
 }
 
 // Alleen bij directe aanroep. Bij `import` mag hier niets draaien: de tests importeren dit bestand.
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const { readFileSync, writeFileSync } = await import('node:fs');
   process.exitCode = runSelectCandidates(process.argv.slice(2), {
     readFile: (p) => readFileSync(p, 'utf8'),

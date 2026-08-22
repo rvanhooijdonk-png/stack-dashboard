@@ -56,6 +56,7 @@
 // één byte over het netwerk gaat.
 
 import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { evaluateShield, evaluateMergeAuthorizations } from './verify-review-gate.mjs';
 import { buildShieldInput, flattenPages } from './collect-shield-input.mjs';
 import {
@@ -210,6 +211,27 @@ const MERGE_ASYNC_STATUS = Object.freeze({
  * uitkomst `MERGE_POLL_EXHAUSTED` — geen aanname over wat er daarna gebeurt.
  */
 const MERGE_ASYNC_POLL_BUDGET = 3;
+
+/**
+ * De wachttijd, in milliseconden, tussen twee opeenvolgende `GET .../merge-async/{uuid}`-pogingen
+ * wanneer het lichaam nog `pending` meldt (V22, Gemini1-bevinding `5000494458`). Zonder deze
+ * wachttijd zou dit bestand GitHub in een strakke lus bevragen, meteen na elkaar — geen enkele
+ * echte asynchrone bewerking is binnen milliseconden klaar, dus dat is geen polling maar spammen.
+ * De wachttijd geldt uitsluitend TUSSEN lezende pollpogingen op een reeds aanvaard verzoek, nooit
+ * als een retry op een geweigerd verzoek: die blijven, zoals hierboven, TERMINAAL en zonder wachttijd.
+ */
+const MERGE_ASYNC_POLL_DELAY_MS = 2000;
+
+/**
+ * De echte wachtfunctie voor het pollinterval: een tijdklok, nooit een lus. `mergePullRequest`
+ * accepteert een eigen `sleepImpl` zodat een test de wachttijd kan METEN — hoeveel keer, met welke
+ * duur, in welke volgorde ten opzichte van de pollverzoeken — zonder hem daadwerkelijk uit te
+ * zitten. Zonder een geïnjecteerde `sleepImpl` gebruikt dit bestand deze functie, en dus een echte
+ * `setTimeout`.
+ */
+function defaultSleep(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
 
 /**
  * Het aantal API-verzoeken van ÉÉN volledige meting van één kandidaat:
@@ -888,9 +910,15 @@ async function fetchMergeAsyncResult({
  * aan exact die commit. Elke HTTP-statuscode buiten 200/202 blijft TERMINAAL zoals voorheen — er is
  * op die codes geen retrylus. De pollgrens hierboven geldt uitsluitend voor het LEZEN van het
  * resultaat van een reeds aanvaard verzoek, niet voor het opnieuw INDIENEN van een geweigerd verzoek.
+ *
+ * V22 — Gemini1-bevinding `5000494458`: tussen twee pollpogingen zit nu een AANTOONBARE wachttijd
+ * (`MERGE_ASYNC_POLL_DELAY_MS` via `wacht`/`sleepImpl`), zodat dit bestand GitHub niet in een strakke
+ * lus bevraagt. Die wachttijd is dependency-injected — `mergePullRequest` accepteert een eigen
+ * `sleepImpl` — precies zodat een test hem kan meten (hoevaak, met welke duur) zonder hem
+ * daadwerkelijk uit te zitten.
  */
 export async function mergePullRequest({
-  repository, pullRequest, sha, mergeMethod, policy, token, fetchImpl,
+  repository, pullRequest, sha, mergeMethod, policy, token, fetchImpl, sleepImpl,
 }) {
   if (policy?.merge_finalizer_enabled !== true) {
     return { ok: false, blocked: FINALIZE_ERROR.FINALIZER_DISABLED, requests: 0 };
@@ -915,6 +943,7 @@ export async function mergePullRequest({
   }
 
   const doFetch = fetchImpl ?? globalThis.fetch;
+  const wacht = typeof sleepImpl === 'function' ? sleepImpl : defaultSleep;
   if (typeof doFetch !== 'function') {
     return { ok: false, blocked: FINALIZE_ERROR.MERGE_TRANSPORT_ERROR, requests: 0 };
   }
@@ -972,6 +1001,10 @@ export async function mergePullRequest({
     }
     let terminal = false;
     for (let poging = 0; poging < MERGE_ASYNC_POLL_BUDGET && !terminal; poging += 1) {
+      // Wacht VOOR elke pollpoging, ook de eerste: het aanvaarde verzoek is net ingediend en geen
+      // enkele echte asynchrone bewerking is binnen milliseconden klaar. `wacht` is de geïnjecteerde
+      // of, bij ontbreken daarvan, de echte tijdklok (`defaultSleep`) — nooit een lus.
+      await wacht(MERGE_ASYNC_POLL_DELAY_MS);
       const uitkomst = await fetchMergeAsyncResult({
         repository, pullRequest, uuid: body.uuid, token, doFetch,
       });
@@ -1103,7 +1136,7 @@ export function readMeasurement(rawDir, readFile) {
  * andere uitkomst geeft rc 1. De uitvoer is één JSON-regel met uitsluitend de gesloten uitkomstvorm
  * en redencodes — geen SHA's, geen paden, geen API-teksten.
  */
-export async function runFinalize(argv, { readFile, fetchImpl } = {}) {
+export async function runFinalize(argv, { readFile, fetchImpl, sleepImpl } = {}) {
   const meld = (uitkomst) => console.log(JSON.stringify(uitkomst));
   const parsed = parseFinalizeArgs(argv);
   if (!parsed.ok) {
@@ -1161,6 +1194,7 @@ export async function runFinalize(argv, { readFile, fetchImpl } = {}) {
     policy,
     token: process.env.GITHUB_TOKEN,
     fetchImpl,
+    sleepImpl,
   });
   if (!effect.ok) {
     meld({
@@ -1181,7 +1215,7 @@ export async function runFinalize(argv, { readFile, fetchImpl } = {}) {
 }
 
 // Alleen bij directe aanroep. Bij `import` mag hier niets draaien: de tests importeren dit bestand.
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const { readFileSync } = await import('node:fs');
   process.exitCode = await runFinalize(
     process.argv.slice(2),

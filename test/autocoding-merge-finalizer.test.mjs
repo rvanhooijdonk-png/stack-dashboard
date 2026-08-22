@@ -734,6 +734,18 @@ function jsonAntwoord(status, inhoud) {
   return { status, json: async () => inhoud };
 }
 
+/**
+ * Een `sleepImpl` die geen enkele echte tijd kost maar wél precies vastlegt met welke duur, en hoe
+ * vaak, hij is aangeroepen (V22, Gemini1-bevinding `5000494458`). Een pollende test injecteert deze
+ * in plaats van de echte tijdklok, zodat hij de wachttijd kan METEN zonder hem uit te zitten.
+ */
+function geenWacht() {
+  const aanroepen = [];
+  const impl = async (ms) => { aanroepen.push(ms); };
+  impl.aanroepen = aanroepen;
+  return impl;
+}
+
 test(
   'M20a. CLAUDE4/CODEX V20: een 202 zonder leesbaar lichaam is GEEN bewezen inschrijving',
   async () => {
@@ -823,9 +835,11 @@ test(
         details: { uuid, merge_action: 'merge_queue', expected_head_sha: HEAD },
       }),
     ]);
+    const sleepImpl = geenWacht();
     const uitkomst = await mergePullRequest({
       repository: 'a/b', pullRequest: PR_A, sha: HEAD,
       mergeMethod: POLICY_AAN.merge_finalizer.merge_method, policy: POLICY_AAN, token: 'x', fetchImpl,
+      sleepImpl,
     });
     assert.deepEqual(uitkomst, {
       ok: true, status: 202, requests: 3, effect: 'MERGE_QUEUED',
@@ -836,6 +850,9 @@ test(
     assert.equal(fetchImpl.aanroepen[1].init.method, 'GET');
     assert.ok(fetchImpl.aanroepen[1].url.endsWith(`/pulls/${PR_A}/merge-async/${uuid}`));
     assert.equal(fetchImpl.aanroepen[2].init.method, 'GET');
+    // V22: precies twee lezende pollpogingen, dus precies twee wachtpogingen ervoor — nooit vóór de
+    // eerste schrijvende PUT.
+    assert.deepEqual(sleepImpl.aanroepen, [2000, 2000]);
   },
 );
 
@@ -850,14 +867,18 @@ test(
       jsonAntwoord(202, { status: 'pending', details: { uuid } }),
       jsonAntwoord(200, { status: 'pending', details: { uuid } }),
     ]);
+    const sleepImpl = geenWacht();
     const uitkomst = await mergePullRequest({
       repository: 'a/b', pullRequest: PR_A, sha: HEAD,
       mergeMethod: POLICY_AAN.merge_finalizer.merge_method, policy: POLICY_AAN, token: 'x', fetchImpl,
+      sleepImpl,
     });
     assert.deepEqual(uitkomst, {
       ok: false, blocked: FINALIZE_ERROR.MERGE_POLL_EXHAUSTED, status: 202, requests: 4,
     });
     assert.equal(fetchImpl.aanroepen.length, 4, 'PUT + drie begrensde pollpogingen, geen vierde');
+    // V22: precies `MERGE_ASYNC_POLL_BUDGET` (3) wachtpogingen — begrensd zoals de pollpogingen zelf.
+    assert.deepEqual(sleepImpl.aanroepen, [2000, 2000, 2000]);
   },
 );
 
@@ -885,27 +906,31 @@ test(
       jsonAntwoord(202, { status: 'pending', details: { uuid } }),
       () => { throw new Error('netwerk weg'); },
     ]);
+    const transportWacht = geenWacht();
     const uitkomstTransport = await mergePullRequest({
       repository: 'a/b', pullRequest: PR_A, sha: HEAD,
       mergeMethod: POLICY_AAN.merge_finalizer.merge_method, policy: POLICY_AAN, token: 'x',
-      fetchImpl: transport,
+      fetchImpl: transport, sleepImpl: transportWacht,
     });
     assert.deepEqual(uitkomstTransport, {
       ok: false, blocked: FINALIZE_ERROR.MERGE_POLL_TRANSPORT_ERROR, status: 202, requests: 2,
     });
+    assert.deepEqual(transportWacht.aanroepen, [2000]);
 
     const onleesbaar = opeenvolgendeFetch([
       jsonAntwoord(202, { status: 'pending', details: { uuid } }),
       { status: 200, json: async () => { throw new Error('kapotte json'); } },
     ]);
+    const onleesbaarWacht = geenWacht();
     const uitkomstOnleesbaar = await mergePullRequest({
       repository: 'a/b', pullRequest: PR_A, sha: HEAD,
       mergeMethod: POLICY_AAN.merge_finalizer.merge_method, policy: POLICY_AAN, token: 'x',
-      fetchImpl: onleesbaar,
+      fetchImpl: onleesbaar, sleepImpl: onleesbaarWacht,
     });
     assert.deepEqual(uitkomstOnleesbaar, {
       ok: false, blocked: FINALIZE_ERROR.MERGE_RESPONSE_INVALID, status: 202, requests: 2,
     });
+    assert.deepEqual(onleesbaarWacht.aanroepen, [2000]);
   },
 );
 
@@ -922,9 +947,11 @@ test('M21. 400, 403, 404, 409 en 422 zijn TERMINAAL — er volgt nooit een tweed
   ];
   for (const [status, code] of gevallen) {
     const fetchImpl = antwoordFetch(status);
+    const sleepImpl = geenWacht();
     const uitkomst = await mergePullRequest({
       repository: 'a/b', pullRequest: PR_A, sha: HEAD,
       mergeMethod: POLICY_AAN.merge_finalizer.merge_method, policy: POLICY_AAN, token: 'x', fetchImpl,
+      sleepImpl,
     });
     // Eén verzoek, altijd. Opnieuw proberen na een van deze codes zou ofwel een dubbele inschrijving
     // ofwel een nooit beoordeelde commit riskeren.
@@ -932,10 +959,18 @@ test('M21. 400, 403, 404, 409 en 422 zijn TERMINAAL — er volgt nooit een tweed
     assert.equal(uitkomst.requests, 1, String(status));
     if (code) assert.equal(uitkomst.blocked, code, String(status));
     else assert.equal(uitkomst.ok, true, String(status));
+    // Een TERMINALE statuscode wacht nooit: de wachttijd geldt uitsluitend TUSSEN lezende
+    // pollpogingen op een reeds aanvaard `pending`-verzoek (zie M20e/M20f/M20h), nooit rond een
+    // terminale respons op de eerste PUT.
+    assert.deepEqual(sleepImpl.aanroepen, [], String(status));
   }
-  // De broncode kent geen enkele retryconstructie.
+  // De broncode kent geen enkele retryconstructie op een TERMINALE statuscode. `setTimeout` is sinds
+  // V22 (Gemini1-bevinding `5000494458`) opzettelijk UITGESLOTEN van deze bewaking: dat woord draagt
+  // nu de begrensde, dependency-injected wachttijd tussen `pending`-pollpogingen (`defaultSleep`,
+  // hierboven zelf apart bewezen in M20e/M20f/M20h en M20i/M20j) — geen retry op een geweigerd
+  // verzoek, en dus geen tegenstrijdigheid met deze toets.
   const bron = readFileSync(FINALIZER, 'utf8');
-  assert.equal(/retry|opnieuw proberen|setTimeout|while \(/i.test(bron.replace(/^\s*(\/\/|\*).*$/gm, '')), false);
+  assert.equal(/retry|opnieuw proberen|while \(/i.test(bron.replace(/^\s*(\/\/|\*).*$/gm, '')), false);
 });
 
 test('M21a. `hasActiveMergeQueueRule` eist het TYPE `merge_queue`, en niets minder', () => {
