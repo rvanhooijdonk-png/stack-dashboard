@@ -200,16 +200,25 @@ jobs:
       # output leeg en slaat de stap eronder over — onmeetbaar telt hier als "niets te bewaren",
       # nooit als "sla dan maar op". Dat is de fail-closed kant: hoogstens één ronde cache kwijt,
       # nooit een waarschuwende of half geslaagde opslag.
+      #
+      # Codex-review op deze reparatie (2026-08-22, HIGH): `[ -f pad ]` DEREFERENCEERT. Gemeten:
+      # een symlink naar een regulier bestand geeft `-f` = true, dus de poort ging open voor een
+      # pad dat zelf helemaal geen regulier bestand is. Daarom `-f` ÉN `! -L` — opslaan mag alleen
+      # als het pad zélf een regulier bestand is. Een dangling symlink en een directory vielen al
+      # af op `-f`; een symlink naar een regulier bestand niet. Bewust geen `realpath`/`readlink -f`:
+      # die zijn niet POSIX-draagbaar en zouden juist WÉL dereferencen — het tegenovergestelde van
+      # wat deze poort hoort te meten.
       - name: Meten of de runtime-feed-cache iets te bewaren heeft
         id: runtime_cache_probe
         if: always()
         run: |
-          if [ -f .local/runtime-feed-last-known-good.json ]; then
+          if [ -f .local/runtime-feed-last-known-good.json ] \
+            && [ ! -L .local/runtime-feed-last-known-good.json ]; then
             echo "aanwezig=true" >> "$GITHUB_OUTPUT"
             echo "cachebestand aanwezig — wordt opgeslagen onder de refgescope sleutel"
           else
             echo "aanwezig=false" >> "$GITHUB_OUTPUT"
-            echo "geen cachebestand — niets te bewaren, opslag wordt overgeslagen"
+            echo "geen regulier cachebestand — niets te bewaren, opslag wordt overgeslagen"
           fi
 
       - name: Runtime-feed last-known-good cache opslaan

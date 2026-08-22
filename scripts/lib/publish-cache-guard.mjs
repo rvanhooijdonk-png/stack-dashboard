@@ -49,10 +49,27 @@ export const CACHE_VIOLATION = Object.freeze({
   PROBE_NOT_ALWAYS: 'PROBE_NOT_ALWAYS',
   PROBE_PATH_MISMATCH: 'PROBE_PATH_MISMATCH',
   PROBE_OUTPUT_NOT_WRITTEN: 'PROBE_OUTPUT_NOT_WRITTEN',
+  PROBE_FOLLOWS_SYMLINK: 'PROBE_FOLLOWS_SYMLINK',
   CACHE_PATH_MISMATCH: 'CACHE_PATH_MISMATCH',
   CACHE_KEY_MISMATCH: 'CACHE_KEY_MISMATCH',
   RESTORE_KEY_MISMATCH: 'RESTORE_KEY_MISMATCH',
 });
+
+const PAD_RE = RUNTIME_CACHE_PATH.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * `[ -f pad ]` DEREFERENCEERT: een symlink naar een regulier bestand geeft true. Gemeten in de
+ * Codex-review op deze branch, en daarmee is "alleen een regulier bestand" met `-f` alleen niet
+ * gehaald. De meetstap moet dus BEIDE tests dragen: het doel is een regulier bestand (`-f`) én het
+ * pad is zelf geen symlink (`! -L`). Deze functie meet die twee los, zodat de melding kan zeggen
+ * welke helft ontbrak in plaats van alleen dat er iets mis is.
+ */
+function reguliereBestandspoortIn(script) {
+  return {
+    regulier: new RegExp(`\\[\\s*-f\\s+["']?${PAD_RE}["']?\\s*\\]`).test(script),
+    geenSymlink: new RegExp(`\\[\\s*!\\s+-L\\s+["']?${PAD_RE}["']?\\s*\\]`).test(script),
+  };
+}
 
 const SAVE_ACTION = 'actions/cache/save';
 const RESTORE_ACTION = 'actions/cache/restore';
@@ -238,6 +255,15 @@ export function findPublishCacheViolations(text) {
   }
   if (!new RegExp(`${referentie.output}=`).test(script) || !script.includes('GITHUB_OUTPUT')) {
     meld(CACHE_VIOLATION.PROBE_OUTPUT_NOT_WRITTEN, `${probe.id}.${referentie.output}`);
+  }
+
+  // Terugval naar alleen `-f` is precies de gemeten HIGH-finding: de save ging open voor een pad
+  // dat zelf een symlink was. Rood, zodat een latere "vereenvoudiging" van deze shell niet
+  // stilzwijgend de fail-closed eis opgeeft.
+  const poort = reguliereBestandspoortIn(script);
+  if (!poort.regulier || !poort.geenSymlink) {
+    meld(CACHE_VIOLATION.PROBE_FOLLOWS_SYMLINK,
+      `${probe.id}: -f=${poort.regulier} !-L=${poort.geenSymlink}`);
   }
 
   return violations;

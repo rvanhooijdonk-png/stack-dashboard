@@ -16,7 +16,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -69,6 +69,23 @@ const MEETSTAP = `      - name: Meten of de runtime-feed-cache iets te bewaren h
         id: runtime_cache_probe
         if: always()
         run: |
+          if [ -f ${RUNTIME_CACHE_PATH} ] \\
+            && [ ! -L ${RUNTIME_CACHE_PATH} ]; then
+            echo "aanwezig=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "aanwezig=false" >> "$GITHUB_OUTPUT"
+          fi
+`;
+
+/**
+ * VERBATIM de meetstap zoals hij VOOR deze reparatie was: alleen `-f`. Gemeten in de Codex-review
+ * op deze branch: `[ -f pad ]` dereferenceert, dus een symlink NAAR een regulier bestand gaf true
+ * en de save ging open voor een pad dat zelf geen regulier bestand is. Deze vorm moet rood zijn.
+ */
+const MEETSTAP_ALLEEN_MINUS_F = `      - name: Meten of de runtime-feed-cache iets te bewaren heeft
+        id: runtime_cache_probe
+        if: always()
+        run: |
           if [ -f ${RUNTIME_CACHE_PATH} ]; then
             echo "aanwezig=true" >> "$GITHUB_OUTPUT"
           else
@@ -117,7 +134,7 @@ test('NEGATIEVE CONTROLE — de onvoorwaardelijke save van main wordt afgekeurd'
 });
 
 test('NEGATIEVE CONTROLE — een meetstap die een ANDER pad meet, dekt de save niet', () => {
-  const scheveMeting = MEETSTAP.replace(RUNTIME_CACHE_PATH, '.local/iets-anders.json');
+  const scheveMeting = MEETSTAP.replaceAll(RUNTIME_CACHE_PATH, '.local/iets-anders.json');
   const gemeten = codes(workflow(HERSTELSTAP + '\n' + scheveMeting + '\n' + BEWAAKTE_SAVE));
   assert.ok(gemeten.includes(CACHE_VIOLATION.PROBE_PATH_MISMATCH),
     `padverschuiving hoort rood te zijn, gemeten: ${gemeten.join(', ') || '<niets>'}`);
@@ -136,6 +153,24 @@ test('NEGATIEVE CONTROLE — een meetstap ná de save meet niets en is dus een d
   const gemeten = codes(workflow(HERSTELSTAP + '\n' + BEWAAKTE_SAVE + '\n' + MEETSTAP));
   assert.ok(gemeten.includes(CACHE_VIOLATION.PROBE_AFTER_SAVE),
     `volgorde hoort te tellen, gemeten: ${gemeten.join(', ') || '<niets>'}`);
+});
+
+test('NEGATIEVE CONTROLE — een meetstap met alleen `-f` volgt een symlink en is dus niet fail-closed', () => {
+  // De gemeten HIGH-finding op deze branch, verbatim: `[ -f pad ]` dereferenceert. Zonder de
+  // `! -L`-helft ging de save open voor een pad dat zelf geen regulier bestand is. Deze assertie
+  // is het bewijs dat een terugval naar alleen `-f` niet stilzwijgend kan gebeuren.
+  const gemeten = codes(workflow(HERSTELSTAP + '\n' + MEETSTAP_ALLEEN_MINUS_F + '\n' + BEWAAKTE_SAVE));
+  assert.ok(gemeten.includes(CACHE_VIOLATION.PROBE_FOLLOWS_SYMLINK),
+    `alleen -f hoort rood te zijn, gemeten: ${gemeten.join(', ') || '<niets>'}`);
+});
+
+test('NEGATIEVE CONTROLE — de `-f`-helft mag ook niet wegvallen ten gunste van alleen `! -L`', () => {
+  // Spiegelbeeld: `! -L` alleen is true voor een ONTBREKEND pad en voor een directory. Zonder `-f`
+  // zou de save juist opengaan waar #77 begon.
+  const alleenL = MEETSTAP.replace(`[ -f ${RUNTIME_CACHE_PATH} ] \\\n            && `, '');
+  const gemeten = codes(workflow(HERSTELSTAP + '\n' + alleenL + '\n' + BEWAAKTE_SAVE));
+  assert.ok(gemeten.includes(CACHE_VIOLATION.PROBE_FOLLOWS_SYMLINK),
+    `alleen ! -L hoort rood te zijn, gemeten: ${gemeten.join(', ') || '<niets>'}`);
 });
 
 test('NEGATIEVE CONTROLE — de refscope mag niet uit de cachesleutel verdwijnen', () => {
@@ -172,16 +207,30 @@ test('NEGATIEVE CONTROLE — de save mag zijn always() niet kwijtraken bij het t
 /**
  * De shell van de meetstap draait hier ECHT, in een lege tijdelijke map, met exact de shellvorm
  * die GitHub gebruikt (`bash -e`). Alleen zo is bewezen dat de poort meet in plaats van beweert.
+ *
+ * `soort` zet het cachepad neer als één van de vijf vormen die een runner kan tegenkomen. De
+ * symlinkgevallen zijn geen theorie: `[ -f pad ]` DEREFERENCEERT, dus vóór deze reparatie meldde
+ * een symlink naar een regulier bestand hier `aanwezig=true`.
  */
-async function draaiMeetstap({ bestandAanwezig }) {
+async function draaiMeetstap(soort) {
   const script = blockScalarOf(publish, 'runtime_cache_probe', 'run');
   assert.ok(script && script.trim() !== '', 'de meetstap hoort een uitvoerbare shell te hebben');
   const werkmap = await mkdtemp(join(tmpdir(), 'publish-cache-'));
   try {
-    if (bestandAanwezig) {
-      const doel = join(werkmap, RUNTIME_CACHE_PATH);
-      await mkdir(dirname(doel), { recursive: true });
+    const doel = join(werkmap, RUNTIME_CACHE_PATH);
+    await mkdir(dirname(doel), { recursive: true });
+    if (soort === 'regulier') {
       await writeFile(doel, '{"contractVersion":1}\n', 'utf8');
+    } else if (soort === 'symlink-naar-regulier') {
+      const echt = join(werkmap, '.local/echt-regulier-doel.json');
+      await writeFile(echt, '{"contractVersion":1}\n', 'utf8');
+      await symlink(echt, doel);
+    } else if (soort === 'dangling-symlink') {
+      await symlink(join(werkmap, '.local/dit-doel-bestaat-niet.json'), doel);
+    } else if (soort === 'directory') {
+      await mkdir(doel);
+    } else if (soort !== 'ontbrekend') {
+      throw new Error(`onbekende soort in de gedragsproef: ${soort}`);
     }
     const scriptPad = join(werkmap, 'stap.sh');
     const outputPad = join(werkmap, 'github-output');
@@ -196,16 +245,48 @@ async function draaiMeetstap({ bestandAanwezig }) {
   }
 }
 
-test('GEDRAG — zonder cachebestand meldt de meetstap "aanwezig=false" en blijft de save dus uit', async () => {
-  // Dit is de exacte productieconditie van run 32596205038: een verse runner zonder het bestand.
-  assert.match(await draaiMeetstap({ bestandAanwezig: false }), /^aanwezig=false$/m);
-});
+/**
+ * Eén regel per vorm die het cachepad op een runner kan hebben. Alleen een ECHT regulier bestand
+ * mag de save openen; alles daarbuiten telt als "niets te bewaren". Dat is de fail-closed eis, en
+ * hij wordt hier gedraaid in plaats van uit de YAML gelezen.
+ */
+const GEDRAGSMATRIX = [
+  {
+    soort: 'regulier',
+    verwacht: 'true',
+    waarom: 'een echt regulier bestand is precies wat de cache hoort te bewaren',
+  },
+  {
+    soort: 'ontbrekend',
+    verwacht: 'false',
+    waarom: 'de exacte productieconditie van run 32596205038: een verse runner zonder het bestand',
+  },
+  {
+    soort: 'directory',
+    verwacht: 'false',
+    waarom: 'een map is geen last-known-good-momentopname; opslaan zou hier alsnog rood worden',
+  },
+  {
+    soort: 'symlink-naar-regulier',
+    verwacht: 'false',
+    waarom: 'de gemeten HIGH-finding: `-f` dereferenceert, dus dit gaf eerder ten onrechte true',
+  },
+  {
+    soort: 'dangling-symlink',
+    verwacht: 'false',
+    waarom: 'een symlink zonder doel viel al op `-f` af en moet dat blijven doen',
+  },
+];
 
-test('GEDRAG — mét cachebestand meldt de meetstap "aanwezig=true" en wordt er wél opgeslagen', async () => {
-  // De reparatie mag de bestaande terugval niet uitschakelen: bestaat het bestand, dan gaat het
-  // gewoon de cache in — onder dezelfde sleutel als voorheen.
-  assert.match(await draaiMeetstap({ bestandAanwezig: true }), /^aanwezig=true$/m);
-});
+for (const { soort, verwacht, waarom } of GEDRAGSMATRIX) {
+  test(`GEDRAG — ${soort} → aanwezig=${verwacht} (${waarom})`, async () => {
+    const output = await draaiMeetstap(soort);
+    assert.match(output, new RegExp(`^aanwezig=${verwacht}$`, 'm'),
+      `${soort} hoort "aanwezig=${verwacht}" te meten, gemeten output: ${JSON.stringify(output)}`);
+    assert.doesNotMatch(output, new RegExp(`^aanwezig=${verwacht === 'true' ? 'false' : 'true'}$`, 'm'),
+      'de meetstap hoort precies één oordeel te schrijven');
+  });
+}
 
 test('GEDRAG — de conditie van de save leest exact de output die de meetstap schrijft', () => {
   // Een poort die naar een output kijkt die niemand schrijft, staat permanent dicht. Naam en
