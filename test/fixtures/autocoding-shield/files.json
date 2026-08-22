@@ -1,0 +1,12 @@
+[
+  [
+    {
+      "filename": ".github/workflows/autocoding-shield.yml",
+      "status": "modified"
+    },
+    {
+      "filename": "scripts/autocoding/collect-shield-input.mjs",
+      "status": "added"
+    }
+  ]
+]

@@ -1,50 +1,71 @@
 name: autocoding-shield
 
+# DIT BESTAND IS DE ONPRIVILEGED HELFT. Het draagt GEEN ENKELE schrijfscope — niet op
+# bestandsniveau, niet op een job — en dat is geen zuinigheid maar de vertrouwensgrens zelf.
+#
+# Op elk `pull_request*`-event draait GitHub de workflowdefinitie ZOALS DIE IN DE PR STAAT. Dat is
+# hier gemeten, niet aangenomen: Actions-run `32542688290` draaide op event `pull_request_review` een
+# workflowbestand dat op `main` 404 gaf. Een schrijfscope in dit bestand zou een same-repo branch dus
+# in staat stellen de stappen te vervangen en de poortstatus zelf groen te schrijven.
+#
+# Dit bestand doet daarom precies twee dingen:
+#
+#   1. Op `pull_request`: de echte shieldcheck. Die checkt de PR-head uit en voert PR-headcode uit
+#      (validator-, adapter-, publisher- en vertrouwensgrenstests, secretscan op de branchdiff).
+#   2. Op `pull_request_review` en `pull_request_review_comment`: een SIGNAAL zonder inhoud. Geen
+#      checkout, geen PR-code, `permissions: {}`. Het enige nut van die job is dat deze workflowrun
+#      voltooit, waarna de trusted writer via `workflow_run` vanaf de DEFAULT BRANCH start en de
+#      bijbehorende PR uit `workflow_run.pull_requests` haalt.
+#
+# `issue_comment` is hier PER V11 VERWIJDERD, en dat is geen versobering maar het opheffen van een
+# dubbele dispatch. De trusted writer luistert sinds V11 zélf op `issue_comment` — een event dat
+# GitHub uitsluitend vanaf de default-branch-definitie draait en dat zijn PR-associatie meedraagt in
+# `github.event.issue.number` plus `github.event.issue.pull_request`. Zou de shield hetzelfde event
+# óók nog signaleren, dan leverde één comment twee aanleidingen op: de directe en de `workflow_run`
+# die op deze run volgt. Dat kost dubbel API-budget zonder één extra feit op te leveren.
+#
+# `pull_request_review_comment` is er juist BIJ gekomen. Een losse reviewcomment is bewijs dat de
+# poort meeweegt, maar hij levert geen `pull_request_review`-event op; zonder dit signaal moest de
+# uurlijkse schedule die wijziging opvangen.
+#
+# De statuswriter staat in een fysiek apart bestand dat door geen enkel direct PR- of reviewevent
+# startbaar is:
+#
+#   .github/workflows/autocoding-shield-live-gate.yml
+#
+# Die scheiding wordt statisch afgedwongen door `test/autocoding-workflow-trust.test.mjs`, inclusief
+# de regel dat een uitcheckende job hier tot `pull_request` beperkt moet blijven.
+#
+# Nooit `pull_request_target`.
+
 on:
   pull_request:
     branches: [main]
-  issue_comment:
-    types: [created, edited, deleted]
+  # Alleen als onprivileged signaal. Zie de job `autocoding-shield-signal` hieronder.
   pull_request_review:
     types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
 
 permissions: {}
 
+# Het event zit in de groepsleutel, zodat een signaalrun nooit een lopende of wachtende echte
+# shieldcheck op dezelfde PR kan verdringen.
 concurrency:
-  group: autocoding-shield-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  group: autocoding-shield-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   autocoding-shield:
-    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    # PR-code wordt uitsluitend op `pull_request` uitgevoerd, nooit op een comment of review.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
     steps:
-      - name: Bepaal PR en vertrouwde checkout
-        id: pr
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_FROM_PULL: ${{ github.event.pull_request.number }}
-          PR_FROM_ISSUE: ${{ github.event.issue.number }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          number="${PR_FROM_PULL:-${PR_FROM_ISSUE:-}}"
-          test -n "$number"
-          echo "number=$number" >> "$GITHUB_OUTPUT"
-          if [ "$EVENT_NAME" = pull_request ]; then
-            test "${#PR_HEAD}" -eq 40
-            echo "checkout_ref=$PR_HEAD" >> "$GITHUB_OUTPUT"
-          else
-            echo "checkout_ref=${{ github.event.repository.default_branch }}" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ steps.pr.outputs.checkout_ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -53,20 +74,34 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f scripts/autocoding/verify-review-gate.mjs ] && \
+             [ -f scripts/autocoding/collect-shield-input.mjs ] && \
+             [ -f scripts/autocoding/publish-live-status.mjs ] && \
+             [ -f scripts/autocoding/workflow-trust.mjs ] && \
+             [ -f scripts/autocoding/select-live-gate-targets.mjs ] && \
+             [ -f scripts/autocoding/finalize-merge.mjs ] && \
+             [ -f scripts/autocoding/select-finalize-candidates.mjs ] && \
              [ -f test/autocoding-review-gate.test.mjs ] && \
+             [ -f test/autocoding-shield-adapter.test.mjs ] && \
+             [ -f test/autocoding-live-status.test.mjs ] && \
+             [ -f test/autocoding-workflow-trust.test.mjs ] && \
+             [ -f test/autocoding-live-gate-targets.test.mjs ] && \
+             [ -f test/autocoding-merge-finalizer.test.mjs ] && \
              [ -f CONTROL/AUTOCODING/policy.v1.json ]; then
-            echo 'trusted_gate_files=true' >> "$GITHUB_OUTPUT"
+            echo 'gate_files=true' >> "$GITHUB_OUTPUT"
           else
-            echo 'trusted_gate_files=false' >> "$GITHUB_OUTPUT"
-            echo 'BOOTSTRAP_TRUSTED_GATE_FILES_NOT_ON_DEFAULT_BRANCH'
+            echo 'gate_files=false' >> "$GITHUB_OUTPUT"
+            echo 'BOOTSTRAP_GATE_FILES_ABSENT_ON_PR_HEAD'
           fi
 
-      - name: Validator-tests
-        if: github.event_name == 'pull_request' && steps.bootstrap.outputs.trusted_gate_files == 'true'
-        run: node --test test/autocoding-review-gate.test.mjs
+      - name: Validator-, adapter- en vertrouwensgrenstests
+        if: steps.bootstrap.outputs.gate_files == 'true'
+        run: >-
+          node --test test/autocoding-review-gate.test.mjs
+          test/autocoding-shield-adapter.test.mjs test/autocoding-live-status.test.mjs
+          test/autocoding-workflow-trust.test.mjs test/autocoding-live-gate-targets.test.mjs
+          test/autocoding-merge-finalizer.test.mjs
 
       - name: Branchdiff op secrets toetsen
-        if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
@@ -77,43 +112,14 @@ jobs:
             exit 1
           fi
 
-      - name: Live receiptpoort
-        if: steps.bootstrap.outputs.trusted_gate_files == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-        run: |
-          set -euo pipefail
-          enabled="$(node -p "JSON.parse(require('fs').readFileSync('CONTROL/AUTOCODING/policy.v1.json')).live_receipt_gate_enabled")"
-          if [ "$enabled" != true ]; then
-            echo 'BOOTSTRAP_RECEIPT_GATE_DISABLED'
-            exit 0
-          fi
-          gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
-          gh api --paginate --slurp "repos/$REPOSITORY/issues/$PR_NUMBER/comments" > "$RUNNER_TEMP/comment-pages.json"
-          gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PR_NUMBER/reviews" > "$RUNNER_TEMP/review-pages.json"
-          gh api "repos/$REPOSITORY/git/commits/$(node -p "JSON.parse(require('fs').readFileSync('$RUNNER_TEMP/pr.json')).head.sha")" > "$RUNNER_TEMP/commit.json"
-          node --input-type=module <<'NODE'
-          import { readFileSync, writeFileSync } from 'node:fs';
-          import { extractReceiptFromCommentBody } from './scripts/autocoding/verify-review-gate.mjs';
-          const read = (name) => JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/${name}.json`));
-          const pr = read('pr');
-          const task = pr.body?.match(/^task_id=([^\s]+)$/m)?.[1] ?? '';
-          const items = [...read('comment-pages').flat(), ...read('review-pages').flat()];
-          const receipts = items.flatMap((item) => {
-            const receipt = extractReceiptFromCommentBody(item.body);
-            return receipt ? [{ receipt, transport_actor: item.user?.login ?? '' }] : [];
-          });
-          writeFileSync(`${process.env.RUNNER_TEMP}/receipts.json`, JSON.stringify(receipts));
-          writeFileSync(`${process.env.RUNNER_TEMP}/context.json`, JSON.stringify({
-            pr_head_sha: pr.head.sha,
-            pr_tree_sha: read('commit').tree.sha,
-            builder_actor: pr.user.login,
-            task_id: task,
-          }));
-          NODE
-          node scripts/autocoding/verify-review-gate.mjs \
-            --receipts "$RUNNER_TEMP/receipts.json" \
-            --context "$RUNNER_TEMP/context.json" \
-            --policy CONTROL/AUTOCODING/policy.v1.json
+  # Het onprivileged signaal. Deze job leest niets, checkt niets uit en voert geen repositorycode
+  # uit; hij bestaat alleen zodat de voltooiing van deze run de trusted writer via `workflow_run`
+  # kan starten. De writer haalt de doel-PR daarna uit `workflow_run.pull_requests` — een veld dat
+  # GITHUB vult, niet deze run — en meet die PR vervolgens zelf opnieuw.
+  autocoding-shield-signal:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Signaal zonder inhoud
+        run: echo 'AUTOCODING_SHIELD_SIGNAL_ONLY'

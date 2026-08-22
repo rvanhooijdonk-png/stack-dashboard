@@ -1,9 +1,41 @@
 {
   "schema": "AUTOCODING_SHIELD_POLICY_V1",
   "live_receipt_gate_enabled": false,
-  "required_distinct_vendors": 2,
-  "allowed_reviewer_actors": {
-    "codex": [],
-    "gemini": []
+  "merge_finalizer_enabled": false,
+  "class_b_auto_merge_enabled": false,
+  "diagnostic_status_context": "autocoding-shield-diagnostic",
+  "native_review": {
+    "required_vendors": ["codex", "gemini"],
+    "codex": {
+      "actor": "chatgpt-codex-connector[bot]",
+      "user_id": 199175422,
+      "user_type": "Bot",
+      "app_id": 1144995,
+      "allowed_states": ["COMMENTED"],
+      "terminal_success_markers": ["Codex Review: Didn't find any major issues."]
+    },
+    "gemini": {
+      "actor": "gemini-code-assist[bot]",
+      "user_id": 176961590,
+      "user_type": "Bot",
+      "allowed_states": ["COMMENTED", "APPROVED"],
+      "terminal_success_markers": ["## Code Review"]
+    }
+  },
+  "owner_gate": {
+    "schema": "AUTOCODING_OWNER_APPROVAL_V1",
+    "sensitive_path_prefixes": [".github/workflows/", "CONTROL/AUTOCODING/"],
+    "allowed_review_states": ["COMMENTED"],
+    "allowed_owner_actors": ["rvanhooijdonk-png"]
+  },
+  "merge_finalizer": {
+    "schema": "AUTOCODING_MERGE_FINALIZER_V1",
+    "merge_method": "squash",
+    "allowed_base_refs": ["main"],
+    "allowed_builder_actors": ["rvanhooijdonk-png"],
+    "required_checks": ["autocoding-shield"],
+    "required_merge_queue_checks": ["autocoding-shield", "autocoding-merge-group-gate"],
+    "required_check_app_id": 15368,
+    "candidate_limit": 5
   }
 }

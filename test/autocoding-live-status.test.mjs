@@ -1,0 +1,1074 @@
+/**
+ * AUTOCODING_SHIELD — tests van de statuspublicatie.
+ *
+ * Deze tests bewijzen de eigenschap waar de hele live poort op rust: de gepubliceerde commitstatus
+ * is een pure functie van de API-momentopname op de GEMETEN PR-head. Welk event de run startte, in
+ * welke volgorde het bewijs binnenkwam, en of er tussendoor iets is bewerkt, verwijderd of dismissed
+ * mag de uitkomst niet beïnvloeden — alleen het bewijs zelf mag dat. En alles wat geen bewezen GO is,
+ * schrijft `failure` op precies dezelfde commit; er bestaat geen zwijgend pad dat een oude groene
+ * uitspraak laat staan.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+
+import { buildShieldInput } from '../scripts/autocoding/collect-shield-input.mjs';
+import { evaluateShield, REASON } from '../scripts/autocoding/verify-review-gate.mjs';
+import {
+  describeReasons, resolvePublication, resolvePendingPublication, publishStatus, runPublish,
+  parsePublishArgs, PUBLISH_ERROR, DESCRIPTION_LIMIT, STATUS_CONTEXT_RE, PENDING_PUBLICATION,
+  PENDING_INCOMPATIBLE_OPTIONS, PUBLISHABLE_STATES, DIAGNOSTIC_GO_DESCRIPTION,
+} from '../scripts/autocoding/publish-live-status.mjs';
+
+const FIXTURES = 'test/fixtures/autocoding-shield';
+const HEAD = 'b9df1f8398aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const POLICY = JSON.parse(readFileSync('CONTROL/AUTOCODING/policy.v1.json', 'utf8'));
+// V18: de context heet `diagnostic_status_context` en draagt nooit meer een autorisatie.
+const CONTEXT_NAME = POLICY.diagnostic_status_context;
+
+function raw(name) {
+  return JSON.parse(readFileSync(join(FIXTURES, `${name}.json`), 'utf8'));
+}
+
+/** Eén pagina met exact de meegegeven items — de vorm die `gh-bounded-pages.sh` oplevert. */
+function page(items) {
+  return [items];
+}
+
+function flatten(name) {
+  return raw(name).flat();
+}
+
+/**
+ * Draait de complete keten zoals de workflow hem draait: momentopname → adapter → beslisser →
+ * publicatie. `mutate` mag de momentopname aanpassen zoals een event dat zou doen.
+ */
+function publicationFor(mutate = (s) => s, { executionError } = {}) {
+  const snapshot = mutate({
+    pr: raw('pr'),
+    headCommit: raw('head-commit'),
+    prCommits: raw('pr-commits'),
+    issueComments: page(flatten('issue-comments')),
+    reviews: page(flatten('reviews')),
+    reviewComments: raw('review-comments'),
+    changedFiles: raw('files'),
+    policy: POLICY,
+  });
+  const { context, shieldInput } = buildShieldInput(snapshot);
+  const gateResult = evaluateShield({ ...shieldInput, context, policy: POLICY });
+  return resolvePublication({
+    headSha: context.pr_head_sha, statusContext: CONTEXT_NAME, gateResult, executionError,
+  });
+}
+
+test('L1. een schone momentopname levert DIAGNOSTIEK op, geen groen', () => {
+  // V18. Een commitstatus hangt aan de SHA en blijft staan, dus zou een `success` hier door elke
+  // latere pull request op dezelfde commit geërfd worden (Codex-bevinding `3835364972`). De
+  // uitspraak wordt daarom als `pending` geschreven, met een omschrijving die letterlijk zegt wat
+  // zij niet is. De mergeautorisatie leeft in `scripts/autocoding/finalize-merge.mjs`.
+  const publication = publicationFor();
+  assert.deepEqual(publication, {
+    ok: true,
+    sha: HEAD,
+    context: CONTEXT_NAME,
+    state: 'pending',
+    description: DIAGNOSTIC_GO_DESCRIPTION,
+  });
+  assert.match(CONTEXT_NAME, STATUS_CONTEXT_RE);
+  assert.match(DIAGNOSTIC_GO_DESCRIPTION, /not a merge authorization/);
+});
+
+test('L2. convergentie: elke volgorde van hetzelfde bewijs levert byte-identiek dezelfde status', () => {
+  const baseline = publicationFor();
+  const comments = flatten('issue-comments');
+  const reviews = flatten('reviews');
+
+  const permutations = [
+    // Codex ná Gemini, en Gemini ná Codex: het event dat de run startte staat achteraan resp. vooraan.
+    (s) => ({ ...s, issueComments: page([...comments].reverse()), reviews: page(reviews) }),
+    (s) => ({ ...s, issueComments: page(comments), reviews: page([...reviews].reverse()) }),
+    (s) => ({ ...s, issueComments: page([...comments].reverse()), reviews: page([...reviews].reverse()) }),
+    // Gepagineerd binnengekomen in plaats van in één keer: dezelfde feiten, andere transportvorm.
+    (s) => ({ ...s, issueComments: comments.map((c) => [c]), reviews: reviews.map((r) => [r]) }),
+  ];
+
+  for (const permutation of permutations) {
+    assert.deepEqual(publicationFor(permutation), baseline);
+  }
+});
+
+test('L3. een verwijderd Codex-comment maakt dezelfde head rood, niet stil groen', () => {
+  const publication = publicationFor((s) => ({
+    ...s,
+    // Precies wat een `issue_comment: deleted` oplevert: het schone Codex-bewijs op deze head is weg.
+    issueComments: page(flatten('issue-comments').filter((c) => c.id !== 4)),
+  }));
+  assert.equal(publication.sha, HEAD, 'dezelfde commit als de groene uitspraak');
+  assert.equal(publication.context, CONTEXT_NAME, 'dezelfde context overschrijft de vorige status');
+  assert.equal(publication.state, 'failure');
+  assert.match(publication.description, /INSUFFICIENT_GO/);
+});
+
+test('L4. een dismissed Gemini-review maakt dezelfde head rood', () => {
+  const publication = publicationFor((s) => ({
+    ...s,
+    reviews: page(flatten('reviews').map((r) => (
+      r.id === 4997700001 ? { ...r, state: 'DISMISSED' } : r
+    ))),
+  }));
+  assert.equal(publication.sha, HEAD);
+  assert.equal(publication.state, 'failure');
+  assert.match(publication.description, /INSUFFICIENT_GO/);
+});
+
+test('L5. een bewerkt Codex-comment dat zijn succesvorm verliest maakt dezelfde head rood', () => {
+  const publication = publicationFor((s) => ({
+    ...s,
+    issueComments: page(flatten('issue-comments').map((c) => (
+      c.id === 4
+        ? { ...c, body: 'Codex Review: 2 comment(s) generated.\n\n**Reviewed commit:** `b9df1f8398`\n' }
+        : c
+    ))),
+  }));
+  assert.equal(publication.sha, HEAD);
+  assert.equal(publication.state, 'failure');
+});
+
+test('L6. alles wat geen bewezen GO is, is failure op dezelfde head', () => {
+  const cases = [
+    ['NO_GO met redenen', { decision: 'NO_GO', reasons: [REASON.INSUFFICIENT_GO] }, ''],
+    ['NO_GO zonder redenen', { decision: 'NO_GO', reasons: [] }, ''],
+    ['onleesbaar resultaat', null, ''],
+    ['leeg object', {}, ''],
+    ['GO met resterende redenen', { decision: 'GO', reasons: [REASON.OWNER_GATE_REQUIRED] }, ''],
+    ['GO naast een uitvoeringsfout', { decision: 'GO', reasons: [] }, PUBLISH_ERROR.GATE_EXECUTION_ERROR],
+    ['truncatie', { decision: 'NO_GO', reasons: [REASON.FILES_INCOMPLETE] }, ''],
+    ['parsefout van de beslisser', { decision: 'NO_GO', reasons: [REASON.PARSE_ERROR] }, ''],
+  ];
+  for (const [label, gateResult, executionError] of cases) {
+    const publication = resolvePublication({
+      headSha: HEAD, statusContext: CONTEXT_NAME, gateResult, executionError,
+    });
+    assert.equal(publication.ok, true, label);
+    assert.equal(publication.sha, HEAD, label);
+    assert.equal(publication.context, CONTEXT_NAME, label);
+    assert.equal(publication.state, 'failure', label);
+    assert.ok(publication.description.startsWith('NO_GO: '), label);
+  }
+  // En de bewezen GO is `pending` — er bestaat geen enkele invoer die `success` oplevert.
+  assert.equal(
+    resolvePublication({ headSha: HEAD, statusContext: CONTEXT_NAME, gateResult: { decision: 'GO', reasons: [] } }).state,
+    'pending',
+  );
+});
+
+test('L6a. er bestaat GEEN invoer waarop deze route `success` publiceert', () => {
+  // De allowlist is gesloten en bevat `success` niet. Dat is de structurele vorm van V18: de route
+  // KAN geen mergeautorisatie meer dragen, ook niet per ongeluk en ook niet na een policywijziging.
+  assert.deepEqual([...PUBLISHABLE_STATES], ['pending', 'failure']);
+
+  const invoeren = [
+    { decision: 'GO', reasons: [] },
+    { decision: 'GO', reasons: [REASON.OWNER_GATE_REQUIRED] },
+    { decision: 'NO_GO', reasons: [] },
+    { decision: 'success', reasons: [] },
+    { decision: 'GO', reasons: [], state: 'success' },
+    null, undefined, {}, 'GO', 42,
+  ];
+  for (const gateResult of invoeren) {
+    for (const executionError of ['', undefined, PUBLISH_ERROR.GATE_EXECUTION_ERROR, 'success']) {
+      const publication = resolvePublication({
+        headSha: HEAD, statusContext: CONTEXT_NAME, gateResult, executionError,
+      });
+      if (publication.ok !== true) continue;
+      assert.ok(PUBLISHABLE_STATES.includes(publication.state), JSON.stringify(publication));
+      assert.notEqual(publication.state, 'success');
+    }
+  }
+});
+
+test('L6b. de laatste poort vóór het netwerk weigert elke niet-toegestane state', async () => {
+  // De weigering staat vóór `fetch`, niet erna: een mutant die `success` terugbrengt doet NUL
+  // verzoeken in plaats van één te veel, en laat dus geen erfbaar groen op een gedeelde commit na.
+  for (const state of ['success', 'error', 'SUCCESS', '', undefined]) {
+    let aanroepen = 0;
+    const posted = await publishStatus({
+      repository: 'rvanhooijdonk-png/stack-dashboard',
+      token: 'x-token-x',
+      fetchImpl: async () => { aanroepen += 1; return { status: 201 }; },
+      publication: {
+        ok: true, sha: HEAD, context: CONTEXT_NAME, state, description: 'wat dan ook',
+      },
+    });
+    assert.deepEqual(posted, { ok: false, blocked: PUBLISH_ERROR.STATUS_STATE_NOT_ALLOWED }, String(state));
+    assert.equal(aanroepen, 0, String(state));
+  }
+});
+
+test('L7. zonder gemeten head of geldige context wordt er niets gepubliceerd, ook niet groen', () => {
+  for (const headSha of ['', undefined, 'b9df1f8398', `${HEAD}Z`, HEAD.toUpperCase()]) {
+    const publication = resolvePublication({
+      headSha, statusContext: CONTEXT_NAME, gateResult: { decision: 'GO', reasons: [] },
+    });
+    assert.deepEqual(publication, { ok: false, blocked: PUBLISH_ERROR.HEAD_UNMEASURED });
+  }
+  for (const statusContext of ['', undefined, '/leading-slash', 'met spatie']) {
+    const publication = resolvePublication({
+      headSha: HEAD, statusContext, gateResult: { decision: 'GO', reasons: [] },
+    });
+    assert.deepEqual(publication, { ok: false, blocked: PUBLISH_ERROR.STATUS_CONTEXT_INVALID });
+  }
+});
+
+test('L8. de omschrijving is een gesloten, gesorteerde codelijst binnen de GitHub-limiet', () => {
+  const sorted = describeReasons([REASON.OWNER_GATE_REQUIRED, REASON.FILES_INCOMPLETE, REASON.STALE_HEAD]);
+  assert.equal(sorted, `NO_GO: ${[REASON.FILES_INCOMPLETE, REASON.OWNER_GATE_REQUIRED, REASON.STALE_HEAD].sort().join(',')}`);
+  // Volgorde van binnenkomst en dubbelingen mogen de tekst niet veranderen: twee runs met dezelfde
+  // bevindingen schrijven dezelfde regel.
+  assert.equal(describeReasons([REASON.STALE_HEAD, REASON.FILES_INCOMPLETE, REASON.OWNER_GATE_REQUIRED, REASON.STALE_HEAD]), sorted);
+
+  // Onbekende inhoud wordt nooit doorgegeven, maar evenmin verzwegen.
+  const injected = describeReasons(['ruwe stderr: https://example.invalid/pad/naar/geheim', 42, null]);
+  assert.equal(injected, `NO_GO: ${PUBLISH_ERROR.UNRECOGNISED_REASON}`);
+  assert.ok(!injected.includes('http'));
+  assert.equal(describeReasons([]), `NO_GO: ${PUBLISH_ERROR.UNSPECIFIED}`);
+
+  // Alle codes tegelijk past niet in 140 tekens; dan blijft het aantal weggelaten codes zichtbaar.
+  const all = describeReasons(Object.values(REASON));
+  assert.ok(all.length <= DESCRIPTION_LIMIT, `te lang: ${all.length}`);
+  assert.match(all, /,\+\d+$/);
+  for (const part of all.slice('NO_GO: '.length).split(',')) {
+    assert.ok(/^\+\d+$/.test(part) || Object.values(REASON).includes(part), `afgekapte code: ${part}`);
+  }
+});
+
+test('L9. publishStatus schrijft op /statuses/<gemeten sha> en lekt het token niet', () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return { status: 201 };
+  };
+  const publication = {
+    ok: true, sha: HEAD, context: CONTEXT_NAME, state: 'failure', description: 'NO_GO: INSUFFICIENT_GO',
+  };
+  return publishStatus({
+    repository: 'rvanhooijdonk-png/stack-dashboard', publication, token: 'x-token-x', fetchImpl,
+  }).then(async (posted) => {
+    assert.deepEqual(posted, { ok: true, status: 201 });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, `https://api.github.com/repos/rvanhooijdonk-png/stack-dashboard/statuses/${HEAD}`);
+    assert.equal(calls[0].init.method, 'POST');
+    assert.deepEqual(JSON.parse(calls[0].init.body), {
+      state: 'failure', context: CONTEXT_NAME, description: 'NO_GO: INSUFFICIENT_GO',
+    });
+
+    // Een niet-201 is geen publicatie: fail-closed, en de reden is de HTTP-code, niet het antwoord.
+    const rejected = await publishStatus({
+      repository: 'rvanhooijdonk-png/stack-dashboard', publication, token: 'x-token-x',
+      fetchImpl: async () => ({ status: 403, body: 'geheime foutmelding' }),
+    });
+    assert.deepEqual(rejected, { ok: false, status: 403 });
+
+    // Een reponaam die geen `owner/repo` is bereikt de API nooit.
+    let touched = false;
+    const invalid = await publishStatus({
+      repository: '../../etc', publication, token: 'x-token-x',
+      fetchImpl: async () => { touched = true; return { status: 201 }; },
+    });
+    assert.deepEqual(invalid, { ok: false, blocked: PUBLISH_ERROR.REPOSITORY_INVALID });
+    assert.equal(touched, false);
+  });
+});
+
+test('L9b. een ongemeten publicatie doet NUL fetches en heet HEAD_UNMEASURED', async () => {
+  // `publishStatus` is los aanroepbaar, dus mag hij niet leunen op de resolvers die de head al
+  // afdwingen. Vóór deze grens was `publication.sha` een onbewaakte property-read met twee
+  // verschillende gevolgen: `null` gooide een TypeError die de transportafvang verkleedde als
+  // `STATUS_TRANSPORT_ERROR`, en een object ZONDER geldige sha gooide niets maar stuurde een echte
+  // POST naar `/statuses/undefined` — of, bij een sha met `/` of `..` erin, naar een heel ander pad.
+  let touched = 0;
+  const fetchImpl = async () => { touched += 1; return { status: 201 }; };
+  const ongemeten = [
+    null,
+    undefined,
+    {},
+    { state: 'pending', context: CONTEXT_NAME, description: 'x' },
+    { sha: null, state: 'pending', context: CONTEXT_NAME },
+    { sha: '', state: 'pending', context: CONTEXT_NAME },
+    { sha: HEAD.slice(0, 39), state: 'pending', context: CONTEXT_NAME },
+    { sha: `${HEAD}0`, state: 'pending', context: CONTEXT_NAME },
+    { sha: HEAD.toUpperCase(), state: 'pending', context: CONTEXT_NAME },
+    { sha: `../../${HEAD}`, state: 'pending', context: CONTEXT_NAME },
+    { sha: `${HEAD}/../../../repos/elders/statuses/${HEAD}`, state: 'pending', context: CONTEXT_NAME },
+    { sha: 42, state: 'pending', context: CONTEXT_NAME },
+    'not-an-object',
+    42,
+    [{ sha: HEAD, state: 'pending', context: CONTEXT_NAME }],
+  ];
+  for (const publication of ongemeten) {
+    const posted = await publishStatus({
+      repository: 'rvanhooijdonk-png/stack-dashboard', publication, token: 'x-token-x', fetchImpl,
+    });
+    assert.deepEqual(
+      posted, { ok: false, blocked: PUBLISH_ERROR.HEAD_UNMEASURED },
+      `ongemeten publicatie: ${JSON.stringify(publication) ?? String(publication)}`,
+    );
+  }
+  assert.equal(touched, 0, 'geen enkele fetch op een ongemeten head');
+
+  // De reponaamgrens blijft de eerste poort: bij twee kapotte invoeren is de uitkomst deterministisch
+  // en niet afhankelijk van de volgorde waarin de aanroeper toevallig iets vergat.
+  assert.deepEqual(
+    await publishStatus({ repository: '../../etc', publication: null, token: 'x', fetchImpl }),
+    { ok: false, blocked: PUBLISH_ERROR.REPOSITORY_INVALID },
+  );
+  assert.equal(touched, 0);
+
+  // En de grens is niet te ruim: een volledig gemeten head gaat er gewoon doorheen.
+  const goed = await publishStatus({
+    repository: 'rvanhooijdonk-png/stack-dashboard', token: 'x-token-x', fetchImpl,
+    publication: { ok: true, sha: HEAD, context: CONTEXT_NAME, ...PENDING_PUBLICATION },
+  });
+  assert.deepEqual(goed, { ok: true, status: 201 });
+  assert.equal(touched, 1);
+});
+
+test('L10. de CLI publiceert alleen bij een leesbaar GO-resultaat en geeft anders rc 1', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'autocoding-live-status-'));
+  const goPath = join(dir, 'go.json');
+  const noGoPath = join(dir, 'no-go.json');
+  const brokenPath = join(dir, 'broken.json');
+  writeFileSync(goPath, JSON.stringify({ decision: 'GO', reasons: [] }));
+  writeFileSync(noGoPath, JSON.stringify({ decision: 'NO_GO', reasons: [REASON.INSUFFICIENT_GO] }));
+  writeFileSync(brokenPath, '{ dit is geen json');
+
+  const logged = [];
+  const original = console.log;
+  console.log = (line) => logged.push(String(line));
+  const readFile = (path) => readFileSync(path, 'utf8');
+  try {
+    const base = ['--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', HEAD,
+      '--status-context', CONTEXT_NAME];
+
+    assert.equal(await runPublish([...base, '--gate-result', goPath, '--dry-run'], { readFile }), 0);
+    assert.equal(JSON.parse(logged.at(-1)).state, 'pending');
+
+    assert.equal(await runPublish([...base, '--gate-result', noGoPath, '--dry-run'], { readFile }), 1);
+    assert.equal(JSON.parse(logged.at(-1)).state, 'failure');
+
+    // Onleesbaar resultaat: nog steeds een publicatie, op dezelfde head, en rood.
+    assert.equal(await runPublish([...base, '--gate-result', brokenPath, '--dry-run'], { readFile }), 1);
+    assert.deepEqual(JSON.parse(logged.at(-1)), {
+      ok: true, sha: HEAD, context: CONTEXT_NAME, state: 'failure',
+      description: `NO_GO: ${PUBLISH_ERROR.GATE_RESULT_UNREADABLE}`,
+    });
+
+    // Ontbrekend bestand (de gate-stap kwam nooit tot schrijven) idem.
+    assert.equal(await runPublish([...base, '--gate-result', join(dir, 'weg.json'), '--dry-run'], { readFile }), 1);
+    assert.match(logged.at(-1), new RegExp(PUBLISH_ERROR.GATE_RESULT_UNREADABLE));
+
+    // Een gemelde uitvoeringsfout overstemt zelfs een GO-bestand.
+    assert.equal(await runPublish([
+      ...base, '--gate-result', goPath, '--execution-error', PUBLISH_ERROR.GATE_EXECUTION_ERROR, '--dry-run',
+    ], { readFile }), 1);
+    assert.equal(JSON.parse(logged.at(-1)).state, 'failure');
+
+    // Zonder gemeten head is er niets om op te publiceren; dat wordt gemeld, niet verzwegen.
+    assert.equal(await runPublish([
+      '--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', '',
+      '--status-context', CONTEXT_NAME, '--gate-result', goPath, '--dry-run',
+    ], { readFile }), 1);
+    assert.equal(logged.at(-1), `LIVE_STATUS_NOT_PUBLISHABLE_${PUBLISH_ERROR.HEAD_UNMEASURED}`);
+
+    for (const line of logged) {
+      assert.ok(!line.includes('x-token-x'), 'geen tokenmateriaal in de uitvoer');
+    }
+  } finally {
+    console.log = original;
+  }
+});
+
+test('L10a. een falende fetch eindigt in EEN vaste categorie, nooit in een crash of foutlek', async () => {
+  // De GitHub-API kan wegvallen: DNS, TLS, timeout, reset. `fetch` gooit dan. Zonder afvang werd dat
+  // een onafgevangen promise-rejection met stacktrace in het joblog; nu is het een gesloten
+  // categorie zonder een letter uit de exceptie.
+  const publication = {
+    ok: true, sha: HEAD, context: CONTEXT_NAME, state: 'failure', description: 'NO_GO: PARSE_ERROR',
+  };
+  const geheim = 'ECONNREFUSED api.github.com token=x-token-x';
+  const stukkeFetches = [
+    async () => { throw new Error(geheim); },
+    () => { throw new Error(geheim); },              // synchroon falende impl
+    () => Promise.reject(new Error(geheim)),         // afgewezen promise zonder throw
+    {},                                               // geen aanroepbare fetch in deze runtime
+  ];
+  for (const fetchImpl of stukkeFetches) {
+    const posted = await publishStatus({
+      repository: 'rvanhooijdonk-png/stack-dashboard', publication, token: 'x-token-x', fetchImpl,
+    });
+    assert.deepEqual(posted, { ok: false, blocked: PUBLISH_ERROR.STATUS_TRANSPORT_ERROR });
+  }
+});
+
+test('L10b. runPublish eindigt rc 1 op een transportfout en logt alleen de vaste categorie', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'autocoding-live-status-'));
+  const goPath = join(dir, 'go.json');
+  writeFileSync(goPath, JSON.stringify({ decision: 'GO', reasons: [] }));
+  const readFile = (path) => readFileSync(path, 'utf8');
+  const geheim = 'getaddrinfo ENOTFOUND api.github.com (bearer x-token-x)';
+
+  const logged = [];
+  const original = console.log;
+  console.log = (line) => logged.push(String(line));
+  try {
+    const rc = await runPublish([
+      '--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', HEAD,
+      '--status-context', CONTEXT_NAME, '--gate-result', goPath,
+    ], { readFile, fetchImpl: async () => { throw new Error(geheim); } });
+
+    // Rood, niet stil groen: een mislukte publicatie is nooit een geslaagde poort.
+    assert.equal(rc, 1);
+    assert.deepEqual(logged, [`LIVE_STATUS_POST_REJECTED_${PUBLISH_ERROR.STATUS_TRANSPORT_ERROR}`]);
+    for (const line of logged) {
+      assert.ok(!line.includes('x-token-x'), 'geen tokenmateriaal in de uitvoer');
+      assert.ok(!line.includes('ENOTFOUND'), 'geen exceptietekst in de uitvoer');
+      assert.ok(!line.includes('api.github.com'), 'geen endpoint in de uitvoer');
+      assert.ok(!line.includes(geheim));
+    }
+  } finally {
+    console.log = original;
+  }
+});
+
+test('L10c. een transportfout in een APART PROCES geeft rc 1 zonder unhandled rejection', () => {
+  // De echte regressie zat op procesniveau: een afgewezen `fetch` verliet `publishStatus` als
+  // onafgevangen promise-rejection, met stacktrace op stderr. Dit draait de CLI-lus daarom in een
+  // eigen Node-proces met een gooiende `fetch` — geen netwerk, wel een echt proces.
+  const dir = mkdtempSync(join(tmpdir(), 'autocoding-live-status-cli-'));
+  const goPath = join(dir, 'go.json');
+  writeFileSync(goPath, JSON.stringify({ decision: 'GO', reasons: [] }));
+  const geheim = 'getaddrinfo ENOTFOUND api.github.com (bearer x-token-x)';
+  const script = `
+    globalThis.fetch = () => Promise.reject(new Error(${JSON.stringify(geheim)}));
+    const { readFileSync } = await import('node:fs');
+    const { runPublish } = await import('./scripts/autocoding/publish-live-status.mjs');
+    process.exitCode = await runPublish([
+      '--repository', 'rvanhooijdonk-png/stack-dashboard',
+      '--head-sha', ${JSON.stringify(HEAD)},
+      '--status-context', ${JSON.stringify(CONTEXT_NAME)},
+      '--gate-result', ${JSON.stringify(goPath)},
+    ], { readFile: (path) => readFileSync(path, 'utf8') });
+  `;
+  const cli = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8', env: { ...process.env, GITHUB_TOKEN: 'x-token-x' },
+  });
+  assert.equal(cli.status, 1);
+  assert.equal(cli.stderr, '', 'geen stacktrace, geen unhandled rejection');
+  assert.equal(cli.stdout.trim(), `LIVE_STATUS_POST_REJECTED_${PUBLISH_ERROR.STATUS_TRANSPORT_ERROR}`);
+  assert.ok(!cli.stdout.includes('x-token-x'));
+  assert.ok(!cli.stdout.includes('ENOTFOUND'));
+});
+
+test('L11. de CLI als losse binary schrijft geen stderr en lekt geen argumenten', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'autocoding-live-status-cli-'));
+  const goPath = join(dir, 'go.json');
+  writeFileSync(goPath, JSON.stringify({ decision: 'GO', reasons: [] }));
+  const cli = spawnSync(process.execPath, [
+    'scripts/autocoding/publish-live-status.mjs',
+    '--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', HEAD,
+    '--status-context', CONTEXT_NAME, '--gate-result', goPath, '--dry-run',
+  ], { encoding: 'utf8', env: { ...process.env, GITHUB_TOKEN: 'x-token-x' } });
+  assert.equal(cli.status, 0);
+  assert.equal(cli.stderr, '');
+  const publication = JSON.parse(cli.stdout);
+  assert.equal(publication.state, 'pending');
+  assert.equal(publication.sha, HEAD);
+  assert.ok(!cli.stdout.includes('x-token-x'));
+});
+
+test('L12. de workflow publiceert altijd, op de gemeten head, met de enige schrijfscope in de stack', () => {
+  const strip = (path) => readFileSync(path, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+  // De statuswriter staat in een APART bestand dat door geen enkele PR-gecontroleerde event start.
+  const liveGate = strip('.github/workflows/autocoding-shield-live-gate.yml');
+  const prShield = strip('.github/workflows/autocoding-shield.yml');
+
+  // De statuscontext is bewust geen jobnaam: zo kan de required check nooit samenvallen met een
+  // Actions-run die aan de default-branch-SHA hangt.
+  assert.ok(!liveGate.includes(`  ${CONTEXT_NAME}:`), 'de statuscontext mag geen jobnaam zijn');
+  assert.notEqual(CONTEXT_NAME, 'autocoding-shield');
+  assert.notEqual(CONTEXT_NAME, 'autocoding-shield-live-gate');
+
+  // Alleen de trusted job mag statussen schrijven, en die job checkt de default branch uit. Het
+  // PR-bestand — de enige dat op een `pull_request`-event zijn eigen voorgestelde definitie draait —
+  // heeft geen enkele schrijfscope, dus is er geen event waarop PR-YAML `statuses: write` krijgt.
+  assert.match(liveGate, /^\s+statuses: write$/m);
+  assert.ok(!/:\s*write\b/.test(prShield), 'de PR-shield heeft geen schrijfscope');
+  assert.ok(!/^ {2}pull_request(_target)?:$/m.test(liveGate), 'de trusted writer kent geen PR-event');
+  assert.equal(liveGate.split('\n').filter((l) => /^\s+[a-z-]+:\s*write\b/.test(l)).length, 1);
+
+  // De publicatie draait ook als de poortstap zelf ontplofte, en uitsluitend op de GEMETEN head:
+  // `$head_sha` komt uit een eigen read-only API-lezing binnen de lus, nooit uit het eventpayload.
+  assert.match(liveGate, /node scripts\/autocoding\/publish-live-status\.mjs/);
+  assert.match(liveGate, /--head-sha "\$head_sha"/);
+  assert.ok(
+    !/--head-sha "\$\{\{ github\.event/.test(liveGate),
+    'de head mag nooit uit het eventpayload komen',
+  );
+  // Een crash van de poortstap wordt opgevangen (`|| true`) en als uitvoeringsfout doorgegeven,
+  // zodat de publicatie eronder hoe dan ook draait.
+  assert.match(liveGate, /verify-review-gate\.mjs[\s\S]*?\|\| true/);
+  assert.match(liveGate, /--execution-error "\$execution_error"/);
+
+  // Record-lokale foutafhandeling: een mislukte invalidatie of een kapotte poortstap maakt de job
+  // rood, maar breekt hem niet halverwege af — afbreken zou een `pending` laten staan zonder ooit
+  // een uitspraak te publiceren.
+  assert.ok(!/^\s*set -euo pipefail$/m.test(publishStep(liveGate)), 'de stap mag niet vroegtijdig stoppen');
+  assert.match(publishStep(liveGate), /^\s*set -uo pipefail$/m);
+  assert.match(liveGate, /overall=1/);
+  assert.match(liveGate, /exit "\$overall"/);
+});
+
+/** Het `run:`-blok van de publicatiestap; daarbinnen mag geen `set -e` staan. */
+function publishStep(liveGate) {
+  const start = liveGate.indexOf(`      - name: ${SCHRIJFSTAP}`);
+  assert.ok(start !== -1, 'publicatiestap ontbreekt');
+  return liveGate.slice(start);
+}
+
+/** De naam van de enige stap die statussen schrijft; sinds V11 meet die precies één PR. */
+const SCHRIJFSTAP = 'Meet, beslis en publiceer deze pull request';
+
+
+// --- Argumentparser -------------------------------------------------------------------------------
+//
+// Gemini medium, review 4998403781, inline 3834607793. `runPublish()` las argv in VASTE PAREN. Eén
+// losse booleaanse vlag middenin de lijst verschoof daardoor elk volgend key/valuepaar met één plek:
+// `--head-sha` kreeg de waarde van `--status-context`, en de laatste sleutel verloor zijn waarde.
+// Dat gebeurde STIL — de vlaggen bleven herkenbaar, alleen de bindingen klopten niet meer.
+
+test('L13. --dry-run is positie-onafhankelijk: begin, midden en einde binden identiek', () => {
+  const paren = [
+    ['--repository', 'rvanhooijdonk-png/stack-dashboard'],
+    ['--head-sha', HEAD],
+    ['--status-context', CONTEXT_NAME],
+    ['--gate-result', '/tmp/gate-result.json'],
+  ];
+  const vlak = paren.flat();
+  const verwacht = {
+    '--repository': 'rvanhooijdonk-png/stack-dashboard',
+    '--head-sha': HEAD,
+    '--status-context': CONTEXT_NAME,
+    '--gate-result': '/tmp/gate-result.json',
+  };
+
+  // Elke invoegpositie op een paargrens — begin, alle tussenposities, einde.
+  for (let i = 0; i <= paren.length; i += 1) {
+    const argv = [...paren.slice(0, i).flat(), '--dry-run', ...paren.slice(i).flat()];
+    const parsed = parsePublishArgs(argv);
+    assert.equal(parsed.ok, true, `positie ${i}`);
+    assert.equal(parsed.dryRun, true, `positie ${i}`);
+    assert.deepEqual(Object.fromEntries(parsed.values), verwacht, `positie ${i}`);
+  }
+
+  // Het scherpe geval uit de bevinding: de vlag MIDDEN IN een paar-lijst. De oude paarlezing
+  // (`i += 2`) las hier `--head-sha` als waarde van `--dry-run` en verschoof alles daarna.
+  const middenin = ['--repository', 'rvanhooijdonk-png/stack-dashboard', '--dry-run',
+    '--head-sha', HEAD, '--status-context', CONTEXT_NAME, '--gate-result', '/tmp/gate-result.json'];
+  const oud = new Map();
+  for (let i = 0; i < middenin.length; i += 2) oud.set(middenin[i], middenin[i + 1]);
+  // De vlag op een ONEVEN positie schuift alles erna een plek op: `--head-sha` belandt als WAARDE
+  // van `--dry-run` en verdwijnt als sleutel, terwijl de gemeten head zelf sleutel wordt.
+  assert.equal(oud.get('--dry-run'), '--head-sha', 'de oude paarlezing verschoof daadwerkelijk');
+  assert.equal(oud.get('--head-sha'), undefined, 'de gemeten head raakte kwijt');
+  assert.equal(oud.get(HEAD), '--status-context');
+  // De nieuwe parser bindt elke sleutel aan zijn eigen waarde, ongeacht waar de vlag staat.
+  assert.equal(parsePublishArgs(middenin).values.get('--head-sha'), HEAD);
+  assert.equal(parsePublishArgs(middenin).values.get('--status-context'), CONTEXT_NAME);
+  assert.equal(parsePublishArgs(middenin).values.get('--gate-result'), '/tmp/gate-result.json');
+
+  // En zonder de vlag is `dryRun` gewoon false.
+  assert.equal(parsePublishArgs(vlak).dryRun, false);
+});
+
+test('L13a. onbekende, dubbele en waardeloze argumenten eindigen fail-closed', () => {
+  const goed = ['--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', HEAD,
+    '--status-context', CONTEXT_NAME, '--gate-result', '/tmp/gate-result.json'];
+  assert.equal(parsePublishArgs(goed).ok, true);
+
+  const fout = [
+    ['--head-sha'],                                   // sleutel zonder waarde, aan het einde
+    [...goed, '--execution-error'],                   // idem, na een geldige lijst
+    ['--head-sha', '--status-context', CONTEXT_NAME], // waarde is zelf een sleutel
+    ['--head-sha', '--dry-run'],                      // waarde is zelf een vlag
+    ['--onbekend', 'x'],                              // onbekende sleutel
+    ['--dry-runs'],                                   // bijna-vlag
+    [...goed, 'losse-waarde'],                        // positioneel argument zonder sleutel
+    ['--head-sha', HEAD, '--head-sha', HEAD],         // dubbele sleutel
+    [...goed, '--dry-run', '--dry-run'],              // dubbele vlag
+    [42],                                             // niet-string token
+  ];
+  for (const argv of fout) {
+    const parsed = parsePublishArgs(argv);
+    assert.equal(parsed.ok, false, JSON.stringify(argv));
+    assert.equal(parsed.error, PUBLISH_ERROR.ARGUMENTS_INVALID, JSON.stringify(argv));
+  }
+});
+
+test('L13b. runPublish weigert kapotte argv en publiceert dan niets', async () => {
+  const logged = [];
+  const original = console.log;
+  console.log = (line) => logged.push(String(line));
+  let touched = false;
+  const fetchImpl = async () => { touched = true; return { status: 201 }; };
+  try {
+    const rc = await runPublish(
+      ['--repository', 'rvanhooijdonk-png/stack-dashboard', '--onbekend', 'x'],
+      { fetchImpl, readFile: () => JSON.stringify({ decision: 'GO', reasons: [] }) },
+    );
+    assert.equal(rc, 1);
+    assert.equal(touched, false, 'een kapotte aanroep bereikt de API nooit');
+    assert.equal(logged.at(-1), `LIVE_STATUS_NOT_PUBLISHABLE_${PUBLISH_ERROR.ARGUMENTS_INVALID}`);
+  } finally {
+    console.log = original;
+  }
+});
+
+// --- Invalidatie (pendingmodus) ------------------------------------------------------------------
+//
+// Codex P1, review 4998653669, inline 3834812708. De writerlock houdt hooguit één WACHTENDE run aan.
+// Wordt die door een nieuwe aanleiding geannuleerd, dan verdween de invalidatie die hij had moeten
+// doen — en bleef een eerder gepubliceerde `success` bruikbaar. De reparatie is dat iedere writer
+// EERST elke open head op `pending` zet, vóór er ook maar één detail-GET is gedaan. Dat maakt de
+// publisher de enige plek waar die invalidatie vandaan komt, dus wordt hij hier gemeten.
+
+test('L14. de pendingstatus is vast, draagt geen uitspraak en staat op de gemeten head', () => {
+  const invalidatie = resolvePendingPublication({ headSha: HEAD, statusContext: CONTEXT_NAME });
+  assert.equal(invalidatie.ok, true);
+  assert.equal(invalidatie.state, 'pending');
+  assert.notEqual(invalidatie.state, 'success', 'een invalidatie mag nooit groen zijn');
+  assert.equal(invalidatie.sha, HEAD, 'altijd op de gemeten head');
+  assert.equal(invalidatie.context, CONTEXT_NAME, 'exact dezelfde context als de uitspraak');
+  assert.equal(invalidatie.description, PENDING_PUBLICATION.description);
+  assert.ok(invalidatie.description.length <= DESCRIPTION_LIMIT);
+
+  // Twee aanroepen met dezelfde head leveren byte-identiek dezelfde status: de invalidatie is een
+  // constante, geen momentopname.
+  assert.deepEqual(resolvePendingPublication({ headSha: HEAD, statusContext: CONTEXT_NAME }), invalidatie);
+
+  // Zonder gemeten head of zonder geldige context wordt er niets geschreven — ook geen pending.
+  for (const kapot of ['', 'HEAD', HEAD.slice(0, 39), `${HEAD}0`]) {
+    const geweigerd = resolvePendingPublication({ headSha: kapot, statusContext: CONTEXT_NAME });
+    assert.equal(geweigerd.ok, false, JSON.stringify(kapot));
+    assert.equal(geweigerd.blocked, PUBLISH_ERROR.HEAD_UNMEASURED);
+  }
+  const geenContext = resolvePendingPublication({ headSha: HEAD, statusContext: '' });
+  assert.equal(geenContext.ok, false);
+  assert.equal(geenContext.blocked, PUBLISH_ERROR.STATUS_CONTEXT_INVALID);
+});
+
+test('L15. --pending geeft rc 0 UITSLUITEND als de pendingstatus werkelijk geplaatst is', async () => {
+  const argv = ['--pending', '--repository', 'rvanhooijdonk-png/stack-dashboard',
+    '--head-sha', HEAD, '--status-context', CONTEXT_NAME];
+  const logged = [];
+  const original = console.log;
+  console.log = (line) => logged.push(String(line));
+  try {
+    // Geaccepteerd: 201 → rc 0, en de POST draagt state `pending` op de gemeten head.
+    const verzoeken = [];
+    const ok = async (url, init) => {
+      verzoeken.push({ url, body: JSON.parse(init.body) });
+      return { status: 201 };
+    };
+    assert.equal(await runPublish(argv, { fetchImpl: ok }), 0);
+    assert.equal(verzoeken.length, 1);
+    assert.equal(verzoeken[0].url, `https://api.github.com/repos/rvanhooijdonk-png/stack-dashboard/statuses/${HEAD}`);
+    assert.deepEqual(verzoeken[0].body, {
+      state: 'pending', context: CONTEXT_NAME, description: PENDING_PUBLICATION.description,
+    });
+    assert.equal(logged.at(-1), 'LIVE_STATUS_PENDING_PUBLISHED');
+
+    // Geweigerd door de API → rc 1. De head kan dan nog groen staan, dus moet de job dat weten.
+    assert.equal(await runPublish(argv, { fetchImpl: async () => ({ status: 422 }) }), 1);
+    assert.equal(logged.at(-1), 'LIVE_STATUS_PENDING_POST_REJECTED_422');
+
+    // Transportfout → rc 1, één vaste categorie, geen stacktrace en geen verzoekdetails.
+    assert.equal(await runPublish(argv, { fetchImpl: () => { throw new Error('boom'); } }), 1);
+    assert.equal(logged.at(-1), `LIVE_STATUS_PENDING_POST_REJECTED_${PUBLISH_ERROR.STATUS_TRANSPORT_ERROR}`);
+
+    // Geen gemeten head → er wordt niets gePOST en de rc is 1.
+    let geraakt = false;
+    const rc = await runPublish(
+      ['--pending', '--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', '',
+        '--status-context', CONTEXT_NAME],
+      { fetchImpl: async () => { geraakt = true; return { status: 201 }; } },
+    );
+    assert.equal(rc, 1);
+    assert.equal(geraakt, false);
+    assert.equal(logged.at(-1), `LIVE_STATUS_PENDING_NOT_PUBLISHABLE_${PUBLISH_ERROR.HEAD_UNMEASURED}`);
+  } finally {
+    console.log = original;
+  }
+});
+
+test('L16. de pending-CLI heeft een GESLOTEN vorm en kan geen uitspraak meesmokkelen', () => {
+  const basis = ['--pending', '--repository', 'rvanhooijdonk-png/stack-dashboard',
+    '--head-sha', HEAD, '--status-context', CONTEXT_NAME];
+  const goed = parsePublishArgs(basis);
+  assert.equal(goed.ok, true);
+  assert.equal(goed.pending, true);
+  assert.equal(parsePublishArgs(basis.slice(1)).pending, false, 'zonder de vlag is er geen pendingmodus');
+
+  // Een poortresultaat of uitvoeringsfout heeft in deze modus geen betekenis. Stil negeren zou de
+  // aanroeper laten denken dat er een uitspraak is gepubliceerd; de vorm bestaat dus niet.
+  assert.deepEqual([...PENDING_INCOMPATIBLE_OPTIONS], ['--gate-result', '--execution-error']);
+  for (const optie of PENDING_INCOMPATIBLE_OPTIONS) {
+    const parsed = parsePublishArgs([...basis, optie, '/tmp/x.json']);
+    assert.equal(parsed.ok, false, optie);
+    assert.equal(parsed.error, PUBLISH_ERROR.ARGUMENTS_INVALID, optie);
+  }
+  // Ook andersom: de uitspraakvorm mag de vlag niet per ongeluk oppikken.
+  assert.equal(parsePublishArgs([...basis, '--pending']).ok, false, 'dubbele vlag');
+  assert.equal(parsePublishArgs(['--head-sha', '--pending']).ok, false, 'de vlag als waarde telt niet');
+
+  // De vlag is positie-onafhankelijk, net als `--dry-run`.
+  const achteraan = ['--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', HEAD,
+    '--status-context', CONTEXT_NAME, '--pending'];
+  assert.equal(parsePublishArgs(achteraan).pending, true);
+  assert.equal(parsePublishArgs(achteraan).values.get('--head-sha'), HEAD);
+});
+
+test('L17. de writer invalideert de HERMETEN head vóór de eerste detail-GET, ná de per-PR-lock', () => {
+  // V11 heeft de globale invalidatieronde vervangen door één invalidatie per PR, binnen de job die
+  // de per-PR-lock houdt. De volgorde is de hele waarde ervan: wie eerst bewijs verzamelt en pas
+  // daarna invalideert, laat een eerder groene head groen staan zolang die verzameling loopt.
+  const liveGate = readFileSync('.github/workflows/autocoding-shield-live-gate.yml', 'utf8');
+  const stap = publishStep(liveGate);
+
+  const hermeting = stap.indexOf('repos/$REPOSITORY/pulls/$number');
+  const pending = stap.indexOf('--pending');
+  const detail = stap.indexOf('for endpoint in');
+  assert.ok(hermeting !== -1, 'de hermeting bestaat');
+  assert.ok(pending !== -1, 'de invalidatie bestaat');
+  assert.ok(detail !== -1, 'de bewijsverzameling bestaat');
+  assert.ok(hermeting < pending, 'er wordt hermeten vóór de invalidatie');
+  assert.ok(pending < detail, 'de invalidatie staat vóór de eerste detail-GET');
+
+  // De `pending` gaat naar dezelfde context en dezelfde HERMETEN head als de uitspraak.
+  assert.match(stap, /publish-live-status\.mjs \\\n\s+--pending/);
+  assert.match(stap, /--head-sha "\$head_sha"/);
+  assert.match(stap, /--status-context "\$STATUS_CONTEXT"/);
+
+  // Een mislukte invalidatie maakt de job rood, maar stopt hem niet: doorgaan levert alsnog een
+  // uitspraak op die de oude status overschrijft, afbreken zou de oude status juist laten staan.
+  assert.match(stap, /PR_\$\{number\}_NOT_INVALIDATED[\s\S]{0,40}overall=1/);
+  assert.match(stap, /exit "\$overall"/);
+
+  // Niets uit de aanleiding: de schrijfstap kent het eventpayload niet eens.
+  const env = stap.slice(stap.indexOf('env:'), stap.indexOf('run: |'));
+  assert.ok(!env.includes('GITHUB_EVENT_PATH'), 'de schrijfstap leest het eventpayload niet');
+  assert.match(env, /PULL_REQUEST: \$\{\{ matrix\.pr \}\}/);
+});
+
+test('L13c. de vorm die de workflow werkelijk doorgeeft blijft geldig, inclusief lege --execution-error', () => {
+  // De workflow geeft `--execution-error ""` door zodra er geen uitvoeringsfout is. De lege string is
+  // dus een LEGITIEME waarde; ontbreken is iets anders dan leeg zijn.
+  const workflowVorm = ['--repository', 'rvanhooijdonk-png/stack-dashboard', '--head-sha', HEAD,
+    '--status-context', CONTEXT_NAME, '--gate-result', '/tmp/gate-result.json',
+    '--execution-error', ''];
+  const parsed = parsePublishArgs(workflowVorm);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.dryRun, false);
+  assert.equal(parsed.values.get('--execution-error'), '');
+  assert.equal(parsed.values.get('--head-sha'), HEAD);
+});
+
+
+// --- De "+N"-teller op de beschrijvingsgrens (bevinding `3835177564`) ----------------------------
+
+const PUBLISHER = 'scripts/autocoding/publish-live-status.mjs';
+
+/** Alle codes die de beschrijving kent, in exact de volgorde waarin `describeReasons` ze sorteert. */
+const ALLE_CODES = [...new Set([...Object.values(REASON), ...Object.values(PUBLISH_ERROR)])].sort();
+
+/**
+ * Leest een beschrijving terug uit: welke codes staan er WERKELIJK in, en wat beweert de teller?
+ * De hele bevinding gaat over het verschil tussen die twee, dus wordt het verschil gemeten en niet
+ * geredeneerd.
+ */
+function ontleed(beschrijving) {
+  assert.ok(beschrijving.startsWith('NO_GO: '), beschrijving);
+  const romp = beschrijving.slice('NO_GO: '.length).split(',').filter((d) => d.length > 0);
+  const laatste = romp[romp.length - 1] ?? '';
+  const teller = laatste.startsWith('+') ? Number.parseInt(laatste.slice(1), 10) : 0;
+  return { codes: teller === 0 ? romp : romp.slice(0, -1), teller };
+}
+
+/**
+ * Hoeveel codes er passen ZONDER teller, gemeten met de echte functie: de langste oplopende reeks
+ * die nog zonder `+N` wordt afgedrukt. Geen nabouw van de afkaplogica — de functie zelf antwoordt.
+ */
+function pastZonderTeller(gesorteerd, limiet) {
+  let n = 0;
+  for (let i = 1; i <= gesorteerd.length; i += 1) {
+    const d = ontleed(describeReasons(gesorteerd.slice(0, i), limiet));
+    if (d.teller === 0 && d.codes.length === i) n = i;
+  }
+  return n;
+}
+
+/** Een deterministische pseudo-toevalsreeks: dezelfde steekproef bij elke run. */
+function reeks(zaad) {
+  let x = zaad;
+  return () => {
+    x = (x * 1103515245 + 12345) % 2147483648;
+    return x / 2147483648;
+  };
+}
+
+test('L18. de +N-teller telt exact de codes die zijn weggelaten, ook precies op de afkapgrens', () => {
+  // Drie GEMETEN grensgevallen. De gekozen codes vullen de beschrijving tot respectievelijk 138,
+  // 139 en 140 tekens vóór de teller erbij komt; mét teller zou de regel 141 tekens of meer worden
+  // en moet er nóg een code wijken. Juist die laatste pop werd niet meegeteld: de teller was één
+  // keer vooraf berekend, dus meldde hij `+3` waar er vier codes ontbraken.
+  const grensgevallen = [
+    [138, ['BUILDER_ACTOR_MISMATCH', 'EMPTY_CHECK_OUTPUT', 'FILES_INCOMPLETE',
+      'OWNER_APPROVAL_CARRIER_NOT_ACTIVE', 'OWNER_APPROVAL_MISSING', 'SCHEMA_MISMATCH',
+      'SELF_REVIEW', 'TREE_MISMATCH']],
+    [139, ['BAD_SHA_FORMAT', 'DUPLICATE_UUID', 'DUPLICATE_VENDOR', 'EMPTY_CHECK_OUTPUT',
+      'NO_GO_VERDICT_PRESENT', 'NO_RECEIPTS', 'OWNER_APPROVAL_ACTOR_NOT_ALLOWED',
+      'OWNER_APPROVAL_CARRIER_NOT_ACTIVE', 'OWNER_APPROVAL_NOT_APPROVE',
+      'OWNER_APPROVAL_STALE_HEAD', 'OWNER_APPROVAL_TREE_MISMATCH', 'OWNER_GATE_REQUIRED',
+      'REPOSITORY_INVALID', 'SELF_REVIEW', 'STATUS_CONTEXT_INVALID', 'UNKNOWN_ACTOR',
+      'UNKNOWN_VENDOR', 'UNRECOGNISED_REASON', 'UNSAFE_POLICY', 'UNSPECIFIED']],
+    [140, ['EMPTY_CHECKS', 'NATIVE_FINDINGS_PRESENT', 'NO_GO_VERDICT_PRESENT',
+      'OWNER_APPROVAL_ACTOR_NOT_ALLOWED', 'OWNER_APPROVAL_SCHEMA_MISMATCH', 'STALE_HEAD',
+      'STATUS_CONTEXT_INVALID', 'TASK_MISMATCH', 'UNRECOGNISED_REASON']],
+  ];
+
+  for (const [grens, gekozen] of grensgevallen) {
+    for (const code of gekozen) assert.ok(ALLE_CODES.includes(code), code);
+    const past = pastZonderTeller(gekozen, DESCRIPTION_LIMIT);
+    const zonderTeller = describeReasons(gekozen.slice(0, past));
+    assert.equal(zonderTeller.length, grens, `zonder teller moet dit ${grens} tekens zijn`);
+
+    // Met de teller erbij zou de regel over de grens gaan — in het eerste geval op exact 141.
+    const kandidaat = zonderTeller.length + 1 + `+${gekozen.length - past}`.length;
+    assert.ok(kandidaat > DESCRIPTION_LIMIT, `kandidaat ${kandidaat}`);
+    if (grens === 138) assert.equal(kandidaat, 141, 'het exacte 141-geval');
+
+    const uitkomst = describeReasons(gekozen);
+    const gelezen = ontleed(uitkomst);
+    assert.ok(uitkomst.length <= DESCRIPTION_LIMIT, `te lang: ${uitkomst.length}`);
+    assert.ok(gelezen.codes.length < past, 'de teller heeft een code gekost');
+    // DE EIGENSCHAP: de teller telt wat er werkelijk ontbreekt, niet wat er vóór de pop ontbrak.
+    assert.equal(gelezen.teller, gekozen.length - gelezen.codes.length, uitkomst);
+    for (const code of gelezen.codes) assert.ok(gekozen.includes(code), code);
+  }
+});
+
+test('L18b. de teller blijft exact bij elke afkapgrens, en meer dan één pop is aantoonbaar onbereikbaar', () => {
+  const volgende = reeks(20260822);
+  let popsGezien = 0;
+  let maxPops = 0;
+
+  for (const limiet of [20, 40, 60, 90, 120, DESCRIPTION_LIMIT]) {
+    for (let poging = 0; poging < 120; poging += 1) {
+      const gekozen = ALLE_CODES.filter(() => volgende() < 0.35);
+      if (gekozen.length === 0) continue;
+      const uitkomst = describeReasons(gekozen, limiet);
+      const gelezen = ontleed(uitkomst);
+
+      // Exact, altijd: de som van getoonde codes en teller is het aantal codes dat erin ging.
+      assert.equal(gelezen.codes.length + gelezen.teller, gekozen.length, uitkomst);
+      if (gelezen.codes.length > 0) {
+        assert.ok(uitkomst.length <= limiet, `limiet ${limiet}: ${uitkomst.length} — ${uitkomst}`);
+      }
+
+      const pops = pastZonderTeller(gekozen, limiet) - gelezen.codes.length;
+      assert.ok(pops >= 0, 'de teller kan nooit codes toevoegen');
+      popsGezien += pops;
+      maxPops = Math.max(maxPops, pops);
+    }
+  }
+
+  assert.ok(popsGezien > 0, 'de steekproef moet de popsituatie werkelijk raken');
+
+  // Meer dan één pop is met DEZE allowlist onbereikbaar, en dat is geen aanname maar een gebonden
+  // eigenschap: één pop maakt minstens `kortste code + 1` tekens vrij, terwijl de teller hoogstens
+  // `1 + aantal cijfers` lang is. Beide getallen staan hieronder vast, zodat een kortere code of een
+  // veel langere allowlist deze test breekt in plaats van stil een verouderde teller op te leveren.
+  // De meervoudige-popTAK zelf wordt in L18c wél gedraaid, op dezelfde broncode.
+  const kortste = Math.min(...ALLE_CODES.map((c) => c.length));
+  const langsteTeller = 1 + String(ALLE_CODES.length).length;
+  assert.ok(kortste >= langsteTeller, `kortste code ${kortste} vs teller ${langsteTeller}`);
+  assert.equal(maxPops, 1, 'één pop volstaat bij deze codelengtes');
+});
+
+/**
+ * Laadt de ECHTE publisher met een gewijzigd fragment. Zelfde vorm als `mutantVanDeSelector` in de
+ * doelentest: de mutant leeft buiten de repository, dus worden zijn relatieve imports absoluut.
+ */
+function mutantVanDePublisher(naam, oud, nieuw) {
+  const bron = readFileSync(PUBLISHER, 'utf8');
+  assert.equal(bron.split(oud).length - 1, 1, 'het mutatieanker moet precies één keer voorkomen');
+  const dir = mkdtempSync(join(tmpdir(), `publish-status-${naam}-`));
+  const pad = join(dir, `publish-live-status.${naam}.mjs`);
+  writeFileSync(pad, bron.replace(oud, nieuw).replace(
+    "from './verify-review-gate.mjs'",
+    `from ${JSON.stringify(pathToFileURL('scripts/autocoding/verify-review-gate.mjs').href)}`,
+  ));
+  return import(pathToFileURL(pad).href);
+}
+
+test('L18c. MEERDERE pops: met korte codes moet de teller twee keer opnieuw worden bepaald', async () => {
+  // Met de productie-allowlist volstaat één pop altijd (L18b). De lus moet er tóch tegen kunnen,
+  // want de codelengtes zijn geen wet. Deze mutant raakt de LUS NIET aan: hij voegt alleen korte
+  // codes aan de allowlist toe, zodat een pop nauwelijks ruimte vrijmaakt en de meervoudige-popTAK
+  // van de ECHTE broncode werkelijk gedraaid wordt.
+  const kort = Array.from({ length: 20 }, (_, i) => String.fromCharCode(65 + i));
+  const gemuteerd = await mutantVanDePublisher(
+    'korte-codes',
+    "  ARGUMENTS_INVALID: 'ARGUMENTS_INVALID',\n});",
+    `  ARGUMENTS_INVALID: 'ARGUMENTS_INVALID',\n${kort.map((c) => `  ${c}: '${c}',`).join('\n')}\n});`,
+  );
+
+  const alle = [...new Set([...Object.values(REASON), ...Object.values(gemuteerd.PUBLISH_ERROR)])].sort();
+  // Bij limiet 28 passen er drie codes zonder teller (`A,ARGUMENTS_INVALID,B` is exact 28 tekens).
+  // De teller `+63` past er dan niet meer bij, en ook ná de eerste pop niet: er moeten er twee weg.
+  const limiet = 28;
+  const uitkomst = gemuteerd.describeReasons(alle, limiet);
+  const gelezen = ontleed(uitkomst);
+
+  assert.ok(uitkomst.length <= limiet, `${uitkomst.length}: ${uitkomst}`);
+  assert.equal(gelezen.codes.length + gelezen.teller, alle.length, uitkomst);
+
+  // En hier zijn het er écht meer dan één.
+  let past = 0;
+  for (let i = 1; i <= alle.length; i += 1) {
+    const d = ontleed(gemuteerd.describeReasons(alle.slice(0, i), limiet));
+    if (d.teller === 0 && d.codes.length === i) past = i;
+  }
+  assert.equal(past, 3, 'drie codes passen zonder teller');
+  assert.equal(past - gelezen.codes.length, 2, 'twee pops');
+
+  // De gerepareerde lus telt beide pops mee; de oude vorm zou hier `+63` melden terwijl er 65
+  // codes ontbreken.
+  assert.equal(gelezen.teller, alle.length - gelezen.codes.length);
+  assert.ok(gelezen.teller > alle.length - past, 'de teller groeide met de pops mee');
+});
+
+test('L18d. NEGATIEVE MUTATIE: een teller die vóór de pops wordt vastgezet, liegt over het restant', async () => {
+  // De vorm van vóór deze reparatie, letterlijk: `dropped` één keer berekenen en daarna nog codes
+  // laten wijken. De mutant is groen op alles wat niet afkapt — en meldt op het gemeten grensgeval
+  // één weggelaten code te weinig. Dat is precies het defect uit bevinding `3835177564`.
+  const gemuteerd = await mutantVanDePublisher(
+    'teller-vooraf',
+    '  const counterFor = () => `+${sorted.length - kept.length}`;\n'
+    + '  const rendered = () => prefix + [...kept, counterFor()].join(\',\');\n'
+    + '  while (kept.length > 0 && rendered().length > max) kept.pop();\n'
+    + '  return rendered();',
+    '  const counter = `+${sorted.length - kept.length}`;\n'
+    + '  while (kept.length > 0 && prefix.length + kept.join(\',\').length + 1 + counter.length > max) {\n'
+    + '    kept.pop();\n'
+    + '  }\n'
+    + '  return `${prefix}${[...kept, counter].join(\',\')}`;',
+  );
+
+  const gekozen = ['EMPTY_CHECKS', 'NATIVE_FINDINGS_PRESENT', 'NO_GO_VERDICT_PRESENT',
+    'OWNER_APPROVAL_ACTOR_NOT_ALLOWED', 'OWNER_APPROVAL_SCHEMA_MISMATCH', 'STALE_HEAD',
+    'STATUS_CONTEXT_INVALID', 'TASK_MISMATCH', 'UNRECOGNISED_REASON'];
+
+  const oud = ontleed(gemuteerd.describeReasons(gekozen));
+  const nieuw = ontleed(describeReasons(gekozen));
+
+  // Beide tonen evenveel codes; alleen de mutant telt de laatste pop niet mee.
+  assert.equal(oud.codes.length, nieuw.codes.length);
+  assert.equal(nieuw.teller, gekozen.length - nieuw.codes.length, 'de gerepareerde teller klopt');
+  assert.equal(oud.teller, nieuw.teller - 1, 'de mutant meldt er één te weinig');
+  assert.notEqual(oud.teller, gekozen.length - oud.codes.length, 'de mutant liegt over het restant');
+});
+
+// --- De mutanten van de statusroute ---------------------------------------------------------------
+//
+// V18 rust op één structurele eigenschap: deze route KAN geen `success` publiceren. Twee
+// onafhankelijke plaatsen dragen die eigenschap — de resolver die er geen produceert, en de
+// allowlist vlak vóór het transport. De mutanten hieronder halen ze één voor één weg en bewijzen dat
+// elke afzonderlijke verwijdering door een bestaande toets wordt gevangen.
+
+test('L19. een mutant die de RESOLVER weer groen laat schrijven, strandt op de laatste poort', async () => {
+  const gemuteerd = await mutantVanDePublisher(
+    'resolver-groen',
+    "      state: 'pending',\n      description: DIAGNOSTIC_GO_DESCRIPTION,",
+    "      state: 'success',\n      description: DIAGNOSTIC_GO_DESCRIPTION,",
+  );
+  const publication = gemuteerd.resolvePublication({
+    headSha: HEAD, statusContext: CONTEXT_NAME, gateResult: { decision: 'GO', reasons: [] },
+  });
+  // De mutant produceert weer een erfbaar groen artefact: L1 en L6a breken hierop.
+  assert.equal(publication.state, 'success');
+  assert.throws(() => assert.notEqual(publication.state, 'success'), /AssertionError/);
+
+  // Maar hij komt het netwerk niet op: de tweede laag weigert vóór `fetch`, met nul verzoeken.
+  let aanroepen = 0;
+  const posted = await gemuteerd.publishStatus({
+    repository: 'rvanhooijdonk-png/stack-dashboard', token: 'x', publication,
+    fetchImpl: async () => { aanroepen += 1; return { status: 201 }; },
+  });
+  assert.deepEqual(posted, { ok: false, blocked: gemuteerd.PUBLISH_ERROR.STATUS_STATE_NOT_ALLOWED });
+  assert.equal(aanroepen, 0);
+});
+
+test('L20. een mutant die `success` weer op de ALLOWLIST zet, gaat rood op L6a en L6b', async () => {
+  const gemuteerd = await mutantVanDePublisher(
+    'allowlist-groen',
+    "export const PUBLISHABLE_STATES = Object.freeze(['pending', 'failure']);",
+    "export const PUBLISHABLE_STATES = Object.freeze(['pending', 'failure', 'success']);",
+  );
+  // L6a leest de allowlist zelf: die toets breekt onmiddellijk.
+  assert.throws(
+    () => assert.deepEqual([...gemuteerd.PUBLISHABLE_STATES], ['pending', 'failure']),
+    /AssertionError/,
+  );
+
+  // En L6b breekt op het gedrag: met deze mutant gaat een groene status wél het netwerk op.
+  let aanroepen = 0;
+  const posted = await gemuteerd.publishStatus({
+    repository: 'rvanhooijdonk-png/stack-dashboard', token: 'x',
+    fetchImpl: async () => { aanroepen += 1; return { status: 201 }; },
+    publication: {
+      ok: true, sha: HEAD, context: CONTEXT_NAME, state: 'success', description: 'wat dan ook',
+    },
+  });
+  assert.deepEqual(posted, { ok: true, status: 201 });
+  assert.equal(aanroepen, 1);
+  assert.throws(() => assert.equal(aanroepen, 0), /AssertionError/);
+});
+
+test('L21. de oude, autoriserende contextnaam bestaat nergens meer in de stack', () => {
+  // `autocoding-shield-live-receipts` was de context waarop een required check zou rusten. Hij wordt
+  // niet hernoemd maar VERLATEN: er is geen head waarop hij ooit `success` heeft gedragen, want de
+  // poort stond de hele bootstrap uit. Blijft de naam ergens staan, dan kan een ruleset hem alsnog
+  // als required check aanwijzen — en dat is precies de constructie die V18 opheft.
+  const bestanden = [
+    'CONTROL/AUTOCODING/policy.v1.json',
+    'scripts/autocoding/publish-live-status.mjs',
+    '.github/workflows/autocoding-shield-live-gate.yml',
+    '.github/workflows/autocoding-merge-finalizer.yml',
+    '.github/workflows/autocoding-shield.yml',
+  ];
+  for (const bestand of bestanden) {
+    const tekst = readFileSync(bestand, 'utf8');
+    const regels = tekst.split('\n').filter((r) => r.includes('autocoding-shield-live-receipts'));
+    // De naam mag alleen nog in UITLEG voorkomen, nooit als waarde die iets configureert.
+    for (const regel of regels) {
+      assert.match(regel.trim(), /^(#|\*|\/\/|-- )/, `${bestand}: ${regel}`);
+    }
+  }
+  assert.equal(POLICY.live_status_context, undefined);
+  assert.equal(POLICY.diagnostic_status_context, 'autocoding-shield-diagnostic');
+});

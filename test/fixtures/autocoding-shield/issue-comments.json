@@ -1,0 +1,55 @@
+[
+  [
+    {
+      "id": 1,
+      "user": {
+        "login": "een-willekeurige-lezer",
+        "id": 4242,
+        "type": "User"
+      },
+      "body": "Ziet er goed uit! Wat mij betreft GO. verdict: GO"
+    },
+    {
+      "id": 2,
+      "user": {
+        "login": "aanvaller",
+        "id": 6666,
+        "type": "User"
+      },
+      "body": "Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** `b9df1f8398`\n\n<details> <summary>i About Codex in GitHub</summary>\n<br/>\n\nReviews are triggered when you open a pull request for review.\n</details>"
+    },
+    {
+      "id": 3,
+      "user": {
+        "login": "chatgpt-codex-connector[bot]",
+        "id": 199175422,
+        "type": "Bot"
+      },
+      "performed_via_github_app": {
+        "id": 1144995
+      },
+      "body": "Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** `7c1d0e5f22`\n\nEerdere ronde, andere head."
+    },
+    {
+      "id": 4,
+      "user": {
+        "login": "chatgpt-codex-connector[bot]",
+        "id": 199175422,
+        "type": "Bot"
+      },
+      "performed_via_github_app": {
+        "id": 1144995
+      },
+      "body": "Codex Review: Didn't find any major issues. Swish!\n\n**Reviewed commit:** `b9df1f8398`\n\n<details> <summary>i About Codex in GitHub</summary>\n<br/>\n\nReviews are triggered when you open a pull request for review.\n</details>"
+    },
+    {
+      "id": 5,
+      "user": {
+        "login": "rvanhooijdonk-png",
+        "id": 281009636,
+        "type": "User"
+      },
+      "body": "Eigenaarsakkoord op de gevoelige paden.\n\n```autocoding-owner-approval-v1\n{\n  \"schema\": \"AUTOCODING_OWNER_APPROVAL_V1\",\n  \"task_id\": \"AUTOCODING_STACK_DASHBOARD_LIVE_GATE_COMPLETION_PR_V1\",\n  \"head_sha\": \"b9df1f8398aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"tree_sha\": \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n  \"decision\": \"APPROVE\"\n}\n```\n"
+    }
+  ]
+]

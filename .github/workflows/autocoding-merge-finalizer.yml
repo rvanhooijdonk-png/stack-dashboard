@@ -1,0 +1,345 @@
+name: autocoding-merge-finalizer
+
+# AUTOCODING_SHIELD — DE TRUSTED, PR-GEBONDEN MERGEFINALIZER.
+#
+# WAAROM DIT BESTAND BESTAAT. Tot V17 lag de mergeautorisatie bij een commitstatus: de trusted writer
+# publiceerde `success` op de gemeten head, en een required check op die context zou de merge
+# vrijgeven. Codex-bevindingen `3835364972` en `3835364974` toonden dat dat principieel niet klopt.
+# Een commitstatus hangt aan de SHA en blijft staan, dus erft elke LATER geopende pull request op
+# diezelfde commit het groen zonder dat er iets over die pull request is gemeten. Geen meting op
+# publicatiemoment kan een toekomstige lezer tegenhouden, en de open-PR-lijst waarmee V17 dat
+# probeerde af te vangen is offsetgepagineerd en dus geen atomaire momentopname.
+#
+# De bevoegdheid is daarom verhuisd naar dit bestand: één plaats die de PULL REQUEST ZELF hermeet en,
+# indien geactiveerd, uitsluitend díé pull request kan laten INSCHRIJVEN in GitHubs eigen merge queue
+# — `PUT /repos/{owner}/{repo}/pulls/{number}/merge-async` met `merge_action: "merge_queue"` en de
+# exact gemeten volledige `sha`. Er is geen artefact meer dat een tweede pull request kan oppakken:
+# het nummer staat in het pad, de sha in het lichaam.
+#
+# V19 — CODEX `3835523940` (P1). Een directe merge-aanroep (`PUT .../merge`, of `merge-async` met
+# `merge_action: "direct_merge"`/`"default"`) is nooit meer bereikbaar: `finalize-merge.mjs` eist
+# vóór elk effect bewijs dat de base van deze pull request een ACTIEVE `merge_queue`-regel draagt
+# (`GET /repos/{owner}/{repo}/rules/branches/{base_ref}`, hieronder gemeten als
+# `merge-queue-rules.json`). Zonder dat bewijs is de uitkomst `NO_GO`, met nul verzoeken. Het
+# werkelijke mergen gebeurt bij een geslaagde inschrijving niet op dit moment, maar later, binnen
+# GitHubs eigen wachtrij — die herbeoordeelt de doelbranch vlak vóór het echte mergen opnieuw, als
+# serverkant autoriteit. Dat VERKLEINT de opening die de klassieke `PUT .../merge` open liet — die
+# was alleen op de head-sha geconditioneerd, zag een basisretarget of een ingetrokken
+# eigenaarsreview tussen hermeting en aanroep dus niet — tot het smalle venster tussen deze
+# inschrijving en GitHubs eigen herbeoordeling; het sluit dat venster niet atomisch, want de
+# `GET rules/branches/{base_ref}`-meting en de inschrijvings-PUT zijn zelf twee aparte verzoeken.
+# Wat resteert is hoe ver GitHub die herbeoordeling zelf doorvoert — dat is precies het bewijs dat
+# de aparte, toekomstige activatiestap moet leveren, niet deze pull request. Deze pull request
+# BOUWT, ACTIVEERT of WIJZIGT geen GitHub-ruleset of branch-protection — dat bewijs wordt
+# uitsluitend gelezen, nooit aangemaakt; of een repository daadwerkelijk zo'n regel draagt is een
+# afzonderlijke, toekomstige activatiestap.
+#
+# WAT DEZE WORKFLOW NOOIT DOET: PR-code uitchecken, PR-scripts draaien, PR-headpolicy lezen,
+# artifacts of cache lezen, secrets lezen, statussen schrijven, een branch aanraken, of op een ander
+# event dan de klok starten. `pull-requests: write` bestaat in deze repository op precies één job, en
+# dat is de finalisatiejob hieronder; `scripts/autocoding/workflow-trust.mjs` meet dat statisch af
+# over ALLE workflowbestanden (`PULL_REQUESTS_WRITE_OUTSIDE_FINALIZER`).
+#
+# WAAROM ALLEEN `schedule`. `workflow_run` zou de finalizer laten starten door de voltooiing van een
+# run waarvan de pull request de definitie levert. `issue_comment` zou iedere commentator een
+# directe trekker naar een token met mergerechten geven. `workflow_dispatch` draait de definitie van
+# de GEKOZEN ref, dus zou een pull request zijn eigen finalizer kunnen voorstellen. Een klok kan
+# niemand richten. De prijs is latentie — hoogstens één ronde — en dat is de juiste ruil voor de
+# enige job hier die iets onomkeerbaars kan doen.
+#
+# STAND IN DEZE PULL REQUEST: `merge_finalizer_enabled` en `class_b_auto_merge_enabled` staan allebei
+# op `false`. De poortstap hieronder stopt daarop vóór er ook maar één API-verzoek is gedaan, de
+# kandidatenlijst blijft daardoor leeg, de matrix draait nul jobs, en `mergePullRequest` weigert
+# bovendien nog eens in de code zelf vóór elk netwerkverkeer. Een echte merge is in deze stand
+# mechanisch onmogelijk op drie onafhankelijke plaatsen.
+#
+# BOOTSTRAP, eerlijk benoemd: een `schedule`-workflow bestaat pas ná merge op de default branch. Deze
+# pull request kan de keten dus niet zelf live bewijzen; wat hier bewezen wordt is de statische vorm
+# en het gedrag van de scripts.
+
+on:
+  schedule:
+    - cron: '47 * * * *'
+
+permissions: {}
+
+# DE REPOSITORYBREDE RIJ. Eén vaste literal zonder één expressie, zodat elke finalizerrun in dezelfde
+# rij valt en er nooit twee tegelijk tegen dezelfde resterende quotumteller besluiten.
+# `cancel-in-progress: false` kapt een lopende finalisatie nooit af — halverwege afgebroken worden
+# tussen beslissing en merge is precies de toestand die je niet wilt. `queue: max` bewaart wachtende
+# runs in plaats van de vorige te annuleren.
+#
+# `queue` is een ondersteunde sleutel op workflow- én jobniveau; verboden is alleen de combinatie met
+# `cancel-in-progress: true`. Bron:
+#   https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency
+concurrency:
+  group: autocoding-merge-finalizer-repository
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  # FASE 1 — KANDIDAATSELECTIE. Uitsluitend LEESRECHTEN. Deze job kan niets muteren en draagt geen
+  # enkele schrijfscope. Zijn enige product is een JSON-lijst van PR-nummers.
+  #
+  # Deze lijst is SELECTIE en geen autorisatie. Een kandidaat die er door pagineringsdrift uit valt,
+  # wordt deze ronde simpelweg niet bekeken — er gebeurt dan niets, wat de fail-closed richting is.
+  # ---------------------------------------------------------------------------------------------
+  kandidaten:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pull_requests: ${{ steps.selectie.outputs.pull_requests }}
+      finalize: ${{ steps.selectie.outputs.finalize }}
+    steps:
+      # Altijd de default branch, expliciet. De finalizer mag nooit door PR-code of PR-policy worden
+      # bestuurd; `workflow-trust.mjs` eist deze exacte refvorm op elke checkout in dit bestand.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Bepaal bootstrapbeschikbaarheid
+        id: bootstrap
+        run: |
+          set -euo pipefail
+          if [ -f scripts/autocoding/finalize-merge.mjs ] && \
+             [ -f scripts/autocoding/select-finalize-candidates.mjs ] && \
+             [ -f scripts/autocoding/verify-review-gate.mjs ] && \
+             [ -f scripts/autocoding/collect-shield-input.mjs ] && \
+             [ -f scripts/autocoding/gh-bounded-pages.sh ] && \
+             [ -f CONTROL/AUTOCODING/policy.v1.json ]; then
+            echo 'trusted_finalizer_files=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'trusted_finalizer_files=false' >> "$GITHUB_OUTPUT"
+            echo 'BOOTSTRAP_TRUSTED_FINALIZER_FILES_NOT_ON_DEFAULT_BRANCH'
+          fi
+
+      # DE EERSTE VAN DRIE ONAFHANKELIJKE STOPS. Staat de vlag uit, dan wordt er geen open-PR-lijst
+      # opgehaald, geen quotum gemeten en geen kandidaat bepaald: nul API-verzoeken.
+      - name: Bepaal finalizerstand
+        id: enabled
+        if: steps.bootstrap.outputs.trusted_finalizer_files == 'true'
+        run: |
+          set -euo pipefail
+          enabled="$(node -p "JSON.parse(require('fs').readFileSync('CONTROL/AUTOCODING/policy.v1.json','utf8')).merge_finalizer_enabled === true")"
+          if [ "$enabled" != true ]; then
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'BOOTSTRAP_MERGE_FINALIZER_DISABLED'
+            exit 0
+          fi
+          echo 'enabled=true' >> "$GITHUB_OUTPUT"
+
+      - name: Bepaal de kandidaten read-only
+        id: selectie
+        if: steps.enabled.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          . scripts/autocoding/gh-bounded-pages.sh
+
+          # Het matrixbestand bestaat vóór de selectie, zodat een weigering nooit een ontbrekend
+          # bestand achterlaat en de matrix in elk geval een geldige lege lijst leest.
+          echo '[]' > "$RUNNER_TEMP/candidates.json"
+
+          complete=true
+          gh_bounded_pages "repos/$REPOSITORY/pulls?state=open" \
+            "$RUNNER_TEMP/open-pulls.json" \
+            "$GH_BOUNDED_SELECTION_PAGES" \
+            "$RUNNER_TEMP/open-pulls-pages"
+          lijst_rc=$?
+          case "$lijst_rc" in
+            0) ;;
+            2) complete=false ;;
+            *)
+              echo '::error::OPEN_PULL_REQUEST_LIST_UNAVAILABLE'
+              echo 'pull_requests=[]' >> "$GITHUB_OUTPUT"
+              echo 'finalize=false' >> "$GITHUB_OUTPUT"
+              exit 1 ;;
+          esac
+
+          # `rate_limit` telt zelf niet mee voor het core-quotum en levert het GEDEELDE restant. `-`
+          # is de afgesproken ONBEKEND-vorm en betekent: geen ronde.
+          remaining="$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null || true)"
+          case "$remaining" in
+            ''|*[!0-9]*) remaining='-' ;;
+          esac
+
+          rc=0
+          node scripts/autocoding/select-finalize-candidates.mjs \
+            --open-pulls "$RUNNER_TEMP/open-pulls.json" \
+            --open-pulls-complete "$complete" \
+            --policy CONTROL/AUTOCODING/policy.v1.json \
+            --remaining-quota "$remaining" \
+            --now-epoch "$(date -u +%s)" \
+            --out "$RUNNER_TEMP/candidates.json" || rc=$?
+
+          kandidaten="$(cat "$RUNNER_TEMP/candidates.json")"
+          echo "pull_requests=$kandidaten" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -eq 0 ] && [ "$kandidaten" != '[]' ]; then
+            echo 'finalize=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo 'finalize=false' >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+  # ---------------------------------------------------------------------------------------------
+  # FASE 2 — FINALISATIE, ÉÉN JOB PER PULL REQUEST. Dit is de enige job in de hele repository met
+  # `pull-requests: write`, en dus de enige plaats waar een merge-aanroep überhaupt kan slagen.
+  #
+  # De job draait alleen wanneer fase 1 een niet-lege kandidatenlijst opleverde. Met de vlaggen op
+  # `false` is die lijst per definitie leeg, dus draait deze job nul keer.
+  # ---------------------------------------------------------------------------------------------
+  finaliseer:
+    needs: kandidaten
+    if: needs.kandidaten.outputs.finalize == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        pr: ${{ fromJSON(needs.kandidaten.outputs.pull_requests) }}
+    # DE PER-PR RIJ. Sleutelt op exact het PR-nummer van deze matrixjob en op niets wat per run
+    # verschilt. `cancel-in-progress: false` kapt een lopende finalisatie nooit af; `queue: max`
+    # bewaart wachtende beurten in plaats van de vorige te annuleren.
+    concurrency:
+      group: autocoding-merge-finalizer-pr-${{ matrix.pr }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      # De poortstand wordt hier OPNIEUW uit de eigen checkout gelezen, niet overgenomen uit fase 1.
+      # Dit is de tweede van de drie onafhankelijke stops.
+      - name: Bepaal finalizerstand
+        id: enabled
+        run: |
+          set -euo pipefail
+          enabled="$(node -p "JSON.parse(require('fs').readFileSync('CONTROL/AUTOCODING/policy.v1.json','utf8')).merge_finalizer_enabled === true")"
+          if [ "$enabled" != true ]; then
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'MERGE_FINALIZER_DISABLED'
+            exit 0
+          fi
+          echo 'enabled=true' >> "$GITHUB_OUTPUT"
+
+      # ALLES HIERONDER GEBEURT NA DE PER-PR LOCK. Uit fase 1 komt uitsluitend het PR-NUMMER: geen
+      # head, geen momentopname, geen artifact, geen cache.
+      #
+      # De volgorde is de hele eigenschap:
+      #
+      #   1. meet deze pull request VOLLEDIG (meting A);
+      #   2. meet hem NOG EEN KEER, vlak vóór het effect (meting B);
+      #   3. `finalize-merge.mjs` beslist op A, beslist opnieuw op B, en vergelijkt de
+      #      vingerafdrukken. Elk verschil — verschoven head, ingetrokken review, bewerkt lichaam,
+      #      nieuwe bevinding, omgeslagen check — is `MEASUREMENT_DRIFT` en nul mergeverzoeken;
+      #   4. pas dan, en alleen met de sha uit meting B, de merge-aanroep.
+      - name: Meet, beslis en finaliseer deze pull request
+        if: steps.enabled.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PULL_REQUEST: ${{ matrix.pr }}
+        run: |
+          set -uo pipefail
+          . scripts/autocoding/gh-bounded-pages.sh
+          number="$PULL_REQUEST"
+          case "$number" in
+            ''|*[!0-9]*)
+              echo '::error::PULL_REQUEST_NUMBER_INVALID'
+              exit 1 ;;
+          esac
+
+          # Meet één volledige waarheid in een eigen map. Alleen read-only GET's, allemaal begrensd:
+          # elke lijst kost hoogstens `$GH_BOUNDED_EVIDENCE_PAGES` respectievelijk
+          # `$GH_BOUNDED_CHECKS_PAGES` verzoeken. Geen enkel gemeten veld wordt gelogd.
+          #
+          # De volledigheidsvlaggen zijn expliciete bestanden en geen afwezigheid: `finalize-merge.mjs`
+          # leest ze als `true`/niet-`true`, en een afgekapte lijst wordt daarmee `EVIDENCE_INCOMPLETE`
+          # in plaats van stilzwijgend schoon bewijs.
+          meet() {
+            local doel="$1"
+            rm -rf "$doel"
+            mkdir -p "$doel"
+            local evidence=true checks=true rules=true rc=0
+
+            gh api "repos/$REPOSITORY/pulls/$number" > "$doel/pr.json" || return 1
+            head_sha="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const s=((p||{}).head||{}).sha;if(!/^[0-9a-f]{40}$/.test(s||""))process.exit(1);process.stdout.write(s)' "$doel/pr.json")" || return 1
+            gh api "repos/$REPOSITORY/git/commits/$head_sha" > "$doel/head-commit.json" || return 1
+
+            # Het merge-queue-bewijs (V19, Codex `3835523940`): of de BASE van deze pull request een
+            # actieve `merge_queue`-regel draagt. Dit LEEST alleen bestaand bewijs — er wordt hier
+            # geen ruleset of branch-protection aangemaakt of gewijzigd. Onleesbare base maakt de hele
+            # meting onleesbaar, dezelfde lijn als bij `head_sha`.
+            #
+            # V20 — scope-item 6 (CLAUDE4-review): dit liep tot dan toe via één ONGEBONDEN `gh api`,
+            # als enige lijst zonder de begrenzing die de vijf bewijslijsten en de check-runs al hadden.
+            # Nu dezelfde begrensde lees-lus en dezelfde truncatiedetectie: een volle laatste pagina
+            # zet `rules=false`, en `finalize-merge.mjs` behandelt dat expliciet als onvolledig bewijs
+            # in plaats van als een branch zonder regels.
+            base_ref="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const r=((p||{}).base||{}).ref;if(typeof r!=="string"||r.length===0)process.exit(1);process.stdout.write(r)' "$doel/pr.json")" || return 1
+            gh_bounded_pages "repos/$REPOSITORY/rules/branches/$base_ref" \
+              "$doel/merge-queue-rules.json" "$GH_BOUNDED_RULES_PAGES" "$doel/pages-merge-queue-rules"
+            rc=$?
+            if [ "$rc" -eq 2 ]; then rules=false; fi
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then return 1; fi
+
+            for endpoint in \
+              "pulls/$number/commits:pr-commits" \
+              "issues/$number/comments:issue-comments" \
+              "pulls/$number/reviews:reviews" \
+              "pulls/$number/comments:review-comments" \
+              "pulls/$number/files:files"; do
+              path="${endpoint%%:*}"
+              naam="${endpoint##*:}"
+              gh_bounded_pages "repos/$REPOSITORY/$path" "$doel/$naam.json" \
+                "$GH_BOUNDED_EVIDENCE_PAGES" "$doel/pages-$naam"
+              rc=$?
+              if [ "$rc" -eq 2 ]; then evidence=false; fi
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then return 1; fi
+            done
+
+            # De check runs van deze commit. Dit eindpunt levert geen kale array maar een object met
+            # de lijst onder `check_runs`; de vijfde parameter haalt dat veld eruit, zodat dezelfde
+            # begrensde lees-lus en dezelfde truncatiedetectie gelden als voor elke andere lijst.
+            gh_bounded_pages "repos/$REPOSITORY/commits/$head_sha/check-runs" \
+              "$doel/check-runs.json" "$GH_BOUNDED_CHECKS_PAGES" "$doel/pages-check-runs" 'check_runs'
+            rc=$?
+            if [ "$rc" -eq 2 ]; then checks=false; fi
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then return 1; fi
+
+            printf '%s' "$evidence" > "$doel/evidence-complete"
+            printf '%s' "$checks" > "$doel/checks-complete"
+            printf '%s' "$rules" > "$doel/merge-queue-rules-complete"
+            return 0
+          }
+
+          if ! meet "$RUNNER_TEMP/meting-a"; then
+            echo "::error::PR_${number}_MEASUREMENT_UNREADABLE"
+            exit 1
+          fi
+          if ! meet "$RUNNER_TEMP/meting-b"; then
+            echo "::error::PR_${number}_RECHECK_UNREADABLE"
+            exit 1
+          fi
+
+          # De beslissing en het effect, allebei in één gesloten aanroep. De uitvoer is één JSON-regel
+          # met uitsluitend redencodes uit een vaste verzameling: geen SHA's, geen paden, geen
+          # API-teksten. Dit is de derde onafhankelijke stop — `mergePullRequest` weigert zelf óók nog
+          # eens vóór elk netwerkverkeer zolang de vlag uit staat.
+          node scripts/autocoding/finalize-merge.mjs \
+            --repository "$REPOSITORY" \
+            --pull-request "$number" \
+            --raw "$RUNNER_TEMP/meting-a" \
+            --raw-recheck "$RUNNER_TEMP/meting-b" \
+            --policy CONTROL/AUTOCODING/policy.v1.json

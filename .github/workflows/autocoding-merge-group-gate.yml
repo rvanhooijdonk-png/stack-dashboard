@@ -1,0 +1,208 @@
+name: autocoding-merge-group-gate
+
+# AUTOCODING_SHIELD — V20 scope-item 1/2. DE MERGE-GROUP-POORT.
+#
+# WAAROM DIT BESTAND BESTAAT. Claude4-architectuurreview `AUTOCODING_PR74_V19_MERGE_GROUP_EVIDENCE_
+# ARCHITECTURE_REVIEW_CLAUDE4_RETRY1` (F1, NO_GO, met letterlijk citaat uit de GitHub-documentatie):
+# "You must use the merge_group event […] Otherwise, status checks will not be triggered when you
+# add a pull request to a merge queue. The merge will fail as the required status check will not be
+# reported." Dit bestand bestond tot V20 nergens in deze repository: elke bestaande poort (de shield,
+# de trusted writer, de mergefinalizer) meet en autoriseert uitsluitend de PULL REQUEST ZELF — haar
+# eigen head en haar eigen tree. GitHub herbeoordeelt bij een inschrijving in de merge queue echter
+# UITSLUITEND de vereiste statuscontroles, en doet dat op de MERGE-GROUP-COMMIT: een synthetische
+# samenvoeging van de doelbranch met (mogelijk) meerdere ingeschreven pull requests. Een autorisatie
+# die alleen aan de PR-eigen boom bindt zegt dus niets over de boom die GitHub daadwerkelijk zou
+# mergen.
+#
+# WAT DIT BESTAND WEL EN NIET DOET.
+#
+#   - Trigger is UITSLUITEND `merge_group`, met `checks_requested`. Dat is met opzet de enige
+#     `on:`-sleutel: een `merge_group`-run gebruikt de workflowDEFINITIE van de BASEBRANCH, niet van
+#     de PR-head — in tegenstelling tot `pull_request`/`pull_request_target`/`pull_request_review*`
+#     is deze trigger daarmee genuinely default-branch-trusted. `workflow-trust.mjs` handhaaft
+#     statisch dat dit bestand geen andere trigger draagt en dat geen ander bestand in deze
+#     repository `checks: write` draagt.
+#   - De job checkt UITSLUITEND de default branch uit — nooit de PR-head, nooit de merge-group-ref
+#     zelf. PR-code wordt hier nooit uitgevoerd.
+#   - De job leest de MERGE-GROUP-COMMIT (`git/commits/{merge_group.head_sha}`) om haar OUDERS te
+#     meten. Precies twee ouders — de basebranch en de HUIDIGE head van EXACT de pull request uit de
+#     queue-ref — is de enige vorm die ondubbelzinnig aan één PR is toe te schrijven
+#     (`resolveMergeGroupBinding` in `scripts/autocoding/resolve-merge-group.mjs`). Elke andere vorm
+#     (verstaald bewijs, een basisverplaatsing, een mede-inzittende pull request in dezelfde
+#     wachtrij) is fail-closed: een falende check-run, ONMIDDELLIJK, zonder verder bewijs op te
+#     halen.
+#   - De vijf begrensd gepagineerde PR-bewijslijsten (`gh_bounded_pages`) melden zelf of hun laatst
+#     toegestane pagina VOL was — dus mogelijk onvolledig (V21, Gemini1 V20-bevinding HIGH). Die
+#     uitspraak reist LETTERLIJK mee als `--evidence-complete` naar de verifier, die fail-closed stopt
+#     vóórdat er ook maar één binding- of shieldoordeel wordt geveld zodra dat niet `true` is —
+#     ongeacht hoe schoon het al opgehaalde fragment eruitziet.
+#   - Bij een geslaagde binding meet de job de volledige PR-eigen shieldwaarheid (native
+#     Codex/Gemini-bewijs, bestandscompleetheid, gevoelige paden) via dezelfde adapters die de
+#     bestaande shield en finalizer al gebruiken (`buildShieldInput`, `evaluateShield`), ÉN eist
+#     daarbovenop een eigenaarsautorisatie die EXPLICIET aan de MERGE-GROUP-TREE bindt
+#     (`evaluateMergeAuthorizations` met een boom-vervangen context) — niet aan de PR's eigen tree.
+#     Een autorisatie die alleen op de eigen PR-tree geldig is telt hier niet mee: "not re-derivable
+#     on the merge-group's actual tree → red", exact zoals de review eist.
+#   - De job publiceert ALTIJD, in elk pad — geslaagde binding, gefaalde binding, onleesbaar bewijs,
+#     een onverwachte fout — precies één check-run, gebonden aan `merge_group.head_sha` via de
+#     GitHub Checks API (`checks: write`, niet `statuses: write`). Nooit een stille afwezigheid: een
+#     ontbrekende check op de vereiste context is voor een merge-queue-regel niet-onderscheidbaar van
+#     "nog niet gedraaid" en zou de wachtrij eeuwig laten wachten in plaats van fail-closed te
+#     blokkeren.
+#
+# WAT DIT BESTAND NOOIT DOET. Geen ruleset aanmaken of wijzigen, geen required-status-check
+# configureren, geen branch-protection aanraken, geen merge uitvoeren, geen andere schrijfscope dan
+# `checks: write`. Of deze check-run ooit als vereiste context in een ruleset wordt opgenomen is een
+# aparte, toekomstige activatiestap — dezelfde scheiding die de mergefinalizer al hanteert voor
+# `merge_queue`-regels.
+#
+# BOOTSTRAP, eerlijk benoemd: `merge_group` vuurt uitsluitend wanneer deze repository al een actieve
+# merge-queue-regel draagt die deze check als vereist noemt — dat bestaat nog niet. Deze pull request
+# kan de keten dus niet zelf live bewijzen; wat hier bewezen wordt is de statische vorm en het gedrag
+# van de scripts (zie de nieuwe testsuite `test/autocoding-merge-group-gate.test.mjs`).
+
+on:
+  merge_group:
+    types: [checks_requested]
+
+permissions: {}
+
+jobs:
+  poort:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    # DE PER-MERGE-GROUP-SHA RIJ. Sleutelt op exact de commit-SHA van deze merge-group-poging en op
+    # niets wat per run verschilt. Dezelfde SHA kan in theorie meerdere `checks_requested`-events
+    # opleveren (bv. een her-run); die mogen elkaar nooit overlappend beoordelen. `cancel-in-progress:
+    # false` kapt een lopende beoordeling nooit af.
+    concurrency:
+      group: autocoding-merge-group-gate-${{ github.event.merge_group.head_sha }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Bepaal bootstrapbeschikbaarheid
+        id: bootstrap
+        run: |
+          set -euo pipefail
+          if [ -f scripts/autocoding/verify-merge-group-gate.mjs ] && \
+             [ -f scripts/autocoding/resolve-merge-group.mjs ] && \
+             [ -f scripts/autocoding/verify-review-gate.mjs ] && \
+             [ -f scripts/autocoding/collect-shield-input.mjs ] && \
+             [ -f scripts/autocoding/gh-bounded-pages.sh ] && \
+             [ -f CONTROL/AUTOCODING/policy.v1.json ]; then
+            echo 'trusted_gate_files=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'trusted_gate_files=false' >> "$GITHUB_OUTPUT"
+            echo 'BOOTSTRAP_TRUSTED_MERGE_GROUP_GATE_FILES_NOT_ON_DEFAULT_BRANCH'
+          fi
+
+      # Meet het volledige bewijs — PR-eigen én merge-group-eigen — en beslis. Deze stap mag zelf
+      # falen (onleesbaar bewijs, een netwerkfout): de publicatiestap hieronder draait met `always()`
+      # en valt terug op een vaste, generieke faalreden zodra hier geen geldig resultaat is
+      # geschreven. Er is dus geen pad waarop deze workflow zwijgt.
+      - name: Meet en beslis, read-only
+        id: meet
+        if: steps.bootstrap.outputs.trusted_gate_files == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          MERGE_GROUP_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -uo pipefail
+          . scripts/autocoding/gh-bounded-pages.sh
+
+          echo '{"decision":"NO_GO","reasons":["MERGE_GROUP_GATE_INTERNAL_ERROR"]}' > "$RUNNER_TEMP/uitkomst.json"
+
+          # Het PR-nummer komt UITSLUITEND uit de door GitHub gegenereerde queue-ref
+          # (`gh-readonly-queue/<base>/pr-<nummer>-<sha>`) — nooit uit een aanname. Een onherkenbare
+          # ref laat de sentinelfout hierboven staan en de publicatiestap meldt die als check-run.
+          number="$(printf '%s' "$MERGE_GROUP_HEAD_REF" | sed -nE 's#^(refs/heads/)?gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]{4,40}$#\2#p')"
+          case "$number" in
+            ''|*[!0-9]*)
+              echo '::error::MERGE_GROUP_REF_UNPARSEABLE'
+              exit 0 ;;
+          esac
+
+          raw="$RUNNER_TEMP/pr"
+          mkdir -p "$raw"
+          gh api "repos/$REPOSITORY/pulls/$number" > "$raw/pr.json" || { echo '::error::PULL_REQUEST_UNREADABLE'; exit 0; }
+          head_sha="$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const s=((p||{}).head||{}).sha;if(!/^[0-9a-f]{40}$/.test(s||""))process.exit(1);process.stdout.write(s)' "$raw/pr.json")" || { echo '::error::PULL_REQUEST_HEAD_UNREADABLE'; exit 0; }
+          gh api "repos/$REPOSITORY/git/commits/$head_sha" > "$raw/head-commit.json" || { echo '::error::HEAD_COMMIT_UNREADABLE'; exit 0; }
+
+          # V21 (Gemini1 V20-bevinding, HIGH): een afgekapte laatste pagina mag NOOIT stilzwijgend als
+          # compleet bewijs verder reizen — een blokkerende review of finding kan op een
+          # niet-opgehaalde volgende pagina staan. `compleet` wordt daarom hieronder mechanisch
+          # bewezen en LETTERLIJK als `--evidence-complete` aan de verifier doorgegeven; die stopt
+          # fail-closed vóór elke GO-check zodra dat niet `true` is, ongeacht hoe schoon het al
+          # opgehaalde fragment eruitziet.
+          compleet=true
+          for endpoint in \
+            "pulls/$number/commits:pr-commits" \
+            "issues/$number/comments:issue-comments" \
+            "pulls/$number/reviews:reviews" \
+            "pulls/$number/comments:review-comments" \
+            "pulls/$number/files:files"; do
+            path="${endpoint%%:*}"
+            naam="${endpoint##*:}"
+            gh_bounded_pages "repos/$REPOSITORY/$path" "$raw/$naam.json" \
+              "$GH_BOUNDED_EVIDENCE_PAGES" "$raw/pages-$naam"
+            rc=$?
+            if [ "$rc" -eq 2 ]; then compleet=false; fi
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+              echo '::error::EVIDENCE_UNREADABLE'
+              exit 0
+            fi
+          done
+
+          mg="$RUNNER_TEMP/mg"
+          mkdir -p "$mg"
+          node -e '
+            const fs = require("fs");
+            fs.writeFileSync(process.argv[1], JSON.stringify({
+              head_ref: process.env.MERGE_GROUP_HEAD_REF,
+              base_sha: process.env.MERGE_GROUP_BASE_SHA,
+            }));
+          ' "$mg/event.json"
+          gh api "repos/$REPOSITORY/git/commits/$MERGE_GROUP_HEAD_SHA" > "$mg/commit.json" || { echo '::error::MERGE_GROUP_COMMIT_UNREADABLE'; exit 0; }
+
+          node scripts/autocoding/verify-merge-group-gate.mjs \
+            --raw "$raw" \
+            --merge-group "$mg" \
+            --policy CONTROL/AUTOCODING/policy.v1.json \
+            --evidence-complete "$compleet" > "$RUNNER_TEMP/uitkomst.json" || true
+
+      # ALTIJD, ongeacht wat hierboven gebeurde: precies één check-run, gebonden aan de
+      # merge-group-SHA. `if: always()` is hier geen gemak maar het hele punt — een pad zonder
+      # check-run zou een merge-queue-regel eeuwig laten wachten in plaats van fail-closed te
+      # blokkeren.
+      - name: Publiceer de check-run op de merge-group-SHA
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -uo pipefail
+          uitkomst="$RUNNER_TEMP/uitkomst.json"
+          if [ ! -s "$uitkomst" ]; then
+            echo '{"decision":"NO_GO","reasons":["MERGE_GROUP_GATE_DID_NOT_RUN"]}' > "$uitkomst"
+          fi
+
+          conclusion="$(node -e 'const u=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(u.decision==="GO"?"success":"failure")' "$uitkomst" 2>/dev/null || echo failure)"
+          samenvatting="$(node -e 'const u=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const r=Array.isArray(u.reasons)?u.reasons:["MERGE_GROUP_GATE_OUTPUT_UNPARSEABLE"];process.stdout.write(r.length?r.join(", "):"GO")' "$uitkomst" 2>/dev/null || echo 'MERGE_GROUP_GATE_OUTPUT_UNPARSEABLE')"
+
+          gh api "repos/$REPOSITORY/check-runs" \
+            -f "name=autocoding-merge-group-gate" \
+            -f "head_sha=$MERGE_GROUP_HEAD_SHA" \
+            -f "status=completed" \
+            -f "conclusion=$conclusion" \
+            -f "output[title]=AUTOCODING_MERGE_GROUP_GATE_V1" \
+            -f "output[summary]=$samenvatting"

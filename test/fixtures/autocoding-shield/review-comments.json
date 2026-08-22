@@ -1,0 +1,34 @@
+[
+  [
+    {
+      "id": 900001,
+      "pull_request_review_id": 4997642205,
+      "user": {
+        "login": "gemini-code-assist[bot]",
+        "id": 176961590,
+        "type": "Bot"
+      },
+      "body": "![critical](https://www.gstatic.com/codereviewagent/critical.svg)\n\n### Critical: onbeheerde invoer"
+    },
+    {
+      "id": 900002,
+      "pull_request_review_id": 4997700003,
+      "user": {
+        "login": "chatgpt-codex-connector[bot]",
+        "id": 199175422,
+        "type": "Bot"
+      },
+      "body": "**P1 Badge** De statuspublicatie hangt aan de event-SHA in plaats van aan de gemeten PR-head."
+    },
+    {
+      "id": 900003,
+      "pull_request_review_id": 4997700003,
+      "user": {
+        "login": "chatgpt-codex-connector[bot]",
+        "id": 199175422,
+        "type": "Bot"
+      },
+      "body": "**P2 Badge** De ownergate hergebruikt de reviewerroute."
+    }
+  ]
+]
