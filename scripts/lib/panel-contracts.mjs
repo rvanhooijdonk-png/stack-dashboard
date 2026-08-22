@@ -27,8 +27,8 @@ export const PANEL_CONTRACTS = Object.freeze([
     slot: 'statusgen',
     id: 'paneel-statusgen',
     title: 'STATUSGEN',
-    inputSource: 'generatie-/buildmetadata van de statuslaag (bron nog niet gekoppeld aan deze slot)',
-    denominatorLabel: 'n.v.t. — dit paneel toont alleen een generatiestempel',
+    inputSource: 'generatie-/buildmetadata van de statuslaag zelf — contractversie, bouwstempel, overall-status en het aantal niet-geverifieerde bronnen',
+    denominatorLabel: 'aantal bronnen dat de statuslaag bij deze bouw heeft gelezen',
   }),
 ]);
 
@@ -40,17 +40,30 @@ export const PANEL_CONTRACTS = Object.freeze([
 export function renderPanelSlot(contract, options) {
   // `null` of een niet-object mag hier nooit klappen: een latere vuller die per ongeluk
   // `renderPanelSlot(contract, null)` aanroept hoort UNKNOWN te krijgen, geen TypeError.
-  const { measuredAt = null } = (options && typeof options === 'object') ? options : {};
+  const opts = (options && typeof options === 'object') ? options : {};
+  const { measuredAt = null, body = null, badge = 'warn', statusLabel = 'UNKNOWN' } = opts;
   const stamp = measuredAt ? esc(measuredAt) : '<span class="unknown">UNKNOWN</span>';
+  // Een vuller levert een `body`; zolang die ontbreekt blijft het slot exact het lege skelet.
+  // `body` is al door de vuller gesaneerd (alleen `esc()`-output) — het is bewust het enige
+  // fragment dat hier niet nog eens door `esc()` gaat, anders zou de opmaak zichtbaar worden.
+  const inhoud = typeof body === 'string' && body !== ''
+    ? body
+    : '<p class="unknown">UNKNOWN — bron nog niet gekoppeld.</p>';
   return `<section id="${esc(contract.id)}" class="card" data-panel-slot="${esc(contract.slot)}">
-  <h2>${esc(contract.title)} <span class="badge warn">UNKNOWN</span></h2>
-  <p class="unknown">UNKNOWN — bron nog niet gekoppeld.</p>
+  <h2>${esc(contract.title)} <span class="badge ${esc(badge)}">${esc(statusLabel)}</span></h2>
+  ${inhoud}
   <p class="muted">Contract: ${esc(contract.inputSource)}.</p>
   <p class="muted">Noemer: ${esc(contract.denominatorLabel)}.</p>
   <p class="muted">Gemeten om: ${stamp}.</p>
 </section>`;
 }
 
-export function renderPanelSlots() {
-  return PANEL_CONTRACTS.map((contract) => renderPanelSlot(contract)).join('\n');
+/**
+ * Rendert alle slots op volgorde van het contract. `vullingen` is een map van slot-key naar de
+ * opties van die slot; een slot zonder vulling blijft het lege UNKNOWN-skelet. Onbekende sleutels
+ * in `vullingen` worden genegeerd: het contract bepaalt welke slots bestaan, niet de vuller.
+ */
+export function renderPanelSlots(vullingen) {
+  const map = (vullingen && typeof vullingen === 'object') ? vullingen : {};
+  return PANEL_CONTRACTS.map((contract) => renderPanelSlot(contract, map[contract.slot])).join('\n');
 }
