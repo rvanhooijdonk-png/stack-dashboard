@@ -687,3 +687,77 @@ test('A28b. resolveReviewCommit onderscheidt ontbrekend van leeg, en kent geen e
   assert.equal(resolveReviewCommit({ body: 'geen regel' }, index), null);
   assert.equal(resolveReviewCommit(null, index), null);
 });
+
+// --- De gemeten Codex-succesvorm: twee feestwoorden, één betekenis ---------------------------------
+
+/**
+ * A29. Codex schrijft achter zijn schone eerste zin een wisselend feestwoord: `:tada:` op PR #72
+ * (comment 5376132338), `Swish!` op PR #74 (comment 5378185484). De fixtureset draagt daarom nu
+ * beide vormen — de ACTUELE head de live `Swish!`-vorm, de vorige ronde de oudere `:tada:`-vorm —
+ * en de hele keten van ruwe API-oogst tot einduitspraak moet ze allebei als bewijs dragen.
+ */
+test('A29. de adapter draagt beide gemeten Codex-succesvormen door de hele keten', () => {
+  const comments = flattenPages(raw('issue-comments'));
+  const bot = comments.filter((c) => c.user.login === 'chatgpt-codex-connector[bot]');
+  assert.ok(bot.some((c) => c.body.startsWith("Codex Review: Didn't find any major issues. Swish!")),
+    'de fixture draagt de live vorm');
+  assert.ok(bot.some((c) => c.body.startsWith("Codex Review: Didn't find any major issues. :tada:")),
+    'en de eerder gemeten vorm blijft staan');
+
+  const { context, shieldInput } = buildShieldInput(fixtureInput());
+  // Beide commentrondes leveren een GO-bewijsstuk: de live vorm op de ACTUELE head, de oudere vorm
+  // op de vorige. De derde Codex-bewijsvorm in de fixture is de REVIEW met bevindingen en blijft
+  // terecht NO_GO — die draagt geen succesvorm.
+  const codexGo = shieldInput.nativeEvidence.filter((e) => e.vendor === 'codex' && e.verdict === 'GO');
+  assert.deepEqual(codexGo.map((e) => e.resolved_head_sha).sort(), [HEAD, PREV_HEAD].sort());
+  for (const e of codexGo) assert.deepEqual(e.extra_reasons, [], 'geen enkele vorm ketst op de marker af');
+  assert.deepEqual(evaluateShield({ ...shieldInput, context, policy: POLICY }), { decision: 'GO', reasons: [] });
+
+  // Wissel de twee vormen om: welke ronde welk feestwoord droeg mag de uitkomst niet raken.
+  const omgewisseld = [comments.map((c) => (c.user.login === 'chatgpt-codex-connector[bot]'
+    ? { ...c, body: c.body.replace('. Swish!', '. :tada:X').replace('. :tada:', '. Swish!').replace('. :tada:X', '. :tada:') }
+    : c))];
+  const gewisseld = buildShieldInput(fixtureInput({ issueComments: omgewisseld }));
+  assert.deepEqual(
+    evaluateShield({ ...gewisseld.shieldInput, context: gewisseld.context, policy: POLICY }),
+    { decision: 'GO', reasons: [] },
+  );
+});
+
+test('A30. de live succesvorm zonder identiteit, binding of schone ronde blijft rood', () => {
+  const comments = flattenPages(raw('issue-comments'));
+  const live = comments.find((c) => c.user.login === 'chatgpt-codex-connector[bot]' && c.body.includes('Swish!'));
+
+  // 1. Dezelfde live tekst van een andere actor of via een andere App => geen bewijsstuk.
+  for (const vervalst of [
+    { ...live, user: { login: 'aanvaller', id: 6666, type: 'User' } },
+    { ...live, performed_via_github_app: { id: 999 } },
+  ]) {
+    const vervangen = [comments.map((c) => (c.id === live.id ? vervalst : c))];
+    const { context, shieldInput } = buildShieldInput(fixtureInput({ issueComments: vervangen }));
+    const r = evaluateShield({ ...shieldInput, context, policy: POLICY });
+    assert.equal(r.decision, 'NO_GO', JSON.stringify(vervalst.user.login));
+  }
+
+  // 2. Live tekst zonder `**Reviewed commit:**`-regel => niets om mechanisch aan te binden, dus
+  //    geen actueel bewijs. De schone zin alleen bindt aan geen enkele head.
+  const zonderRegel = [comments.map((c) => (c.id === live.id
+    ? { ...c, body: "Codex Review: Didn't find any major issues. Swish!" }
+    : c))];
+  const los = buildShieldInput(fixtureInput({ issueComments: zonderRegel }));
+  const losBewijs = los.shieldInput.nativeEvidence.find((e) => e.vendor === 'codex' && e.resolved_head_sha === '');
+  assert.ok(losBewijs, 'het bewijsstuk bestaat, maar bindt aan niets');
+  assert.ok(bindNativeEvidence(losBewijs, los.context).reasons.includes(REASON.STALE_HEAD));
+  const rLos = evaluateShield({ ...los.shieldInput, context: los.context, policy: POLICY });
+  assert.equal(rLos.decision, 'NO_GO');
+  assert.ok(rLos.reasons.includes(REASON.INSUFFICIENT_GO));
+
+  // 3. Near-miss semantiek op de actuele head => de vendor mist zijn schone ronde.
+  const bijna = [comments.map((c) => (c.id === live.id
+    ? { ...c, body: c.body.replace('major issues. Swish!', 'major issues, op één na. Swish!') }
+    : c))];
+  const nb = buildShieldInput(fixtureInput({ issueComments: bijna }));
+  const rBijna = evaluateShield({ ...nb.shieldInput, context: nb.context, policy: POLICY });
+  assert.equal(rBijna.decision, 'NO_GO');
+  assert.ok(rBijna.reasons.includes(REASON.NATIVE_TERMINAL_MARKER_MISSING));
+});

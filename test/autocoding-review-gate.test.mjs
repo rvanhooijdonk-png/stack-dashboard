@@ -1088,7 +1088,7 @@ const NATIVE_POLICY = Object.freeze({
       user_type: 'Bot',
       app_id: 1144995,
       allowed_states: Object.freeze(['COMMENTED']),
-      terminal_success_markers: Object.freeze(["Codex Review: Didn't find any major issues. :tada:"]),
+      terminal_success_markers: Object.freeze(["Codex Review: Didn't find any major issues."]),
     }),
     gemini: Object.freeze({
       actor: 'gemini-code-assist[bot]',
@@ -1332,4 +1332,151 @@ test('N32. parseVerifyArgs weigert per vorm en houdt de bronkeuze exclusief', ()
   assert.equal(parseVerifyArgs(null).ok, false);
   // De positieverschuiving zelf: een los token vóór de rest mag niets stil hernoemen.
   assert.equal(parseVerifyArgs(['--dry-run', ...goed]).ok, false, 'geen vlaggen op deze grens');
+});
+
+/**
+ * De letterlijke live vorm: PR #74, issue-comment 5378185484, geschreven door
+ * `chatgpt-codex-connector[bot]` via GitHub-App 1144995 op head `12c1913623`. Dezelfde schone
+ * uitkomst als PR #72's comment 5376132338, alleen met een ander feestwoord achter de eerste zin.
+ */
+const CODEX_LIVE_SWISH_BODY = 'Codex Review: Didn\'t find any major issues. Swish!\n\n'
+  + '**Reviewed commit:** `12c1913623`\n\n'
+  + '<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n'
+  + '[Your team has set up Codex to review pull requests in this repo]'
+  + '(https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n'
+  + '- Open a pull request for review\n- Mark a draft as ready\n- Comment "@codex review".\n\n'
+  + 'If Codex has suggestions, it will comment; otherwise it will react with 👍.\n\n\n\n\n'
+  + 'Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".'
+  + '\n            \n</details>';
+
+test('N33. beide gemeten Codex-feestsuffixen zijn GO; het suffix draagt geen bewijslast', () => {
+  // Gemeten defect: de policy pinde de VOLLEDIGE zin inclusief `:tada:`. Toen het levende transport
+  // op deze PR `Swish!` schreef, ketste een werkelijk ontvangen schone review af op
+  // NATIVE_TERMINAL_MARKER_MISSING. Alleen de betekenisdragende eerste zin is nu gepind.
+  for (const body of [
+    'Codex Review: Didn\'t find any major issues. :tada:\n\n**Reviewed commit:** `b9df1f8398`\n',
+    CODEX_LIVE_SWISH_BODY,
+    // Zonder feestwoord, en met de leidende newline die GitHub soms levert.
+    'Codex Review: Didn\'t find any major issues.',
+    '\n  Codex Review: Didn\'t find any major issues.\n\n**Reviewed commit:** `b9df1f8398`\n',
+  ]) {
+    const evidence = extractCodexNativeEvidence(codexComment({ body }), resolved(), NATIVE_POLICY);
+    assert.equal(evidence.verdict, 'GO', body.slice(0, 60));
+    assert.deepEqual(bindNativeEvidence(evidence, NATIVE_CONTEXT).reasons, [], body.slice(0, 60));
+  }
+
+  // Dezelfde regel op de REVIEW-route, waar de App-id niet bestaat en de binding uit `commit_id` komt.
+  const review = extractCodexReviewEvidence(
+    codexReview({ body: CODEX_LIVE_SWISH_BODY }), [], resolved(), NATIVE_POLICY,
+  );
+  assert.equal(review.verdict, 'GO');
+  assert.deepEqual(bindNativeEvidence(review, NATIVE_CONTEXT).reasons, []);
+});
+
+test('N34. near-missteksten rond de gepinde eerste zin blijven NATIVE_TERMINAL_MARKER_MISSING', () => {
+  const nearMiss = [
+    // Semantisch omgekeerd of afgezwakt: de zin zelf is anders, hoe schoon hij ook klinkt.
+    'Codex Review: Didn\'t find any major issues, but one change is risky.',
+    'Codex Review: Found 3 major issues. :tada:',
+    'Codex Review: Didn\'t find any major issue. Swish!',
+    'Codex Review: Did find any major issues. Swish!',
+    'Codex Review: 2 comment(s) generated.\n\n**Reviewed commit:** `b9df1f8398`\n',
+    // De gepinde zin staat er wel, maar niet vooraan: alles ervoor is niet-gemeten proza.
+    'Update: Codex Review: Didn\'t find any major issues. Swish!',
+    '> Codex Review: Didn\'t find any major issues. Swish!',
+    // Woordgrens: het suffix moet los staan, niet vastgeplakt aan de gepinde zin.
+    'Codex Review: Didn\'t find any major issues.NOT — zie hieronder.',
+    // Interpunctie en hoofdletters zijn deel van de gepinde vorm.
+    'Codex Review: Didn\'t find any major issues! Swish!',
+    'Codex Review: Didn\'t find any major issues Swish!',
+    'codex review: didn\'t find any major issues.',
+    // Typografische apostrof in plaats van de gemeten ASCII-apostrof.
+    'Codex Review: Didn’t find any major issues. Swish!',
+    '',
+    '   ',
+  ];
+  for (const body of nearMiss) {
+    const evidence = extractCodexNativeEvidence(codexComment({ body }), resolved(), NATIVE_POLICY);
+    assert.equal(evidence.verdict, 'NO_GO', JSON.stringify(body.slice(0, 60)));
+    assert.ok(evidence.extra_reasons.includes(REASON.NATIVE_TERMINAL_MARKER_MISSING),
+      JSON.stringify(body.slice(0, 60)));
+  }
+  // Een lichaam dat helemaal geen string is telt evenmin als succesvorm.
+  for (const body of [undefined, null, 42, {}, ["Codex Review: Didn't find any major issues."]]) {
+    const evidence = extractCodexNativeEvidence(codexComment({ body }), resolved(), NATIVE_POLICY);
+    assert.ok(evidence.extra_reasons.includes(REASON.NATIVE_TERMINAL_MARKER_MISSING), String(body));
+  }
+  // En Gemini's structuurmarker blijft even streng op dezelfde woordgrens.
+  const geminiNearMiss = extractGeminiNativeEvidence(
+    geminiReview({ body: '## Code Reviewers zijn het oneens met deze PR.' }), [], resolved(), NATIVE_POLICY,
+  );
+  assert.ok(geminiNearMiss.extra_reasons.includes(REASON.NATIVE_TERMINAL_MARKER_MISSING));
+});
+
+test('N35. de live Swish-vorm koopt identiteit, headbinding of bevindingen niet af', () => {
+  // 1. Verkeerde actor met exact dezelfde live tekst => geen bewijsstuk, geen ruis.
+  for (const login of ['aanvaller', 'chatgpt-codex-connector', 'rvanhooijdonk-png', '']) {
+    const gespooft = codexComment({ body: CODEX_LIVE_SWISH_BODY, user: { login } });
+    assert.equal(extractCodexNativeEvidence(gespooft, resolved(), NATIVE_POLICY), null, login);
+  }
+
+  // 2. Juiste actorlogin, maar een andere App of een ander numeriek user-id => identiteit onbewezen.
+  for (const kapot of [
+    { performed_via_github_app: { id: 999 } },
+    { performed_via_github_app: undefined },
+    { user: { id: 4242 } },
+    { user: { type: 'User' } },
+  ]) {
+    const evidence = extractCodexNativeEvidence(
+      codexComment({ body: CODEX_LIVE_SWISH_BODY, ...kapot }), resolved(), NATIVE_POLICY,
+    );
+    assert.equal(evidence.verdict, 'GO', 'de tekst is schoon');
+    const bound = bindNativeEvidence(evidence, NATIVE_CONTEXT);
+    assert.equal(bound.valid, false, JSON.stringify(kapot));
+    assert.ok(bound.reasons.includes(REASON.NATIVE_IDENTITY_UNVERIFIED), JSON.stringify(kapot));
+  }
+
+  // 3. Geen mechanisch geresolveerde gereviewde commit => de live tekst bindt aan niets.
+  for (const zonderBinding of [null, undefined, { head_sha: '', tree_sha: '' }]) {
+    const evidence = extractCodexNativeEvidence(
+      codexComment({ body: CODEX_LIVE_SWISH_BODY }), zonderBinding, NATIVE_POLICY,
+    );
+    const bound = bindNativeEvidence(evidence, NATIVE_CONTEXT);
+    assert.equal(bound.valid, false, String(zonderBinding));
+    assert.ok(bound.reasons.includes(REASON.STALE_HEAD), String(zonderBinding));
+  }
+
+  // 4. Inline bevindingen op dezelfde ronde => NO_GO, hoe feestelijk het lichaam ook is.
+  const metBevinding = extractCodexReviewEvidence(
+    codexReview({ body: CODEX_LIVE_SWISH_BODY }), [{ id: 1, body: 'P1: dit is fout' }], resolved(), NATIVE_POLICY,
+  );
+  assert.equal(metBevinding.verdict, 'NO_GO');
+  assert.ok(metBevinding.extra_reasons.includes(REASON.NATIVE_FINDINGS_PRESENT));
+  assert.ok(!metBevinding.extra_reasons.includes(REASON.NATIVE_TERMINAL_MARKER_MISSING));
+
+  // 5. En de vendor blijft verplicht: alleen Codex is nooit genoeg.
+  const alleen = extractCodexNativeEvidence(codexComment({ body: CODEX_LIVE_SWISH_BODY }), resolved(), NATIVE_POLICY);
+  const r = evaluateNativeReview([alleen], NATIVE_CONTEXT, NATIVE_POLICY);
+  assert.equal(r.decision, 'NO_GO');
+  assert.ok(r.reasons.includes(REASON.INSUFFICIENT_GO));
+});
+
+test('N36. de gepinde policyvorm is de eerste zin, zonder feestwoord', () => {
+  const policy = JSON.parse(readFileSync('CONTROL/AUTOCODING/policy.v1.json', 'utf8'));
+  assert.deepEqual(policy.native_review.codex.terminal_success_markers,
+    ["Codex Review: Didn't find any major issues."]);
+  assert.deepEqual(policy.native_review.gemini.terminal_success_markers, ['## Code Review']);
+  // De verruiming blijft tot de succesvorm beperkt: identiteit en app-id staan onveranderd gepind.
+  assert.equal(policy.native_review.codex.user_id, 199175422);
+  assert.equal(policy.native_review.codex.user_type, 'Bot');
+  assert.equal(policy.native_review.codex.app_id, 1144995);
+  assert.deepEqual(policy.native_review.codex.allowed_states, ['COMMENTED']);
+  assert.equal(policy.live_receipt_gate_enabled, false);
+  // Met de echte policy — niet de testkopie — is de live vorm GO en de near-miss dat niet.
+  const live = extractCodexNativeEvidence(codexComment({ body: CODEX_LIVE_SWISH_BODY }), resolved(), policy);
+  assert.equal(live.verdict, 'GO');
+  const bijna = extractCodexNativeEvidence(
+    codexComment({ body: 'Codex Review: Didn\'t find any major issues, op één na.' }), resolved(), policy,
+  );
+  assert.equal(bijna.verdict, 'NO_GO');
 });

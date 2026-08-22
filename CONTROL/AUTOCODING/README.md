@@ -355,7 +355,7 @@ daarom hun eigen, ongewijzigde GitHub-uitvoer, gemeten door
 alle drie worden ondersteund:
 
 - **Codex als issue-comment** — van `chatgpt-codex-connector[bot]` via GitHub-App `1144995`, die
-  begint met het exacte succesbericht en een `**Reviewed commit:**`-regel draagt.
+  begint met de exacte succeszin en een `**Reviewed commit:**`-regel draagt.
 - **Codex als pull-request-review** — dezelfde bot levert op deze PR een `pull_request_review` mét
   inline comments. Een reviewobject draagt géén `performed_via_github_app`-veld, dus daar is de
   App-id niet af te dwingen; de identiteit hangt op deze route aan `user.login`, `user.type` en het
@@ -369,6 +369,29 @@ alle drie worden ondersteund:
   headvergelijking dus nooit, en telt daarmee niet als bewijs op de actuele head.
 - **Gemini als pull-request-review** — van `gemini-code-assist[bot]` (`user.id` `176961590`) in een
   toegestane state, met de terminale `## Code Review`-marker.
+
+#### De Codex-succesvorm is de eerste zin, niet het feestwoord
+
+Codex hangt achter zijn schone eerste zin een wisselend feestwoord. Gemeten: `:tada:` op PR #72
+(comment 5376132338) en `Swish!` op PR #74 (comment 5378185484), beide van dezelfde bot, dezelfde
+App en met dezelfde inhoudelijke uitkomst. Zolang de policy de VOLLEDIGE zin inclusief `:tada:`
+pinde, ketste een werkelijk ontvangen schone review af op `NATIVE_TERMINAL_MARKER_MISSING` — een
+gemeten integratiefout, geen theoretisch geval.
+
+De gepinde vorm is daarom uitsluitend de betekenisdragende eerste zin:
+
+```
+Codex Review: Didn't find any major issues.
+```
+
+Wat daarachter staat, telt niet mee. Dat is geen verruiming van de poort: interpunctie,
+hoofdletters en de ASCII-apostrof zijn deel van de gepinde vorm, de zin moet vooraan staan (alleen
+leidende witruimte wordt genegeerd), en hij moet op een woordgrens eindigen — einde lichaam of
+witruimte, zodat een vastgeplakte voortzetting (`... major issues.NOT`) of een langere kop
+(`## Code Reviewers ...` op Gemini's marker) gesloten blijft vallen. Near-misssemantiek
+(`... major issues, but ...`, `Codex Review: 2 comment(s) generated.`) blijft `NO_GO`. Identiteit,
+App-id, headbinding en het bevindingenverbod zijn ongewijzigd: het feestwoord droeg nooit bewijs, de
+gepinde bot en de mechanisch geresolveerde commit doen dat wel.
 
 Voor beide reviewroutes geldt dezelfde regel: inline reviewcomments horen via
 `pull_request_review_id` bij precies één review, en **elke** inline bevinding op die review maakt die

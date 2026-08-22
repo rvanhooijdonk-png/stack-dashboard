@@ -371,12 +371,22 @@ export function nativeReviewStateIsActive(review, cfg) {
  * betekent "geen enkele vorm is succes", nooit "alles is succes". Voorafgaande witruimte wordt
  * genegeerd (GitHub levert reviewlichamen soms met een leidende newline); dat kan een
  * bevindingenlichaam nooit op een succesmarker laten lijken.
+ *
+ * De prefix moet op een woordgrens eindigen: wat volgt is het einde van het lichaam of witruimte.
+ * Zonder die eis zou een marker halverwege een ander woord of een andere zin kunnen aanslaan
+ * ("## Code Reviewers vinden dit fout" op "## Code Review"), en dat is precies de klasse
+ * near-missteksten die gesloten moet blijven vallen. De eis is strikt strenger dan een kale
+ * `startsWith`: hij kan nooit iets toelaten dat voorheen faalde.
  */
 function matchesTerminalSuccessMarker(body, markers) {
   if (typeof body !== 'string') return false;
   if (!Array.isArray(markers) || markers.length === 0) return false;
   const trimmed = body.trimStart();
-  return markers.some((marker) => isNonEmptyString(marker) && trimmed.startsWith(marker));
+  return markers.some((marker) => {
+    if (!isNonEmptyString(marker) || !trimmed.startsWith(marker)) return false;
+    const rest = trimmed.slice(marker.length);
+    return rest === '' || /^\s/.test(rest);
+  });
 }
 
 /**
@@ -385,6 +395,13 @@ function matchesTerminalSuccessMarker(body, markers) {
  * getoetst), een canonieke terminale succesvorm, en NUL inline bevindingen. Afwezigheid van
  * bevindingen is uitdrukkelijk géén GO op zichzelf — Codex plaatst bij een schone review helemaal
  * geen review, dus "geen bevindingen" is even goed verenigbaar met "nooit gedraaid".
+ *
+ * De gepinde succesvorm is uitsluitend de eerste zin `Codex Review: Didn't find any major issues.`
+ * Codex hangt daar een wisselend feestwoord achter: op PR #72 gemeten als `:tada:`, op PR #74
+ * (comment 5378185484) als `Swish!`. Dat suffix draagt geen betekenis en werd toch als bewijslast
+ * gepind, waardoor een werkelijk ontvangen schone review als NATIVE_TERMINAL_MARKER_MISSING
+ * afketste. Alleen de betekenisdragende zin telt nu; identiteit, App-id, headbinding en het
+ * bevindingenverbod blijven onverkort en dragen de weigering.
  */
 function codexEvidence(carrier, inlineComments, resolved, policy, requireApp) {
   const cfg = policy?.native_review?.codex;
