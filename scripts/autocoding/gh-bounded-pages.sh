@@ -36,27 +36,36 @@ GH_BOUNDED_EVIDENCE_PAGES=4
 # gemeten stand was er 126. Spiegelbeeld van `SELECTION_PAGE_BUDGET`.
 GH_BOUNDED_SELECTION_PAGES=4
 
-# Het aantal pagina's van de open-PR-lijst in de ISOLATIEMETING van de schrijfjob. Diezelfde lijst,
-# maar een ander moment en een ander doel: de selectiejob bepaalt er WELKE pull requests gemeten
-# worden, de schrijfjob toetst er of de gemeten head door precies één open pull request wordt
-# gedragen. Zie `scripts/autocoding/verify-head-isolation.mjs`. Spiegelbeeld van
-# `ISOLATION_PAGE_BUDGET`; bewust een eigen naam, zodat het ene budget niet ongemerkt met het andere
-# meebeweegt.
-GH_BOUNDED_ISOLATION_PAGES=4
+# Het aantal pagina's van de CHECK-RUNS van één commit, in de finalizer. Dit eindpunt geeft geen
+# kale array terug maar een object met de lijst onder `check_runs`, en wordt daarom met de vijfde
+# parameter hieronder opgehaald. Vier pagina's is 400 checks op één commit — ruimschoots boven wat
+# deze repository draait, en hard genoeg om in de budgetsom mee te tellen. Spiegelbeeld van
+# `CHECKS_PAGE_BUDGET`.
+GH_BOUNDED_CHECKS_PAGES=4
 
-# `gh_bounded_pages <api-pad> <uitvoerbestand> <max-pagina's> <werkmap>`
+# `gh_bounded_pages <api-pad> <uitvoerbestand> <max-pagina's> <werkmap> [<veld>]`
 #
 #   rc 0 — de lijst is VOLLEDIG opgehaald en staat in het uitvoerbestand.
-#   rc 1 — een parameter was onbruikbaar (geen geldig paginamaximum, lege werkmap), of een verzoek,
-#          een antwoord of een schrijfactie mislukte; het uitvoerbestand is onbruikbaar.
+#   rc 1 — een parameter was onbruikbaar (geen geldig paginamaximum, lege werkmap, onbruikbare
+#          veldnaam), of een verzoek, een antwoord of een schrijfactie mislukte; het uitvoerbestand
+#          is onbruikbaar.
 #   rc 2 — de laatst toegestane pagina was vol: de oogst is MOGELIJK ONVOLLEDIG. Het uitvoerbestand
 #          bevat wat er wél is opgehaald, maar mag niet als volledig bewijs gelden.
+#
+# `<veld>` is optioneel en dient uitsluitend voor eindpunten die hun pagina NIET als kale array
+# leveren maar als object met de lijst eronder — `/commits/{sha}/check-runs` geeft `check_runs`.
+# Zonder deze parameter zou de finalizer voor zo'n eindpunt een tweede, ongebonden ophaalpad nodig
+# hebben, en precies dat willen we niet: één begrensde lees-lus, één vol-detectie, één truncatiecode.
+# De veldnaam moet een kale sleutelnaam zijn; alles daarbuiten is een aanroepfout en wordt geweigerd
+# vóór het eerste verzoek. De uitvoervorm blijft in beide gevallen een array VAN PAGINA's, zodat
+# `flattenPages` er niets van hoeft te weten.
 gh_bounded_pages() {
-  local api_path="$1" out="$2" max_pages="$3" scratch="$4"
+  local api_path="$1" out="$2" max_pages="$3" scratch="$4" veld="${5-}"
   local separator page count truncated last body
 
   case "$max_pages" in ''|*[!0-9]*) return 1 ;; esac
   [ "$max_pages" -ge 1 ] || return 1
+  case "$veld" in '') ;; *[!A-Za-z0-9_]*|[0-9]*) return 1 ;; esac
   # Het pad draagt soms al een query (`pulls?state=open`). Het verkeerde scheidingsteken zou de
   # paginaparameters aan de vorige waarde plakken en de begrenzing stil laten vervallen.
   case "$api_path" in *'?'*) separator='&' ;; *) separator='?' ;; esac
@@ -78,8 +87,10 @@ gh_bounded_pages() {
     body="$scratch/page-$page.json"
     gh api "${api_path}${separator}per_page=${GH_BOUNDED_PAGE_SIZE}&page=${page}" > "$body" || return 1
     # De telling komt uit het AL OPGEHAALDE antwoord, niet uit een extra verzoek. Een antwoord dat
-    # geen lijst is, is geen lege lijst maar een onbruikbaar antwoord.
-    count="$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(!Array.isArray(d))process.exit(1);process.stdout.write(String(d.length))' "$body")" || return 1
+    # geen lijst is, is geen lege lijst maar een onbruikbaar antwoord. Is er een veld gevraagd, dan
+    # wordt de pagina ter plekke tot die lijst herschreven — de vol-detectie hieronder telt dan de
+    # items die het eindpunt werkelijk pagineert, niet de sleutels van de omhullende envelop.
+    count="$(node -e 'const fs=require("fs");const f=process.argv[1],veld=process.argv[2];let d=JSON.parse(fs.readFileSync(f,"utf8"));if(veld){if(typeof d!=="object"||d===null||Array.isArray(d))process.exit(1);d=d[veld];if(!Array.isArray(d))process.exit(1);fs.writeFileSync(f,JSON.stringify(d));}if(!Array.isArray(d))process.exit(1);process.stdout.write(String(d.length))' "$body" "$veld")" || return 1
     case "$count" in ''|*[!0-9]*) return 1 ;; esac
     last="$page"
     # Een niet-volle pagina is het einde van de lijst: er valt niets meer te halen. Bewust een `if`

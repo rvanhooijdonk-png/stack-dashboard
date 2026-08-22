@@ -78,11 +78,14 @@ jobs:
              [ -f scripts/autocoding/publish-live-status.mjs ] && \
              [ -f scripts/autocoding/workflow-trust.mjs ] && \
              [ -f scripts/autocoding/select-live-gate-targets.mjs ] && \
+             [ -f scripts/autocoding/finalize-merge.mjs ] && \
+             [ -f scripts/autocoding/select-finalize-candidates.mjs ] && \
              [ -f test/autocoding-review-gate.test.mjs ] && \
              [ -f test/autocoding-shield-adapter.test.mjs ] && \
              [ -f test/autocoding-live-status.test.mjs ] && \
              [ -f test/autocoding-workflow-trust.test.mjs ] && \
              [ -f test/autocoding-live-gate-targets.test.mjs ] && \
+             [ -f test/autocoding-merge-finalizer.test.mjs ] && \
              [ -f CONTROL/AUTOCODING/policy.v1.json ]; then
             echo 'gate_files=true' >> "$GITHUB_OUTPUT"
           else
@@ -96,6 +99,7 @@ jobs:
           node --test test/autocoding-review-gate.test.mjs
           test/autocoding-shield-adapter.test.mjs test/autocoding-live-status.test.mjs
           test/autocoding-workflow-trust.test.mjs test/autocoding-live-gate-targets.test.mjs
+          test/autocoding-merge-finalizer.test.mjs
 
       - name: Branchdiff op secrets toetsen
         env:

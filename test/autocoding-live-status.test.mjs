@@ -22,13 +22,14 @@ import { evaluateShield, REASON } from '../scripts/autocoding/verify-review-gate
 import {
   describeReasons, resolvePublication, resolvePendingPublication, publishStatus, runPublish,
   parsePublishArgs, PUBLISH_ERROR, DESCRIPTION_LIMIT, STATUS_CONTEXT_RE, PENDING_PUBLICATION,
-  PENDING_INCOMPATIBLE_OPTIONS,
+  PENDING_INCOMPATIBLE_OPTIONS, PUBLISHABLE_STATES, DIAGNOSTIC_GO_DESCRIPTION,
 } from '../scripts/autocoding/publish-live-status.mjs';
 
 const FIXTURES = 'test/fixtures/autocoding-shield';
 const HEAD = 'b9df1f8398aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const POLICY = JSON.parse(readFileSync('CONTROL/AUTOCODING/policy.v1.json', 'utf8'));
-const CONTEXT_NAME = POLICY.live_status_context;
+// V18: de context heet `diagnostic_status_context` en draagt nooit meer een autorisatie.
+const CONTEXT_NAME = POLICY.diagnostic_status_context;
 
 function raw(name) {
   return JSON.parse(readFileSync(join(FIXTURES, `${name}.json`), 'utf8'));
@@ -65,16 +66,21 @@ function publicationFor(mutate = (s) => s, { executionError } = {}) {
   });
 }
 
-test('L1. de fixture-momentopname publiceert success op de gemeten head onder de vaste context', () => {
+test('L1. een schone momentopname levert DIAGNOSTIEK op, geen groen', () => {
+  // V18. Een commitstatus hangt aan de SHA en blijft staan, dus zou een `success` hier door elke
+  // latere pull request op dezelfde commit geërfd worden (Codex-bevinding `3835364972`). De
+  // uitspraak wordt daarom als `pending` geschreven, met een omschrijving die letterlijk zegt wat
+  // zij niet is. De mergeautorisatie leeft in `scripts/autocoding/finalize-merge.mjs`.
   const publication = publicationFor();
   assert.deepEqual(publication, {
     ok: true,
     sha: HEAD,
     context: CONTEXT_NAME,
-    state: 'success',
-    description: 'GO: native two-vendor review verified on this head',
+    state: 'pending',
+    description: DIAGNOSTIC_GO_DESCRIPTION,
   });
   assert.match(CONTEXT_NAME, STATUS_CONTEXT_RE);
+  assert.match(DIAGNOSTIC_GO_DESCRIPTION, /not a merge authorization/);
 });
 
 test('L2. convergentie: elke volgorde van hetzelfde bewijs levert byte-identiek dezelfde status', () => {
@@ -133,7 +139,7 @@ test('L5. een bewerkt Codex-comment dat zijn succesvorm verliest maakt dezelfde 
   assert.equal(publication.state, 'failure');
 });
 
-test('L6. success uitsluitend bij een bewezen GO: elke andere uitkomst is failure op dezelfde head', () => {
+test('L6. alles wat geen bewezen GO is, is failure op dezelfde head', () => {
   const cases = [
     ['NO_GO met redenen', { decision: 'NO_GO', reasons: [REASON.INSUFFICIENT_GO] }, ''],
     ['NO_GO zonder redenen', { decision: 'NO_GO', reasons: [] }, ''],
@@ -154,11 +160,54 @@ test('L6. success uitsluitend bij een bewezen GO: elke andere uitkomst is failur
     assert.equal(publication.state, 'failure', label);
     assert.ok(publication.description.startsWith('NO_GO: '), label);
   }
-  // En de enige groene vorm blijft groen.
+  // En de bewezen GO is `pending` — er bestaat geen enkele invoer die `success` oplevert.
   assert.equal(
     resolvePublication({ headSha: HEAD, statusContext: CONTEXT_NAME, gateResult: { decision: 'GO', reasons: [] } }).state,
-    'success',
+    'pending',
   );
+});
+
+test('L6a. er bestaat GEEN invoer waarop deze route `success` publiceert', () => {
+  // De allowlist is gesloten en bevat `success` niet. Dat is de structurele vorm van V18: de route
+  // KAN geen mergeautorisatie meer dragen, ook niet per ongeluk en ook niet na een policywijziging.
+  assert.deepEqual([...PUBLISHABLE_STATES], ['pending', 'failure']);
+
+  const invoeren = [
+    { decision: 'GO', reasons: [] },
+    { decision: 'GO', reasons: [REASON.OWNER_GATE_REQUIRED] },
+    { decision: 'NO_GO', reasons: [] },
+    { decision: 'success', reasons: [] },
+    { decision: 'GO', reasons: [], state: 'success' },
+    null, undefined, {}, 'GO', 42,
+  ];
+  for (const gateResult of invoeren) {
+    for (const executionError of ['', undefined, PUBLISH_ERROR.GATE_EXECUTION_ERROR, 'success']) {
+      const publication = resolvePublication({
+        headSha: HEAD, statusContext: CONTEXT_NAME, gateResult, executionError,
+      });
+      if (publication.ok !== true) continue;
+      assert.ok(PUBLISHABLE_STATES.includes(publication.state), JSON.stringify(publication));
+      assert.notEqual(publication.state, 'success');
+    }
+  }
+});
+
+test('L6b. de laatste poort vóór het netwerk weigert elke niet-toegestane state', async () => {
+  // De weigering staat vóór `fetch`, niet erna: een mutant die `success` terugbrengt doet NUL
+  // verzoeken in plaats van één te veel, en laat dus geen erfbaar groen op een gedeelde commit na.
+  for (const state of ['success', 'error', 'SUCCESS', '', undefined]) {
+    let aanroepen = 0;
+    const posted = await publishStatus({
+      repository: 'rvanhooijdonk-png/stack-dashboard',
+      token: 'x-token-x',
+      fetchImpl: async () => { aanroepen += 1; return { status: 201 }; },
+      publication: {
+        ok: true, sha: HEAD, context: CONTEXT_NAME, state, description: 'wat dan ook',
+      },
+    });
+    assert.deepEqual(posted, { ok: false, blocked: PUBLISH_ERROR.STATUS_STATE_NOT_ALLOWED }, String(state));
+    assert.equal(aanroepen, 0, String(state));
+  }
 });
 
 test('L7. zonder gemeten head of geldige context wordt er niets gepubliceerd, ook niet groen', () => {
@@ -307,7 +356,7 @@ test('L10. de CLI publiceert alleen bij een leesbaar GO-resultaat en geeft ander
       '--status-context', CONTEXT_NAME];
 
     assert.equal(await runPublish([...base, '--gate-result', goPath, '--dry-run'], { readFile }), 0);
-    assert.equal(JSON.parse(logged.at(-1)).state, 'success');
+    assert.equal(JSON.parse(logged.at(-1)).state, 'pending');
 
     assert.equal(await runPublish([...base, '--gate-result', noGoPath, '--dry-run'], { readFile }), 1);
     assert.equal(JSON.parse(logged.at(-1)).state, 'failure');
@@ -349,7 +398,7 @@ test('L10a. een falende fetch eindigt in EEN vaste categorie, nooit in een crash
   // een onafgevangen promise-rejection met stacktrace in het joblog; nu is het een gesloten
   // categorie zonder een letter uit de exceptie.
   const publication = {
-    ok: true, sha: HEAD, context: CONTEXT_NAME, state: 'success', description: 'GO: ...',
+    ok: true, sha: HEAD, context: CONTEXT_NAME, state: 'failure', description: 'NO_GO: PARSE_ERROR',
   };
   const geheim = 'ECONNREFUSED api.github.com token=x-token-x';
   const stukkeFetches = [
@@ -437,7 +486,7 @@ test('L11. de CLI als losse binary schrijft geen stderr en lekt geen argumenten'
   assert.equal(cli.status, 0);
   assert.equal(cli.stderr, '');
   const publication = JSON.parse(cli.stdout);
-  assert.equal(publication.state, 'success');
+  assert.equal(publication.state, 'pending');
   assert.equal(publication.sha, HEAD);
   assert.ok(!cli.stdout.includes('x-token-x'));
 });
@@ -942,4 +991,84 @@ test('L18d. NEGATIEVE MUTATIE: een teller die vóór de pops wordt vastgezet, li
   assert.equal(nieuw.teller, gekozen.length - nieuw.codes.length, 'de gerepareerde teller klopt');
   assert.equal(oud.teller, nieuw.teller - 1, 'de mutant meldt er één te weinig');
   assert.notEqual(oud.teller, gekozen.length - oud.codes.length, 'de mutant liegt over het restant');
+});
+
+// --- De mutanten van de statusroute ---------------------------------------------------------------
+//
+// V18 rust op één structurele eigenschap: deze route KAN geen `success` publiceren. Twee
+// onafhankelijke plaatsen dragen die eigenschap — de resolver die er geen produceert, en de
+// allowlist vlak vóór het transport. De mutanten hieronder halen ze één voor één weg en bewijzen dat
+// elke afzonderlijke verwijdering door een bestaande toets wordt gevangen.
+
+test('L19. een mutant die de RESOLVER weer groen laat schrijven, strandt op de laatste poort', async () => {
+  const gemuteerd = await mutantVanDePublisher(
+    'resolver-groen',
+    "      state: 'pending',\n      description: DIAGNOSTIC_GO_DESCRIPTION,",
+    "      state: 'success',\n      description: DIAGNOSTIC_GO_DESCRIPTION,",
+  );
+  const publication = gemuteerd.resolvePublication({
+    headSha: HEAD, statusContext: CONTEXT_NAME, gateResult: { decision: 'GO', reasons: [] },
+  });
+  // De mutant produceert weer een erfbaar groen artefact: L1 en L6a breken hierop.
+  assert.equal(publication.state, 'success');
+  assert.throws(() => assert.notEqual(publication.state, 'success'), /AssertionError/);
+
+  // Maar hij komt het netwerk niet op: de tweede laag weigert vóór `fetch`, met nul verzoeken.
+  let aanroepen = 0;
+  const posted = await gemuteerd.publishStatus({
+    repository: 'rvanhooijdonk-png/stack-dashboard', token: 'x', publication,
+    fetchImpl: async () => { aanroepen += 1; return { status: 201 }; },
+  });
+  assert.deepEqual(posted, { ok: false, blocked: gemuteerd.PUBLISH_ERROR.STATUS_STATE_NOT_ALLOWED });
+  assert.equal(aanroepen, 0);
+});
+
+test('L20. een mutant die `success` weer op de ALLOWLIST zet, gaat rood op L6a en L6b', async () => {
+  const gemuteerd = await mutantVanDePublisher(
+    'allowlist-groen',
+    "export const PUBLISHABLE_STATES = Object.freeze(['pending', 'failure']);",
+    "export const PUBLISHABLE_STATES = Object.freeze(['pending', 'failure', 'success']);",
+  );
+  // L6a leest de allowlist zelf: die toets breekt onmiddellijk.
+  assert.throws(
+    () => assert.deepEqual([...gemuteerd.PUBLISHABLE_STATES], ['pending', 'failure']),
+    /AssertionError/,
+  );
+
+  // En L6b breekt op het gedrag: met deze mutant gaat een groene status wél het netwerk op.
+  let aanroepen = 0;
+  const posted = await gemuteerd.publishStatus({
+    repository: 'rvanhooijdonk-png/stack-dashboard', token: 'x',
+    fetchImpl: async () => { aanroepen += 1; return { status: 201 }; },
+    publication: {
+      ok: true, sha: HEAD, context: CONTEXT_NAME, state: 'success', description: 'wat dan ook',
+    },
+  });
+  assert.deepEqual(posted, { ok: true, status: 201 });
+  assert.equal(aanroepen, 1);
+  assert.throws(() => assert.equal(aanroepen, 0), /AssertionError/);
+});
+
+test('L21. de oude, autoriserende contextnaam bestaat nergens meer in de stack', () => {
+  // `autocoding-shield-live-receipts` was de context waarop een required check zou rusten. Hij wordt
+  // niet hernoemd maar VERLATEN: er is geen head waarop hij ooit `success` heeft gedragen, want de
+  // poort stond de hele bootstrap uit. Blijft de naam ergens staan, dan kan een ruleset hem alsnog
+  // als required check aanwijzen — en dat is precies de constructie die V18 opheft.
+  const bestanden = [
+    'CONTROL/AUTOCODING/policy.v1.json',
+    'scripts/autocoding/publish-live-status.mjs',
+    '.github/workflows/autocoding-shield-live-gate.yml',
+    '.github/workflows/autocoding-merge-finalizer.yml',
+    '.github/workflows/autocoding-shield.yml',
+  ];
+  for (const bestand of bestanden) {
+    const tekst = readFileSync(bestand, 'utf8');
+    const regels = tekst.split('\n').filter((r) => r.includes('autocoding-shield-live-receipts'));
+    // De naam mag alleen nog in UITLEG voorkomen, nooit als waarde die iets configureert.
+    for (const regel of regels) {
+      assert.match(regel.trim(), /^(#|\*|\/\/|-- )/, `${bestand}: ${regel}`);
+    }
+  }
+  assert.equal(POLICY.live_status_context, undefined);
+  assert.equal(POLICY.diagnostic_status_context, 'autocoding-shield-diagnostic');
 });

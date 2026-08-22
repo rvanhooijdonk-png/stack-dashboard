@@ -243,9 +243,19 @@ export function buildShieldInput({
   const headSha = pr?.head?.sha;
   const commitIndex = buildCommitIndex({ prCommits, headSha, headCommit });
 
+  // `pr_number` en `pr_base_sha` horen bij dezelfde gemeten waarheid als head en tree, en worden om
+  // dezelfde reden hier afgeleid: uit het door GitHub geleverde PR-object, nooit uit tekst. Ze
+  // dragen de binding die een SHA alleen niet kan dragen — twee pull requests kunnen dezelfde head
+  // hebben tegen verschillende bases, en dan is de boom identiek terwijl de merge iets heel anders
+  // doet. Onmeetbaar betekent hier `0` respectievelijk de lege string, zodat een validator er nooit
+  // toevallig gelijkheid mee vindt.
+  const baseSha = pr?.base?.sha;
   const context = {
+    pr_number: Number.isInteger(pr?.number) && pr.number > 0 ? pr.number : 0,
     pr_head_sha: SHA_RE.test(headSha) ? headSha : '',
     pr_tree_sha: SHA_RE.test(headCommit?.tree?.sha) ? headCommit.tree.sha : '',
+    pr_base_sha: SHA_RE.test(baseSha) ? baseSha : '',
+    pr_base_ref: typeof pr?.base?.ref === 'string' ? pr.base.ref : '',
     builder_actor: typeof pr?.user?.login === 'string' ? pr.user.login : '',
     task_id: extractTaskId(pr?.body),
   };

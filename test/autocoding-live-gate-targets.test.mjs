@@ -29,7 +29,7 @@ import {
   mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
@@ -38,7 +38,7 @@ import {
   scheduleBucketVisit, selectBucketWindow,
   parseTargetArgs, parseCounter, parseCompleteness, runSelect,
   EXPECTED_SOURCE, EVENT_TARGET_LIMIT, SCHEDULE_BUCKET_LIMIT, SCHEDULE_SLOT_SECONDS,
-  LIST_PAGE_BUDGET, SELECTION_PAGE_BUDGET, ISOLATION_PAGE_BUDGET,
+  LIST_PAGE_BUDGET, SELECTION_PAGE_BUDGET, CHECKS_PAGE_BUDGET,
   PER_PULL_REQUEST_REQUEST_BUDGET, SELECTION_REQUEST_BUDGET, EVENT_REQUEST_BUDGET,
   SCHEDULE_REQUEST_BUDGET, SHARED_HOURLY_REQUEST_QUOTA, QUOTA_RESERVE,
   TARGET_OUTCOME, TARGET_REASON, TARGET_SELECTION,
@@ -47,11 +47,6 @@ import {
   analyzeWorkflow, isRepositoryWideQueuedLock, TRUSTED_WRITER_REPOSITORY_LOCK_GROUP,
 } from '../scripts/autocoding/workflow-trust.mjs';
 import { resolvePublication, PUBLISH_ERROR } from '../scripts/autocoding/publish-live-status.mjs';
-import {
-  resolveHeadIsolation, normaliseOpenHeads, parseIsolationArgs, runVerifyHeadIsolation,
-  HEAD_ISOLATION_REASON, ISOLATION_DETAIL,
-  ISOLATION_PAGE_BUDGET as ISOLATION_PAGE_BUDGET_VAN_DE_MODULE,
-} from '../scripts/autocoding/verify-head-isolation.mjs';
 
 /**
  * Een ruim, BEKEND restquotum. Sinds de reparatie van bevinding `3835186662` is een ONBEKEND
@@ -480,39 +475,45 @@ test('S7. de API-bovengrenzen liggen vast en blijven onder het gedeelde uurquotu
   const endpoints = stap.match(/for endpoint in \\\n([\s\S]*?); do\n/)[1].match(/"[^"]+:[a-z-]+"/g);
   const gepagineerd = endpoints.filter((e) => !e.includes(':head-commit')).length;
   const enkelvoudig = endpoints.length - gepagineerd;
-  // En sinds V17 haalt de schrijfjob ZELF de open-PR-lijst op voor de head-isolatie. Ook die lijst
-  // wordt hier uit het bestand geteld: staat er een tweede aanroep bij zonder dat het budget
-  // meegroeit, dan is dit rood.
-  const isolatieLijsten = (stap.match(/gh_bounded_pages "repos\/\$REPOSITORY\/pulls\?state=open"/g) ?? []).length;
+  // EN DE SCHRIJFSTAP HAALT GEEN REPOSITORYBREDE LIJST MEER OP. V17 telde hier vier verzoeken bij
+  // voor de head-isolatie; die meting is met de bevindingen `3835364972` en `3835364974` vervallen,
+  // en het budget krimpt mee. Dit telt uit het BESTAND: komt de lijst ooit terug zonder dat het
+  // budget meegroeit, dan is dit rood in plaats van stil te duur.
+  const repositorybredeLijsten = (stap.match(/gh_bounded_pages "repos\/\$REPOSITORY\/pulls\?state=open"/g) ?? []).length;
 
   assert.equal(hermetingPogingen, 3, 'hoogstens drie hermetingspogingen');
   assert.equal(publicaties, 2, 'precies één pending-POST en één eind-POST');
   assert.equal(endpoints.length, 6);
   assert.equal(gepagineerd, 5);
   assert.equal(enkelvoudig, 1);
-  assert.equal(isolatieLijsten, 1, 'precies één open-PR-lijst voor de head-isolatie');
+  assert.equal(repositorybredeLijsten, 0, 'de schrijfstap kent geen repositorybrede lijst meer');
   assert.equal(
     PER_PULL_REQUEST_REQUEST_BUDGET,
-    hermetingPogingen + publicaties + enkelvoudig + (gepagineerd * LIST_PAGE_BUDGET)
-      + (isolatieLijsten * ISOLATION_PAGE_BUDGET),
+    hermetingPogingen + publicaties + enkelvoudig + (gepagineerd * LIST_PAGE_BUDGET),
     'het budget per PR volgt uit de stap zelf',
   );
-  assert.equal(PER_PULL_REQUEST_REQUEST_BUDGET, 30);
+  assert.equal(PER_PULL_REQUEST_REQUEST_BUDGET, 26);
 
   // En de paginagrens is een GRENS, niet een schatting. Zij komt uit de gedeelde shell-lib die de
   // verzoeken werkelijk doet; `--paginate` volgde de `Link`-header tot de laatste pagina en maakte
   // het getal hierboven onwaar. Loopt bash of JavaScript weg van de ander, dan is dit rood.
   assert.equal(shellConstante('GH_BOUNDED_EVIDENCE_PAGES'), LIST_PAGE_BUDGET);
   assert.equal(shellConstante('GH_BOUNDED_SELECTION_PAGES'), SELECTION_PAGE_BUDGET);
-  assert.equal(shellConstante('GH_BOUNDED_ISOLATION_PAGES'), ISOLATION_PAGE_BUDGET);
   assert.equal(shellConstante('GH_BOUNDED_PAGE_SIZE'), 100, 'GitHub levert nooit meer per pagina');
   assert.equal(SELECTION_REQUEST_BUDGET, SELECTION_PAGE_BUDGET);
   assert.equal(LIST_PAGE_BUDGET, 4);
   assert.equal(SELECTION_PAGE_BUDGET, 4);
-  assert.equal(ISOLATION_PAGE_BUDGET, 4);
-  // De isolatiemodule leest hetzelfde getal als de budgetmodule. Twee definities zouden van elkaar
-  // weg kunnen lopen, en dan begroot de ene kant minder verzoeken dan de andere doet.
-  assert.equal(ISOLATION_PAGE_BUDGET_VAN_DE_MODULE, ISOLATION_PAGE_BUDGET);
+  // De ISOLATIEGRENS bestaat niet meer, in geen van beide talen. Een achtergebleven constante zou
+  // een budgetclaim zijn voor verzoeken die niemand nog doet — precies het soort dode rest waaraan
+  // een volgende lezer zou aflezen dat de meting er nog is.
+  assert.ok(!BOUNDED_TEKST.includes('GH_BOUNDED_ISOLATION_PAGES'), 'weg uit bash');
+  assert.ok(!readFileSync(SELECTOR, 'utf8').includes('export const ISOLATION_PAGE_BUDGET'),
+    'en weg uit de budgetmodule');
+
+  // De CHECK-RUNS-grens is de enige die erbij kwam, en zij hoort bij de finalizer. Ook zij staat in
+  // beide talen op hetzelfde getal, om dezelfde reden als hierboven.
+  assert.equal(shellConstante('GH_BOUNDED_CHECKS_PAGES'), CHECKS_PAGE_BUDGET);
+  assert.equal(CHECKS_PAGE_BUDGET, 4);
 
   // MUTATIE: één van de twee getallen verzetten. De ene kant meet dan meer pagina's dan de andere
   // begroot, en precies dat mag niet stil kunnen gebeuren.
@@ -528,13 +529,12 @@ test('S7. de API-bovengrenzen liggen vast en blijven onder het gedeelde uurquotu
   );
 
   assert.equal(EVENT_REQUEST_BUDGET, SELECTION_REQUEST_BUDGET + PER_PULL_REQUEST_REQUEST_BUDGET);
-  assert.equal(EVENT_REQUEST_BUDGET, 34);
+  assert.equal(EVENT_REQUEST_BUDGET, 30);
   assert.equal(SCHEDULE_REQUEST_BUDGET, SELECTION_REQUEST_BUDGET + (25 * PER_PULL_REQUEST_REQUEST_BUDGET));
-  assert.equal(SCHEDULE_REQUEST_BUDGET, 754);
-  // DE HARDE EIS UIT V17: de ZWAARSTE ronde die deze workflow kan draaien — een volle
-  // scheduledbucket, met de isolatiemeting erbij — past nog steeds binnen het gedeelde uurquotum
-  // MINUS de vaste reserve. 754 <= 900. Zou de isolatie het budget over die grens duwen, dan zou de
-  // schedule halverwege leegraken en heads op `pending` laten staan.
+  assert.equal(SCHEDULE_REQUEST_BUDGET, 654);
+  // DE HARDE EIS: de ZWAARSTE ronde die deze workflow kan draaien — een volle scheduledbucket —
+  // past binnen het gedeelde uurquotum MINUS de vaste reserve. 654 <= 900. Zou een ronde daar
+  // overheen kunnen, dan raakt de schedule halverwege leeg en blijven heads op `pending` staan.
   assert.ok(SCHEDULE_REQUEST_BUDGET <= SHARED_HOURLY_REQUEST_QUOTA - QUOTA_RESERVE,
     `${SCHEDULE_REQUEST_BUDGET} verzoeken past niet in ${SHARED_HOURLY_REQUEST_QUOTA - QUOTA_RESERVE}`);
 
@@ -1006,21 +1006,16 @@ test('S12. er wordt pas NA de per-PR-lock gemeten, en elke afwijking daarvan is 
  */
 function draaiSchrijfstap({
   pr, prJson, ghFaalt = [], publishFaalt = [], beslissing = 'GO', lijstPaginas = {},
-  openPulls = undefined,
 }) {
   const { dir, bin } = werkmap('live-gate-schrijf-');
   const runnerTemp = join(dir, 'runner');
   const log = join(dir, 'log.txt');
 
-  // DE OPEN-PR-LIJST VOOR DE HEAD-ISOLATIE (V17). De schrijfstap haalt haar bij iedere beurt op en
-  // weigert te beslissen zolang niet precies één open pull request de gemeten head draagt. Het
-  // STANDAARDANTWOORD is daarom de eerlijke enkelvoudige stand: alleen deze pull request, met
-  // precies deze head. Een test die de gedeelde head onderzoekt geeft `openPulls` expliciet mee.
-  const standaardOpenPulls = [[{ number: Number(pr), head: { sha: prJson?.head?.sha ?? '' } }]];
-  //
-  // De sleutel is `pulls` zonder query: de `gh`-stub hieronder snijdt de query eraf voordat hij zijn
-  // paginabestand opzoekt, precies zoals `gh_bounded_pages` de query zelf aanvult.
-  const lijsten = { pulls: openPulls ?? standaardOpenPulls, ...lijstPaginas };
+  // Er is GEEN repositorybrede lijst meer te stubben. V17 haalde hier per beurt de open-PR-lijst op
+  // om de gemeten head te isoleren; die meting is met de bevindingen `3835364972` en `3835364974`
+  // vervallen, en met haar de mogelijkheid om deze stap van een andere pull request afhankelijk te
+  // maken. Elke lijst die hier nog gestubd wordt hoort bij DEZE pull request.
+  const lijsten = { ...lijstPaginas };
 
   // De bewijslijsten worden PER PAGINA gestubd. Een stub die elke aanroep hetzelfde antwoord geeft
   // kan het verschil tussen "de lijst is op" en "er is mogelijk meer" niet dragen, en juist dat
@@ -1059,10 +1054,6 @@ function draaiSchrijfstap({
     'script="$1"; shift',
     'args="$*"',
     'case "$script" in',
-    // DE HEAD-ISOLATIE DRAAIT ECHT (V17). Een stub die hier zomaar 0 teruggeeft zou precies de
-    // eigenschap wegnemen die deze tests moeten aantonen: de stap zou de gedeelde head doorlaten en
-    // toch groen zijn. Dit is dezelfde productiecode als in de workflow, op dezelfde argumenten.
-    '  */verify-head-isolation.mjs) exec "$REAL_NODE" "$ISOLATIE_SCRIPT" "$@" ;;',
     '  */publish-live-status.mjs)',
     '    case "$args" in',
     '      *--pending*) echo "PENDING $args" >> "$LOG" ;;',
@@ -1084,11 +1075,10 @@ function draaiSchrijfstap({
     bin,
     env: {
       REAL_NODE: process.execPath,
-      ISOLATIE_SCRIPT: resolve('scripts/autocoding/verify-head-isolation.mjs'),
       PAGES: pagesDir,
       RUNNER_TEMP: runnerTemp,
       REPOSITORY: 'owner/repo',
-      STATUS_CONTEXT: 'autocoding-shield-live-receipts',
+      STATUS_CONTEXT: 'autocoding-shield-diagnostic',
       GH_TOKEN: 'x',
       GITHUB_TOKEN: 'x',
       PULL_REQUEST: String(pr),
@@ -1119,25 +1109,19 @@ test('S13. een event voor PR 74 publiceert uitsluitend op PR 74, en op de HERMET
   const finaal = regels.filter((r) => r.startsWith('FINAL '));
   assert.equal(finaal.length, 1, 'precies één eindstatus');
   assert.match(finaal[0], new RegExp(`--head-sha ${head}`));
-  assert.match(finaal[0], /--status-context autocoding-shield-live-receipts/);
+  assert.match(finaal[0], /--status-context autocoding-shield-diagnostic/);
 
   // Er wordt precies één PR DOORGEMETEN. Geen andere PR-detailmeting, geen tweede head.
   const gets = regels.filter((r) => r.startsWith('GET '));
   assert.ok(gets.every((r) => !/pulls\/(?!74\b)[0-9]+/.test(r)), 'geen enkele andere PR');
 
-  // De ENIGE repositorybrede lijst is de head-isolatie van V17, en die is hard begrensd. Vóór V17
-  // stond hier "geen repositorybrede lijst"; dat verbod is met de bevinding komen te vervallen,
-  // maar de GRENS eronder niet. Zonder dit zicht is niet vast te stellen of een tweede open pull
-  // request dezelfde commit draagt, en zou een `success` op die commit ook voor die andere gelden.
-  const isolatie = gets.filter((r) => r.includes('state=open'));
-  assert.equal(isolatie.length, 1, 'één pagina volstaat voor een lijst van één');
-  assert.ok(isolatie.length <= ISOLATION_PAGE_BUDGET, 'nooit meer dan het isolatiebudget');
-  assert.ok(isolatie.every((r) => r.includes('per_page=100')), 'begrensd, niet `--paginate`');
-  // En zij staat NA de invalidatie en VÓÓR het eerste bewijsverzoek: pas als de drager eenduidig is,
-  // wordt er bewijs opgehaald om over te beslissen.
-  const index = (voorspelling) => regels.findIndex(voorspelling);
-  assert.ok(index((r) => r.startsWith('PENDING ')) < index((r) => r.includes('state=open')));
-  assert.ok(index((r) => r.includes('state=open')) < index((r) => r.includes('/pulls/74/files')));
+  // EN GEEN ENKELE REPOSITORYBREDE LIJST. In V17 stond hier één begrensde open-PR-lijst, omdat de
+  // isolatie van de gedeelde head toen de autorisatie droeg. Die grond is vervallen — zie
+  // bevindingen `3835364972` en `3835364974` — en daarmee ook het zicht: deze stap meet UITSLUITEND
+  // zijn eigen pull request. Elk verzoek hier gaat over PR 74 of over de commit van PR 74.
+  assert.deepEqual(gets.filter((r) => r.includes('state=open')), [], 'geen open-PR-lijst');
+  assert.ok(gets.every((r) => /\/pulls\/74(\/|$)|\/issues\/74\/|\/git\/commits\//.test(r)),
+    gets.join(' | '));
   const koppen = new Set(regels.filter((r) => /--head-sha/.test(r)).map((r) => r.match(/--head-sha (\S+)/)[1]));
   assert.deepEqual([...koppen], [head], 'alle statussen landen op één en dezelfde head');
 
@@ -1509,7 +1493,7 @@ test('S20. een AFGEKAPTE bewijsoogst wordt failure op de gemeten head, nooit suc
   // dezelfde pure functie die de publisher gebruikt, met exact de vlag die de stap doorgeeft.
   const publicatie = resolvePublication({
     headSha: head,
-    statusContext: 'autocoding-shield-live-receipts',
+    statusContext: 'autocoding-shield-diagnostic',
     gateResult: { decision: 'GO', reasons: [] },
     executionError: 'GATE_EXECUTION_ERROR',
   });
@@ -1616,11 +1600,11 @@ const scheduleAanleiding = (open) => ({
 
 test('S22. NEGATIEVE CONTROLE: zonder repositorybrede rij trekken 40 geburste events het gedeelde quotum leeg', () => {
   // De exacte rekensom uit de bevinding, gebonden aan de echte constanten in plaats van aan een
-  // getal in proza: één event kost hoogstens 34 verzoeken, veertig events dus 1360 — meer dan het
-  // gedeelde uurquotum van duizend. (In V13 waren dat er 30 en 1200; V17 telt er vier bij voor de
-  // head-isolatie, en de bevinding blijft dus even hard staan.)
-  assert.equal(EVENT_REQUEST_BUDGET, 34);
-  assert.equal(SCHEDULE_REQUEST_BUDGET, 754);
+  // getal in proza: één event kost hoogstens 30 verzoeken, veertig events dus 1200 — meer dan het
+  // gedeelde uurquotum van duizend. (V17 telde er vier per PR bij voor de head-isolatie en kwam op
+  // 34; die meting is in V18 vervallen, en de bevinding staat op het oude getal even hard.)
+  assert.equal(EVENT_REQUEST_BUDGET, 30);
+  assert.equal(SCHEDULE_REQUEST_BUDGET, 654);
   assert.equal(SHARED_HOURLY_REQUEST_QUOTA, 1000);
 
   const burst = Array.from({ length: 40 }, (_, i) => eventAanleiding(100 + i));
@@ -1652,26 +1636,25 @@ test('S22a. MET de repositorybrede rij kan geen enkele run tegen een al gereserv
     assert.equal(metend[i - 1] - metend[i], EVENT_REQUEST_BUDGET);
   }
 
-  // Het quotum wordt nooit overschreden en de reserve blijft staan. Dat is de hele eigenschap.
   // Het quotum wordt nooit overschreden EN de reserve blijft staan — dat is de eigenschap. Het
   // exacte restant is er de ankerwaarde bij: een run meet zolang er na de reserve en de
-  // selectiekost nog één volle PR-begroting over is, dus stopt de reeks bij 1000 - 26*34 = 116.
+  // selectiekost nog één volle PR-begroting over is, dus stopt de reeks bij 1000 - 30*30 = 100.
   assert.ok(metRij.besteed <= SHARED_HOURLY_REQUEST_QUOTA - QUOTA_RESERVE);
   assert.ok(metRij.resterend >= QUOTA_RESERVE, 'de reserve blijft staan');
-  assert.equal(metRij.resterend, 116);
-  assert.equal(metend.length, 26);
+  assert.equal(metRij.resterend, 100);
+  assert.equal(metend.length, 30);
 
-  // De overgebleven veertien aanleidingen verdwijnen niet stil: ze meten niets en zeggen waarom.
+  // De overgebleven tien aanleidingen verdwijnen niet stil: ze meten niets en zeggen waarom.
   // Dat is ook precies waarom de rij `queue: max` draagt — met `single` waren ze geannuleerd in
   // plaats van afgewezen, en dan had niemand geweten dat er iets niet gemeten was.
   const afgewezen = metRij.uitkomsten.filter((u) => u.outcome === TARGET_OUTCOME.NO_OP);
-  assert.equal(afgewezen.length, 14);
+  assert.equal(afgewezen.length, 10);
   assert.ok(afgewezen.every((u) => u.reason === TARGET_REASON.API_BUDGET_RESERVED));
 });
 
 test('S22b. schedule én event delen dezelfde rij, dus tellen hun begrotingen na elkaar', () => {
-  // De gemengde vorm uit de bevinding: een schedule van hoogstens 754 verzoeken NAAST eventruns.
-  // Twaalf events erbij is 1162 — over het quotum, terwijl beide soorten afzonderlijk keurig binnen
+  // De gemengde vorm uit de bevinding: een schedule van hoogstens 654 verzoeken NAAST eventruns.
+  // Twaalf events erbij is 1014 — over het quotum, terwijl beide soorten afzonderlijk keurig binnen
   // hun eigen begroting blijven.
   const open = Array.from({ length: 126 }, (_, i) => openPr(i + 1));
   const gemengd = [
@@ -1963,456 +1946,125 @@ test('S27. de CLI maakt van een onleesbaar quotum een RODE ronde en publiceert d
 });
 
 
-// --- V17: isolatie van de vaste commitstatus tegen gedeelde heads --------------------------------
+// --- V18: de schrijfstap draagt geen autorisatie meer, en dus geen repositorybreed zicht --------
 
 /**
- * Codex-bevinding `3835302930`. De poort evalueert bewijs en ownerautorisatie PER PULL REQUEST maar
- * publiceert onder één vaste context op de COMMIT. Twee open pull requests kunnen dezelfde volledige
- * head-SHA dragen — dezelfde branch tegen twee bases, of twee branches naar dezelfde commit — en dan
- * geldt de `success` van de goedgekeurde PR op GitHub evengoed voor de andere. De per-PR- en
- * repositorybrede rijen ordenen de writes maar isoleren die betekenis niet: ze schrijven na elkaar,
- * en de laatste wint voor allebei.
+ * Codex-bevindingen `3835364972` en `3835364974` op de V17-vorm hierboven.
+ *
+ * V17 antwoordde op de gedeelde head met een ISOLATIEMETING: publiceer alleen wanneer precies één
+ * open pull request de gemeten head draagt. Die meting was groen en toch onvoldoende, om twee
+ * redenen die geen patch kan wegnemen. Ten eerste hangt een commitstatus aan de COMMIT: een pull
+ * request die NA de publicatie op dezelfde head wordt geopend erft de status alsnog, en geen enkele
+ * puntmeting op het publicatiemoment kan een latere gebeurtenis uitsluiten. Ten tweede is de
+ * open-PR-lijst offsetgepagineerd en dus geen consistente momentopname — een invoeging tijdens het
+ * pagineren schuift de rest op, waardoor een tweede drager ongezien kan blijven.
+ *
+ * De conclusie is niet nog een isolatiepatch maar een andere plaats voor de bevoegdheid. De
+ * autorisatie is verhuisd naar de PR-GEBONDEN finalizer, die zijn eigen pull request hermeet en
+ * uitsluitend via de merge-endpoint van DAT nummer werkt; die eigenschappen worden gemeten in
+ * `test/autocoding-merge-finalizer.test.mjs`. Wat hier overblijft is diagnostiek, en de tests
+ * hieronder meten dat er van de oude bevoegdheid ook werkelijk niets is blijven liggen: geen
+ * module, geen redencode, geen budgetclaim en geen repositorybreed zicht.
  */
 
-/** Een open-PR-vermelding zoals `repos/{r}/pulls?state=open` hem levert. */
-const openMetHead = (number, headSha, ref = `branch-${number}`) => ({
-  number, head: { sha: headSha, ref },
+test('S28. de headisolatie is WEG uit alle drie de talen — geen dode schijnbeveiliging', () => {
+  // 1. De MODULE bestaat niet meer. Een achtergebleven bestand zou nog importeerbaar zijn en dus
+  //    opnieuw als poort kunnen worden ingezet, met precies de zwakte die de bevinding beschreef.
+  assert.ok(!existsSync('scripts/autocoding/verify-head-isolation.mjs'));
+
+  // 2. Niemand roept haar meer aan: niet de trusted writer, niet een ander script in deze poort.
+  const bronnen = ['.github/workflows/autocoding-shield-live-gate.yml', SELECTOR, BOUNDED_PAGES,
+    'scripts/autocoding/publish-live-status.mjs', 'scripts/autocoding/collect-shield-input.mjs',
+    'scripts/autocoding/verify-review-gate.mjs', 'scripts/autocoding/finalize-merge.mjs',
+    'scripts/autocoding/select-finalize-candidates.mjs'];
+  for (const bron of bronnen) {
+    assert.ok(!readFileSync(bron, 'utf8').includes('verify-head-isolation'), bron);
+  }
+
+  // 3. De REDENCODE is weg uit de publisher. Zolang `HEAD_NOT_ISOLATED` daar in de allowlist stond,
+  //    kon een stap hem blijven doorgeven en een `failure` publiceren die een meting suggereert die
+  //    niet meer bestaat — een rode status die iets belooft is even misleidend als een groene.
+  assert.equal(PUBLISH_ERROR.HEAD_NOT_ISOLATED, undefined);
+  assert.ok(!Object.values(PUBLISH_ERROR).includes('HEAD_NOT_ISOLATED'));
+
+  // 4. En de BUDGETCLAIM is weg, in bash én in JavaScript. Zie S7 voor de volledige som; hier gaat
+  //    het erom dat er geen verzoeken meer begroot staan die niemand doet.
+  assert.ok(!BOUNDED_TEKST.includes('ISOLATION'));
+  assert.ok(!readFileSync(SELECTOR, 'utf8').includes('export const ISOLATION_PAGE_BUDGET'));
 });
 
-// De standaardwaarden staan bewust NIET in een destructuring-default: die vervangt ook een
-// EXPLICIET meegegeven `undefined`, en juist die waarde moet hieronder getoetst kunnen worden als
-// onbruikbare parameter. `in` onderscheidt "niet meegegeven" van "meegegeven als undefined".
-const isoleer = (opties) => resolveHeadIsolation({
-  openPullRequests: opties.open,
-  complete: 'complete' in opties ? opties.complete : true,
-  pullRequest: 'pullRequest' in opties ? opties.pullRequest : 74,
-  headSha: 'headSha' in opties ? opties.headSha : sha(7),
-});
-
-test('S28. twee open PRs met DEZELFDE volledige head isoleren geen van beide', () => {
+test('S29. de schrijfstap haalt geen repositorybrede lijst meer op, en hangt van geen andere PR af', () => {
   const gedeeld = sha(7);
 
-  // De vorm uit de bevinding: dezelfde branch tegen twee bases, dus twee PR-nummers op één commit.
-  const twee = [[openMetHead(74, gedeeld, 'claude2/live-gate'), openMetHead(75, gedeeld, 'claude2/live-gate')]];
-  for (const nummer of [74, 75]) {
-    const uitkomst = isoleer({ open: twee, pullRequest: nummer, headSha: gedeeld });
-    assert.equal(uitkomst.isolated, false, `PR ${nummer}`);
-    assert.equal(uitkomst.detail, ISOLATION_DETAIL.HEAD_SHARED);
-    assert.equal(uitkomst.reason, HEAD_ISOLATION_REASON);
+  // TWEE OPEN PULL REQUESTS OP PRECIES DEZELFDE VOLLEDIGE HEAD — het scenario uit de bevinding. In
+  // V17 blokkeerden ze elkaar hier; nu meet elk van beide gewoon zijn eigen pull request door, want
+  // er valt niets meer te blokkeren: deze route publiceert geen autorisatie.
+  const a = draaiSchrijfstap({ pr: 74, prJson: { state: 'open', merged: false, head: { sha: gedeeld } } });
+  const b = draaiSchrijfstap({ pr: 75, prJson: { state: 'open', merged: false, head: { sha: gedeeld } } });
+
+  for (const [nummer, beurt] of [[74, a], [75, b]]) {
+    assert.equal(beurt.status, 0, `PR ${nummer} draait normaal door`);
+    const gets = beurt.regels.filter((r) => r.startsWith('GET '));
+    // GEEN REPOSITORYBREDE LIJST. Dit is punt 7 van de opdracht, gemeten op de echte shell in
+    // plaats van op het workflowbestand: geen enkel verzoek van deze beurt gaat over de repository
+    // als geheel, dus kan de uitspraak over deze PR van geen andere PR afhangen.
+    assert.deepEqual(gets.filter((r) => r.includes('state=open')), [], `PR ${nummer}`);
+    assert.ok(gets.every((r) => new RegExp(`/pulls/${nummer}(/|$)|/issues/${nummer}/|/git/commits/`).test(r)),
+      gets.join(' | '));
+    // En de beurt beslist wél: de gewone poort spreekt, ongewijzigd.
+    assert.deepEqual(beurt.regels.filter((r) => r === 'VERIFY'), ['VERIFY'], `PR ${nummer}`);
+    const finaal = beurt.regels.filter((r) => r.startsWith('FINAL '));
+    assert.equal(finaal.length, 1);
+    assert.match(finaal[0], new RegExp(`--head-sha ${gedeeld}`));
+    assert.match(finaal[0], /--status-context autocoding-shield-diagnostic/);
+    assert.doesNotMatch(finaal[0], /HEAD_NOT_ISOLATED/);
   }
 
-  // Twee VERSCHILLENDE branches die naar dezelfde commit wijzen is hetzelfde defect. De branchnaam
-  // is hier geen onderscheid: hij zegt niets over welke commit de status draagt.
-  const anderePaden = [[openMetHead(74, gedeeld, 'feature/a'), openMetHead(91, gedeeld, 'feature/b')]];
-  assert.equal(isoleer({ open: anderePaden, headSha: gedeeld }).detail, ISOLATION_DETAIL.HEAD_SHARED);
-
-  // En dat geldt over PAGINAGRENZEN heen: de tweede drager mag niet ontsnappen doordat hij op een
-  // andere pagina van dezelfde begrensde oogst staat.
-  const overPaginas = [[openMetHead(74, gedeeld)], [openMetHead(75, gedeeld)]];
-  assert.equal(isoleer({ open: overPaginas, headSha: gedeeld }).detail, ISOLATION_DETAIL.HEAD_SHARED);
-});
-
-test('S29. één unieke open head behoudt de bestaande uitkomst, ook naast andere open PRs', () => {
-  const mijn = sha(7);
-  const open = [[
-    openMetHead(74, mijn),
-    openMetHead(75, sha(1)),
-    openMetHead(76, sha(2)),
-  ]];
-  const uitkomst = isoleer({ open, pullRequest: 74, headSha: mijn });
-  assert.equal(uitkomst.isolated, true);
-  assert.equal(uitkomst.detail, null);
-  assert.equal(uitkomst.reason, null);
-
-  // Zodra de duplicaat GESLOTEN is, staat hij niet meer in de open lijst en meet de overgebleven
-  // singleton weer gewoon door. De blokkade is dus een toestand, geen straf.
-  const metDuplicaat = [[openMetHead(74, mijn), openMetHead(75, mijn)]];
-  assert.equal(isoleer({ open: metDuplicaat, headSha: mijn }).isolated, false);
-  const naSluiting = [[openMetHead(74, mijn)]];
-  assert.equal(isoleer({ open: naSluiting, headSha: mijn }).isolated, true);
-
-  // Dezelfde PR twee keer in de oogst — pagina's kunnen overlappen als de lijst verschuift — is één
-  // pull request en geen duplicaat.
-  const overlap = [[openMetHead(74, mijn)], [openMetHead(74, mijn)]];
-  assert.equal(isoleer({ open: overlap, headSha: mijn }).isolated, true);
-});
-
-test('S30. de vergelijking gaat over de VOLLEDIGE SHA, niet over een prefix en niet over de branch', () => {
-  const mijn = `${'a'.repeat(39)}1`;
-  const bijnaGelijk = `${'a'.repeat(39)}2`;
-
-  // Een PR die de eerste 39 tekens deelt is een ANDERE commit en dus geen duplicaat.
-  const prefixbuur = [[openMetHead(74, mijn), openMetHead(75, bijnaGelijk)]];
-  assert.equal(isoleer({ open: prefixbuur, headSha: mijn }).isolated, true);
-
-  // En omgekeerd: dezelfde branchNAAM op een andere commit blokkeert niets, want de status hangt
-  // aan de commit.
-  const zelfdeNaam = [[openMetHead(74, mijn, 'main-copy'), openMetHead(75, bijnaGelijk, 'main-copy')]];
-  assert.equal(isoleer({ open: zelfdeNaam, headSha: mijn }).isolated, true);
-
-  // Een niet-volledige SHA in de vermelding is geen half bewijs maar geen bewijs: dan is onbekend of
-  // juist DIE pull request deze commit draagt.
-  for (const kapot of [mijn.slice(0, 7), mijn.toUpperCase(), '', null, 42, {}]) {
-    const lijst = [[openMetHead(74, mijn), { number: 75, head: { sha: kapot } }]];
-    assert.equal(isoleer({ open: lijst, headSha: mijn }).detail, ISOLATION_DETAIL.OPEN_LIST_UNREADABLE,
-      String(kapot));
-  }
-});
-
-test('S31. nul dragers, een andere PR, en een verkeerd nummer zijn alle drie fail-closed', () => {
-  const mijn = sha(7);
-
-  // De gemeten head komt in de open lijst helemaal niet voor. Dat kan een verschoven head zijn of
-  // een lijst die niet bij deze meting hoort; in geen van beide gevallen is er iets te publiceren.
-  assert.equal(isoleer({ open: [[openMetHead(75, sha(1))]], headSha: mijn }).detail,
-    ISOLATION_DETAIL.HEAD_ABSENT);
-  assert.equal(isoleer({ open: [[]], headSha: mijn }).detail, ISOLATION_DETAIL.HEAD_ABSENT);
-
-  // Precies één drager, maar een ANDERE pull request dan de gemeten. Publiceren zou hier een
-  // uitspraak over PR 75 op de status van PR 74 zetten.
-  assert.equal(isoleer({ open: [[openMetHead(75, mijn)]], pullRequest: 74, headSha: mijn }).detail,
-    ISOLATION_DETAIL.HEAD_ON_OTHER_PULL_REQUEST);
-
-  // Onbruikbare parameters meten niets.
-  for (const nummer of [0, -1, 74.5, '74', null, undefined, Number.NaN]) {
-    assert.equal(isoleer({ open: [[openMetHead(74, mijn)]], pullRequest: nummer, headSha: mijn }).detail,
-      ISOLATION_DETAIL.ARGUMENTS_INVALID, String(nummer));
-  }
-  // `sha(7)` bestaat uit cijfers en heeft dus geen hoofdlettervorm; de hoofdletterproef gebruikt
-  // daarom een SHA met letters erin. De vergelijking is exact, dus een hoofdletterversie is geen
-  // andere schrijfwijze van dezelfde commit maar een onbruikbare parameter.
-  for (const kop of ['', 'kort', `${'A'.repeat(39)}B`, null, 42]) {
-    assert.equal(isoleer({ open: [[openMetHead(74, mijn)]], headSha: kop }).detail,
-      ISOLATION_DETAIL.ARGUMENTS_INVALID, String(kop));
-  }
-});
-
-test('S32. een onleesbare, malformed of AFGEKAPTE open lijst publiceert nooit success', () => {
-  const mijn = sha(7);
-  const goed = [[openMetHead(74, mijn)]];
-
-  // AFGEKAPT. De lijst ziet er compleet uit binnen de opgehaalde pagina's — de gemeten PR is er
-  // zelfs de enige drager — maar de tweede drager kan op de pagina staan die nooit is opgehaald.
-  // Daarom blokkeert truncatie ook een op het oog schone meting.
-  assert.equal(isoleer({ open: goed, complete: true }).isolated, true);
-  assert.equal(isoleer({ open: goed, complete: false }).detail, ISOLATION_DETAIL.OPEN_LIST_TRUNCATED);
-  for (const vlag of [undefined, null, 'true', 1, 0]) {
-    assert.equal(isoleer({ open: goed, complete: vlag }).detail, ISOLATION_DETAIL.OPEN_LIST_TRUNCATED,
-      String(vlag));
-  }
-
-  // ONLEESBAAR EN MALFORMED. Elke vorm die geen array van pagina's met bruikbare vermeldingen is,
-  // is onleesbaar — nooit "leeg". Een lege lijst zou namelijk als "geen duplicaat" lezen.
-  const onleesbaar = [
-    null, undefined, 42, 'geen-lijst', {}, { items: [] },
-    [null], [42], [{ number: 74 }],
-    [[null]], [[42]], [['74']],
-    [[{ head: { sha: mijn } }]],
-    [[{ number: 0, head: { sha: mijn } }]],
-    [[{ number: -3, head: { sha: mijn } }]],
-    [[{ number: 74 }]],
-    [[{ number: 74, head: null }]],
-    [[{ number: 74, head: [] }]],
-    [[{ number: 74, head: { ref: 'x' } }]],
-  ];
-  for (const vorm of onleesbaar) {
-    assert.equal(isoleer({ open: vorm }).detail, ISOLATION_DETAIL.OPEN_LIST_UNREADABLE,
-      JSON.stringify(vorm) ?? String(vorm));
-    assert.equal(normaliseOpenHeads(vorm), null, JSON.stringify(vorm) ?? String(vorm));
-  }
-
-  // Dezelfde PR met TWEE verschillende heads in één oogst betekent dat de lijst onder de meting is
-  // bewogen. Dan valt er niets betrouwbaars te tellen.
-  assert.equal(isoleer({ open: [[openMetHead(74, mijn)], [openMetHead(74, sha(1))]] }).detail,
-    ISOLATION_DETAIL.OPEN_LIST_UNREADABLE);
-
-  // En géén van deze uitkomsten kan een `success` opleveren: de vaste redencode staat in dezelfde
-  // gesloten publisherallowlist en levert `failure` op de gemeten head.
+  // DAT IS ALLEEN VEILIG OMDAT DE UITKOMST GEEN AUTORISATIE IS. Precies dezelfde pure functie die
+  // de publisher gebruikt, met de bewezen GO van beide beurten: het resultaat is `pending` met een
+  // omschrijving die zichzelf als diagnostiek benoemt. Er valt op deze gedeelde commit dus niets
+  // groens te erven — niet door de andere open pull request, en niet door een die later wordt
+  // geopend. Dat laatste is precies wat geen enkele isolatiemeting kon afdekken.
   const publicatie = resolvePublication({
-    headSha: mijn,
-    statusContext: 'autocoding-shield-live-receipts',
-    gateResult: { decision: 'GO', reasons: [] },
-    executionError: HEAD_ISOLATION_REASON,
-  });
-  assert.equal(publicatie.state, 'failure');
-  assert.match(publicatie.description, /HEAD_NOT_ISOLATED/);
-  assert.equal(HEAD_ISOLATION_REASON, PUBLISH_ERROR.HEAD_NOT_ISOLATED);
-});
-
-test('S33. de isolatie-CLI is fail-closed en lekt geen enkel identificerend gegeven', () => {
-  const mijn = sha(7);
-  const bestanden = new Map();
-  const lees = (pad) => {
-    if (!bestanden.has(pad)) throw new Error('bestaat niet');
-    return bestanden.get(pad);
-  };
-  const draai = (argv) => {
-    const regels = [];
-    const echteLog = console.log;
-    console.log = (regel) => regels.push(String(regel));
-    try {
-      return { rc: runVerifyHeadIsolation(argv, { readFile: lees }), regels };
-    } finally {
-      console.log = echteLog;
-    }
-  };
-  const argv = (pad, complete, nummer, kop) => [
-    '--open-pulls', pad, '--open-pulls-complete', complete,
-    '--pull-request', nummer, '--head-sha', kop,
-  ];
-
-  bestanden.set('/alleen-ik', JSON.stringify([[openMetHead(74, mijn, 'claude2/geheime-branch')]]));
-  bestanden.set('/gedeeld', JSON.stringify([[openMetHead(74, mijn), openMetHead(75, mijn)]]));
-  bestanden.set('/rommel', '{niet eens json');
-
-  const goed = draai(argv('/alleen-ik', 'true', '74', mijn));
-  assert.equal(goed.rc, 0);
-  assert.deepEqual(goed.regels, ['HEAD_ISOLATION_SINGLE_OPEN_HEAD']);
-
-  const gedeeld = draai(argv('/gedeeld', 'true', '74', mijn));
-  assert.equal(gedeeld.rc, 1);
-  assert.deepEqual(gedeeld.regels, [`HEAD_ISOLATION_BLOCKED_${ISOLATION_DETAIL.HEAD_SHARED}`]);
-
-  assert.equal(draai(argv('/gedeeld', 'false', '74', mijn)).regels[0],
-    `HEAD_ISOLATION_BLOCKED_${ISOLATION_DETAIL.OPEN_LIST_TRUNCATED}`);
-  assert.equal(draai(argv('/rommel', 'true', '74', mijn)).regels[0],
-    `HEAD_ISOLATION_BLOCKED_${ISOLATION_DETAIL.OPEN_LIST_UNREADABLE}`);
-  assert.equal(draai(argv('/bestaat-niet', 'true', '74', mijn)).regels[0],
-    `HEAD_ISOLATION_BLOCKED_${ISOLATION_DETAIL.OPEN_LIST_UNREADABLE}`);
-
-  // Onleesbare of ontbrekende argumenten zijn een weigering, nooit een herinterpretatie.
-  for (const kapot of [
-    argv('/alleen-ik', 'waar', '74', mijn),
-    argv('/alleen-ik', '', '74', mijn),
-    argv('/alleen-ik', 'true', '74x', mijn),
-    argv('/alleen-ik', 'true', '', mijn),
-    ['--open-pulls', '/alleen-ik'],
-    [...argv('/alleen-ik', 'true', '74', mijn), '--onbekend', 'x'],
-    [...argv('/alleen-ik', 'true', '74', mijn), '--head-sha', mijn],
-    ['--open-pulls', '--pull-request', '--open-pulls-complete', 'true', '--head-sha', mijn],
-  ]) {
-    const uitkomst = draai(kapot);
-    assert.equal(uitkomst.rc, 1, kapot.join(' '));
-    assert.match(uitkomst.regels[0], /^HEAD_ISOLATION_BLOCKED_/, kapot.join(' '));
-  }
-
-  // GEEN LEK. Geen enkele uitvoerregel draagt een PR-nummer, een branchnaam, een SHA of een pad.
-  const alleRegels = [
-    ...goed.regels, ...gedeeld.regels,
-    ...draai(argv('/gedeeld', 'false', '74', mijn)).regels,
-    ...draai(argv('/rommel', 'true', '74', mijn)).regels,
-  ];
-  for (const regel of alleRegels) {
-    assert.doesNotMatch(regel, /[0-9]/, regel);
-    assert.doesNotMatch(regel, /geheime-branch|claude2|\//, regel);
-  }
-  assert.ok(alleRegels.every((r) => Object.values(ISOLATION_DETAIL)
-    .some((detail) => r === `HEAD_ISOLATION_BLOCKED_${detail}`) || r === 'HEAD_ISOLATION_SINGLE_OPEN_HEAD'));
-
-  assert.deepEqual(parseIsolationArgs('geen array'), { ok: false });
-});
-
-/**
- * Eén regel uit de isolatiemodule terugdraaien en de MUTANT importeren. Zonder deze controles zouden
- * de tests hierboven ook groen zijn op een module die op de verkeerde eigenschap toetst.
- */
-function mutantVanDeIsolatie(naam, oud, nieuw) {
-  const bron = readFileSync('scripts/autocoding/verify-head-isolation.mjs', 'utf8');
-  assert.equal(bron.split(oud).length - 1, 1, 'het mutatieanker moet precies één keer voorkomen');
-  const dir = mkdtempSync(join(tmpdir(), `head-isolation-${naam}-`));
-  const pad = join(dir, `verify-head-isolation.${naam}.mjs`);
-  writeFileSync(pad, bron.replace(oud, nieuw)
-    .replace("from './publish-live-status.mjs'",
-      `from ${JSON.stringify(pathToFileURL('scripts/autocoding/publish-live-status.mjs').href)}`)
-    .replace("from './select-live-gate-targets.mjs'",
-      `from ${JSON.stringify(pathToFileURL('scripts/autocoding/select-live-gate-targets.mjs').href)}`));
-  return import(pathToFileURL(pad).href);
-}
-
-test('S34. NEGATIEVE MUTATIE: toetsen op branchnaam of op het eigen PR-nummer gaat aantoonbaar rood', async () => {
-  const gedeeld = sha(7);
-  const tweeOpEenCommit = [[
-    openMetHead(74, gedeeld, 'claude2/live-gate'),
-    openMetHead(75, gedeeld, 'codex/andere-branch'),
-  ]];
-
-  // MUTANT 1: op BRANCHNAAM vergelijken in plaats van op de volledige head-SHA. Twee PR's met
-  // verschillende branches maar dezelfde commit zien er dan uit als twee losse pull requests — en
-  // precies dat is de bevinding.
-  const opBranch = await mutantVanDeIsolatie('branch',
-    '  for (const [number, sha] of heads) if (sha === headSha) dragers.push(number);',
-    '  for (const [number] of heads) if (number === pullRequest) dragers.push(number);');
-  assert.equal(opBranch.resolveHeadIsolation({
-    openPullRequests: tweeOpEenCommit, complete: true, pullRequest: 74, headSha: gedeeld,
-  }).isolated, true, 'de mutant laat de gedeelde head door');
-  assert.equal(resolveHeadIsolation({
-    openPullRequests: tweeOpEenCommit, complete: true, pullRequest: 74, headSha: gedeeld,
-  }).isolated, false, 'de echte module niet');
-
-  // MUTANT 2: alleen toetsen DAT het huidige PR-nummer in de lijst staat, zonder de dragers te
-  // tellen. Dat is de vorm waarin de per-PR-locks al zaten: ordenen zonder isoleren.
-  const alleenAanwezigheid = await mutantVanDeIsolatie('aanwezig',
-    '  if (dragers.length > 1) return blocked(ISOLATION_DETAIL.HEAD_SHARED);\n',
-    '');
-  assert.equal(alleenAanwezigheid.resolveHeadIsolation({
-    openPullRequests: tweeOpEenCommit, complete: true, pullRequest: 74, headSha: gedeeld,
-  }).isolated, true, 'de mutant laat de gedeelde head door');
-
-  // MUTANT 3: op een PREFIX van de SHA vergelijken. Dan zijn twee verschillende commits met dezelfde
-  // korte vorm ineens één, en blokkeert de poort een PR die niets deelt.
-  const opPrefix = await mutantVanDeIsolatie('prefix',
-    '  for (const [number, sha] of heads) if (sha === headSha) dragers.push(number);',
-    '  for (const [number, sha] of heads) if (sha.slice(0, 7) === headSha.slice(0, 7)) dragers.push(number);');
-  const mijn = `${'a'.repeat(39)}1`;
-  const buur = `${'a'.repeat(39)}2`;
-  const geenDuplicaat = [[openMetHead(74, mijn), openMetHead(75, buur)]];
-  assert.equal(opPrefix.resolveHeadIsolation({
-    openPullRequests: geenDuplicaat, complete: true, pullRequest: 74, headSha: mijn,
-  }).isolated, false, 'de prefixmutant blokkeert een PR die niets deelt');
-  assert.equal(resolveHeadIsolation({
-    openPullRequests: geenDuplicaat, complete: true, pullRequest: 74, headSha: mijn,
-  }).isolated, true, 'de echte module vergelijkt de volledige SHA');
-
-  // MUTANT 4: truncatie negeren. Dan is een lijst die op de paginagrens ophoudt "volledig zicht".
-  const zonderTruncatie = await mutantVanDeIsolatie('truncatie',
-    '  if (complete !== true) return blocked(ISOLATION_DETAIL.OPEN_LIST_TRUNCATED);\n',
-    '');
-  assert.equal(zonderTruncatie.resolveHeadIsolation({
-    openPullRequests: [[openMetHead(74, gedeeld)]], complete: false, pullRequest: 74, headSha: gedeeld,
-  }).isolated, true, 'de mutant beslist op een half zicht');
-  assert.equal(resolveHeadIsolation({
-    openPullRequests: [[openMetHead(74, gedeeld)]], complete: false, pullRequest: 74, headSha: gedeeld,
-  }).isolated, false);
-});
-
-test('S35. in de ECHTE schrijfstap krijgt geen van twee PRs op één head een success', () => {
-  const gedeeld = sha(7);
-  // PR 74 is volledig GO, PR 75 heeft geen reviews en geen ownerbewijs. Ze delen één commit.
-  const beide = [[
-    openMetHead(74, gedeeld, 'claude2/live-gate'),
-    openMetHead(75, gedeeld, 'codex/zelfde-commit'),
-  ]];
-
-  for (const [nummer, beslissing] of [[74, 'GO'], [75, 'NO_GO']]) {
-    const uitkomst = draaiSchrijfstap({
-      pr: nummer,
-      prJson: { state: 'open', merged: false, head: { sha: gedeeld } },
-      openPulls: beide,
-      beslissing,
-    });
-
-    // De uitspraak wordt niet eens berekend: zonder eenduidige drager valt er niets te beslissen.
-    assert.deepEqual(uitkomst.regels.filter((r) => r === 'VERIFY'), [], `PR ${nummer}`);
-    assert.deepEqual(uitkomst.regels.filter((r) => r === 'COLLECT'), [], `PR ${nummer}`);
-
-    const finaal = uitkomst.regels.filter((r) => r.startsWith('FINAL '));
-    assert.equal(finaal.length, 1, `PR ${nummer}: precies één eindstatus`);
-    assert.match(finaal[0], /--execution-error HEAD_NOT_ISOLATED/, `PR ${nummer}`);
-    assert.match(finaal[0], new RegExp(`--head-sha ${gedeeld}`), `PR ${nummer}`);
-
-    // De invalidatie is er wél geweest: de head staat op `pending` voordat er iets misgaat.
-    assert.equal(uitkomst.regels.filter((r) => r.startsWith('PENDING ')).length, 1, `PR ${nummer}`);
-
-    // De categorie haalt het joblog, maar zonder nummer, SHA of branchnaam.
-    assert.match(uitkomst.stdout, /HEAD_ISOLATION_BLOCKED_HEAD_SHARED/, `PR ${nummer}`);
-    assert.doesNotMatch(uitkomst.stdout, /zelfde-commit|live-gate/, `PR ${nummer}`);
-
-    // En de bewijs-GET's zijn overgeslagen: quotum dat niets meer kan beslissen wordt niet besteed.
-    assert.deepEqual(uitkomst.regels.filter((r) => /\/pulls\/[0-9]+\/(reviews|files|commits)/.test(r)),
-      [], `PR ${nummer}`);
-  }
-
-  // ZELFDE PUBLICATIE, DUS GEEN VAN BEIDE GROEN. De pure publisherfunctie bevestigt dat de code die
-  // de stap doorgeeft `failure` oplevert, ook bij een `GO`-uitspraak.
-  assert.equal(resolvePublication({
     headSha: gedeeld,
-    statusContext: 'autocoding-shield-live-receipts',
+    statusContext: 'autocoding-shield-diagnostic',
     gateResult: { decision: 'GO', reasons: [] },
-    executionError: 'HEAD_NOT_ISOLATED',
-  }).state, 'failure');
+    executionError: '',
+  });
+  assert.equal(publicatie.state, 'pending');
+  assert.notEqual(publicatie.state, 'success');
 });
 
-test('S36. de schrijfstap houdt zijn normale uitkomst bij een unieke head, en blijft binnen budget', () => {
-  const mijn = sha(7);
+test('S30. de open-PR-lijst bestaat alleen nog in de SELECTIEjob, waar zij niets autoriseert', () => {
+  // De lijst is niet uit de workflow verdwenen en hoort dat ook niet te zijn: een scheduled ronde
+  // moet ergens vandaan halen welke pull requests er zijn. Wat veranderde is haar BETEKENIS. In de
+  // selectiejob bepaalt zij hoogstens WIE er deze ronde bekeken wordt; valt er iemand uit, dan
+  // gebeurt er niets — dat is de fail-closed richting. In de schrijfstap DROEG zij een uitspraak, en
+  // daar hoort zij dus niet meer thuis. Deze test bindt dat onderscheid aan het bestand.
+  const selectie = stapScript(WRITER_TEKST, SELECTIE_STAP);
+  const schrijf = stapScript(WRITER_TEKST, SCHRIJF_STAP);
 
-  // SINGLETON: ongewijzigde GO-semantiek. Naast andere open PR's met andere heads.
-  const go = draaiSchrijfstap({
-    pr: 74,
-    prJson: { state: 'open', merged: false, head: { sha: mijn } },
-    openPulls: [[openMetHead(74, mijn), openMetHead(75, sha(1)), openMetHead(76, sha(2))]],
-  });
-  assert.equal(go.status, 0, 'een bewezen GO blijft groen');
-  assert.deepEqual(go.regels.filter((r) => r === 'VERIFY'), ['VERIFY']);
-  assert.doesNotMatch(go.regels.filter((r) => r.startsWith('FINAL '))[0], /--execution-error HEAD_NOT_ISOLATED/);
+  assert.equal((selectie.match(/pulls\?state=open/g) ?? []).length, 1, 'selectie mag kijken');
+  assert.equal((schrijf.match(/pulls\?state=open/g) ?? []).length, 0, 'de schrijfstap niet');
+  assert.equal((WRITER_TEKST.match(/pulls\?state=open/g) ?? []).length, 1, 'en nergens anders');
 
-  // SINGLETON MET NO_GO: eveneens ongewijzigd — de gewone poort spreekt, niet de isolatie.
-  const nogo = draaiSchrijfstap({
-    pr: 74,
-    prJson: { state: 'open', merged: false, head: { sha: mijn } },
-    openPulls: [[openMetHead(74, mijn)]],
-    beslissing: 'NO_GO',
-  });
-  assert.deepEqual(nogo.regels.filter((r) => r === 'VERIFY'), ['VERIFY']);
-  assert.doesNotMatch(nogo.regels.filter((r) => r.startsWith('FINAL '))[0], /HEAD_NOT_ISOLATED/);
+  // De selectiejob haalt haar bovendien alleen bij een SCHEDULE op: een event heeft al een
+  // associatie en mag nooit een repositorybrede ronde kunnen veroorzaken.
+  assert.match(selectie, /if \[ "\$EVENT_NAME" = 'schedule' \]; then/);
 
-  // DUPLICAAT GESLOTEN: de resterende singleton meet weer normaal door. De blokkade is een toestand.
-  const naSluiting = draaiSchrijfstap({
-    pr: 74,
-    prJson: { state: 'open', merged: false, head: { sha: mijn } },
-    openPulls: [[openMetHead(74, mijn)]],
-  });
-  assert.equal(naSluiting.status, 0);
-  assert.deepEqual(naSluiting.regels.filter((r) => r === 'VERIFY'), ['VERIFY']);
-
-  // BUDGET. Het duurste pad is dít pad: de isolatie slaagt en het bewijs wordt alsnog volledig
-  // opgehaald. Ook met de zwaarste bewijslijst blijft de beurt onder de bovengrens per PR.
-  const zwaar = draaiSchrijfstap({
-    pr: 74,
-    prJson: { state: 'open', merged: false, head: { sha: mijn } },
-    openPulls: [[openMetHead(74, mijn)]],
-    lijstPaginas: { 'pulls/74/files': [volleP(1), volleP(101), volleP(201), [{ number: 301 }]] },
-  });
-  const verzoeken = zwaar.regels.filter((r) => /^(GET |PENDING |FINAL )/.test(r)).length;
-  assert.ok(verzoeken <= PER_PULL_REQUEST_REQUEST_BUDGET,
-    `${verzoeken} verzoeken, budget ${PER_PULL_REQUEST_REQUEST_BUDGET}`);
+  // En de schrijfstap kan met dat zicht ook niets meer doen: er staat geen enkele mutatie in behalve
+  // de twee statuspublicaties, en zeker geen merge.
+  assert.doesNotMatch(schrijf, /\/merge\b/);
+  assert.doesNotMatch(schrijf, /--method (PUT|POST|PATCH|DELETE)/);
+  assert.equal((schrijf.match(/publish-live-status\.mjs/g) ?? []).length, 2);
 });
 
-test('S37. een onleesbare of AFGEKAPTE open-PR-lijst in de schrijfstap blokkeert de uitspraak', () => {
-  const mijn = sha(7);
-  const prJson = { state: 'open', merged: false, head: { sha: mijn } };
 
-  // AFGEKAPT: vier volle pagina's. Er wordt geen vijfde opgevraagd, en er volgt geen uitspraak.
-  const afgekapt = draaiSchrijfstap({
-    pr: 74, prJson, openPulls: [volleP(1), volleP(101), volleP(201), volleP(301), volleP(401)],
-  });
-  const lijstGets = afgekapt.regels.filter((r) => r.includes('state=open'));
-  assert.equal(lijstGets.length, ISOLATION_PAGE_BUDGET, lijstGets.join(' | '));
-  assert.ok(!lijstGets.some((r) => r.endsWith(`page=${ISOLATION_PAGE_BUDGET + 1}`)));
-  assert.match(afgekapt.regels.filter((r) => r.startsWith('FINAL '))[0],
-    /--execution-error HEAD_NOT_ISOLATED/);
-  assert.deepEqual(afgekapt.regels.filter((r) => r === 'VERIFY'), []);
-
-  // ONLEESBAAR: het verzoek zelf mislukt. Ook dan geen uitspraak, en wel een `failure` op de head.
-  const stuk = draaiSchrijfstap({ pr: 74, prJson, ghFaalt: ['state=open'] });
-  const finaal = stuk.regels.filter((r) => r.startsWith('FINAL '));
-  assert.equal(finaal.length, 1);
-  assert.match(finaal[0], /--execution-error HEAD_NOT_ISOLATED/);
-  assert.match(finaal[0], new RegExp(`--head-sha ${mijn}`), 'op de al gemeten head');
-  assert.deepEqual(stuk.regels.filter((r) => r === 'VERIFY'), []);
-
-  // MALFORMED: de lijst is leesbaar maar draagt vermeldingen zonder bruikbare head.
-  const rommel = draaiSchrijfstap({
-    pr: 74, prJson, openPulls: [[{ number: 74, head: { sha: mijn } }, { number: 75 }]],
-  });
-  assert.match(rommel.regels.filter((r) => r.startsWith('FINAL '))[0],
-    /--execution-error HEAD_NOT_ISOLATED/);
-  assert.match(rommel.stdout, /HEAD_ISOLATION_BLOCKED_OPEN_LIST_UNREADABLE/);
-});
-
-test('S38. de statuscontext blijft VAST — de isolatie zit in de meting, niet in de naam', () => {
-  // Een context per pull request zou dit defect ook oplossen en een groter defect maken: een
-  // required check moet één canonieke naam houden, anders valt er niets als vereist in te stellen en
-  // kan een nieuwe PR zijn eigen contextnaam kiezen.
+test('S38. de statuscontext blijft VAST, en is uitdrukkelijk GEEN required check', () => {
+  // De context houdt één canonieke naam, maar niet meer om als vereiste check ingesteld te kunnen
+  // worden — dat is zij nadrukkelijk niet, en de policy legt dat vast. De reden is nu leesbaarheid:
+  // een naam per pull request zou de diagnostische stand over willekeurig veel contexten uitsmeren,
+  // en dan is op een PR niet meer te zien welke regel er sprak.
   const stap = stapScript(WRITER_TEKST, SCHRIJF_STAP);
   assert.match(WRITER_TEKST, /STATUS_CONTEXT: \$\{\{ steps\.enabled\.outputs\.status_context \}\}/);
   assert.doesNotMatch(stap, /--status-context "\$STATUS_CONTEXT-/);
@@ -2426,4 +2078,12 @@ test('S38. de statuscontext blijft VAST — de isolatie zit in de meting, niet i
   // variant zou hierboven buiten de match vallen en anders onopgemerkt blijven.
   assert.equal((stap.match(/--status-context/g) ?? []).length, contexten.length);
   assert.equal(contexten.length, 2, 'pending én eindstatus');
+
+  // En de naam komt uit de DIAGNOSTISCHE sleutel van de policy. De oude sleutel bestaat niet meer:
+  // zolang er ergens nog een `live_status_context` viel te lezen, kon een lezer denken dat deze
+  // context de poort is die vroeger `success` publiceerde.
+  const policy = JSON.parse(readFileSync('CONTROL/AUTOCODING/policy.v1.json', 'utf8'));
+  assert.equal(policy.live_status_context, undefined);
+  assert.equal(policy.diagnostic_status_context, 'autocoding-shield-diagnostic');
+  assert.equal(policy.merge_finalizer_enabled, false, 'en de finalizer staat uit');
 });

@@ -71,6 +71,13 @@ export const REASON = Object.freeze({
   OWNER_APPROVAL_TREE_MISMATCH: 'OWNER_APPROVAL_TREE_MISMATCH',
   OWNER_APPROVAL_TASK_MISMATCH: 'OWNER_APPROVAL_TASK_MISMATCH',
   OWNER_APPROVAL_NOT_APPROVE: 'OWNER_APPROVAL_NOT_APPROVE',
+  // De STRENGERE binding die de mergefinalizer eist. Een ownergoedkeuring voor een gevoelig pad
+  // bindt aan task/head/tree; een MERGEautorisatie moet daarbovenop aan exact dit PR-nummer en
+  // exact deze base binden, want een merge is een uitspraak over een PR en een doelbranch en niet
+  // alleen over een boom. Zie `evaluateMergeAuthorizations`.
+  OWNER_APPROVAL_PULL_REQUEST_MISMATCH: 'OWNER_APPROVAL_PULL_REQUEST_MISMATCH',
+  OWNER_APPROVAL_BASE_MISMATCH: 'OWNER_APPROVAL_BASE_MISMATCH',
+  OWNER_APPROVAL_BINDING_INCOMPLETE: 'OWNER_APPROVAL_BINDING_INCOMPLETE',
 });
 
 function isNonEmptyString(v) {
@@ -616,7 +623,18 @@ export function evaluateNativeReview(evidenceItems, rawContext, rawPolicy) {
 
 export const OWNER_APPROVAL_SCHEMA = 'AUTOCODING_OWNER_APPROVAL_V1';
 
-const OWNER_APPROVAL_FIELDS = new Set(['schema', 'task_id', 'head_sha', 'tree_sha', 'decision']);
+/**
+ * De gesloten veldverzameling van een owner-autorisatie.
+ *
+ * `pull_request` en `base_sha` zijn OPTIONEEL voor de gevoelige-padpoort en VERPLICHT voor de
+ * mergefinalizer. Ze staan hier — en niet in een tweede, eigen schema — omdat er maar één
+ * ownerautorisatiewet mag zijn: één parser, één statefilter, één actorallowlist. Wat verschilt is
+ * niet de wet maar de STRENGTE waarmee een poort haar inroept, en die strengte leeft bij de poort
+ * (`evaluateMergeAuthorizations`) in plaats van in een gedupliceerd blokformaat.
+ */
+const OWNER_APPROVAL_FIELDS = new Set([
+  'schema', 'task_id', 'head_sha', 'tree_sha', 'base_sha', 'pull_request', 'decision',
+]);
 
 /**
  * Haalt een owner-autorisatie uit een comment-/reviewlichaam. Alleen een letterlijk fenced blok met
@@ -772,6 +790,20 @@ export function evaluateOwnerApproval(envelope, rawContext, rawGate) {
   if (!SHA_RE.test(context.pr_tree_sha) || approval.tree_sha !== context.pr_tree_sha) {
     add(REASON.OWNER_APPROVAL_TREE_MISMATCH);
   }
+  // De twee OPTIONELE bindingsvelden. Ze worden getoetst zodra ze AANWEZIG zijn, ook op de
+  // gevoelige-padpoort die ze niet eist: een blok dat een PR-nummer of een base noemt, doet daarmee
+  // een uitspraak, en een uitspraak die niet klopt mag nooit als "veld dat deze poort niet leest"
+  // wegvallen. Ontbreken ze, dan zwijgt deze functie erover — de STRENGERE eis dat ze er moeten
+  // zijn hoort bij de mergefinalizer en staat in `evaluateMergeAuthorizations`.
+  if ('pull_request' in approval
+    && !(Number.isInteger(context.pr_number) && context.pr_number > 0
+      && approval.pull_request === context.pr_number)) {
+    add(REASON.OWNER_APPROVAL_PULL_REQUEST_MISMATCH);
+  }
+  if ('base_sha' in approval
+    && !(SHA_RE.test(context.pr_base_sha ?? '') && approval.base_sha === context.pr_base_sha)) {
+    add(REASON.OWNER_APPROVAL_BASE_MISMATCH);
+  }
   if (approval.decision !== 'APPROVE') add(REASON.OWNER_APPROVAL_NOT_APPROVE);
 
   return { valid: reasons.length === 0, reasons };
@@ -809,6 +841,42 @@ export function evaluateOwnerApprovals(envelopes, rawContext, rawGate) {
   if (evaluated.some((e) => e.valid)) return { decision: 'GO', reasons: [] };
   const reasons = new Set();
   for (const e of evaluated) for (const r of e.reasons) reasons.add(r);
+  return { decision: 'NO_GO', reasons: Array.from(reasons) };
+}
+
+/**
+ * Toetst of één autorisatieblok de VOLLEDIGE mergebinding draagt: naast task/head/tree ook exact
+ * dit PR-nummer en exact deze base. Alleen de aanwezigheid en de VORM worden hier gemeten; of de
+ * waarden kloppen is het werk van `evaluateOwnerApproval`, dat er de enige toets van blijft.
+ */
+function mergeBindingIsComplete(approval) {
+  if (typeof approval !== 'object' || approval === null || Array.isArray(approval)) return false;
+  if (!Number.isInteger(approval.pull_request) || approval.pull_request <= 0) return false;
+  return SHA_RE.test(approval.base_sha ?? '');
+}
+
+/**
+ * De ownerpoort van de MERGEFINALIZER. Zelfde wet als `evaluateOwnerApprovals` — zelfde parser,
+ * zelfde actorallowlist, zelfde statefilter, zelfde head-selectie — met één extra eis: het
+ * autorisatieblok moet aan exact dit PR-nummer en exact deze base gebonden zijn.
+ *
+ * Waarom die extra eis bestaat. Een commitstatus is SHA-scoped en kon daardoor door een tweede pull
+ * request op dezelfde head geërfd worden (Codex-bevinding `3835364972`). Precies dezelfde
+ * overdraagbaarheid zou een ownerautorisatie treffen die alleen aan task/head/tree bindt: twee pull
+ * requests kunnen dezelfde head en dus dezelfde boom dragen, tegen verschillende bases. Een
+ * autorisatie die het PR-nummer én de base noemt kan per definitie niet op een andere pull request
+ * of een andere doelbranch slaan.
+ *
+ * Een blok zonder die velden is geen zwakkere autorisatie maar GEEN mergeautorisatie: het levert
+ * `OWNER_APPROVAL_BINDING_INCOMPLETE` op en nooit een GO.
+ */
+export function evaluateMergeAuthorizations(envelopes, rawContext, rawGate) {
+  const list = (Array.isArray(envelopes) ? envelopes : []).filter((e) => e != null);
+  const gebonden = list.filter((e) => mergeBindingIsComplete(e?.approval));
+  const uitkomst = evaluateOwnerApprovals(gebonden, rawContext, rawGate);
+  if (uitkomst.decision === 'GO') return uitkomst;
+  const reasons = new Set(uitkomst.reasons);
+  if (gebonden.length < list.length) reasons.add(REASON.OWNER_APPROVAL_BINDING_INCOMPLETE);
   return { decision: 'NO_GO', reasons: Array.from(reasons) };
 }
 

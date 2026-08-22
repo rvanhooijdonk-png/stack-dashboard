@@ -25,11 +25,13 @@ import {
   UNTRUSTED_TRIGGERS, TRUSTED_WRITER_TRIGGERS, parseFlowMapping, extractJobConcurrency,
   extractJobMatrixKeys, isPerPullRequestQueuedWriteJob,
   extractWorkflowConcurrency, isRepositoryWideQueuedLock, TRUSTED_WRITER_REPOSITORY_LOCK_GROUP,
+  TRUSTED_FINALIZER_TRIGGERS, ALLOWED_FINALIZER_WRITE_SCOPES, FINALIZER_REPOSITORY_LOCK_GROUP,
 } from '../scripts/autocoding/workflow-trust.mjs';
 
 const WORKFLOW_DIR = '.github/workflows';
 const PR_SHIELD = `${WORKFLOW_DIR}/autocoding-shield.yml`;
 const TRUSTED_WRITER = `${WORKFLOW_DIR}/autocoding-shield-live-gate.yml`;
+const TRUSTED_FINALIZER = `${WORKFLOW_DIR}/autocoding-merge-finalizer.yml`;
 
 function allWorkflows() {
   return readdirSync(WORKFLOW_DIR)
@@ -40,6 +42,20 @@ function allWorkflows() {
 function violations(workflows) {
   return findTrustBoundaryViolations({
     workflows, prShieldPath: PR_SHIELD, trustedWriterPath: TRUSTED_WRITER,
+  });
+}
+
+/**
+ * De volledige repositorybrede meting, inclusief de mergefinalizer. Bewust APART van `violations()`:
+ * de synthetische scenario's hieronder dragen geen finalizerbestand, en die zouden met dit pad erbij
+ * allemaal op `TRUSTED_FINALIZER_MISSING` stuklopen zonder dat dat iets over hun onderwerp zegt.
+ */
+function alleViolations(workflows) {
+  return findTrustBoundaryViolations({
+    workflows,
+    prShieldPath: PR_SHIELD,
+    trustedWriterPath: TRUSTED_WRITER,
+    trustedFinalizerPath: TRUSTED_FINALIZER,
   });
 }
 
@@ -495,7 +511,7 @@ test('T6d. NEGATIEVE MUTATIE: de oude `actions/`-eis laat derdepartijartifacts d
 });
 
 test('T7. geen enkel workflowbestand in deze repository overtreedt de grens', () => {
-  assert.deepEqual(violations(allWorkflows()), []);
+  assert.deepEqual(alleViolations(allWorkflows()), []);
 });
 
 test('T8. de gemeten vorm van de twee shieldbestanden is precies de bedoelde', () => {
@@ -1159,4 +1175,293 @@ test('T16c. de lezer van de workflowbrede rij is zelf gemeten, niet aangenomen',
 
   // De vaste groepsnaam is zelf een literal zonder expressie — anders was de hele eis leeg.
   assert.doesNotMatch(TRUSTED_WRITER_REPOSITORY_LOCK_GROUP, /\$\{\{/);
+});
+
+// --- De mergefinalizer --------------------------------------------------------------------------
+
+const FINALIZER_ON = ['on:', '  schedule:', "    - cron: '47 * * * *'"];
+const FINALIZER_GLOBALE_RIJ = [
+  'concurrency:',
+  `  group: ${FINALIZER_REPOSITORY_LOCK_GROUP}`,
+  '  cancel-in-progress: false',
+  '  queue: max',
+];
+const FINALIZER_RIJ = [
+  '    concurrency:',
+  '      group: autocoding-merge-finalizer-pr-${{ matrix.pr }}',
+  '      cancel-in-progress: false',
+  '      queue: max',
+];
+const FINALIZER_KANDIDATEN = [
+  '  kandidaten:',
+  '    permissions:',
+  '      contents: read',
+  '      pull-requests: read',
+  '    steps:',
+  '      - uses: actions/checkout@v4',
+  '        with:',
+  '          ref: ${{ github.event.repository.default_branch }}',
+];
+
+/**
+ * Bouwt een finalizer. Dezelfde knoppen als `schoneWriter`, zodat elke mutatie hieronder precies
+ * één eigenschap verandert en de rest aantoonbaar schoon blijft.
+ */
+function schoneFinalizer({
+  on = FINALIZER_ON, scopes = [], rij = FINALIZER_RIJ, globaleRij = FINALIZER_GLOBALE_RIJ,
+  ref = '${{ github.event.repository.default_branch }}', finaliseer = [], jobs = [],
+} = {}) {
+  return [
+    'name: autocoding-merge-finalizer',
+    ...on,
+    'permissions: {}',
+    ...globaleRij,
+    'jobs:',
+    ...FINALIZER_KANDIDATEN,
+    '  finaliseer:',
+    '    needs: kandidaten',
+    '    permissions:',
+    '      pull-requests: write',
+    ...scopes.map((scope) => `      ${scope}`),
+    '    strategy:',
+    '      matrix:',
+    '        pr: ${{ fromJSON(needs.kandidaten.outputs.pull_requests) }}',
+    ...rij,
+    '    steps:',
+    '      - uses: actions/checkout@v4',
+    '        with:',
+    `          ref: ${ref}`,
+    ...finaliseer,
+    ...jobs,
+  ].join('\n');
+}
+
+/** De overtredingen van één finalizertekst, met een verder schone shield en writer ernaast. */
+function finalizerViolations(text) {
+  return findTrustBoundaryViolations({
+    workflows: [
+      { path: PR_SHIELD, text: SCHONE_SHIELD },
+      { path: TRUSTED_WRITER, text: schoneWriter() },
+      { path: TRUSTED_FINALIZER, text },
+    ],
+    prShieldPath: PR_SHIELD,
+    trustedWriterPath: TRUSTED_WRITER,
+    trustedFinalizerPath: TRUSTED_FINALIZER,
+  });
+}
+
+test('F1. een schone finalizer levert geen enkele overtreding op', () => {
+  assert.deepEqual(finalizerViolations(schoneFinalizer()), []);
+});
+
+test('F2. de finalizer mag UITSLUITEND op een klok draaien', () => {
+  // De allowlist is één trigger lang, en dat is de hele grens. `workflow_run` zou hem laten starten
+  // door de voltooiing van een run waarvan de PR de definitie levert; `issue_comment` zou iedere
+  // commentator een trekker naar een token met MERGErechten geven; `workflow_dispatch` draait de
+  // definitie van de GEKOZEN ref. Geen van drieën is een klok.
+  assert.deepEqual(TRUSTED_FINALIZER_TRIGGERS, ['schedule']);
+
+  const nietToegestaan = `${TRUST_VIOLATION.TRUSTED_FINALIZER_TRIGGER_NOT_ALLOWED}:${TRUSTED_FINALIZER}`;
+  for (const on of [
+    ['on:', '  workflow_run:', '    workflows: [autocoding-shield]', '    types: [completed]'],
+    ['on:', '  issue_comment:', '    types: [created]'],
+    ['on:', '  workflow_dispatch:'],
+    ['on:', '  push:', '    branches: [main]'],
+  ]) {
+    assert.ok(finalizerViolations(schoneFinalizer({ on })).includes(nietToegestaan), on[1]);
+  }
+
+  // Een DIRECT PR-event is bovendien nog een tweede, zwaardere overtreding.
+  const prEvent = finalizerViolations(schoneFinalizer({
+    on: ['on:', '  pull_request_target:', '    types: [opened]'],
+  }));
+  assert.ok(prEvent.includes(`${TRUST_VIOLATION.TRUSTED_FINALIZER_HAS_UNTRUSTED_TRIGGER}:${TRUSTED_FINALIZER}`));
+  assert.ok(prEvent.includes(`${TRUST_VIOLATION.PULL_REQUEST_TARGET_PRESENT}:${TRUSTED_FINALIZER}`));
+  assert.ok(prEvent.includes(`${TRUST_VIOLATION.UNTRUSTED_TRIGGER_WITH_WRITE_PERMISSION}:${TRUSTED_FINALIZER}`));
+
+  assert.ok(finalizerViolations(schoneFinalizer({ on: ['permissions: {}'] }))
+    .includes(`${TRUST_VIOLATION.TRUSTED_FINALIZER_HAS_NO_TRIGGER}:${TRUSTED_FINALIZER}`));
+});
+
+test('F3. `pull-requests: write` bestaat in precies ÉÉN bestand van de repository', () => {
+  const buiten = `${TRUST_VIOLATION.PULL_REQUESTS_WRITE_OUTSIDE_FINALIZER}`;
+
+  // De writer die er stiekem een mergescope bij neemt, is een tweede weg naar dezelfde
+  // onomkeerbare actie — en wordt als zodanig afgekeurd.
+  assert.ok(findTrustBoundaryViolations({
+    workflows: [
+      { path: PR_SHIELD, text: SCHONE_SHIELD },
+      { path: TRUSTED_WRITER, text: schoneWriter({ scopes: ['pull-requests: write'] }) },
+      { path: TRUSTED_FINALIZER, text: schoneFinalizer() },
+    ],
+    prShieldPath: PR_SHIELD, trustedWriterPath: TRUSTED_WRITER, trustedFinalizerPath: TRUSTED_FINALIZER,
+  }).includes(`${buiten}:${TRUSTED_WRITER}`));
+
+  // `write-all` draagt de mergescope zonder het woord te noemen. Juist die stille vorm moet vallen.
+  const alles = [
+    'name: los',
+    'on:',
+    '  schedule:',
+    "    - cron: '0 * * * *'",
+    'jobs:',
+    '  a:',
+    '    permissions: write-all',
+  ].join('\n');
+  assert.ok(findTrustBoundaryViolations({
+    workflows: [
+      { path: PR_SHIELD, text: SCHONE_SHIELD },
+      { path: TRUSTED_WRITER, text: schoneWriter() },
+      { path: TRUSTED_FINALIZER, text: schoneFinalizer() },
+      { path: `${WORKFLOW_DIR}/los.yml`, text: alles },
+    ],
+    prShieldPath: PR_SHIELD, trustedWriterPath: TRUSTED_WRITER, trustedFinalizerPath: TRUSTED_FINALIZER,
+  }).includes(`${buiten}:${WORKFLOW_DIR}/los.yml`));
+
+  // En omgekeerd: de finalizer mag geen ANDERE schrijfscope dragen dan `pull-requests`.
+  assert.deepEqual(ALLOWED_FINALIZER_WRITE_SCOPES, ['pull-requests']);
+  for (const scope of ['contents: write', 'statuses: write', 'actions: write']) {
+    assert.ok(
+      finalizerViolations(schoneFinalizer({ scopes: [scope] }))
+        .includes(`${TRUST_VIOLATION.TRUSTED_FINALIZER_WRITE_SCOPE_NOT_ALLOWED}:${TRUSTED_FINALIZER}`),
+      scope,
+    );
+  }
+  // `statuses: write` in de finalizer is bovendien een overtreding van de ANDERE concentratieregel.
+  assert.ok(
+    finalizerViolations(schoneFinalizer({ scopes: ['statuses: write'] }))
+      .includes(`${TRUST_VIOLATION.STATUSES_WRITE_OUTSIDE_TRUSTED_WRITER}:${TRUSTED_FINALIZER}`),
+  );
+});
+
+test('F4. de finaliserende job staat per PR in een wachtende rij, de run repositorybreed', () => {
+  const perPr = `${TRUST_VIOLATION.TRUSTED_FINALIZER_WRITE_JOB_NOT_PER_PULL_REQUEST_QUEUED}:${TRUSTED_FINALIZER}`;
+  const repo = `${TRUST_VIOLATION.TRUSTED_FINALIZER_NOT_REPOSITORY_QUEUED}:${TRUSTED_FINALIZER}`;
+
+  for (const rij of [
+    [],
+    ['    concurrency:', '      group: autocoding-merge-finalizer-pr-${{ matrix.pr }}', '      cancel-in-progress: true', '      queue: max'],
+    ['    concurrency:', '      group: autocoding-merge-finalizer-pr-${{ matrix.pr }}', '      cancel-in-progress: false', '      queue: single'],
+    ['    concurrency:', '      group: autocoding-merge-finalizer-vast', '      cancel-in-progress: false', '      queue: max'],
+    ['    concurrency:', '      group: autocoding-merge-finalizer-${{ github.run_id }}', '      cancel-in-progress: false', '      queue: max'],
+  ]) {
+    assert.ok(finalizerViolations(schoneFinalizer({ rij })).includes(perPr), JSON.stringify(rij));
+  }
+
+  for (const globaleRij of [
+    [],
+    ['concurrency:', `  group: ${FINALIZER_REPOSITORY_LOCK_GROUP}`, '  cancel-in-progress: false'],
+    ['concurrency:', `  group: ${FINALIZER_REPOSITORY_LOCK_GROUP}`, '  cancel-in-progress: true', '  queue: max'],
+    // De rij van de DIAGNOSTISCHE writer is niet de rij van de finalizer: twee bestanden die
+    // dezelfde groepsnaam delen zouden elkaar blokkeren zonder dat dat ergens bedoeld is.
+    ['concurrency:', `  group: ${TRUSTED_WRITER_REPOSITORY_LOCK_GROUP}`, '  cancel-in-progress: false', '  queue: max'],
+  ]) {
+    assert.ok(finalizerViolations(schoneFinalizer({ globaleRij })).includes(repo), JSON.stringify(globaleRij));
+  }
+
+  // Twee schrijvende jobs is geen verdeling maar een tweede mergepad.
+  assert.ok(
+    finalizerViolations(schoneFinalizer({
+      jobs: ['  tweede:', '    permissions:', '      pull-requests: write'],
+    })).includes(`${TRUST_VIOLATION.TRUSTED_FINALIZER_WRITE_JOB_NOT_UNIQUE}:${TRUSTED_FINALIZER}`),
+  );
+});
+
+test('F5. de finalizer checkt AANTOONBAAR de default branch uit — niets anders', () => {
+  const verkeerd = `${TRUST_VIOLATION.TRUSTED_FINALIZER_CHECKS_OUT_PR_CODE}:${TRUSTED_FINALIZER}`;
+
+  for (const ref of [
+    '${{ github.event.pull_request.head.sha }}',
+    'refs/pull/${{ matrix.pr }}/head',
+    '${{ github.head_ref }}',
+    '${{ github.event.workflow_run.head_sha }}',
+    // Zelfs een op zichzelf onschuldige vaste branchnaam valt: de eis is POSITIEF, want alleen dan
+    // blijft hij kloppen als de default branch ooit anders heet.
+    'main',
+  ]) {
+    assert.ok(finalizerViolations(schoneFinalizer({ ref })).includes(verkeerd), ref);
+  }
+
+  // Een finalizer die HELEMAAL niet uitcheckt kan de trusted scripts niet draaien; dat is geen
+  // veiligere vorm maar een onmeetbare, en valt daarom ook.
+  const zonderCheckout = [
+    'name: autocoding-merge-finalizer',
+    ...FINALIZER_ON,
+    'permissions: {}',
+    ...FINALIZER_GLOBALE_RIJ,
+    'jobs:',
+    '  finaliseer:',
+    '    permissions:',
+    '      pull-requests: write',
+    '    strategy:',
+    '      matrix:',
+    '        pr: [1]',
+    ...FINALIZER_RIJ,
+  ].join('\n');
+  assert.ok(finalizerViolations(zonderCheckout).includes(verkeerd));
+});
+
+test('F6. de finalizer leest geen secrets en geen artifacts van een onbevoorrechte run', () => {
+  assert.ok(
+    finalizerViolations(schoneFinalizer({
+      finaliseer: ['      - env:', '          T: ${{ secrets.MERGE_TOKEN }}'],
+    })).includes(`${TRUST_VIOLATION.TRUSTED_FINALIZER_USES_SECRETS}:${TRUSTED_FINALIZER}`),
+  );
+  for (const uses of [
+    'actions/download-artifact@v4',
+    'dawidd6/action-download-artifact@v6',
+    'actions/cache@v4',
+  ]) {
+    assert.ok(
+      finalizerViolations(schoneFinalizer({ finaliseer: [`      - uses: ${uses}`] }))
+        .includes(`${TRUST_VIOLATION.TRUSTED_FINALIZER_USES_PR_ARTIFACTS}:${TRUSTED_FINALIZER}`),
+      uses,
+    );
+  }
+});
+
+test('F7. een ontbrekend finalizerbestand is een overtreding, geen stilte', () => {
+  assert.ok(findTrustBoundaryViolations({
+    workflows: [
+      { path: PR_SHIELD, text: SCHONE_SHIELD },
+      { path: TRUSTED_WRITER, text: schoneWriter() },
+    ],
+    prShieldPath: PR_SHIELD, trustedWriterPath: TRUSTED_WRITER, trustedFinalizerPath: TRUSTED_FINALIZER,
+  }).includes(`${TRUST_VIOLATION.TRUSTED_FINALIZER_MISSING}:${TRUSTED_FINALIZER}`));
+});
+
+test('F8. de gemeten vorm van het werkelijke finalizerbestand is precies de bedoelde', () => {
+  const finalizer = analyzeWorkflow(readFileSync(TRUSTED_FINALIZER, 'utf8'));
+  assert.deepEqual(finalizer.triggers, ['schedule']);
+  assert.equal(finalizer.triggersUnparseable, false);
+  assert.equal(finalizer.usesSecrets, false);
+  assert.equal(finalizer.usesArtifactsOrCache, false);
+  assert.deepEqual(finalizer.workflowLevelWriteGrants, []);
+  // Precies één schrijvende job, en zijn enige scope is `pull-requests`.
+  const schrijvend = finalizer.jobs.filter((j) => j.writeGrants.length > 0);
+  assert.deepEqual(schrijvend.map((j) => j.id), ['finaliseer']);
+  assert.deepEqual(schrijvend[0].writeGrants.map((g) => g.scope), ['pull-requests']);
+  assert.equal(isPerPullRequestQueuedWriteJob(schrijvend[0]), true);
+  assert.equal(isRepositoryWideQueuedLock(finalizer.workflowConcurrency, {
+    group: FINALIZER_REPOSITORY_LOCK_GROUP,
+  }), true);
+  // Elke checkout gaat naar de default branch — er is er geen enkele die iets anders doet.
+  assert.ok(finalizer.checkoutRefs.length > 0);
+  for (const ref of finalizer.checkoutRefs) {
+    assert.equal(ref, '${{ github.event.repository.default_branch }}');
+  }
+});
+
+test('F9. de trusted writer draagt GEEN mergescope, de finalizer GEEN statusscope', () => {
+  // De twee bevoegdheden zijn fysiek gescheiden, en dat is de kern van V18: de diagnostiek kan niets
+  // autoriseren en de autorisatie kan niets publiceren.
+  const writer = analyzeWorkflow(readFileSync(TRUSTED_WRITER, 'utf8'));
+  assert.deepEqual(
+    Array.from(new Set(writer.writeGrants.map((g) => g.scope))),
+    ['statuses'],
+  );
+  const finalizer = analyzeWorkflow(readFileSync(TRUSTED_FINALIZER, 'utf8'));
+  assert.deepEqual(
+    Array.from(new Set(finalizer.writeGrants.map((g) => g.scope))),
+    ['pull-requests'],
+  );
 });

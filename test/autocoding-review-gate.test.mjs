@@ -408,10 +408,19 @@ test('workflow-eventmatrix houdt bootstrap-events groen en live gate uit', () =>
   assert.match(liveGate, /BOOTSTRAP_RECEIPT_GATE_DISABLED/);
   assert.match(liveGate, /Bepaal poortstand en statuscontext\n\s+id: enabled\n\s+if: steps\.bootstrap\.outputs\.trusted_gate_files == 'true'/);
 
-  // De poort blijft in deze PR uit, en de statuscontext waaronder hij later publiceert is geen jobnaam.
+  // De poort blijft in deze PR uit, en de context waaronder hij later publiceert is geen jobnaam.
+  // Zij heet sinds V18 `diagnostic_status_context` en niet meer `live_status_context`: deze route
+  // publiceert geen `success` meer en draagt dus geen mergeautorisatie. De oude sleutel bestaat
+  // niet meer, zodat een lezer hem ook niet meer als poort kan aanzien.
   assert.equal(policy.live_receipt_gate_enabled, false);
-  assert.equal(policy.live_status_context, 'autocoding-shield-live-receipts');
-  assert.ok(!/^ {2}autocoding-shield-live-receipts:$/m.test(liveGate), 'de statuscontext is geen jobnaam');
+  assert.equal(policy.live_status_context, undefined);
+  assert.equal(policy.diagnostic_status_context, 'autocoding-shield-diagnostic');
+  assert.ok(!/^ {2}autocoding-shield-diagnostic:$/m.test(liveGate), 'de statuscontext is geen jobnaam');
+
+  // En de mergefinalizer die de autorisatie wél draagt staat in deze PR volledig uit — beide
+  // vlaggen, want de tweede opent het automatische pad dat de eerste nog per geval afdekt.
+  assert.equal(policy.merge_finalizer_enabled, false);
+  assert.equal(policy.class_b_auto_merge_enabled, false);
 });
 
 test('W1. de stabiele checknaam draait alleen op pull_request en heeft geen API-rechten', () => {

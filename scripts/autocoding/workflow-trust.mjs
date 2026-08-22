@@ -61,6 +61,38 @@ export const TRUSTED_WRITER_TRIGGERS = Object.freeze(['workflow_run', 'schedule'
 /** De enige schrijfscope die de trusted writer mag dragen. */
 export const ALLOWED_TRUSTED_WRITE_SCOPES = Object.freeze(['statuses']);
 
+/**
+ * De enige events waarop de MERGEFINALIZER mag draaien: alleen `schedule`.
+ *
+ * Dat is strenger dan de writer, en met reden. `workflow_run` zou de finalizer laten starten door de
+ * voltooiing van een run waarvan de PR de definitie levert; `issue_comment` zou iedere commentator
+ * een directe trekker naar een token met MERGErechten geven. `workflow_dispatch` staat er evenmin
+ * bij: dat event draait de definitie van de GEKOZEN ref, dus zou een pull request zijn eigen
+ * finalizer kunnen voorstellen. Blijft over: een klok, die niemand kan richten.
+ *
+ * De prijs is latentie — een kandidaat wacht hoogstens één ronde. Dat is precies de goede ruil voor
+ * de enige job in deze repository die iets onomkeerbaars kan doen.
+ */
+export const TRUSTED_FINALIZER_TRIGGERS = Object.freeze(['schedule']);
+
+/**
+ * De enige schrijfscope die de mergefinalizer mag dragen. `contents: write` staat er NIET bij: de
+ * merge-endpoint schrijft zelf naar de basebranch met de PR-scope, en een finalizer met
+ * contentsrechten zou daarnaast rechtstreeks naar elke branch kunnen pushen.
+ */
+export const ALLOWED_FINALIZER_WRITE_SCOPES = Object.freeze(['pull-requests']);
+
+/** De vaste naam van de repositorybrede rij van de mergefinalizer. */
+export const FINALIZER_REPOSITORY_LOCK_GROUP = 'autocoding-merge-finalizer-repository';
+
+/**
+ * De enige refvorm waarmee de finalizer mag uitchecken. Niet "geen PR-code" maar "aantoonbaar de
+ * default branch": de zwakkere eis laat een weggelaten `ref:` toe, en die betekent bij een
+ * `schedule` weliswaar de default branch, maar bij elke latere triggerwijziging iets anders. De
+ * sterke vorm blijft ook dán kloppen.
+ */
+const DEFAULT_BRANCH_REF_RE = /^\$\{\{\s*github\.event\.repository\.default_branch\s*\}\}$/;
+
 export const TRUST_VIOLATION = Object.freeze({
   UNTRUSTED_TRIGGER_WITH_WRITE_PERMISSION: 'UNTRUSTED_TRIGGER_WITH_WRITE_PERMISSION',
   PULL_REQUEST_TARGET_PRESENT: 'PULL_REQUEST_TARGET_PRESENT',
@@ -81,6 +113,24 @@ export const TRUST_VIOLATION = Object.freeze({
   TRUSTED_WRITER_CHECKS_OUT_PR_CODE: 'TRUSTED_WRITER_CHECKS_OUT_PR_CODE',
   TRUSTED_WRITER_USES_PR_ARTIFACTS: 'TRUSTED_WRITER_USES_PR_ARTIFACTS',
   STATUSES_WRITE_OUTSIDE_TRUSTED_WRITER: 'STATUSES_WRITE_OUTSIDE_TRUSTED_WRITER',
+  // De mergefinalizer. Zelfde grenzen als de writer, met twee verschillen: hij mag alleen op een
+  // klok draaien, en hij is de ENIGE plaats in de hele repository waar `pull-requests: write` mag
+  // bestaan. Die scope is wat de merge-endpoint bedient, dus is elke andere drager ervan een tweede
+  // weg naar dezelfde onomkeerbare actie.
+  PULL_REQUESTS_WRITE_OUTSIDE_FINALIZER: 'PULL_REQUESTS_WRITE_OUTSIDE_FINALIZER',
+  TRUSTED_FINALIZER_MISSING: 'TRUSTED_FINALIZER_MISSING',
+  TRUSTED_FINALIZER_HAS_UNTRUSTED_TRIGGER: 'TRUSTED_FINALIZER_HAS_UNTRUSTED_TRIGGER',
+  TRUSTED_FINALIZER_TRIGGER_NOT_ALLOWED: 'TRUSTED_FINALIZER_TRIGGER_NOT_ALLOWED',
+  TRUSTED_FINALIZER_HAS_NO_TRIGGER: 'TRUSTED_FINALIZER_HAS_NO_TRIGGER',
+  TRUSTED_FINALIZER_WRITE_JOB_NOT_UNIQUE: 'TRUSTED_FINALIZER_WRITE_JOB_NOT_UNIQUE',
+  TRUSTED_FINALIZER_WRITE_JOB_NOT_PER_PULL_REQUEST_QUEUED:
+    'TRUSTED_FINALIZER_WRITE_JOB_NOT_PER_PULL_REQUEST_QUEUED',
+  TRUSTED_FINALIZER_NOT_REPOSITORY_QUEUED: 'TRUSTED_FINALIZER_NOT_REPOSITORY_QUEUED',
+  TRUSTED_FINALIZER_WRITE_SCOPE_NOT_ALLOWED: 'TRUSTED_FINALIZER_WRITE_SCOPE_NOT_ALLOWED',
+  TRUSTED_FINALIZER_WORKFLOW_LEVEL_WRITE: 'TRUSTED_FINALIZER_WORKFLOW_LEVEL_WRITE',
+  TRUSTED_FINALIZER_USES_SECRETS: 'TRUSTED_FINALIZER_USES_SECRETS',
+  TRUSTED_FINALIZER_CHECKS_OUT_PR_CODE: 'TRUSTED_FINALIZER_CHECKS_OUT_PR_CODE',
+  TRUSTED_FINALIZER_USES_PR_ARTIFACTS: 'TRUSTED_FINALIZER_USES_PR_ARTIFACTS',
   ISSUE_COMMENT_WRITE_OUTSIDE_TRUSTED_WRITER: 'ISSUE_COMMENT_WRITE_OUTSIDE_TRUSTED_WRITER',
   TRIGGER_MAPPING_UNPARSEABLE: 'TRIGGER_MAPPING_UNPARSEABLE',
   PR_SHIELD_CHECKS_OUT_CODE_OUTSIDE_PULL_REQUEST: 'PR_SHIELD_CHECKS_OUT_CODE_OUTSIDE_PULL_REQUEST',
@@ -669,13 +719,16 @@ function scopesOf(grants) {
  * "geen schrijfscope op een untrusted trigger" is repositorybreed, niet iets wat alleen voor de
  * shield geldt.
  */
-export function findTrustBoundaryViolations({ workflows, prShieldPath, trustedWriterPath }) {
+export function findTrustBoundaryViolations({
+  workflows, prShieldPath, trustedWriterPath, trustedFinalizerPath,
+}) {
   const violations = [];
   const add = (code, path) => violations.push(`${code}:${path}`);
   const list = Array.isArray(workflows) ? workflows : [];
 
   let sawPrShield = false;
   let sawTrustedWriter = false;
+  let sawTrustedFinalizer = false;
 
   // De naam waarop de writer zijn `workflow_run` moet pinnen komt uit het SHIELDBESTAND zelf, niet
   // uit een losse literal: zo kan een hernoemde shield de keten niet stil loskoppelen.
@@ -706,6 +759,13 @@ export function findTrustBoundaryViolations({ workflows, prShieldPath, trustedWr
     // iedere commentator een directe trekker naar een token met schrijfrechten.
     if (path !== trustedWriterPath && wf.triggers.includes('issue_comment') && wf.writeGrants.length > 0) {
       add(TRUST_VIOLATION.ISSUE_COMMENT_WRITE_OUTSIDE_TRUSTED_WRITER, path);
+    }
+    // De mergescope is repositorybreed geconcentreerd op één bestand. `write-all` telt mee: die
+    // vorm draagt `pull-requests: write` zonder het woord te noemen, en juist die stille vorm zou de
+    // concentratie ongemerkt opheffen.
+    if (path !== trustedFinalizerPath
+      && wf.writeGrants.some((g) => g.scope === 'pull-requests' || g.scope === '*')) {
+      add(TRUST_VIOLATION.PULL_REQUESTS_WRITE_OUTSIDE_FINALIZER, path);
     }
 
     if (path === prShieldPath) {
@@ -772,9 +832,53 @@ export function findTrustBoundaryViolations({ workflows, prShieldPath, trustedWr
       }
       if (wf.usesArtifactsOrCache) add(TRUST_VIOLATION.TRUSTED_WRITER_USES_PR_ARTIFACTS, path);
     }
+
+    // DE MERGEFINALIZER. Dezelfde vorm als de writer — één schrijvende job, per PR gequeued,
+    // repositorybreed geserialiseerd, geen secrets, geen artifacts, geen PR-code — met twee
+    // verschillen: alleen een klok mag hem starten, en zijn enige toegestane schrijfscope is
+    // `pull-requests`. De checkout-eis is hier bovendien POSITIEF geformuleerd: niet "geen PR-code"
+    // maar "aantoonbaar de default branch".
+    if (path === trustedFinalizerPath) {
+      sawTrustedFinalizer = true;
+      if (untrusted.length > 0) add(TRUST_VIOLATION.TRUSTED_FINALIZER_HAS_UNTRUSTED_TRIGGER, path);
+      if (wf.triggers.some((t) => !TRUSTED_FINALIZER_TRIGGERS.includes(t))) {
+        add(TRUST_VIOLATION.TRUSTED_FINALIZER_TRIGGER_NOT_ALLOWED, path);
+      }
+      if (wf.triggers.length === 0) add(TRUST_VIOLATION.TRUSTED_FINALIZER_HAS_NO_TRIGGER, path);
+
+      const finalizerWriteJobs = wf.jobs.filter((job) => job.writeGrants.length > 0);
+      if (finalizerWriteJobs.length !== 1) {
+        add(TRUST_VIOLATION.TRUSTED_FINALIZER_WRITE_JOB_NOT_UNIQUE, path);
+      }
+      for (const job of finalizerWriteJobs) {
+        if (!isPerPullRequestQueuedWriteJob(job)) {
+          add(TRUST_VIOLATION.TRUSTED_FINALIZER_WRITE_JOB_NOT_PER_PULL_REQUEST_QUEUED, path);
+        }
+      }
+      if (!isRepositoryWideQueuedLock(wf.workflowConcurrency, {
+        group: FINALIZER_REPOSITORY_LOCK_GROUP,
+      })) {
+        add(TRUST_VIOLATION.TRUSTED_FINALIZER_NOT_REPOSITORY_QUEUED, path);
+      }
+      if (wf.workflowLevelWriteGrants.length > 0) {
+        add(TRUST_VIOLATION.TRUSTED_FINALIZER_WORKFLOW_LEVEL_WRITE, path);
+      }
+      if (!scopesOf(wf.writeGrants).every((s) => ALLOWED_FINALIZER_WRITE_SCOPES.includes(s))) {
+        add(TRUST_VIOLATION.TRUSTED_FINALIZER_WRITE_SCOPE_NOT_ALLOWED, path);
+      }
+      if (wf.usesSecrets) add(TRUST_VIOLATION.TRUSTED_FINALIZER_USES_SECRETS, path);
+      if (wf.checkoutRefs.length === 0
+        || !wf.checkoutRefs.every((ref) => DEFAULT_BRANCH_REF_RE.test(ref))) {
+        add(TRUST_VIOLATION.TRUSTED_FINALIZER_CHECKS_OUT_PR_CODE, path);
+      }
+      if (wf.usesArtifactsOrCache) add(TRUST_VIOLATION.TRUSTED_FINALIZER_USES_PR_ARTIFACTS, path);
+    }
   }
 
   if (prShieldPath && !sawPrShield) add(TRUST_VIOLATION.PR_SHIELD_MISSING, prShieldPath);
   if (trustedWriterPath && !sawTrustedWriter) add(TRUST_VIOLATION.TRUSTED_WRITER_MISSING, trustedWriterPath);
+  if (trustedFinalizerPath && !sawTrustedFinalizer) {
+    add(TRUST_VIOLATION.TRUSTED_FINALIZER_MISSING, trustedFinalizerPath);
+  }
   return violations;
 }

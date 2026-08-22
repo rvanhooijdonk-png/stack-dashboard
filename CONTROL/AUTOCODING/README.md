@@ -10,7 +10,21 @@ PR-nummer. De live receiptpoort staat in
 een afzonderlijke wijziging van het beleid nadat een fixture-PR de negatieve en positieve route heeft
 bewezen.
 
-## Twee BESTANDEN, twee jobs en één statuscontext
+## Drie BESTANDEN, en waar de bevoegdheid zit
+
+De **diagnose** en de **autorisatie** staan sinds V18 op verschillende plaatsen, en dat is geen
+opdeling maar de reparatie van Codex-bevindingen `3835364972` en `3835364974`. Een commitstatus is
+SHA-scoped: hij hoort bij de commit, niet bij de pull request. Een pull request die later op dezelfde
+head wordt geopend erft een eerder geschreven `success` dus onmiddellijk, en geen enkele meting op
+het publicatiemoment kan een latere gebeurtenis uitsluiten. Uniciteit bewijzen uit de open-PR-lijst
+sloot dat gat niet: die lijst is offsetgepagineerd en dus geen atomische momentopname.
+
+De statuscontext draagt daarom **geen** bevoegdheid meer en publiceert structureel geen `success`;
+zij is er om op de pull request zelf te kunnen zien wat de poort meet. De bevoegdheid ligt bij de
+PR-gebonden **mergefinalizer**, die zijn eigen pull request hermeet en uitsluitend via
+`PUT /repos/{owner}/{repo}/pulls/{number}/merge` met de hermeten volledige `sha` zou kunnen werken —
+met alle activatievlaggen op `false`. Zie "De mergefinalizer" verderop.
+
 
 | naam | soort | bestand | events | checkout | doet |
 | --- | --- | --- | --- | --- | --- |
@@ -18,7 +32,8 @@ bewezen.
 | `autocoding-shield-signal` | job | `.github/workflows/autocoding-shield.yml` | `pull_request_review`, `pull_request_review_comment` | geen | niets — een `echo` met `permissions: {}`, zodat de voltooiing van deze run de trusted writer aanstoot |
 | `selecteer` | job | `.github/workflows/autocoding-shield-live-gate.yml` | `issue_comment`, `workflow_run` (na `autocoding-shield`), `schedule` | default branch | bepaalt read-only en zonder enige schrijfscope wélke PR's deze aanleiding meet, en schrijft die als JSON-matrix |
 | `schrijf` | matrixjob | `.github/workflows/autocoding-shield-live-gate.yml` | idem, één job per doel-PR | default branch | de enige job met `statuses: write`; meet ná zijn per-PR-lock opnieuw, invalideert die head en publiceert de uitspraak erop |
-| `autocoding-shield-live-receipts` | commitstatus-context | — | — | — | draagt de uitspraak op de gemeten PR-head; dit is de naam die later required wordt |
+| `autocoding-shield-diagnostic` | commitstatus-context | — | — | — | toont de diagnose op de gemeten PR-head; publiceert nooit `success` en wordt nooit required |
+| `finaliseer` | job | `.github/workflows/autocoding-merge-finalizer.yml` | uitsluitend `schedule` | default branch, nooit PR-code | de enige job met `pull-requests: write`; hermeet één pull request en zou die — met de vlaggen aan — via de merge-endpoint van dát nummer kunnen afronden |
 
 ### Waarom dit twee bestanden zijn en geen twee jobs in één bestand
 
@@ -317,7 +332,7 @@ bestaande ownermergegate afgehandeld en zet geen ruleset of required check aan.
 De `issue_comment`-route is wél direct beproefbaar zodra dit bestand op de default branch staat, want
 dat event draait per definitie de default-branch-definitie en heeft geen voorafgaande run nodig.
 
-## Waarom de uitspraak een commitstatus is, geen checknaam
+## Waarom de diagnose een commitstatus is, geen checknaam — en geen autorisatie
 
 Gemeten, niet bedacht: een Actions-run die door `workflow_run`, `issue_comment` of `schedule` wordt
 getriggerd hangt aan de **default-branch-SHA**, niet aan de PR-head. De
@@ -325,17 +340,24 @@ checknaam van zo'n run verschijnt daarom nooit op de PR-head. Een eerder groene 
 nadat het bewijs waarop hij groen werd is verwijderd, bewerkt of dismissed — precies de stale-green
 die Codex-reviewcomment `3834428052` reproduceerde.
 
-`scripts/autocoding/publish-live-status.mjs` hangt de uitspraak daarom niet aan de checknaam maar
+`scripts/autocoding/publish-live-status.mjs` hangt de diagnose daarom niet aan de checknaam maar
 schrijft een expliciete commitstatus op de via de API **gemeten** volledige PR-head, onder de vaste
-context `autocoding-shield-live-receipts` uit `policy.live_status_context`. Twee eigenschappen maken
-dat convergent:
+context `autocoding-shield-diagnostic` uit `policy.diagnostic_status_context`. Die context is
+uitdrukkelijk **geen** required check en wordt er ook nooit een: `assertMergeFinalizerPolicySafe`
+weigert een `required_checks`-lijst waarin zij voorkomt, dus kan het beleid zichzelf er niet opnieuw
+van afhankelijk maken. Twee eigenschappen maken de diagnose convergent:
 
 1. De uitspraak is een pure functie van de API-momentopname. Het event zelf gaat de berekening niet
    in, dus Codex-na-Gemini, Gemini-na-Codex, een edit, een delete, een dismiss en elke volgorde
    daarvan publiceren byte-identiek dezelfde status op dezelfde commit.
-2. Er is geen zwijgend pad. `success` bestaat uitsluitend bij een bewezen `GO`; elke `NO_GO`,
-   parsefout, API-truncatie, ontbrekend bewijs of uitvoeringsfout schrijft `failure` op diezelfde
-   head. Een crash van de poortstap wordt binnen de lus opgevangen (`|| true`) en als
+2. Er is geen zwijgend pad, en geen groen pad. Een bewezen `GO` wordt `pending` met een vaste
+   omschrijving die zichzelf als diagnostiek benoemt; elke `NO_GO`, parsefout, API-truncatie,
+   ontbrekend bewijs of uitvoeringsfout schrijft `failure` op diezelfde head. `success` bestaat in
+   deze route niet: `PUBLISHABLE_STATES` is een gesloten allowlist van `pending` en `failure`, en
+   `publishStatus` weigert vóór élk netwerkverkeer een publicatie met een state daarbuiten
+   (`STATUS_STATE_NOT_ALLOWED`). Dat is twee onafhankelijke lagen, zodat een mutant die ergens weer
+   `success` laat ontstaan mechanisch stukloopt in plaats van een herbruikbaar groen artefact op een
+   gedeelde commit achter te laten. Een crash van de poortstap wordt binnen de lus opgevangen (`|| true`) en als
    `--execution-error` doorgegeven, zodat de publicatie hoe dan ook draait — rood worden gebeurt ná de
    publicatie, niet ervoor. Alleen een PR waarvan de head zelf na drie pogingen niet meetbaar is
    blijft zonder status: zonder commit is er geen drager. Dat wordt expliciet gelogd
@@ -549,17 +571,73 @@ exceptietekst wordt niet gelezen, niet doorgegeven en niet gelogd; de stap logt 
 verliet zo'n fout `publishStatus()` als onafgevangen promise-rejection, met stacktrace op stderr.
 
 Het restrisico wordt hier eerlijk benoemd in plaats van weggeschreven: een mislukte POST kan een
-**eerdere** status op dezelfde head niet overschrijven. Stond daar al een `success` van een vorige,
-toen nog geldige momentopname, dan blijft die staan tijdens de storing. De poort beschikt met
-`statuses: write` alleen over schrijven; wat niet geschreven kan worden, kan ook niet ingetrokken
-worden. De run is wél rood, en de eerstvolgende geslaagde publicatie op dezelfde head herstelt de
-uitspraak — die is immers een pure functie van de momentopname, niet van het event.
+**eerdere** status op dezelfde head niet overschrijven. Een verouderde diagnose blijft dan zichtbaar
+tijdens de storing. Er kan niets **groens** blijven staan — deze route schrijft geen `success` en
+deze context is nergens vereist — dus is het restrisico beperkt tot wat een lezer ziet. De poort
+beschikt met `statuses: write` alleen over schrijven; wat niet geschreven kan worden, kan ook niet
+ingetrokken worden. De run is wél rood, en de eerstvolgende geslaagde publicatie op dezelfde head
+herstelt de diagnose — die is immers een pure functie van de momentopname, niet van het event.
+
+## De mergefinalizer
+
+De enige plaats in deze repository waar een merge kan ontstaan. Hij staat in deze pull request
+volledig uit; wat hier beschreven wordt is de vorm, niet een draaiende voorziening.
+
+**Bestanden.** `.github/workflows/autocoding-merge-finalizer.yml` (de trusted workflow),
+`scripts/autocoding/finalize-merge.mjs` (de zuivere beslisser en de enige transportfunctie) en
+`scripts/autocoding/select-finalize-candidates.mjs` (kandidaatselectie). De bewijswet zelf wordt
+**niet** herschreven: het native tweevendorbewijs, de bewijsbinding en de ownergate komen ongewijzigd
+uit `collect-shield-input.mjs` en `verify-review-gate.mjs`. Een tweede losse parser van dezelfde wet
+zou van de eerste weg kunnen lopen, en dan is niet meer te zeggen welke van de twee de poort is.
+
+**Alleen `schedule`.** `workflow_run` zou de finalizer laten starten door de voltooiing van een run
+waarvan de pull request de definitie levert; `issue_comment` zou iedere commentator een trekker naar
+een token met mergerechten geven; `workflow_dispatch` draait de definitie van de gekozen ref, dus zou
+een pull request zijn eigen finalizer kunnen voorstellen. Een klok kan niemand richten. De prijs is
+latentie — hoogstens één ronde.
+
+**Selectie is geen autorisatie.** De kandidatenlijst komt uit de open-PR-lijst, en die is
+offsetgepagineerd. Dat mag hier, omdat de lijst niets draagt: zij levert alleen een nummer. Valt een
+pull request door de paginering tussenuit, dan wordt hij deze ronde niet bekeken — er gebeurt niets,
+en dat is de fail-closed richting. Elke kandidaat die doorkomt wordt daarna volledig en uitsluitend
+op zijn EIGEN hermeten bewijs beoordeeld.
+
+**Beslissing en effect zijn gescheiden.** `resolveFinalization` is puur — geen netwerk, geen
+bestanden, geen klok — en levert `FINALIZE_GO` of `FINALIZE_NO_GO` met redencodes uit een gesloten
+verzameling. De redenen worden cumulatief verzameld en niet bij de eerste tegenstem afgebroken, zodat
+het log alle gronden draagt. Gemeten worden: PR-nummer, `state`/`draft`, de volledige head, de boom,
+de base-SHA en de base-ref, de bouwer, de task-id, de volledigheid van de bestandslijst, de actuele
+Codex- en Gemini-reviews inclusief inline bevindingen, de ownerautorisatie voor gevoelige paden, en de
+vereiste check-runs op precies deze head.
+
+**Het effect is één verzoek.** `mergePullRequest` doet uitsluitend
+`PUT /repos/{owner}/{repo}/pulls/{number}/merge` met de hermeten volledige `sha` en een `merge_method`
+uit een vaste allowlist. Geen branchnaam, geen afgekorte SHA, geen event-SHA. Vlak vóór het verzoek
+wordt opnieuw gemeten en tegen de vingerafdruk van de beslissing gelegd (`measurementFingerprint`,
+een sha256 over een genormaliseerde projectie met alleen digests van teksten, nooit tekst zelf). Bij
+drift, een ingetrokken review, een nieuwe bevinding, gewijzigde checks, ontbrekend bewijs of
+onleesbaarheid: nul mergeverzoeken. Een 409, 405 of 422 is terminaal — er wordt nooit opnieuw
+geprobeerd met een nieuwere, ongetoetste head.
+
+**Klasse A en B.** Klasse A is de gewone weg en vereist een ownerautorisatie die exact aan dit
+PR-nummer, deze head, deze boom, deze base en deze task bindt. Klasse B is de latere autofinalisatie
+voor werk dat geen gevoelig pad raakt; die staat uit (`class_b_auto_merge_enabled: false`), dus is
+vandaag ELKE kandidaat klasse A.
+
+**Waarom een echte merge nu mechanisch onmogelijk is**, op drie onafhankelijke plaatsen: de
+poortstap in de workflow stopt op de uitgeschakelde vlag vóór het eerste API-verzoek; de
+kandidatenlijst blijft daardoor leeg en de matrix draait nul jobs; en `mergePullRequest` weigert
+bovendien in de code zelf vóór elk netwerkverkeer. `test/autocoding-merge-finalizer.test.mjs` meet
+dat af, inclusief mutanten die respectievelijk de `sha` uit het lichaam halen, de PR-binding
+weglaten, de ownerbinding versoepelen, de driftvergelijking overslaan of de vlag negeren — alle vijf
+gaan aantoonbaar rood.
 
 ## Activering en compatibiliteit
 
-Deze wijziging zet `live_receipt_gate_enabled` **niet** aan. De poort is compleet en getest, maar de
-stap `Bepaal poortstand en statuscontext` eindigt op `BOOTSTRAP_RECEIPT_GATE_DISABLED` zolang de vlag
-uit staat, en er wordt dan ook geen enkele status gepubliceerd.
+Deze wijziging zet `live_receipt_gate_enabled` **niet** aan, en `merge_finalizer_enabled` en
+`class_b_auto_merge_enabled` evenmin. De poort is compleet en getest, maar de stap
+`Bepaal poortstand en statuscontext` eindigt op `BOOTSTRAP_RECEIPT_GATE_DISABLED` zolang de vlag uit
+staat, en er wordt dan ook geen enkele status gepubliceerd.
 
 Activering is een **afzonderlijke latere PR** die precies drie dingen doet, in deze volgorde:
 
@@ -567,10 +645,13 @@ Activering is een **afzonderlijke latere PR** die precies drie dingen doet, in d
    gate-bestanden via merge op de default branch staan en een fixture-PR de negatieve én de positieve
    route heeft aangetoond.
 2. De gemeten vendoridentiteiten herbevestigen tegen de dan actuele GitHub-App-id's.
-3. `autocoding-shield-live-receipts` als required status check instellen. Niet `autocoding-shield`,
-   want die job draait PR-headcode; en niet `autocoding-shield-live-gate`, want die Actions-checknaam
-   hangt bij `workflow_run` en `schedule` aan de default-branch-SHA en verschijnt helemaal niet op de
-   PR-head. Alleen de commitstatus staat gegarandeerd op de gemeten head.
+3. **Geen** statuscontext als required check instellen — en `autocoding-shield-diagnostic` al
+   helemaal niet. Dat was tot V17 wél het plan, en Codex-bevinding `3835364972` sloot die route af:
+   een commitstatus hoort bij de commit, dus zou een tweede pull request op dezelfde head de
+   vereiste check als vervuld zien. Een required check hoort te gaan over de CODE (`autocoding-shield`
+   is zo'n check, al draait die PR-headcode en autoriseert hij dus niets), niet over een
+   reviewuitspraak. De mergeautorisatie loopt sinds V18 uitsluitend via de mergefinalizer hieronder,
+   die per pull request beslist en zijn uitkomst nergens als herbruikbaar artefact achterlaat.
 
 Een generieke regel "alle wijzigingen moeten via een PR" mag niet stilzwijgend worden geactiveerd.
 `.github/workflows/doorstroom.yml` en `.github/workflows/waarnemer.yml` bevatten jobs met
@@ -599,7 +680,7 @@ door zodra er geen uitvoeringsfout is, en ontbreken is iets anders dan leeg zijn
 
 ## Permissions
 
-Beide workflowbestanden gebruiken minimale permissions. `autocoding-shield.yml` heeft **geen enkele**
+Alle drie de workflowbestanden gebruiken minimale permissions. `autocoding-shield.yml` heeft **geen enkele**
 schrijfscope — bestandsniveau `permissions: {}`, de PR-job `contents: read`, de signaaljob
 `permissions: {}`. `autocoding-shield-live-gate.yml` heeft er precies één, `statuses: write`, en die zit uitsluitend op de
 matrixjob `schrijf`, naast `contents: read`, `pull-requests: read` en `issues: read`. De selectiejob
@@ -611,6 +692,15 @@ een ongepinde of verkeerd gepinde `workflow_run`-bron, een tweede job met een sc
 schrijfjob zonder eigen per-PR-rij, een ontbrekende of afwijkende repositorybrede rij, `issue_comment` met een
 schrijfscope buiten dit ene bestand, een niet te ontleden `on:`-mapping, en een uitcheckende shieldjob
 die niet tot `pull_request` beperkt is.
+
+`autocoding-merge-finalizer.yml` heeft er eveneens precies één: `pull-requests: write`, uitsluitend op
+de finalisatiejob, naast `contents: read` en `issues: read`. Die scope bestaat in deze repository op
+**precies één job**, en `findTrustBoundaryViolations` meet dat af over álle workflowbestanden
+(`PULL_REQUESTS_WRITE_OUTSIDE_FINALIZER`). Omgekeerd draagt de finalizer geen `statuses: write`
+(`STATUSES_WRITE_OUTSIDE_TRUSTED_WRITER`): de twee bevoegdheden liggen fysiek uit elkaar, zodat geen
+van beide de ander kan naspelen. Verder geldt voor dit bestand hetzelfde als voor de writer — geen
+secrets, geen artifacts of cache, geen PR-checkout, uitsluitend `schedule`, en een verplichte
+repositorybrede `queue: max`-rij vóór hermeting en merge.
 
 Zolang de trusted gatebestanden nog niet op de default branch bestaan, meldt de schrijfjob
 expliciet een bootstrap-no-op; validator-, adapter-, doelselectie-, vertrouwensgrens- en branchtests

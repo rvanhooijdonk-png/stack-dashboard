@@ -1,25 +1,46 @@
 /**
- * AUTOCODING_SHIELD — deterministische statuspublisher.
+ * AUTOCODING_SHIELD — DIAGNOSTISCHE STATUSPUBLISHER. GEEN AUTORISATIE.
  *
- * Het probleem dat dit oplost is gemeten, niet bedacht. Een Actions-run die door `issue_comment` of
- * `pull_request_review` wordt getriggerd hangt aan de DEFAULT-BRANCH-SHA, niet aan de PR-head. De
- * checknaam van zo'n run verschijnt dus nooit op de PR-head, en de laatste check die daar wél op
- * staat blijft staan — óók als het bewijs waarop hij groen werd inmiddels verwijderd, bewerkt of
- * dismissed is. Een verwijderd Codex-comment liet zo een groene check achter op een head die niet
- * meer beoordeeld was.
+ * WAT HIER VERANDERDE, EN WAAROM HET GEEN VERFIJNING MAAR EEN AFSCHAFFING IS. Tot en met V17 droeg
+ * deze route de uitspraak van de poort als een COMMITSTATUS met de bedoeling ooit een required check
+ * te worden. Codex-bevinding `3835364972` bewees dat die constructie principieel niet kan werken:
+ * een commitstatus is SHA-scoped en hoort dus bij de COMMIT, niet bij de pull request. Een tweede
+ * pull request die later op dezelfde volledige head-SHA wordt geopend ziet een eerder geschreven
+ * `success` onmiddellijk als de zijne — er is geen moment waarop een puntmeting dat nog kan
+ * voorkomen, want de erfenis ontstaat NA de meting. Bevinding `3835364974` sloot de tweede uitweg:
+ * uniciteit bewijzen uit een offset-gepagineerde open-PR-lijst is geen atomische momentopname, dus
+ * ook de V17-isolatie was geen grens maar een gok met een net kleinere kans.
  *
- * De oplossing is de uitspraak niet aan de Actions-checknaam te hangen maar aan een expliciete
- * COMMITSTATUS op de via de API gemeten volledige PR-head, onder een eigen vaste context. Elke
- * relevante eventsoort publiceert opnieuw op diezelfde head, dus de laatst gepubliceerde status is
- * altijd de uitspraak over het actuele bewijs.
+ * De conclusie is niet "beter meten" maar "niet meer autoriseren". Deze route publiceert daarom
+ * STRUCTUREEL geen `success` meer, in welk codepad dan ook:
  *
- * Twee eigenschappen maken die publicatie convergent:
+ *   - `resolvePublication` kent nog maar twee uitkomsten, `pending` en `failure`;
+ *   - `PUBLISHABLE_STATES` is een gesloten allowlist, en `publishStatus` weigert vóór elk
+ *     netwerkverkeer elke publicatie met een state daarbuiten. Een mutant die ergens weer `success`
+ *     laat ontstaan haalt het transport dus niet, en de test die daarop staat wordt rood;
+ *   - de context heet sinds V18 `diagnostic_status_context` en draagt de naam
+ *     `autocoding-shield-diagnostic`. De oude naam `autocoding-shield-live-receipts` is verlaten en
+ *     wordt nooit meer geschreven. Er is geen head waarop die oude context ooit `success` heeft
+ *     gedragen: de poort stond de hele bootstrap uit (`live_receipt_gate_enabled: false`), dus geen
+ *     enkele publicatiestap heeft ooit gedraaid.
  *
- *   1. De uitspraak is een pure functie van de API-momentopname, niet van het event. Codex-na-Gemini,
- *      Gemini-na-Codex, een edit, een delete, een dismiss en elke volgorde daarvan lezen dezelfde
- *      momentopname en produceren dus byte-identiek dezelfde status.
- *   2. Alles wat geen bewezen GO is — NO_GO, parsefout, API-truncatie, ontbrekend bewijs,
- *      uitvoeringsfout — publiceert `failure` op precies dezelfde head. Er is geen pad dat zwijgt.
+ * WAAROM DEZE ROUTE DAN BLIJFT BESTAAN. Zij is de enige plek waar een mens op de pull request zelf
+ * kan zien WAAROM de poort niets toestaat. Redencodes in een joblog zijn onvindbaar zodra de run uit
+ * beeld is; een `failure` op de head met dezelfde codes blijft staan. Dat is diagnostiek, geen
+ * bevoegdheid: `pending` en `failure` kunnen niets toestaan, alleen iets tonen. De autorisatie zelf
+ * is verplaatst naar `scripts/autocoding/finalize-merge.mjs`, die per PULL REQUEST beslist en zijn
+ * uitkomst nergens als herbruikbaar artefact achterlaat.
+ *
+ * DEZE CONTEXT WORDT NOOIT ALS REQUIRED CHECK GECONFIGUREERD. Dat is niet alleen een afspraak in
+ * `CONTROL/AUTOCODING/README.md`: de finalizerpolicy WEIGERT een `required_checks`-lijst waarin de
+ * diagnostische context voorkomt (`assertMergeFinalizerPolicySafe`), dus kan het beleid zichzelf hier
+ * niet opnieuw van afhankelijk maken.
+ *
+ * Wat wél gebleven is, is de convergentie-eigenschap. De uitspraak is een pure functie van de
+ * API-momentopname en niet van het event, dus produceren Codex-na-Gemini, Gemini-na-Codex, een edit,
+ * een delete en een dismiss byte-identiek dezelfde status. En er is geen pad dat zwijgt: alles wat
+ * geen schone meting is — parsefout, API-truncatie, ontbrekend bewijs, uitvoeringsfout — schrijft
+ * `failure` op precies dezelfde head.
  *
  * De omschrijving bevat uitsluitend redencodes uit een gesloten allowlist; nooit ruwe stderr, een
  * URL, een pad, een modelnaam of bewijsinhoud. De codes worden gesorteerd zodat twee runs met
@@ -47,14 +68,12 @@ export const PUBLISH_ERROR = Object.freeze({
   GATE_RESULT_UNREADABLE: 'GATE_RESULT_UNREADABLE',
   HEAD_UNMEASURED: 'HEAD_UNMEASURED',
   /**
-   * De head waarop geschreven zou worden, wordt op dit moment door meer dan één open pull request
-   * gedragen — of dat is niet uit te sluiten. Zie `scripts/autocoding/verify-head-isolation.mjs`:
-   * een commitstatus hoort bij de COMMIT, dus zou een `success` voor de goedgekeurde pull request
-   * op GitHub evengoed op de andere gelden. Eén vaste code voor alle vormen van die twijfel — nul
-   * dragers, twee of meer, een andere pull request, een onleesbare of mogelijk afgekapte lijst —
-   * zodat de omschrijving niet verraadt hoeveel of welke pull requests deze commit delen.
+   * De laatste poort vóór het netwerk. Een publicatie met een state buiten `PUBLISHABLE_STATES`
+   * wordt niet verzonden — niet gecorrigeerd, niet gedegradeerd, niet gelogd met inhoud. Deze code
+   * bestaat opdat een mutant die ergens weer `success` laat ontstaan mechanisch stukloopt in plaats
+   * van een herbruikbaar groen artefact op een gedeelde commit achter te laten.
    */
-  HEAD_NOT_ISOLATED: 'HEAD_NOT_ISOLATED',
+  STATUS_STATE_NOT_ALLOWED: 'STATUS_STATE_NOT_ALLOWED',
   STATUS_CONTEXT_INVALID: 'STATUS_CONTEXT_INVALID',
   REPOSITORY_INVALID: 'REPOSITORY_INVALID',
   STATUS_TRANSPORT_ERROR: 'STATUS_TRANSPORT_ERROR',
@@ -110,11 +129,36 @@ export function describeReasons(codes, limit = DESCRIPTION_LIMIT) {
 }
 
 /**
+ * DE GESLOTEN VERZAMELING STATES DIE DEZE ROUTE MAG SCHRIJVEN.
+ *
+ * `success` staat er met opzet NIET in, en dat is de hele V18-reparatie in één constante. Een
+ * `success` op een commit is overdraagbaar naar iedere pull request die diezelfde commit als head
+ * krijgt — ook een pull request die pas ná de meting wordt geopend. `pending` en `failure` zijn dat
+ * evengoed, maar zij kunnen niets toestaan: wie ze erft, erft een niet-uitspraak of een weigering.
+ * Overdraagbaarheid is alleen gevaarlijk in de toestemmende richting.
+ */
+export const PUBLISHABLE_STATES = Object.freeze(['pending', 'failure']);
+
+/**
+ * De vaste omschrijving voor een gemeten GO. Zij bestaat omdat zwijgen erger zou zijn: zonder deze
+ * publicatie zou een head na een schone meting de `failure` van de vorige ronde blijven dragen, en
+ * dan wijst de diagnostiek een lezer op bewijs dat er niet meer is.
+ *
+ * De tekst zegt uitdrukkelijk wat deze status NIET is. Er is geen state waarin GitHub "gemeten en
+ * schoon, maar niet autoriserend" kan uitdrukken, dus wordt het `pending` — de state die het dichtst
+ * bij "hier staat geen uitspraak" ligt — met de betekenis in de omschrijving.
+ */
+export const DIAGNOSTIC_GO_DESCRIPTION = 'MEASURED_GO: diagnostic only, not a merge authorization';
+
+/**
  * Zet de gemeten head, de poortuitspraak en een eventuele uitvoeringsfout om naar precies de
  * commitstatus die gepubliceerd moet worden. Pure functie: geen IO, geen event, geen tijd.
  *
- * `state` is `success` uitsluitend bij een bewezen GO zonder uitvoeringsfout. Elke andere uitkomst —
- * inclusief een ontbrekend of onleesbaar resultaat — is `failure` op dezelfde head.
+ * Er is GEEN pad naar `success`. Een bewezen GO levert `pending` met een vaste diagnostische
+ * omschrijving; elke andere uitkomst — NO_GO, parsefout, truncatie, ontbrekend bewijs,
+ * uitvoeringsfout, onleesbaar resultaat — levert `failure` op dezelfde head. De mergeautorisatie
+ * leeft in `scripts/autocoding/finalize-merge.mjs` en laat op de commit niets achter dat een andere
+ * pull request kan erven.
  */
 export function resolvePublication({ headSha, statusContext, gateResult, executionError }) {
   if (!SHA_RE.test(headSha ?? '')) {
@@ -133,8 +177,8 @@ export function resolvePublication({ headSha, statusContext, gateResult, executi
       ok: true,
       sha: headSha,
       context: statusContext,
-      state: 'success',
-      description: 'GO: native two-vendor review verified on this head',
+      state: 'pending',
+      description: DIAGNOSTIC_GO_DESCRIPTION,
     };
   }
 
@@ -156,14 +200,20 @@ export function resolvePublication({ headSha, statusContext, gateResult, executi
  *
  * Waarom dit bestaat. De writerlock houdt per groep hooguit één WACHTENDE run aan; een nieuwe
  * aanleiding annuleert die wachtende run. De invalidatie die zo'n geannuleerde run had moeten doen,
- * was daarmee weg — en een eerder gepubliceerde `success` bleef staan tot de volgende uurlijkse
- * ronde. Door iedere overlevende writer ALLE open heads eerst op `pending` te zetten, draagt hij de
+ * was daarmee weg — en een eerder gepubliceerde uitspraak bleef staan tot de volgende uurlijkse
+ * ronde. Door iedere overlevende writer de gemeten head eerst op `pending` te zetten, draagt hij de
  * invalidaties van elke geannuleerde voorganger vanzelf mee: er valt niets meer te verliezen, want
  * de status die verloren kon gaan is al weg.
  *
+ * Sinds V18 kan er geen `success` meer staan om te verdringen. Wat hier wordt weggehaald is een
+ * `failure` of een `pending` van een vorige beurt, en dat is nog steeds de moeite: een oude rode
+ * diagnose die als actueel oordeel blijft staan terwijl deze beurt meet, wijst een lezer naar bewijs
+ * dat er misschien niet meer is.
+ *
  * `pending` en niet `failure`: dit is geen uitspraak over het bewijs maar de expliciete afwezigheid
- * van een uitspraak over deze head. Voor een required check telt het even hard — alleen `success`
- * is groen — maar het liegt niet over wat er gemeten is.
+ * van een uitspraak over deze head. Deze context is geen required check en autoriseert niets, dus
+ * gaat het verschil alleen over wat een lezer eraan afleest — en dan hoort "ik meet nog" niet als
+ * "ik heb iets gevonden" te lezen.
  */
 export const PENDING_PUBLICATION = Object.freeze({
   state: 'pending',
@@ -203,10 +253,11 @@ export function resolvePendingPublication({ headSha, statusContext }) {
  *
  * Wat dit uitdrukkelijk NIET doet: het herstelt de status niet. Faalt de POST, dan blijft een
  * eerdere status van deze context op deze head onaangeroerd staan — die kan dus ouder bewijs
- * weerspiegelen. De run wordt daarvan wel rood (rc 1); het restrisico is dat een required check die
- * al groen stond groen blijft tijdens een API-storing. Dat is bewust: deze poort kan met
- * `statuses: write` alleen schrijven, en een status die niet geschreven kan worden kan ook niet
- * ingetrokken worden.
+ * weerspiegelen. De run wordt daarvan wel rood (rc 1). Het restrisico is beperkt tot wat een lezer
+ * ziet: een verouderde diagnose blijft tijdens een API-storing zichtbaar. Er kan niets groens
+ * blijven staan, want deze route publiceert geen `success` en deze context is nergens vereist. Dat
+ * is bewust: deze poort kan met `statuses: write` alleen schrijven, en een status die niet
+ * geschreven kan worden kan ook niet ingetrokken worden.
  */
 export async function publishStatus({ repository, publication, token, fetchImpl }) {
   if (!REPOSITORY_RE.test(repository ?? '')) {
@@ -227,6 +278,14 @@ export async function publishStatus({ repository, publication, token, fetchImpl 
   if (!publication || typeof publication !== 'object' || Array.isArray(publication)
     || !SHA_RE.test(publication.sha ?? '')) {
     return { ok: false, blocked: PUBLISH_ERROR.HEAD_UNMEASURED };
+  }
+  // DE LAATSTE POORT VÓÓR HET NETWERK. `resolvePublication` en `resolvePendingPublication` kunnen
+  // vandaag geen `success` produceren, maar deze functie is los aanroepbaar en de resolvers zijn
+  // bewerkbaar. Zonder deze toets zou één regel elders volstaan om weer een herbruikbaar groen
+  // artefact op een gedeelde commit te zetten. De weigering staat vóór `fetch`, dus een mutant die
+  // `success` terugbrengt doet nul verzoeken in plaats van één te veel.
+  if (!PUBLISHABLE_STATES.includes(publication.state)) {
+    return { ok: false, blocked: PUBLISH_ERROR.STATUS_STATE_NOT_ALLOWED };
   }
   let response;
   try {
@@ -319,10 +378,11 @@ export function parsePublishArgs(argv) {
  * De CLI-lus. Twee modi, allebei met dezelfde harde regel: rc 0 uitsluitend als de bedoelde status
  * WERKELIJK is geplaatst.
  *
- *   - Zonder `--pending`: de uitspraak. rc 0 alleen bij een gepubliceerde `success`; elke andere
- *     uitkomst geeft rc 1, zodat de job rood wordt en er geen stille groene run bestaat.
- *   - Met `--pending`: de invalidatie. rc 0 alleen als de `pending`-status is geaccepteerd. Hier is
- *     rc 0 dus GEEN uitspraak over het bewijs maar het bewijs dat de head niet meer groen staat.
+ *   - Zonder `--pending`: de diagnostiek. rc 0 alleen wanneer de gemeten GO als `pending` is
+ *     geplaatst; een `failure` — dus elke NO_GO, parsefout of uitvoeringsfout — geeft rc 1, zodat de
+ *     run rood is en er geen stille groene beurt bestaat. rc 0 is hier GEEN autorisatie: hij zegt
+ *     alleen dat de bedoelde diagnostische status op de gemeten head staat.
+ *   - Met `--pending`: de invalidatie. rc 0 alleen als de `pending`-status is geaccepteerd.
  */
 export async function runPublish(argv, { fetchImpl, readFile } = {}) {
   const parsed = parsePublishArgs(argv);
@@ -380,7 +440,7 @@ export async function runPublish(argv, { fetchImpl, readFile } = {}) {
 
   if (dryRun) {
     console.log(JSON.stringify(publication));
-    return publication.state === 'success' ? 0 : 1;
+    return publication.state === 'pending' ? 0 : 1;
   }
 
   const posted = await publishStatus({
@@ -391,7 +451,7 @@ export async function runPublish(argv, { fetchImpl, readFile } = {}) {
     return 1;
   }
   console.log(`LIVE_STATUS_PUBLISHED_${publication.state.toUpperCase()}`);
-  return publication.state === 'success' ? 0 : 1;
+  return publication.state === 'pending' ? 0 : 1;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

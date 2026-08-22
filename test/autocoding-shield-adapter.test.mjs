@@ -47,14 +47,33 @@ function fixtureInput(overrides = {}) {
   };
 }
 
-test('A1. de adapter meet head, tree, bouwer en task-id uit de API, niet uit PR-proza', () => {
+test('A1. de adapter meet nummer, head, tree, base, bouwer en task-id uit de API, niet uit PR-proza', () => {
   const { context } = buildShieldInput(fixtureInput());
+  // `pr_number`, `pr_base_sha` en `pr_base_ref` staan hier sinds de PR-gebonden finalizer. Een head
+  // alleen bindt niets: twee pull requests kunnen dezelfde head dragen tegen verschillende bases, en
+  // dan is de boom identiek terwijl de merge iets heel anders doet. Deze fixture draagt geen
+  // `base.ref`, en dat wordt hier de LEGE string — zie hieronder waarom dat de fail-closed vorm is.
   assert.deepEqual(context, {
+    pr_number: 74,
     pr_head_sha: HEAD,
     pr_tree_sha: TREE,
+    pr_base_sha: '2af69bc6259caf5c2f1e03a2c59e56c810ac9831',
+    pr_base_ref: '',
     builder_actor: 'claude2-cloud',
     task_id: 'AUTOCODING_STACK_DASHBOARD_LIVE_GATE_COMPLETION_PR_V1',
   });
+
+  // ONMEETBAAR IS NUL, NOOIT AFWEZIG. Zou een ontbrekend veld hier wegvallen of `undefined` worden,
+  // dan kan een vergelijking verderop toevallig gelijkheid vinden — `undefined === undefined` is
+  // waar, en dan zou een PR zonder gemeten nummer aan een autorisatie zonder nummer voldoen.
+  const kaal = buildShieldInput(fixtureInput({
+    pr: { ...raw('pr'), number: 0, base: {}, user: {} },
+  })).context;
+  assert.equal(kaal.pr_number, 0);
+  assert.equal(kaal.pr_base_sha, '');
+  assert.equal(kaal.pr_base_ref, '');
+  assert.equal(kaal.builder_actor, '');
+  for (const waarde of Object.values(kaal)) assert.notEqual(waarde, undefined);
 });
 
 test('A2. de volledige fixtureset levert precies vijf bewijsstukken op — proza en spoof vallen weg', () => {

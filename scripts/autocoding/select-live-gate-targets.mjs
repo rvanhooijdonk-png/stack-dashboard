@@ -106,21 +106,14 @@ export const SCHEDULE_SLOT_SECONDS = 3600;
 export const LIST_PAGE_BUDGET = 4;
 
 /**
- * Het aantal pagina's dat de ISOLATIEMETING van de schrijfjob hoogstens kost, per pull request.
+ * Het aantal pagina's dat de CHECK-RUNS van één commit hoogstens kosten.
  *
- * Deze meting is nieuw in V17 en komt uit Codex-bevinding `3835302930`: de commitstatus hangt aan de
- * COMMIT, dus zou een `success` voor de goedgekeurde pull request op GitHub evengoed gelden voor een
- * tweede open pull request met dezelfde volledige head-SHA. De schrijfjob haalt daarom, ná zijn
- * eigen hermeting en vóór elke mogelijke `success`, de open-PR-lijst op en toetst dat precies één
- * open pull request deze head draagt. Zie `scripts/autocoding/verify-head-isolation.mjs`.
- *
- * Het getal is bewust gelijk aan maar gescheiden van `SELECTION_PAGE_BUDGET`: die lijst wordt
- * hooguit één keer per RONDE opgehaald, deze één keer per PULL REQUEST, en de twee budgetten mogen
- * niet ongemerkt met elkaar meebewegen. `ISOLATION_PAGE_BUDGET` in de isolatiemodule en
- * `GH_BOUNDED_ISOLATION_PAGES` in de gedeelde shell-lib dragen hetzelfde getal;
- * `test/autocoding-live-gate-targets.test.mjs` bindt alle drie aan elkaar.
+ * Alleen de finalizer leest dit eindpunt; de diagnostische writer heeft er niets aan. Het staat hier
+ * en niet in de finalizer omdat deze module de enige plaats is waar paginabudgetten wonen, en omdat
+ * `test/autocoding-live-gate-targets.test.mjs` de constanten hier aan hun spiegelbeeld in
+ * `scripts/autocoding/gh-bounded-pages.sh` bindt — `GH_BOUNDED_CHECKS_PAGES` draagt hetzelfde getal.
  */
-export const ISOLATION_PAGE_BUDGET = 4;
+export const CHECKS_PAGE_BUDGET = 4;
 
 /**
  * Het maximale aantal API-verzoeken dat één writerjob aan ÉÉN pull request besteedt, exact geteld
@@ -128,24 +121,25 @@ export const ISOLATION_PAGE_BUDGET = 4;
  *
  *   3  hermeting van het PR-object (`repos/{r}/pulls/{n}`, hoogstens drie pogingen)
  *   1  onmiddellijke `pending`-POST op de opnieuw gemeten head
- *   4  de open-PR-lijst voor de HEAD-ISOLATIE maal `ISOLATION_PAGE_BUDGET` pagina's
  *   1  `git/commits/{sha}`
  *  20  vijf bewijslijsten maal `LIST_PAGE_BUDGET` pagina's — een HARDE grens
  *   1  de afsluitende status-POST op diezelfde head
  *  --
- *  30
+ *  26
  *
- * De isolatiemeting staat bewust VOLUIT in de som en niet als "meestal goedkoper". Faalt zij, dan
- * slaat de stap de bewijs-GET's over en kost de beurt er hooguit negen; dat is een besparing en
- * geen grens. Het budget hieronder moet het DUURSTE pad dragen, en dat is het pad waarop de
- * isolatie slaagt en het bewijs alsnog volledig wordt opgehaald.
+ * De open-PR-lijst van de V17-HEADISOLATIE stond hier tot V18 voor vier verzoeken in, en is er nu
+ * uit omdat de meting zelf weg is. Codex-bevindingen `3835364972` en `3835364974` toonden waarom:
+ * een commitstatus hangt aan de COMMIT, dus kan geen enkele puntmeting op het publicatiemoment
+ * voorkomen dat een LATER geopende pull request diezelfde `success` erft, en een offsetgepagineerde
+ * lijst is bovendien geen consistente momentopname. Vier verzoeken per pull request kochten daarmee
+ * geen grens maar een kleinere kans. De autorisatie is verplaatst naar de PR-gebonden finalizer; wat
+ * hier overblijft is diagnostiek die nooit `success` publiceert.
  *
  * Truncatiedetectie staat bewust niet in deze som en hoort daar ook niet: of de laatst toegestane
  * pagina vol was, wordt afgelezen aan de pagina die al is opgehaald. Er gaat geen verzoek naartoe.
  * Er zijn verder geen herhaalpogingen: alleen de hermeting herhaalt, en die drie staan hierboven.
  */
-export const PER_PULL_REQUEST_REQUEST_BUDGET = 3 + 1 + ISOLATION_PAGE_BUDGET + 1
-  + (5 * LIST_PAGE_BUDGET) + 1;
+export const PER_PULL_REQUEST_REQUEST_BUDGET = 3 + 1 + 1 + (5 * LIST_PAGE_BUDGET) + 1;
 
 /**
  * De paginering van de open-PR-lijst in de selectiejob. Vier pagina's van honderd is 400 open PR's;
