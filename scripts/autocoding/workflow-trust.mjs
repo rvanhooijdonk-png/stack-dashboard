@@ -37,15 +37,26 @@ export const UNTRUSTED_TRIGGERS = Object.freeze([
 ]);
 
 /**
- * De enige twee events waarop de trusted writer mag draaien.
+ * De enige drie events waarop de trusted writer mag draaien.
  *
  * `workflow_run` en `schedule` triggeren volgens de officiële GitHub-documentatie uitsluitend een
  * workflowbestand dat OP DE DEFAULT BRANCH bestaat, en `workflow_run` is expliciet bedoeld om na een
- * onprivileged workflow een privileged workflow te starten. Elk direct PR-, comment- of reviewevent
- * is hier een harde overtreding — ook `issue_comment`, dat weliswaar een default-branch-definitie
- * draait maar door iedere commentator direct op de schrijvende workflow gericht kan worden.
+ * onprivileged workflow een privileged workflow te starten.
+ *
+ * `issue_comment` heeft diezelfde eigenschap — GitHub draait dat event alleen wanneer het
+ * workflowbestand op de default branch staat — en is hier toegelaten omdat het als ENIG event de
+ * PR-associatie zelf meedraagt (`github.event.issue.number` plus `github.event.issue.pull_request`).
+ * Zonder dat event moet iedere commentwijziging via de onprivileged shield worden omgeleid, en dan
+ * wordt dezelfde comment twee keer gedispatcht.
+ *
+ * Dit is bewust GEEN generieke verruiming: de toelating geldt alleen voor het fysiek gescheiden
+ * writerbestand, en daar bovenop blijven alle andere writergrenzen gelden (één schrijvende job,
+ * alleen `statuses: write`, geen PR-headcheckout, geen artifacts, per-PR gequeueëde jobconcurrency).
+ * In elk ANDER workflowbestand is `issue_comment` naast een schrijfscope een overtreding; zie
+ * `ISSUE_COMMENT_WRITE_OUTSIDE_TRUSTED_WRITER`. Elk direct PR- of reviewevent blijft ook hier een
+ * harde overtreding.
  */
-export const TRUSTED_WRITER_TRIGGERS = Object.freeze(['workflow_run', 'schedule']);
+export const TRUSTED_WRITER_TRIGGERS = Object.freeze(['workflow_run', 'schedule', 'issue_comment']);
 
 /** De enige schrijfscope die de trusted writer mag dragen. */
 export const ALLOWED_TRUSTED_WRITE_SCOPES = Object.freeze(['statuses']);
@@ -60,13 +71,18 @@ export const TRUST_VIOLATION = Object.freeze({
   TRUSTED_WRITER_TRIGGER_NOT_ALLOWED: 'TRUSTED_WRITER_TRIGGER_NOT_ALLOWED',
   TRUSTED_WRITER_WORKFLOW_RUN_SOURCE_UNPINNED: 'TRUSTED_WRITER_WORKFLOW_RUN_SOURCE_UNPINNED',
   TRUSTED_WRITER_HAS_NO_TRIGGER: 'TRUSTED_WRITER_HAS_NO_TRIGGER',
-  TRUSTED_WRITER_HAS_MULTIPLE_JOBS: 'TRUSTED_WRITER_HAS_MULTIPLE_JOBS',
+  TRUSTED_WRITER_WRITE_JOB_NOT_UNIQUE: 'TRUSTED_WRITER_WRITE_JOB_NOT_UNIQUE',
+  TRUSTED_WRITER_WRITE_JOB_NOT_PER_PULL_REQUEST_QUEUED:
+    'TRUSTED_WRITER_WRITE_JOB_NOT_PER_PULL_REQUEST_QUEUED',
+  TRUSTED_WRITER_HAS_WORKFLOW_LEVEL_CONCURRENCY: 'TRUSTED_WRITER_HAS_WORKFLOW_LEVEL_CONCURRENCY',
   TRUSTED_WRITER_WRITE_SCOPE_NOT_ALLOWED: 'TRUSTED_WRITER_WRITE_SCOPE_NOT_ALLOWED',
   TRUSTED_WRITER_WORKFLOW_LEVEL_WRITE: 'TRUSTED_WRITER_WORKFLOW_LEVEL_WRITE',
   TRUSTED_WRITER_USES_SECRETS: 'TRUSTED_WRITER_USES_SECRETS',
   TRUSTED_WRITER_CHECKS_OUT_PR_CODE: 'TRUSTED_WRITER_CHECKS_OUT_PR_CODE',
   TRUSTED_WRITER_USES_PR_ARTIFACTS: 'TRUSTED_WRITER_USES_PR_ARTIFACTS',
   STATUSES_WRITE_OUTSIDE_TRUSTED_WRITER: 'STATUSES_WRITE_OUTSIDE_TRUSTED_WRITER',
+  ISSUE_COMMENT_WRITE_OUTSIDE_TRUSTED_WRITER: 'ISSUE_COMMENT_WRITE_OUTSIDE_TRUSTED_WRITER',
+  TRIGGER_MAPPING_UNPARSEABLE: 'TRIGGER_MAPPING_UNPARSEABLE',
   PR_SHIELD_CHECKS_OUT_CODE_OUTSIDE_PULL_REQUEST: 'PR_SHIELD_CHECKS_OUT_CODE_OUTSIDE_PULL_REQUEST',
 });
 
@@ -146,15 +162,151 @@ function unquote(value) {
   return value.replace(/^["']|["']$/g, '').trim();
 }
 
-/** Leest de triggernamen uit het `on:`-blok, in alle drie de YAML-vormen die GitHub accepteert. */
+/**
+ * De positie van de eerste `:` die niet binnen een quote of een geneste flow-collectie staat, of
+ * `-1`. Nodig omdat een flow-waarde zelf dubbelepunten kan bevatten (`{ a: { b: c } }`) en omdat een
+ * concurrencygroep een expressie kan dragen waarin `${{ ... }}` als geneste haken telt.
+ */
+function topLevelColon(text) {
+  let depth = 0;
+  let quote = null;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote === '"') {
+      if (ch === '\\') { i += 1; continue; }
+      if (ch === '"') quote = null;
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'") {
+        if (text[i + 1] === "'") { i += 1; continue; }
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === '{' || ch === '[') { depth += 1; continue; }
+    if (ch === '}' || ch === ']') { depth -= 1; continue; }
+    if (ch === ':' && depth === 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * Leest een YAML FLOW-MAPPING (`{ a: 1, b: { c: 2 } }`) tot zijn sleutels op het bovenste niveau.
+ *
+ * Waarom dit moest bestaan — Codex P1, review `4998729801`, inline `3834885357`. De vorige
+ * `extractTriggers()` behandelde elke inline waarde achter `on:` als één trigger-NAAM. Bij de
+ * volstrekt geldige vorm `on: { pull_request: {} }` leverde dat de trigger `"{ pull_request: {} }"`
+ * op. Die naam staat in geen enkele lijst, dus zag `findTrustBoundaryViolations()` GEEN untrusted
+ * trigger en mocht datzelfde bestand `statuses: write` dragen. Daarmee kon een PR-gestuurde
+ * statuswriter langs de repositorybrede vertrouwenstest — precies het defect dat deze scanner moet
+ * vangen.
+ *
+ * De parser is bewust klein en STRIKT: hij herkent de vorm die GitHub accepteert, en weigert alles
+ * wat hij niet met zekerheid kan lezen (`{ ok: false }`). Die weigering is geen gemak maar de
+ * fail-closed richting: de aanroeper maakt er een overtreding van, zodat een onleesbare `on:`-vorm
+ * nooit stil als "geen trigger" wordt gelezen. Onafgesloten quotes, ongebalanceerde haken, een lege
+ * of dubbele sleutel, tekst achter de sluitende accolade en een segment zonder dubbelepunt zijn
+ * allemaal een weigering.
+ *
+ * `${{ ... }}` telt hier gewoon als twee geneste accolades. Dat is precies goed: de haken zijn
+ * gebalanceerd, dus een komma of dubbelepunt binnen een expressie wordt nooit als scheidingsteken
+ * gelezen.
+ */
+export function parseFlowMapping(text) {
+  const source = String(text ?? '').trim();
+  const fail = Object.freeze({ ok: false, entries: null });
+  if (!source.startsWith('{')) return fail;
+
+  const segments = [];
+  let depth = 0;
+  let quote = null;
+  let segmentStart = -1;
+  let closedAt = -1;
+
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    if (quote === '"') {
+      if (ch === '\\') { i += 1; continue; }
+      if (ch === '"') quote = null;
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'") {
+        if (source[i + 1] === "'") { i += 1; continue; }
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === '{' || ch === '[') {
+      depth += 1;
+      if (depth === 1) segmentStart = i + 1;
+      continue;
+    }
+    if (ch === '}' || ch === ']') {
+      depth -= 1;
+      if (depth < 0) return fail;
+      if (depth === 0) { segments.push(source.slice(segmentStart, i)); closedAt = i; break; }
+      continue;
+    }
+    if (ch === ',' && depth === 1) {
+      segments.push(source.slice(segmentStart, i));
+      segmentStart = i + 1;
+    }
+  }
+  if (closedAt === -1 || quote !== null) return fail;
+  if (source.slice(closedAt + 1).trim() !== '') return fail;
+
+  const entries = new Map();
+  for (const segment of segments) {
+    const body = segment.trim();
+    // `{}` levert precies één leeg segment op en is een geldige lege mapping. Een leeg segment
+    // NAAST andere segmenten (`{ a: 1, }`) is ambigu en wordt daarom geweigerd.
+    if (body === '') {
+      if (segments.length === 1) continue;
+      return fail;
+    }
+    const colon = topLevelColon(body);
+    if (colon === -1) return fail;
+    const key = unquote(body.slice(0, colon));
+    if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(key) || entries.has(key)) return fail;
+    entries.set(key, body.slice(colon + 1).trim());
+  }
+  return { ok: true, entries };
+}
+
+/**
+ * Leest de triggernamen uit het `on:`-blok, in alle YAML-vormen die GitHub accepteert: de scalar
+ * (`on: push`), de flow-sequence (`on: [push, pull_request]`), de FLOW-MAPPING
+ * (`on: { pull_request: {} }`), de blokmapping en de bloksequence.
+ *
+ * Levert `null` op zodra de vorm niet met zekerheid te lezen is. Dat is een DERDE uitkomst naast
+ * "geen triggers" en "deze triggers", en het verschil is veiligheidsrelevant: een onleesbare vorm
+ * die als lege lijst wordt gelezen, verbergt precies de trigger waarop de scanner moet aanslaan.
+ * De aanroeper vertaalt `null` naar `TRIGGER_MAPPING_UNPARSEABLE`.
+ */
 export function extractTriggers(lines) {
   const index = lines.findIndex((l) => l.indent === 0 && /^["']?on["']?\s*:/.test(l.text));
   if (index === -1) return [];
   const inline = lines[index].text.replace(/^["']?on["']?\s*:/, '').trim();
-  if (inline.startsWith('[')) {
-    return inline.replace(/^\[|\]$/g, '').split(',').map(unquote).filter((v) => v.length > 0);
+
+  if (inline.startsWith('{')) {
+    const flow = parseFlowMapping(inline);
+    if (!flow.ok) return null;
+    return [...flow.entries.keys()];
   }
-  if (inline.length > 0) return [unquote(inline)].filter((v) => v.length > 0);
+  if (inline.startsWith('[')) {
+    // Een flow-sequence die op deze regel niet sluit, loopt over meerdere regels door; die vorm
+    // leest deze regelgebaseerde scanner niet, dus weigert hij hem.
+    if (!inline.endsWith(']')) return null;
+    return inline.slice(1, -1).split(',').map(unquote).filter((v) => v.length > 0);
+  }
+  if (inline.length > 0) {
+    const name = unquote(inline);
+    return /^[A-Za-z_][A-Za-z0-9_-]*$/.test(name) ? [name] : null;
+  }
 
   const triggers = [];
   let childIndent = null;
@@ -164,7 +316,10 @@ export function extractTriggers(lines) {
     if (childIndent === null) childIndent = line.indent;
     if (line.indent !== childIndent) continue;
     const name = line.text.trim().match(/^-?\s*["']?([A-Za-z_][A-Za-z0-9_-]*)["']?\s*:?/)?.[1];
-    if (name) triggers.push(name);
+    // Een kindregel op triggerniveau die geen naam oplevert, is een vorm die deze scanner niet
+    // kent. Stil overslaan zou de trigger onzichtbaar maken, dus wordt ook dit een weigering.
+    if (!name) return null;
+    triggers.push(name);
   }
   return triggers;
 }
@@ -261,6 +416,73 @@ function jobLevelKeys(job) {
   return children.filter((l) => l.indent === keyIndent);
 }
 
+/**
+ * Leest de `concurrency:` van ÉÉN job — de per-PR schrijfrij van de writer.
+ *
+ * `null` betekent "deze job heeft geen jobconcurrency". `unparseable: true` betekent "wel aanwezig,
+ * niet met zekerheid te lezen"; de aanroeper behandelt dat als een overtreding, want een
+ * onleesbare rij is geen rij.
+ *
+ * De scalarvorm `concurrency: <groep>` wordt gelezen maar levert per definitie geen `queue:` op, dus
+ * valt hij vanzelf door de per-PR-eis heen: zonder `queue: max` vervangt GitHub de vorige WACHTENDE
+ * job in plaats van hem te bewaren, en dan kan een aanleiding stil verdwijnen.
+ */
+export function extractJobConcurrency(job) {
+  const line = jobLevelKeys(job).find((l) => /^\s*["']?concurrency["']?\s*:/.test(l.text));
+  if (!line) return null;
+  const unreadable = { unparseable: true, group: '', cancelInProgress: '', queue: '' };
+  const inline = line.text.replace(/^\s*["']?concurrency["']?\s*:/, '').trim();
+
+  if (inline.startsWith('{')) {
+    const flow = parseFlowMapping(inline);
+    if (!flow.ok) return unreadable;
+    return {
+      unparseable: false,
+      group: unquote(flow.entries.get('group') ?? ''),
+      cancelInProgress: unquote(flow.entries.get('cancel-in-progress') ?? ''),
+      queue: unquote(flow.entries.get('queue') ?? ''),
+    };
+  }
+  if (inline.length > 0) {
+    return { unparseable: false, group: unquote(inline), cancelInProgress: '', queue: '' };
+  }
+
+  const children = blockChildren(job.lines, job.lines.indexOf(line));
+  if (children.length === 0) return unreadable;
+  const keyIndent = Math.min(...children.map((l) => l.indent));
+  const read = (key) => {
+    const found = children.find(
+      (l) => l.indent === keyIndent && new RegExp(`^\\s*["']?${key}["']?\\s*:`).test(l.text),
+    );
+    return found ? unquote(found.text.replace(/^\s*["']?[A-Za-z][A-Za-z0-9_-]*["']?\s*:/, '')) : '';
+  };
+  return {
+    unparseable: false,
+    group: read('group'),
+    cancelInProgress: read('cancel-in-progress'),
+    queue: read('queue'),
+  };
+}
+
+/** De sleutels van `strategy.matrix` van één job; leeg als de job geen matrix draait. */
+export function extractJobMatrixKeys(job) {
+  const strategy = jobLevelKeys(job).find((l) => /^\s*["']?strategy["']?\s*:/.test(l.text));
+  if (!strategy) return [];
+  const strategyBlock = blockChildren(job.lines, job.lines.indexOf(strategy));
+  const matrixIndex = strategyBlock.findIndex((l) => /^\s*["']?matrix["']?\s*:/.test(l.text));
+  if (matrixIndex === -1) return [];
+  const matrixBlock = blockChildren(strategyBlock, matrixIndex);
+  if (matrixBlock.length === 0) return [];
+  const keyIndent = Math.min(...matrixBlock.map((l) => l.indent));
+  return matrixBlock
+    .filter((l) => l.indent === keyIndent)
+    .map((l) => l.text.trim().match(/^["']?([A-Za-z_][A-Za-z0-9_-]*)["']?\s*:/)?.[1] ?? '')
+    // `include` en `exclude` zijn GEEN matrixdimensies maar bijstellingen op de dimensies. Een
+    // concurrencygroep die op `matrix.include` sleutelt bestaat niet, dus mag zo'n sleutel de
+    // per-PR-eis ook niet kunnen vervullen.
+    .filter((v) => v.length > 0 && v !== 'include' && v !== 'exclude');
+}
+
 /** Volledige statische meting van één workflowbestand. Pure functie: tekst in, feiten uit. */
 export function analyzeWorkflow(text) {
   const lines = structureLines(text);
@@ -268,12 +490,22 @@ export function analyzeWorkflow(text) {
   const jobLines = new Set(jobs.flatMap((job) => job.lines));
   const outsideJobs = lines.filter((line) => !jobLines.has(line));
 
+  const parsedTriggers = extractTriggers(lines);
+  const nameLine = lines.find((l) => l.indent === 0 && /^["']?name["']?\s*:/.test(l.text));
+
   return {
-    name: lines.find((l) => l.indent === 0 && /^["']?name["']?\s*:/.test(l.text))
-      ? unquote(lines.find((l) => l.indent === 0 && /^["']?name["']?\s*:/.test(l.text))
-        .text.replace(/^["']?name["']?\s*:/, ''))
-      : '',
-    triggers: extractTriggers(lines),
+    name: nameLine ? unquote(nameLine.text.replace(/^["']?name["']?\s*:/, '')) : '',
+    // `triggers` is altijd een lijst, ook bij een onleesbare vorm; `triggersUnparseable` draagt het
+    // verschil, zodat een onleesbare `on:` nooit stil als "geen trigger" kan doorgaan.
+    triggers: parsedTriggers ?? [],
+    triggersUnparseable: parsedTriggers === null,
+    // Een workflowbrede `concurrency:` coalesceert HELE runs. Voor de writer is dat precies de
+    // eigenschap die weg moest: GitHub bewaart per groep hooguit één wachtende run en annuleert de
+    // vorige, dus zou een globale groep de per-PR-rijen weer samenvoegen en aanleidingen laten
+    // vallen. Alleen inspringing 0 telt als workflowniveau.
+    workflowLevelConcurrency: lines.some(
+      (l) => l.indent === 0 && /^["']?concurrency["']?\s*:/.test(l.text),
+    ),
     workflowRunSources: extractWorkflowRunSources(lines),
     writeGrants: extractWriteGrants(lines),
     workflowLevelWriteGrants: extractWriteGrants(outsideJobs),
@@ -287,6 +519,8 @@ export function analyzeWorkflow(text) {
         .map((l) => l.text.replace(/^\s*if\s*:/, '').trim())
         .join(' '),
       checksOutCode: job.lines.some((l) => /uses\s*:\s*\S*actions\/checkout/.test(l.text)),
+      concurrency: extractJobConcurrency(job),
+      matrixKeys: extractJobMatrixKeys(job),
     })),
     usesSecrets: lines.some((l) => /\bsecrets\s*\./.test(l.text)),
     checkoutRefs: lines
@@ -317,6 +551,40 @@ const PR_CODE_REF_RE = /pull_request|pull\/|head[._](sha|ref|branch|commit)|gith
 /** Een jobconditie die de job aantoonbaar tot het `pull_request`-event beperkt. */
 const PR_ONLY_RE = /github\.event_name\s*==\s*['"]pull_request['"]/;
 
+/** De verwijzing naar de matrixwaarde waarop de schrijfrij per PR gesleuteld moet zijn. */
+const MATRIX_GROUP_REF_RE = /\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}/;
+
+/**
+ * Contextvelden die per RUN verschillen in plaats van per PR. Staat er zoiets in de groep, dan
+ * vallen twee aanleidingen voor dezelfde PR in verschillende rijen en meten ze weer gelijktijdig —
+ * exact de vorm die de gedeelde statuscontext eerder stuk maakte.
+ */
+const VOLATILE_GROUP_RE = /github\.(run_id|run_number|run_attempt|event|sha|ref|actor|job)/;
+
+/**
+ * De schrijvende job moet PER PULL REQUEST geserialiseerd zijn, en wel zo dat een gequeueëde
+ * aanleiding niet verdwijnt.
+ *
+ *   - de groep sleutelt op een matrixwaarde die deze job werkelijk als matrixdimensie draagt, en op
+ *     niets wat per run verschilt: twee aanleidingen voor PR 74 delen dan één rij, terwijl PR 74 en
+ *     PR 75 elkaar niet blokkeren;
+ *   - `cancel-in-progress: false`: een lopende schrijfbeurt wordt nooit halverwege afgekapt, want
+ *     dan zou een head op `pending` blijven staan;
+ *   - `queue: max`: GitHub bewaart standaard (`single`) hooguit ÉÉN wachtende job per groep en
+ *     annuleert de vorige. Met `max` blijven wachtende beurten in de rij staan tot de
+ *     maximumlengte, dus kan een aanleiding niet stil verdwijnen.
+ */
+export function isPerPullRequestQueuedWriteJob(job) {
+  const concurrency = job?.concurrency;
+  if (!concurrency || concurrency.unparseable) return false;
+  if (concurrency.cancelInProgress !== 'false') return false;
+  if (concurrency.queue !== 'max') return false;
+  if (VOLATILE_GROUP_RE.test(concurrency.group)) return false;
+  const reference = MATRIX_GROUP_REF_RE.exec(concurrency.group);
+  if (!reference) return false;
+  return Array.isArray(job.matrixKeys) && job.matrixKeys.includes(reference[1]);
+}
+
 function scopesOf(grants) {
   return Array.from(new Set(grants.map((g) => g.scope)));
 }
@@ -345,6 +613,10 @@ export function findTrustBoundaryViolations({ workflows, prShieldPath, trustedWr
     const wf = analyzeWorkflow(text);
     const untrusted = wf.triggers.filter((t) => UNTRUSTED_TRIGGERS.includes(t));
 
+    // Fail-closed op een `on:`-vorm die niet met zekerheid te lezen is. Zonder deze regel leest een
+    // onleesbare vorm als "geen triggers" en mag het bestand dus een schrijfscope dragen.
+    if (wf.triggersUnparseable) add(TRUST_VIOLATION.TRIGGER_MAPPING_UNPARSEABLE, path);
+
     if (wf.triggers.includes('pull_request_target')) {
       add(TRUST_VIOLATION.PULL_REQUEST_TARGET_PRESENT, path);
     }
@@ -355,6 +627,12 @@ export function findTrustBoundaryViolations({ workflows, prShieldPath, trustedWr
     }
     if (path !== trustedWriterPath && wf.writeGrants.some((g) => g.scope === 'statuses' || g.scope === '*')) {
       add(TRUST_VIOLATION.STATUSES_WRITE_OUTSIDE_TRUSTED_WRITER, path);
+    }
+    // `issue_comment` draait de default-branch-definitie en is daarom in de trusted writer
+    // toegelaten — maar uitsluitend daar. Elk ander schrijvend bestand dat dit event opent, geeft
+    // iedere commentator een directe trekker naar een token met schrijfrechten.
+    if (path !== trustedWriterPath && wf.triggers.includes('issue_comment') && wf.writeGrants.length > 0) {
+      add(TRUST_VIOLATION.ISSUE_COMMENT_WRITE_OUTSIDE_TRUSTED_WRITER, path);
     }
 
     if (path === prShieldPath) {
@@ -371,8 +649,11 @@ export function findTrustBoundaryViolations({ workflows, prShieldPath, trustedWr
     if (path === trustedWriterPath) {
       sawTrustedWriter = true;
       if (untrusted.length > 0) add(TRUST_VIOLATION.TRUSTED_WRITER_HAS_UNTRUSTED_TRIGGER, path);
-      // De allowlist is strenger dan "niet untrusted": alleen `workflow_run` en `schedule` laden
-      // gegarandeerd de default-branch-definitie zonder dat een PR-actor het event zelf richt.
+      // De allowlist is strenger dan "niet untrusted": alleen `workflow_run`, `schedule` en
+      // `issue_comment` laden gegarandeerd de default-branch-definitie. Bij de eerste twee kan een
+      // PR-actor het event niet richten; bij `issue_comment` wel, maar dan nog steeds uitsluitend
+      // tegen de definitie die op de default branch staat — en de PR-associatie komt uit een veld
+      // dat GitHub vult. Zie `TRUSTED_WRITER_TRIGGERS`.
       if (wf.triggers.some((t) => !TRUSTED_WRITER_TRIGGERS.includes(t))) {
         add(TRUST_VIOLATION.TRUSTED_WRITER_TRIGGER_NOT_ALLOWED, path);
       }
@@ -389,7 +670,19 @@ export function findTrustBoundaryViolations({ workflows, prShieldPath, trustedWr
         }
       }
       if (wf.triggers.length === 0) add(TRUST_VIOLATION.TRUSTED_WRITER_HAS_NO_TRIGGER, path);
-      if (wf.jobs.length !== 1) add(TRUST_VIOLATION.TRUSTED_WRITER_HAS_MULTIPLE_JOBS, path);
+      // De writer bestaat nu uit een LEZENDE selectiejob en een SCHRIJVENDE matrixjob. De grens is
+      // daarom niet meer "precies één job" maar "precies één job met een schrijfscope", plus de eis
+      // dat juist die job per PR geserialiseerd is.
+      const writeJobs = wf.jobs.filter((job) => job.writeGrants.length > 0);
+      if (writeJobs.length !== 1) add(TRUST_VIOLATION.TRUSTED_WRITER_WRITE_JOB_NOT_UNIQUE, path);
+      for (const job of writeJobs) {
+        if (!isPerPullRequestQueuedWriteJob(job)) {
+          add(TRUST_VIOLATION.TRUSTED_WRITER_WRITE_JOB_NOT_PER_PULL_REQUEST_QUEUED, path);
+        }
+      }
+      if (wf.workflowLevelConcurrency) {
+        add(TRUST_VIOLATION.TRUSTED_WRITER_HAS_WORKFLOW_LEVEL_CONCURRENCY, path);
+      }
       if (wf.workflowLevelWriteGrants.length > 0) {
         add(TRUST_VIOLATION.TRUSTED_WRITER_WORKFLOW_LEVEL_WRITE, path);
       }

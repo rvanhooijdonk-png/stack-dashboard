@@ -474,18 +474,24 @@ test('L12. de workflow publiceert altijd, op de gemeten head, met de enige schri
   assert.match(liveGate, /verify-review-gate\.mjs[\s\S]*?\|\| true/);
   assert.match(liveGate, /--execution-error "\$execution_error"/);
 
-  // Record-lokale foutafhandeling: één kapotte PR maakt de run rood maar stopt de ronde niet.
-  assert.ok(!/^\s*set -euo pipefail$/m.test(publishLoop(liveGate)), 'de lus mag niet vroegtijdig stoppen');
-  assert.match(liveGate, /overall=1\n\s+continue$/m);
+  // Record-lokale foutafhandeling: een mislukte invalidatie of een kapotte poortstap maakt de job
+  // rood, maar breekt hem niet halverwege af — afbreken zou een `pending` laten staan zonder ooit
+  // een uitspraak te publiceren.
+  assert.ok(!/^\s*set -euo pipefail$/m.test(publishStep(liveGate)), 'de stap mag niet vroegtijdig stoppen');
+  assert.match(publishStep(liveGate), /^\s*set -uo pipefail$/m);
+  assert.match(liveGate, /overall=1/);
   assert.match(liveGate, /exit "\$overall"/);
 });
 
 /** Het `run:`-blok van de publicatiestap; daarbinnen mag geen `set -e` staan. */
-function publishLoop(liveGate) {
-  const start = liveGate.indexOf('      - name: Meet, beslis en publiceer per doel-PR');
+function publishStep(liveGate) {
+  const start = liveGate.indexOf(`      - name: ${SCHRIJFSTAP}`);
   assert.ok(start !== -1, 'publicatiestap ontbreekt');
   return liveGate.slice(start);
 }
+
+/** De naam van de enige stap die statussen schrijft; sinds V11 meet die precies één PR. */
+const SCHRIJFSTAP = 'Meet, beslis en publiceer deze pull request';
 
 
 // --- Argumentparser -------------------------------------------------------------------------------
@@ -686,29 +692,36 @@ test('L16. de pending-CLI heeft een GESLOTEN vorm en kan geen uitspraak meesmokk
   assert.equal(parsePublishArgs(achteraan).values.get('--head-sha'), HEAD);
 });
 
-test('L17. de workflow invalideert ELKE open head vóór de eerste detailmeting', () => {
+test('L17. de writer invalideert de HERMETEN head vóór de eerste detail-GET, ná de per-PR-lock', () => {
+  // V11 heeft de globale invalidatieronde vervangen door één invalidatie per PR, binnen de job die
+  // de per-PR-lock houdt. De volgorde is de hele waarde ervan: wie eerst bewijs verzamelt en pas
+  // daarna invalideert, laat een eerder groene head groen staan zolang die verzameling loopt.
   const liveGate = readFileSync('.github/workflows/autocoding-shield-live-gate.yml', 'utf8');
-  const invalidatie = liveGate.indexOf('      - name: Invalideer eerst iedere open head');
-  const meting = liveGate.indexOf('      - name: Meet, beslis en publiceer per doel-PR');
-  assert.ok(invalidatie !== -1, 'de invalidatiestap bestaat');
-  assert.ok(invalidatie < meting, 'de invalidatiestap staat vóór de meetstap');
+  const stap = publishStep(liveGate);
 
-  const stap = liveGate.slice(invalidatie, meting);
-  // De invalidatie loopt over ALLE open heads, niet over de begrensde meetbatch.
-  assert.match(stap, /done 3< "\$RUNNER_TEMP\/heads\.txt"/);
+  const hermeting = stap.indexOf('repos/$REPOSITORY/pulls/$number');
+  const pending = stap.indexOf('--pending');
+  const detail = stap.indexOf('for endpoint in');
+  assert.ok(hermeting !== -1, 'de hermeting bestaat');
+  assert.ok(pending !== -1, 'de invalidatie bestaat');
+  assert.ok(detail !== -1, 'de bewijsverzameling bestaat');
+  assert.ok(hermeting < pending, 'er wordt hermeten vóór de invalidatie');
+  assert.ok(pending < detail, 'de invalidatie staat vóór de eerste detail-GET');
+
+  // De `pending` gaat naar dezelfde context en dezelfde HERMETEN head als de uitspraak.
   assert.match(stap, /publish-live-status\.mjs \\\n\s+--pending/);
+  assert.match(stap, /--head-sha "\$head_sha"/);
   assert.match(stap, /--status-context "\$STATUS_CONTEXT"/);
-  // Geen enkele detail-GET in deze stap: hij kost precies één POST per head.
-  assert.ok(!/gh api/.test(stap), 'de invalidatieronde doet geen enkele GET');
-  // Record-lokaal: één mislukte POST mag de invalidatie van de volgende head niet tegenhouden.
-  assert.ok(!/^\s*set -euo pipefail$/m.test(stap), 'de invalidatielus mag niet vroegtijdig stoppen');
-  assert.match(stap, /pending_failed=1\n\s+continue$/m);
-  assert.match(stap, /pending_failed=\$pending_failed" >> "\$GITHUB_OUTPUT"/);
-  // En de fout blijft niet hangen: een onvolledige invalidatieronde maakt de job alsnog rood.
-  assert.match(
-    liveGate,
-    /if: always\(\) && steps\.invalidate\.outputs\.pending_failed == '1'/,
-  );
+
+  // Een mislukte invalidatie maakt de job rood, maar stopt hem niet: doorgaan levert alsnog een
+  // uitspraak op die de oude status overschrijft, afbreken zou de oude status juist laten staan.
+  assert.match(stap, /PR_\$\{number\}_NOT_INVALIDATED[\s\S]{0,40}overall=1/);
+  assert.match(stap, /exit "\$overall"/);
+
+  // Niets uit de aanleiding: de schrijfstap kent het eventpayload niet eens.
+  const env = stap.slice(stap.indexOf('env:'), stap.indexOf('run: |'));
+  assert.ok(!env.includes('GITHUB_EVENT_PATH'), 'de schrijfstap leest het eventpayload niet');
+  assert.match(env, /PULL_REQUEST: \$\{\{ matrix\.pr \}\}/);
 });
 
 test('L13c. de vorm die de workflow werkelijk doorgeeft blijft geldig, inclusief lege --execution-error', () => {

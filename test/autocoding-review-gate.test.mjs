@@ -380,22 +380,26 @@ test('workflow-eventmatrix houdt bootstrap-events groen en live gate uit', () =>
   const liveGate = yamlOnly(LIVE_GATE_PATH);
   const policy = JSON.parse(readFileSync('CONTROL/AUTOCODING/policy.v1.json', 'utf8'));
 
-  // De onprivileged shield ontvangt PR-, comment- en reviewevents; PR-code draait alleen op
-  // `pull_request`, de rest is een signaaljob zonder inhoud.
+  // De onprivileged shield ontvangt PR- en reviewevents; PR-code draait alleen op `pull_request`,
+  // de rest is een signaaljob zonder inhoud. `issue_comment` hoort hier NIET meer: dat event draait
+  // altijd de default-branch-definitie en gaat sinds V11 rechtstreeks naar de trusted writer. Zou de
+  // shield het óók signaleren, dan leverde één comment twee aanleidingen op.
   assert.match(shield, /^on:\n {2}pull_request:$/m);
-  for (const event of ['issue_comment:', 'pull_request_review:']) {
+  for (const event of ['pull_request_review:', 'pull_request_review_comment:']) {
     assert.ok(shield.includes(event), `signaalevent ontbreekt op de shield: ${event}`);
   }
+  assert.ok(!shield.includes('issue_comment'), 'issue_comment hoort niet meer op de shield');
   assert.match(shield, /if: github\.event_name == 'pull_request'/);
 
-  // De trusted writer kent GEEN van die events. Dat is de gemeten grens: Actions-run 32542688290
-  // draaide op `pull_request_review` een writerbestand dat op `main` 404 gaf — de definitie kwam
-  // dus van de PR-head. Alleen `workflow_run` en `schedule` laden gegarandeerd de default branch.
-  for (const event of ['workflow_run:', 'schedule:']) {
+  // De trusted writer kent GEEN `pull_request*`-event. Dat is de gemeten grens: Actions-run
+  // 32542688290 draaide op `pull_request_review` een writerbestand dat op `main` 404 gaf — de
+  // definitie kwam dus van de PR-head. `workflow_run`, `schedule` en `issue_comment` laden
+  // gegarandeerd de default-branch-definitie.
+  for (const event of ['workflow_run:', 'schedule:', 'issue_comment:']) {
     assert.ok(liveGate.includes(event), `trusted event ontbreekt: ${event}`);
   }
   assert.match(liveGate, /^ {2}workflow_run:\n {4}workflows: \[autocoding-shield\]$/m);
-  for (const verboden of ['issue_comment', 'pull_request_review', 'pull_request_target']) {
+  for (const verboden of ['pull_request_review', 'pull_request_target']) {
     assert.ok(!liveGate.includes(verboden), `de trusted writer mag niet op ${verboden} draaien`);
   }
   assert.ok(!/^ {2}pull_request(_target)?:$/m.test(liveGate), 'de trusted writer heeft geen PR-event');
@@ -436,12 +440,16 @@ test('W1b. de statuswriter staat in een APART bestand; PR-voorgestelde YAML krij
   assert.ok(!/:\s*write\b/.test(shield), 'de PR-shield mag geen enkele schrijfscope dragen');
   assert.match(shield, /^permissions: \{\}$/m);
 
+  // Twee jobs sinds V11: een read-only selectie en één matrixjob per doel-PR. Alleen die tweede
+  // draagt een schrijfscope, en het blijft bij die ene.
   const liveGate = yamlOnly(LIVE_GATE_PATH);
-  assert.deepEqual(jobNames(LIVE_GATE_PATH), ['autocoding-shield-live-gate:']);
+  assert.deepEqual(jobNames(LIVE_GATE_PATH), ['selecteer:', 'schrijf:']);
   assert.deepEqual(
     liveGate.split('\n').filter((line) => /^\s+[a-z-]+:\s*write\b/.test(line)).map((l) => l.trim()),
     ['statuses: write'],
   );
+  const selecteer = liveGate.slice(liveGate.indexOf('  selecteer:'), liveGate.indexOf('  schrijf:'));
+  assert.ok(!/:\s*write\b/.test(selecteer), 'de selectiejob mag geen schrijfscope dragen');
   assert.match(liveGate, /^permissions: \{\}$/m);
 });
 
@@ -454,10 +462,14 @@ test('W2. de live poort voert nooit PR-headcode uit en checkt uitsluitend de def
   );
   assert.ok(!liveGate.includes('node --test'), 'de live-gate-job mag geen PR-headtests draaien');
   assert.ok(!/actions\/(cache|download-artifact)/.test(liveGate), 'geen PR-artifacts of -cache');
-  // De writer serialiseert globaal: één constante groep voor alle aanleidingen, zodat een oudere
-  // meting nooit ná een nieuwere op dezelfde statuscontext publiceert. De read-only shield houdt
-  // zijn eigen, per-PR groep — die schrijft immers niets.
-  assert.match(liveGate, /^ {2}group: autocoding-shield-live-gate$/m);
+  // De writer serialiseert PER PULL REQUEST, niet globaal: de groep sleutelt op de matrixwaarde,
+  // zodat twee aanleidingen voor dezelfde PR achter elkaar aanschuiven (`queue: max`) terwijl
+  // verschillende PR's elkaar niet blokkeren. Een `concurrency` op WORKFLOWniveau zou die rijen
+  // weer samenvoegen en is daarom verboden.
+  assert.match(liveGate, /^ {6}group: autocoding-shield-live-gate-pr-\$\{\{ matrix\.pr \}\}$/m);
+  assert.match(liveGate, /^ {6}cancel-in-progress: false$/m);
+  assert.match(liveGate, /^ {6}queue: max$/m);
+  assert.ok(!/^concurrency:$/m.test(liveGate), 'geen concurrency op workflowniveau in de writer');
   assert.match(yamlOnly(PR_SHIELD_PATH), /^ {2}group: autocoding-shield-/m);
 });
 

@@ -1,480 +1,75 @@
 /**
- * AUTOCODING_SHIELD — doelselectie en ronde-afhandeling van de trusted statuswriter.
+ * AUTOCODING_SHIELD — doelselectie, per-PR schrijfrij en budgetgrenzen van de trusted statuswriter.
  *
- * De writer wordt niet meer direct door een PR-, comment- of reviewevent gestart maar door
- * `workflow_run` (na de onprivileged shield) en `schedule`. Daarmee verschuift het risico: de
- * aanleiding zegt niets betrouwbaars meer over WELKE pull request gemeten moet worden, en de
- * bronrun kan een door een PR geleverde definitie hebben gehad. Twee eigenschappen worden hier
- * daarom gemeten in plaats van beloofd:
+ * De writer wordt door geen enkel direct PR- of reviewevent gestart, maar door `issue_comment`,
+ * `workflow_run` (na de onprivileged shield) en `schedule`. Codex-review `4998729801` mat in de
+ * vorige vorm drie defecten, en dit bestand meet de reparatie ervan in plaats van haar te beloven:
  *
- *   1. De doel-PR's komen uit een read-only API-lijst, niet uit de eventpayload, en de payload mag
- *      die lijst NIET versmallen. Iedere aanleiding invalideert eerst alle open heads.
- *   2. Eén kapotte PR maakt de ronde rood maar stopt hem niet — anders zou de eerste kapotte PR alle
- *      andere statussen stale laten staan. Die eigenschap zit in de shell van het workflowbestand,
- *      dus wordt die shell hier echt uitgevoerd met gestubde `gh` en `node`.
- *   3. Alle aanleidingen delen één writerlock, zodat een oudere momentopname nooit ná een nieuwere
- *      op dezelfde statuscontext kan publiceren.
- *   4. De ronde kent geen bovengrens op het aantal open PR's: een weigering zou nul statussen
- *      publiceren en een eerder groene head groen laten staan.
+ *   1. inline `3834885350` — het `GITHUB_TOKEN`-quotum van duizend verzoeken per uur is GEDEELD per
+ *      repository. Zolang iedere aanleiding een repositorybrede ronde veroorzaakte, kon één comment
+ *      126 heads invalideren, het budget leegtrekken en de rest van de PR's op `pending` laten
+ *      staan. Een event meet daarom nu hooguit ÉÉN pull request en raakt de open-PR-lijst niet aan;
+ *      een schedule meet er hooguit `SCHEDULE_BUCKET_LIMIT`, en krimpt mee met wat er van het
+ *      gedeelde quotum werkelijk over is.
+ *   2. inline `3834885354` — `github.run_number` loopt door voor runs die als WACHTENDE run worden
+ *      geannuleerd, dus bezoeken de runs die werkelijk draaien geen opeenvolgende blokken. De
+ *      rotatie hangt nu aan een TIJDSLOT, en dat verschil wordt hier met een expliciete negatieve
+ *      controle gemeten.
+ *   3. de schrijfrij is per PULL REQUEST in plaats van globaal, met `cancel-in-progress: false` en
+ *      `queue: max`, en er wordt pas ná die rij gemeten.
  *
- * Bij 3 en 4 hoort een negatieve mutatie: de OUDE vorm wordt hier teruggezet en er wordt gemeten dat
- * die zich fout gedraagt. Zonder dat bewijs zegt een groene test niet dat hij de regressie vangt.
+ * Waar de eigenschap in de SHELL van het workflowbestand zit, wordt die shell hier echt uitgevoerd
+ * met gestubde `gh`, `node` en `date` — niet nagebouwd.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
-  selectTargets, selectEvaluationBatch, isTrustedWorkflowRunSource, normaliseOpenPullRequests,
-  parseTargetArgs, parseRunNumber, runSelect, EVALUATION_BATCH_LIMIT,
-  EXPECTED_SOURCE, TARGET_OUTCOME, TARGET_REASON, TARGET_SELECTION,
+  selectTargets, isTrustedWorkflowRunSource, issueCommentTarget, workflowRunTargets,
+  normaliseOpenPullRequests, scheduleSlotOf, selectScheduleBucket, affordablePullRequests,
+  parseTargetArgs, parseCounter, runSelect,
+  EXPECTED_SOURCE, EVENT_TARGET_LIMIT, SCHEDULE_BUCKET_LIMIT, SCHEDULE_SLOT_SECONDS,
+  PER_PULL_REQUEST_REQUEST_BUDGET, SELECTION_REQUEST_BUDGET, EVENT_REQUEST_BUDGET,
+  SCHEDULE_REQUEST_BUDGET, SHARED_HOURLY_REQUEST_QUOTA, QUOTA_RESERVE,
+  TARGET_OUTCOME, TARGET_REASON, TARGET_SELECTION,
 } from '../scripts/autocoding/select-live-gate-targets.mjs';
+import { analyzeWorkflow } from '../scripts/autocoding/workflow-trust.mjs';
 
 const SELECTOR = 'scripts/autocoding/select-live-gate-targets.mjs';
-
 const TRUSTED_WRITER = '.github/workflows/autocoding-shield-live-gate.yml';
+const WRITER_TEKST = readFileSync(TRUSTED_WRITER, 'utf8');
 
-const sha = (n) => String(n).repeat(40).slice(0, 40).replace(/[^0-9a-f]/g, '0');
+const SELECTIE_STAP = "Bepaal de doel-PR's read-only";
+const SCHRIJF_STAP = 'Meet, beslis en publiceer deze pull request';
 
-function openPr(number, { headSha, headRef } = {}) {
-  return {
-    number,
-    head: { sha: headSha ?? sha(number === 1 ? 'a' : number), ref: headRef ?? `branch-${number}` },
-  };
-}
+/** Een geldige veertigtekens-SHA die uit één cijfer is op te maken, zodat logs leesbaar blijven. */
+const sha = (n) => String(n).repeat(40).slice(0, 40);
+
+const openPr = (number) => ({ number, head: { sha: sha(number % 10), ref: `branch-${number}` } });
 
 function shieldRun(overrides = {}) {
   return {
     name: EXPECTED_SOURCE.workflowName,
     path: EXPECTED_SOURCE.workflowPath,
     event: 'pull_request',
-    head_sha: sha(2),
-    head_branch: 'branch-2',
+    pull_requests: [{ number: 74 }],
     ...overrides,
   };
 }
 
-// --- Bronbegrenzing -----------------------------------------------------------------------------
+const commentOpPr = (number) => ({ issue: { number, pull_request: { url: `x/${number}` } } });
 
-test('S1. alleen de verwachte shieldrun op het verwachte pad en bronevent telt als aanleiding', () => {
-  assert.equal(isTrustedWorkflowRunSource(shieldRun()), true);
-  for (const event of EXPECTED_SOURCE.events) {
-    assert.equal(isTrustedWorkflowRunSource(shieldRun({ event })), true, event);
-  }
-  // Een gelijknamige workflow op een ANDER pad is precies wat een PR kan toevoegen.
-  assert.equal(isTrustedWorkflowRunSource(shieldRun({ path: '.github/workflows/nep.yml' })), false);
-  assert.equal(isTrustedWorkflowRunSource(shieldRun({ name: 'publish' })), false);
-  assert.equal(isTrustedWorkflowRunSource(shieldRun({ event: 'workflow_dispatch' })), false);
-  assert.equal(isTrustedWorkflowRunSource(shieldRun({ event: 'push' })), false);
-  for (const kapot of [null, undefined, 'autocoding-shield', [], 42]) {
-    assert.equal(isTrustedWorkflowRunSource(kapot), false, String(kapot));
-  }
-});
-
-test('S2. een onverwachte bron publiceert niets en is geen fout van deze poort', () => {
-  const result = selectTargets({
-    eventName: 'workflow_run',
-    workflowRun: shieldRun({ name: 'publish' }),
-    openPullRequests: [openPr(2)],
-  });
-  assert.equal(result.outcome, TARGET_OUTCOME.NO_OP);
-  assert.equal(result.reason, TARGET_REASON.SOURCE_NOT_TRUSTED);
-  assert.deepEqual(result.targets, []);
-
-  // Een event dat de workflow helemaal niet kent, betekent dat bestand en script uit elkaar zijn
-  // gelopen. Dat is een defect en wordt rood, niet stil.
-  for (const eventName of ['pull_request_review', 'issue_comment', 'pull_request', '']) {
-    const drift = selectTargets({ eventName, workflowRun: shieldRun(), openPullRequests: [] });
-    assert.equal(drift.outcome, TARGET_OUTCOME.FAIL, eventName);
-    assert.equal(drift.reason, TARGET_REASON.EVENT_NOT_SUPPORTED, eventName);
-  }
-});
-
-// --- Doelbepaling -------------------------------------------------------------------------------
-
-test('S3. GEEN enkele hint versmalt de ronde nog, ook niet bij een eenduidige treffer', () => {
-  // Codex P1, review 4998653669, inline 3834812708. De writergroep is een constante en GitHub houdt
-  // daar hooguit één WACHTENDE run van aan. Verwijdert iemand een receipt op PR 2 (run A gaat in de
-  // wachtrij) en komt er daarna een event op PR 3, dan ANNULEERT GitHub run A. Versmalde de
-  // overlevende run B op zijn eigen hint, dan deed niemand de invalidatie van PR 2 en bleef diens
-  // `success` bruikbaar tot de volgende uurlijkse ronde. Elke aanleiding doet daarom nu een
-  // volledige ronde — dan draagt de overlevende run het werk van elke geannuleerde voorganger.
-  const open = [openPr(2), openPr(3)];
-
-  for (const event of EXPECTED_SOURCE.events) {
-    for (const hint of [{}, { head_sha: sha(9) }, { head_sha: sha(9), head_branch: 'weg' }]) {
-      const ronde = selectTargets({
-        eventName: 'workflow_run',
-        workflowRun: shieldRun({ event, ...hint }),
-        openPullRequests: open,
-      });
-      const label = `${event} ${JSON.stringify(hint)}`;
-      assert.equal(ronde.selection, TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS, label);
-      assert.deepEqual(ronde.targets, [2, 3], label);
-      assert.deepEqual(ronde.heads.map((h) => h.number), [2, 3], label);
-    }
-  }
-
-  // De selectievorm bestaat niet eens meer, dus kan geen enkel pad hem nog kiezen.
-  assert.deepEqual(Object.keys(TARGET_SELECTION), ['ALL_OPEN_PULL_REQUESTS']);
-  const code = readFileSync(SELECTOR, 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^\s*\/\/.*$/gm, '');
-  assert.doesNotMatch(code, /head_sha|head_branch/, 'de hintvelden worden nergens meer gelezen');
-
-  // Een hint die naar een gesloten of onbekende PR wijst, voegt die PR ook niet toe.
-  const onbekend = selectTargets({
-    eventName: 'workflow_run',
-    workflowRun: shieldRun({ head_sha: sha(9), head_branch: 'weg' }),
-    openPullRequests: open,
-  });
-  assert.deepEqual(onbekend.targets, [2, 3]);
-});
-
-test('S4. issue_comment- en schedule-aanleidingen meten alle open PR\'s', () => {
-  const open = [openPr(7), openPr(2), openPr(4)];
-
-  // Een `issue_comment` draait de shield op de default branch, dus wijst de hint naar `main` en
-  // niet naar de becommentarieerde PR. Precies daarom bestaat de volledige ronde.
-  const naComment = selectTargets({
-    eventName: 'workflow_run',
-    workflowRun: shieldRun({ event: 'issue_comment', head_sha: sha(0), head_branch: 'main' }),
-    openPullRequests: open,
-  });
-  assert.equal(naComment.selection, TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS);
-  assert.deepEqual(naComment.targets, [2, 4, 7]);
-
-  const gepland = selectTargets({ eventName: 'schedule', workflowRun: undefined, openPullRequests: open });
-  assert.equal(gepland.outcome, TARGET_OUTCOME.MEASURE);
-  assert.deepEqual(gepland.targets, [2, 4, 7]);
-
-  // Geen open PR's is een geldige lege ronde, geen fout.
-  const leeg = selectTargets({ eventName: 'schedule', openPullRequests: [] });
-  assert.equal(leeg.outcome, TARGET_OUTCOME.MEASURE);
-  assert.deepEqual(leeg.targets, []);
-});
-
-test('S4b. NEGATIEVE MUTATIE: de teruggezette hintversmalling verliest een invalidatie', () => {
-  // Het gemeten scenario uit de bevinding, nagespeeld op de module. PR 74 (het receipt is zojuist
-  // verwijderd) en PR 75 staan open; de overlevende writerrun is aan PR 75 gebonden. De mutant — de
-  // OUDE versmalling, terug in de code — meet alleen PR 75 en laat de head van PR 74 dus ongemoeid.
-  // De echte module invalideert er twee.
-  const bron = readFileSync(SELECTOR, 'utf8');
-  const anker = '  const targets = [...new Set(open.map((pr) => pr.number))].sort((a, b) => a - b);';
-  assert.equal(bron.split(anker).length - 1, 1, 'het mutatieanker moet precies één keer voorkomen');
-
-  const oudeVersmalling = [
-    '  const hint = workflowRun;',
-    '  if (hint) {',
-    "    const bySha = open.filter((pr) => pr.headSha !== '' && pr.headSha === hint.head_sha);",
-    '    if (bySha.length === 1) {',
-    '      return {',
-    '        outcome: TARGET_OUTCOME.MEASURE,',
-    '        selection: TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS,',
-    '        targets: [bySha[0].number],',
-    "        heads: [{ number: bySha[0].number, headSha: bySha[0].headSha }],",
-    '        batch: [bySha[0].number],',
-    '        batchIndex: 0, batchCount: 1, batchRotated: false,',
-    '      };',
-    '    }',
-    '  }',
-    anker,
-  ].join('\n');
-  const collect = pathToFileURL(resolve('scripts/autocoding/collect-shield-input.mjs')).href;
-  const mutant = bron
-    .replace(anker, oudeVersmalling)
-    .replace("'./collect-shield-input.mjs'", JSON.stringify(collect));
-  assert.notEqual(mutant, bron, 'de mutatie moet daadwerkelijk zijn aangebracht');
-
-  const dir = mkdtempSync(join(tmpdir(), 'live-gate-hint-mutant-'));
-  const pad = join(dir, 'select-live-gate-targets.hint.mjs');
-  writeFileSync(pad, mutant);
-  return import(pathToFileURL(pad).href).then((gemuteerd) => {
-    const open = [openPr(74), openPr(75)];
-    const aanleiding = {
-      eventName: 'workflow_run',
-      workflowRun: shieldRun({ event: 'pull_request_review', head_sha: sha(75), head_branch: 'branch-75' }),
-      openPullRequests: open,
-    };
-
-    const mutantRonde = gemuteerd.selectTargets(aanleiding);
-    assert.deepEqual(mutantRonde.targets, [75], 'de mutant versmalt op zijn eigen hint');
-    assert.deepEqual(
-      mutantRonde.heads.map((h) => h.number),
-      [75],
-      'de head van PR 74 wordt door de mutant nooit geïnvalideerd: diens success blijft staan',
-    );
-
-    const echt = selectTargets(aanleiding);
-    assert.deepEqual(echt.targets, [74, 75]);
-    assert.deepEqual(echt.heads.map((h) => h.number), [74, 75],
-      'de echte module invalideert ook de head van de geannuleerde aanleiding');
-  });
-});
-
-test('S5. de volledige ronde kent geen bovengrens en truncateert nooit stilzwijgend', () => {
-  // De oude `OPEN_PULL_REQUEST_LIMIT = 25` maakte van te veel open PR's een weigering: nul
-  // gepubliceerde statussen. Een eerder groene head bleef daardoor groen terwijl het bewijs eronder
-  // al was weggehaald — precies de toestand die deze poort moet uitsluiten. 26 en 100 open PR's
-  // moeten dus allemaal, volledig en deterministisch, in de ronde belanden.
-  for (const aantal of [26, 100]) {
-    const veel = Array.from({ length: aantal }, (_, i) => openPr(i + 1));
-    const ronde = selectTargets({ eventName: 'schedule', openPullRequests: veel });
-    assert.equal(ronde.outcome, TARGET_OUTCOME.MEASURE, String(aantal));
-    assert.equal(ronde.selection, TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS, String(aantal));
-    assert.equal(ronde.targets.length, aantal, `${aantal} open PR's leveren ${aantal} doelen`);
-    assert.deepEqual(
-      ronde.targets,
-      Array.from({ length: aantal }, (_, i) => i + 1),
-      'oplopend gesorteerd, dus dezelfde lijst bij dezelfde momentopname',
-    );
-    // Dezelfde invoer in een andere volgorde geeft dezelfde ronde: deterministisch, niet API-volgorde.
-    const omgekeerd = selectTargets({ eventName: 'schedule', openPullRequests: [...veel].reverse() });
-    assert.deepEqual(omgekeerd.targets, ronde.targets, 'volgorde van de API bepaalt de ronde niet');
-  }
-
-  // Ook via de echte `--paginate --slurp`-vorm (een array van pagina's van 100) blijft de ronde heel.
-  const paginas = [
-    Array.from({ length: 100 }, (_, i) => openPr(i + 1)),
-    Array.from({ length: 26 }, (_, i) => openPr(i + 101)),
-  ];
-  const gepagineerd = selectTargets({ eventName: 'schedule', openPullRequests: paginas });
-  assert.equal(gepagineerd.targets.length, 126, 'geen pagina wordt stilzwijgend weggelaten');
-  assert.equal(gepagineerd.targets.at(-1), 126);
-
-  // `--paginate` kan een PR twee keer opleveren als de lijst tussen twee pagina's verschuift. Dat
-  // ontdubbelt deterministisch en haalt nooit een NUMMER uit de ronde.
-  const metDubbel = selectTargets({
-    eventName: 'schedule',
-    openPullRequests: [[openPr(30), openPr(31)], [openPr(31), openPr(32)]],
-  });
-  assert.deepEqual(metDubbel.targets, [30, 31, 32]);
-
-  // De 126 heads gaan ALLEMAAL de invalidatieronde in; alleen de MEETbatch is begrensd.
-  assert.equal(gepagineerd.heads.length, 126, 'iedere open head wordt geïnvalideerd');
-  assert.equal(gepagineerd.batch.length, EVALUATION_BATCH_LIMIT);
-
-  // Er bestaat geen weigeringsgrond meer die op de LENGTE van de lijst slaat.
-  assert.deepEqual(
-    Object.keys(TARGET_REASON).filter((k) => /LIMIT/.test(k)),
-    [],
-    'een limietweigering zou weer nul statussen publiceren',
-  );
-  // De constante mag ook niet als dode code terugkeren. De moduledoc mag hem uitleggen, dus wordt
-  // hier de CODE getoetst en niet het commentaar.
-  const code = readFileSync(SELECTOR, 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^\s*\/\/.*$/gm, '');
-  assert.doesNotMatch(code, /OPEN_PULL_REQUEST_LIMIT/, 'geen limietconstante in de code');
-
-  // `EVALUATION_BATCH_LIMIT` is wél een limiet, maar een andere soort: hij begrenst hoeveel PR's
-  // deze run DOORMEET, nooit hoeveel er in de ronde zitten. Dat verschil wordt gemeten, niet
-  // beloofd — bij elke lengte blijven `targets` en `heads` compleet.
-  for (const aantal of [1, 99, 100, 101, 126, 250]) {
-    const veel = Array.from({ length: aantal }, (_, i) => openPr(i + 1));
-    const ronde = selectTargets({ eventName: 'schedule', openPullRequests: veel, runNumber: 1 });
-    assert.equal(ronde.outcome, TARGET_OUTCOME.MEASURE, String(aantal));
-    assert.equal(ronde.targets.length, aantal, `${aantal}: de ronde blijft compleet`);
-    assert.equal(ronde.heads.length, aantal, `${aantal}: iedere head wordt geïnvalideerd`);
-    assert.ok(ronde.batch.length <= EVALUATION_BATCH_LIMIT, `${aantal}: de meetbatch is begrensd`);
-  }
-});
-
-test('S5b. negatieve mutatie: de teruggezette limietweigering laat 26 open PR\'s zonder status', async () => {
-  // Bewijs dat S5 de regressie werkelijk vangt: hier wordt de OUDE weigering terug in de module
-  // gemonteerd en wordt gemeten dat die mutant zich fout gedraagt. Slaat het inbouwen niet aan, dan
-  // faalt deze test ook — dan is de mutatie geen bewijs meer.
-  const bron = readFileSync(SELECTOR, 'utf8');
-  const anker = '  const targets = [...new Set(open.map((pr) => pr.number))].sort((a, b) => a - b);';
-  assert.equal(bron.split(anker).length - 1, 1, 'het mutatieanker moet precies één keer voorkomen');
-
-  const oudeWeigering = [
-    '  if (open.length > 25) {',
-    "    return { outcome: TARGET_OUTCOME.FAIL, reason: 'OPEN_PULL_REQUEST_LIMIT_EXCEEDED', targets: [] };",
-    '  }',
-    anker,
-  ].join('\n');
-  const collect = pathToFileURL(resolve('scripts/autocoding/collect-shield-input.mjs')).href;
-  const mutant = bron
-    .replace(anker, oudeWeigering)
-    .replace("'./collect-shield-input.mjs'", JSON.stringify(collect));
-  assert.notEqual(mutant, bron, 'de mutatie moet daadwerkelijk zijn aangebracht');
-
-  const dir = mkdtempSync(join(tmpdir(), 'live-gate-mutant-'));
-  const pad = join(dir, 'select-live-gate-targets.mutant.mjs');
-  writeFileSync(pad, mutant);
-  const gemuteerd = await import(pathToFileURL(pad).href);
-
-  const veel = Array.from({ length: 26 }, (_, i) => openPr(i + 1));
-  const mutantRonde = gemuteerd.selectTargets({ eventName: 'schedule', openPullRequests: veel });
-  assert.equal(mutantRonde.outcome, TARGET_OUTCOME.FAIL, 'de mutant weigert de ronde');
-  assert.deepEqual(mutantRonde.targets, [], 'de mutant publiceert nul statussen en laat groen staan');
-
-  // Dezelfde invoer door de echte module: alle 26 worden hermeten.
-  const echt = selectTargets({ eventName: 'schedule', openPullRequests: veel });
-  assert.equal(echt.outcome, TARGET_OUTCOME.MEASURE);
-  assert.equal(echt.targets.length, 26);
-});
-
-test('S6. een onbruikbare PR-lijst is nooit een lege ronde', () => {
-  // `gh api --paginate --slurp` levert een array van pagina\'s; die vorm moet gewoon werken.
-  assert.deepEqual(
-    normaliseOpenPullRequests([[openPr(2)], [openPr(3)]]).map((p) => p.number),
-    [2, 3],
-  );
-  // Eén vermelding zonder bruikbaar nummer maakt de HELE lijst onbruikbaar: stil overslaan zou een
-  // PR voor altijd zonder status laten.
-  for (const kapot of [[{}], [{ number: 0 }], [{ number: '2' }], [null], ['2'], [42]]) {
-    assert.equal(normaliseOpenPullRequests(kapot), null, JSON.stringify(kapot));
-  }
-  assert.deepEqual(normaliseOpenPullRequests(null), []);
-
-  const result = selectTargets({ eventName: 'schedule', openPullRequests: [{ nummer: 2 }] });
-  assert.equal(result.outcome, TARGET_OUTCOME.FAIL);
-  assert.equal(result.reason, TARGET_REASON.OPEN_PULL_REQUESTS_UNREADABLE);
-
-  // Een ontbrekende head blokkeert de PR niet: de head wordt toch opnieuw via de API gemeten.
-  const zonderHead = selectTargets({ eventName: 'schedule', openPullRequests: [{ number: 5 }] });
-  assert.deepEqual(zonderHead.targets, [5]);
-});
-
-// --- CLI ----------------------------------------------------------------------------------------
-
-test('S7. de CLI leest zijn argumenten fail-closed en vertaalt uitkomsten naar exitcodes', () => {
-  const goed = ['--event-name', 'schedule', '--event', 'e.json', '--open-pulls', 'o.json',
-    '--run-number', '7', '--out-heads', 'h.txt', '--out', 't.txt'];
-  assert.equal(parseTargetArgs(goed).ok, true);
-  assert.equal(parseTargetArgs([...goed, '--onbekend', 'x']).ok, false);
-  assert.equal(parseTargetArgs([...goed, '--out', 'tweede.txt']).ok, false);
-  assert.equal(parseTargetArgs(goed.slice(0, 8)).ok, false, 'een ontbrekende sleutel is een weigering');
-  assert.equal(parseTargetArgs(['--event-name', '--event']).ok, false, 'een sleutel als waarde telt niet');
-  assert.equal(parseTargetArgs(['--event-name', '']).ok, false);
-
-  const files = new Map([
-    ['e.json', JSON.stringify({ workflow_run: shieldRun() })],
-    ['o.json', JSON.stringify([openPr(2), openPr(3)])],
-  ]);
-  const written = new Map();
-  const io = {
-    readFile: (path) => {
-      if (!files.has(path)) throw new Error('ENOENT');
-      return files.get(path);
-    },
-    writeFile: (path, data) => written.set(path, data),
-  };
-
-  const argv = ['--event-name', 'workflow_run', '--event', 'e.json', '--open-pulls', 'o.json',
-    '--run-number', '7', '--out-heads', 'h.txt', '--out', 't.txt'];
-  assert.equal(runSelect(argv, io), 0);
-  // De hint wees op PR 2; de ronde bevat er twee, en beide heads gaan de invalidatie in.
-  assert.equal(written.get('t.txt'), '2\n3\n');
-  assert.equal(written.get('h.txt'), `2 ${sha(2)}\n3 ${sha(3)}\n`);
-
-  // Een PR waarvan de LIJST geen bruikbare head gaf, krijgt `-`. De workflow maakt dat record rood
-  // in plaats van het stil over te slaan: zo'n head kan niet geïnvalideerd worden.
-  files.set('o.json', JSON.stringify([{ number: 5 }]));
-  written.clear();
-  assert.equal(runSelect(argv, io), 0);
-  assert.equal(written.get('h.txt'), '5 -\n');
-  assert.equal(written.get('t.txt'), '5\n');
-
-  // Onverwachte bron: rc 2 (niets publiceren, geen rode run) en geen doelbestand.
-  files.set('e.json', JSON.stringify({ workflow_run: shieldRun({ name: 'publish' }) }));
-  files.set('o.json', JSON.stringify([openPr(2), openPr(3)]));
-  written.clear();
-  assert.equal(runSelect(argv, io), 2);
-  assert.equal(written.size, 0);
-
-  // Onleesbare invoer en kapotte argumenten zijn rc 1.
-  files.delete('o.json');
-  assert.equal(runSelect(argv, io), 1);
-  assert.equal(runSelect(['--event-name'], io), 1);
-});
-
-test('S7b. het run-nummer roteert de batch en weigert de ronde nooit', () => {
-  // De rotatie is SCHEDULING, geen poort: alle heads staan na de invalidatieronde al op `pending`,
-  // dus kan een onbruikbaar run-nummer hooguit een uitspraak uitstellen. De ronde weigeren zou juist
-  // gevaarlijk zijn — dan wordt er niets geïnvalideerd en blijft elke oude `success` staan.
-  assert.equal(parseRunNumber('1'), 1);
-  assert.equal(parseRunNumber('4211'), 4211);
-  for (const kapot of ['', '0', '-3', '2.5', 'zeven', ' 7', '7 ', undefined, null, 7]) {
-    assert.equal(parseRunNumber(kapot), null, JSON.stringify(kapot));
-  }
-
-  const nummers = Array.from({ length: 126 }, (_, i) => i + 1);
-  assert.deepEqual(
-    selectEvaluationBatch(nummers, 1),
-    { batch: nummers.slice(0, 100), index: 0, count: 2, rotated: true },
-  );
-  assert.deepEqual(selectEvaluationBatch(nummers, 2).batch, nummers.slice(100));
-  assert.deepEqual(selectEvaluationBatch(nummers, 3).batch, nummers.slice(0, 100), 'runnummer 3 begint opnieuw');
-
-  // Elke open PR komt binnen `count` opeenvolgende runs aan de beurt — hier dus binnen twee.
-  for (const aantal of [101, 126, 250, 401]) {
-    const lijst = Array.from({ length: aantal }, (_, i) => i + 1);
-    const eerste = selectEvaluationBatch(lijst, 1);
-    const gezien = new Set();
-    for (let run = 1; run <= eerste.count; run += 1) {
-      for (const nummer of selectEvaluationBatch(lijst, run).batch) gezien.add(nummer);
-    }
-    assert.deepEqual([...gezien].sort((a, b) => a - b), lijst,
-      `${aantal} PR's zijn binnen ${eerste.count} runs allemaal geëvalueerd`);
-  }
-  // En dat blijft gelden vanaf een willekeurig run-nummer, niet alleen vanaf 1.
-  const lijst = Array.from({ length: 126 }, (_, i) => i + 1);
-  const vanaf = new Set();
-  for (let run = 4210; run < 4212; run += 1) {
-    for (const nummer of selectEvaluationBatch(lijst, run).batch) vanaf.add(nummer);
-  }
-  assert.equal(vanaf.size, 126);
-
-  // Een onbruikbaar run-nummer valt terug op blok 0 en laat de ronde en de invalidatie heel.
-  const ronde = selectTargets({
-    eventName: 'schedule',
-    openPullRequests: Array.from({ length: 126 }, (_, i) => openPr(i + 1)),
-    runNumber: null,
-  });
-  assert.equal(ronde.outcome, TARGET_OUTCOME.MEASURE, 'nooit een weigering');
-  assert.equal(ronde.heads.length, 126, 'alle heads worden alsnog geïnvalideerd');
-  assert.equal(ronde.batchRotated, false);
-  assert.deepEqual(ronde.batch, ronde.targets.slice(0, 100));
-});
-
-test('S7c. een verschoven head levert TWEE invalidaties op, en de PR blijft één doel', () => {
-  // `--paginate` kan dezelfde PR met twee verschillende heads opleveren als de lijst tussen twee
-  // pagina's verschuift. Op allebei die heads kan een oude `success` staan, dus worden ze allebei
-  // geïnvalideerd; voor de meting telt de PR daarna gewoon één keer.
-  const ronde = selectTargets({
-    eventName: 'schedule',
-    openPullRequests: [
-      [openPr(30, { headSha: sha(1) }), openPr(31)],
-      [openPr(30, { headSha: sha(2) }), openPr(31)],
-    ],
-  });
-  assert.deepEqual(ronde.targets, [30, 31], 'de PR blijft één doel');
-  assert.deepEqual(
-    ronde.heads,
-    [{ number: 30, headSha: sha(1) }, { number: 30, headSha: sha(2) }, { number: 31, headSha: sha(31) }],
-    'beide heads van PR 30 worden geïnvalideerd',
-  );
-  // Een identieke herhaling levert géén tweede invalidatie op: dat zou alleen budget kosten.
-  const zelfde = selectTargets({
-    eventName: 'schedule',
-    openPullRequests: [[openPr(30)], [openPr(30)]],
-  });
-  assert.deepEqual(zelfde.heads, [{ number: 30, headSha: sha(30) }]);
-});
-
-// --- De ronde zelf ------------------------------------------------------------------------------
-
-/** Snijdt het `run:`-blok van een stap uit het workflowbestand en haalt de inspringing eraf. */
-function stepScript(workflowPath, stepName) {
-  const lines = readFileSync(workflowPath, 'utf8').split('\n');
+/** Snijdt het `run:`-blok van een stap uit workflowTEKST en haalt de inspringing eraf. */
+function stapScript(text, stepName) {
+  const lines = text.split('\n');
   const start = lines.findIndex((l) => l.trim() === `- name: ${stepName}`);
   assert.ok(start !== -1, `stap ontbreekt: ${stepName}`);
   const runIndex = lines.findIndex((l, i) => i > start && l.trim() === 'run: |');
@@ -487,830 +82,885 @@ function stepScript(workflowPath, stepName) {
   return body.join('\n');
 }
 
-test('S7d. een onbruikbare batchlimiet valt terug op de canonieke limiet, nooit op Infinity', () => {
-  // Een niet positief-gehele limiet was een STILLE lege ronde: `Math.ceil(126 / 0)` is `Infinity`,
-  // dus `(runNumber - 1) % count` is `NaN` en `slice(NaN, NaN)` levert een lege batch. De run
-  // invalideerde dan alle 126 heads en mat er vervolgens nul — iedereen bleef op `pending` staan.
-  const lijst = Array.from({ length: 126 }, (_, i) => i + 1);
-  const canoniek = selectEvaluationBatch(lijst, 1, EVALUATION_BATCH_LIMIT);
-  assert.equal(canoniek.count, 2);
-  assert.equal(canoniek.batch.length, 100);
+/** Zet een uitvoerbare stub op `PATH`. */
+function stub(bin, name, body) {
+  const path = join(bin, name);
+  writeFileSync(path, `#!/usr/bin/env bash\n${body}\n`);
+  chmodSync(path, 0o755);
+}
 
-  const onbruikbaar = [
-    0, -1, -100, 2.5, 0.5, -0.5, Number.NaN, Infinity, -Infinity,
-    null, undefined, '100', '', 'honderd', true, false, {}, [], [100], () => 100,
-  ];
-  for (const limiet of onbruikbaar) {
-    const uitkomst = selectEvaluationBatch(lijst, 1, limiet);
-    const naam = `limiet ${String(limiet)}`;
-    assert.deepEqual(uitkomst, canoniek, naam);
-    assert.ok(Number.isInteger(uitkomst.count) && uitkomst.count > 0, `${naam}: eindig aantal blokken`);
-    assert.ok(Number.isInteger(uitkomst.index) && uitkomst.index >= 0, `${naam}: eindige index`);
-    assert.ok(uitkomst.batch.length > 0, `${naam}: nooit een lege meting op een niet-lege lijst`);
-
-    // De dekkingsgarantie mag niet van de aanroeper afhangen: iedere PR komt binnen `count` runs
-    // alsnog aan de beurt, ook als de limiet onzin was.
-    const gezien = new Set();
-    for (let run = 1; run <= uitkomst.count; run += 1) {
-      for (const nummer of selectEvaluationBatch(lijst, run, limiet).batch) gezien.add(nummer);
-    }
-    assert.deepEqual([...gezien].sort((a, b) => a - b), lijst, `${naam}: volledige dekking`);
-  }
-
-  // Een lijst KORTER dan de canonieke limiet mag door een kapotte limiet evenmin worden afgekapt.
-  for (const limiet of [0, -1, 2.5, 'honderd']) {
-    assert.deepEqual(
-      selectEvaluationBatch([7, 8, 9], 1, limiet),
-      { batch: [7, 8, 9], index: 0, count: 1, rotated: false },
-      `korte lijst bij limiet ${String(limiet)}`,
-    );
-  }
-
-  // En de grens is niet te ruim: een geldige eigen limiet blijft gewoon gelden.
-  const eigen = selectEvaluationBatch(lijst, 1, 50);
-  assert.equal(eigen.count, 3);
-  assert.deepEqual(eigen.batch, lijst.slice(0, 50));
-  assert.deepEqual(selectEvaluationBatch(lijst, 3, 50).batch, lijst.slice(100));
-
-  // Ook via `selectTargets`, want daar komt de limiet binnen als parameter: de ronde blijft volledig
-  // geïnvalideerd én meet een niet-lege batch.
-  for (const batchLimit of [0, -5, 3.7, 'honderd', null]) {
-    const ronde = selectTargets({
-      eventName: 'schedule',
-      openPullRequests: Array.from({ length: 126 }, (_, i) => openPr(i + 1)),
-      runNumber: 1,
-      batchLimit,
-    });
-    const naam = `selectTargets bij batchLimit ${String(batchLimit)}`;
-    assert.equal(ronde.outcome, TARGET_OUTCOME.MEASURE, naam);
-    assert.equal(ronde.heads.length, 126, `${naam}: alle heads geïnvalideerd`);
-    assert.equal(ronde.batchCount, 2, naam);
-    assert.deepEqual(ronde.batch, ronde.targets.slice(0, EVALUATION_BATCH_LIMIT), naam);
-  }
-});
-
-test('S8. een kapotte PR maakt de ronde rood maar stopt hem niet', () => {
-  // Dit voert de ECHTE shell uit het workflowbestand uit, met gestubde `gh`, `node` en `sleep`.
-  // PR 11 levert geen head op (record-lokale fout), PR 12 publiceert een `failure`, PR 13 een
-  // `success`. De eis: 12 en 13 worden alsnog gemeten en gepubliceerd, en de ronde eindigt rood.
-  const script = stepScript(TRUSTED_WRITER, 'Meet, beslis en publiceer per doel-PR');
-  const dir = mkdtempSync(join(tmpdir(), 'live-gate-round-'));
+/** Een verse werkmap met een `bin/` voor stubs en een `runner/` als `RUNNER_TEMP`. */
+function werkmap(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
   const bin = join(dir, 'bin');
   const runnerTemp = join(dir, 'runner');
   mkdirSync(bin);
   mkdirSync(runnerTemp);
-  writeFileSync(join(runnerTemp, 'targets.txt'), '11\n12\n13\n');
-  writeFileSync(join(dir, 'ronde.sh'), script);
+  return { dir, bin, runnerTemp };
+}
 
-  const stub = (name, body) => {
-    const path = join(bin, name);
-    writeFileSync(path, `#!/usr/bin/env bash\n${body}\n`);
-    chmodSync(path, 0o755);
+/** Draait een stapscript in echte bash en levert exitcode plus uitvoer. */
+function draaiStap(script, { dir, bin, env }) {
+  const pad = join(dir, 'stap.sh');
+  writeFileSync(pad, script);
+  try {
+    const stdout = execFileSync('bash', [pad], {
+      env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, ...env },
+      stdio: 'pipe',
+      encoding: 'utf8',
+    });
+    return { status: 0, stdout };
+  } catch (error) {
+    return { status: error.status, stdout: String(error.stdout ?? '') };
+  }
+}
+
+/** Eén regel uit de selector terugdraaien en de MUTANT importeren. */
+function mutantVanDeSelector(naam, oud, nieuw) {
+  const bron = readFileSync(SELECTOR, 'utf8');
+  assert.equal(bron.split(oud).length - 1, 1, 'het mutatieanker moet precies één keer voorkomen');
+  const dir = mkdtempSync(join(tmpdir(), `select-targets-${naam}-`));
+  const pad = join(dir, `select-live-gate-targets.${naam}.mjs`);
+  // De mutant leeft buiten de repository, dus moeten zijn imports absoluut worden.
+  writeFileSync(pad, bron.replace(oud, nieuw).replace(
+    "from './collect-shield-input.mjs'",
+    `from ${JSON.stringify(pathToFileURL('scripts/autocoding/collect-shield-input.mjs').href)}`,
+  ));
+  return import(pathToFileURL(pad).href);
+}
+
+// --- Bronbegrenzing -----------------------------------------------------------------------------
+
+test('S1. alleen de verwachte shieldrun op het verwachte pad en bronevent telt als aanleiding', () => {
+  for (const event of EXPECTED_SOURCE.events) {
+    assert.equal(isTrustedWorkflowRunSource(shieldRun({ event })), true, event);
+  }
+  // Naam, pad en bronevent moeten alle drie kloppen. Een PR kan een NIEUW workflowbestand toevoegen
+  // met dezelfde naam op een ander pad; die mag de writer nooit kunnen starten.
+  assert.equal(isTrustedWorkflowRunSource(shieldRun({ name: 'anders' })), false);
+  assert.equal(isTrustedWorkflowRunSource(shieldRun({ path: '.github/workflows/kopie.yml' })), false);
+  for (const event of ['push', 'workflow_dispatch', 'schedule', 'issue_comment', '']) {
+    assert.equal(isTrustedWorkflowRunSource(shieldRun({ event })), false, event);
+  }
+  for (const stuk of [null, undefined, 'autocoding-shield', 42, [], [shieldRun()]]) {
+    assert.equal(isTrustedWorkflowRunSource(stuk), false, String(stuk));
+  }
+
+  // `issue_comment` staat bewust NIET in de bronlijst: dat event verwerkt de writer zelf, direct
+  // vanaf de default branch. Zou het hier óók staan, dan werd één comment twee keer gedispatcht.
+  assert.ok(!EXPECTED_SOURCE.events.includes('issue_comment'));
+  assert.deepEqual([...EXPECTED_SOURCE.events],
+    ['pull_request', 'pull_request_review', 'pull_request_review_comment']);
+});
+
+test('S2. een onvertrouwde bron publiceert niets en is geen fout van deze poort', () => {
+  const uitkomst = selectTargets({
+    eventName: 'workflow_run',
+    event: { workflow_run: shieldRun({ name: 'iets-anders' }) },
+    openPullRequests: [openPr(74), openPr(75)],
+  });
+  assert.equal(uitkomst.outcome, TARGET_OUTCOME.NO_OP);
+  assert.equal(uitkomst.reason, TARGET_REASON.SOURCE_NOT_TRUSTED);
+  assert.deepEqual(uitkomst.targets, []);
+
+  // Een vierde eventsoort is wél een defect: bestand en script zijn dan uit elkaar gelopen.
+  for (const eventName of ['pull_request', 'push', 'workflow_dispatch', '', undefined]) {
+    const vreemd = selectTargets({ eventName, event: {}, openPullRequests: [] });
+    assert.equal(vreemd.outcome, TARGET_OUTCOME.FAIL, String(eventName));
+    assert.equal(vreemd.reason, TARGET_REASON.EVENT_NOT_SUPPORTED, String(eventName));
+  }
+});
+
+// --- Eventselectie: precies één pull request ----------------------------------------------------
+
+test('S3. een issue_comment selecteert exact de PR uit zijn eigen payload, en verder niets', () => {
+  const uitkomst = selectTargets({
+    eventName: 'issue_comment',
+    event: commentOpPr(74),
+    openPullRequests: Array.from({ length: 126 }, (_, i) => openPr(i + 1)),
+  });
+  assert.equal(uitkomst.outcome, TARGET_OUTCOME.MEASURE);
+  assert.equal(uitkomst.selection, TARGET_SELECTION.EVENT_PULL_REQUEST);
+  assert.deepEqual(uitkomst.targets, [74], 'exact één doel: PR 74');
+  assert.equal(uitkomst.targets.length, EVENT_TARGET_LIMIT);
+  assert.equal(uitkomst.slot, null, 'een event roteert niet');
+
+  // Een comment op een gewoon ISSUE wijst geen PR aan. `issue.pull_request` is het veld waarmee
+  // GitHub dat onderscheid maakt; zonder dat veld is er niets te meten en is stil zwijgen juist.
+  for (const payload of [
+    { issue: { number: 74 } },
+    { issue: { number: 74, pull_request: null } },
+    { issue: { number: 0, pull_request: {} } },
+    { issue: { number: -3, pull_request: {} } },
+    { issue: { number: '74', pull_request: {} } },
+    { issue: null },
+    {},
+  ]) {
+    assert.equal(issueCommentTarget(payload), null, JSON.stringify(payload));
+    const stil = selectTargets({ eventName: 'issue_comment', event: payload, openPullRequests: [] });
+    assert.equal(stil.outcome, TARGET_OUTCOME.NO_OP);
+    assert.equal(stil.reason, TARGET_REASON.EVENT_ASSOCIATION_EMPTY);
+    assert.deepEqual(stil.targets, []);
+  }
+});
+
+test('S4. een workflow_run selecteert exact één PR; meer dan één associatie is ambigu', () => {
+  const enkel = selectTargets({
+    eventName: 'workflow_run',
+    event: { workflow_run: shieldRun({ pull_requests: [{ number: 74 }] }) },
+    openPullRequests: Array.from({ length: 126 }, (_, i) => openPr(i + 1)),
+  });
+  assert.deepEqual(enkel.targets, [74]);
+  assert.equal(enkel.selection, TARGET_SELECTION.EVENT_PULL_REQUEST);
+
+  // Twee associaties: gokken zou óf te veel meten óf de verkeerde PR meten. De schedule vangt dit
+  // binnen één slot alsnog op, dus is stil zwijgen hier de goedkope én juiste uitkomst.
+  const ambigu = selectTargets({
+    eventName: 'workflow_run',
+    event: { workflow_run: shieldRun({ pull_requests: [{ number: 74 }, { number: 75 }] }) },
+    openPullRequests: [],
+  });
+  assert.equal(ambigu.outcome, TARGET_OUTCOME.NO_OP);
+  assert.equal(ambigu.reason, TARGET_REASON.EVENT_ASSOCIATION_AMBIGUOUS);
+  assert.deepEqual(ambigu.targets, []);
+
+  // Eén onbruikbare vermelding maakt de HELE lijst onbruikbaar. Bij een gedeeltelijk leesbare lijst
+  // is niet bekend welke associatie er nog meer had moeten staan, dus mag er niets uit gekozen.
+  assert.equal(workflowRunTargets({ pull_requests: [{ number: 74 }, { number: 'x' }] }), null);
+  assert.equal(workflowRunTargets({ pull_requests: [{ number: 74 }, null] }), null);
+  assert.equal(workflowRunTargets({ pull_requests: 'geen lijst' }), null);
+  assert.deepEqual(workflowRunTargets({ pull_requests: [{ number: 75 }, { number: 74 }, { number: 74 }] }), [74, 75]);
+
+  for (const lijst of [[], null, undefined, [{ number: 0 }]]) {
+    const leeg = selectTargets({
+      eventName: 'workflow_run',
+      event: { workflow_run: shieldRun({ pull_requests: lijst }) },
+      openPullRequests: [],
+    });
+    assert.equal(leeg.outcome, TARGET_OUTCOME.NO_OP, JSON.stringify(lijst));
+    assert.equal(leeg.reason, TARGET_REASON.EVENT_ASSOCIATION_EMPTY, JSON.stringify(lijst));
+  }
+});
+
+test('S5. een eventaanleiding is NOOIT een volledige sweep, hoeveel PR\'s er ook open staan', () => {
+  // Dit is bevinding `3834885350` als eigenschap: de open-PR-lijst mag de uitkomst van een event
+  // niet kunnen vergroten. Bij 126 open PR's blijft het doel er precies één, en dat doel hangt
+  // uitsluitend aan de door GITHUB gevulde eventpayload.
+  const open = Array.from({ length: 126 }, (_, i) => openPr(i + 1));
+  for (const [naam, invoer] of [
+    ['issue_comment', { eventName: 'issue_comment', event: commentOpPr(74) }],
+    ['workflow_run', { eventName: 'workflow_run', event: { workflow_run: shieldRun() } }],
+  ]) {
+    const met = selectTargets({ ...invoer, openPullRequests: open });
+    const zonder = selectTargets({ ...invoer, openPullRequests: [] });
+    assert.deepEqual(met.targets, [74], naam);
+    assert.deepEqual(met.targets, zonder.targets, `${naam}: de open lijst verandert niets`);
+    assert.ok(met.targets.length <= EVENT_TARGET_LIMIT, naam);
+    // En de selectievorm van de globale sweep bestaat niet meer.
+    assert.equal(met.selection, TARGET_SELECTION.EVENT_PULL_REQUEST, naam);
+  }
+  assert.deepEqual(Object.keys(TARGET_SELECTION), ['EVENT_PULL_REQUEST', 'SCHEDULE_SLOT_BUCKET']);
+  assert.equal(TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS, undefined);
+});
+
+test('S5b. NEGATIEVE MUTATIE: een event dat tóch de hele lijst pakt, blaast de budgetgrens op', async () => {
+  // De regel uit S5 is pas bewezen als de OUDE vorm er aantoonbaar op stukloopt. De mutant laat een
+  // eventaanleiding weer alle open PR's meten; dat is precies de vorm die 126 heads invalideerde.
+  const gemuteerd = await mutantVanDeSelector(
+    'globale-sweep',
+    `      selection: TARGET_SELECTION.EVENT_PULL_REQUEST,
+      targets: candidates,`,
+    `      selection: TARGET_SELECTION.EVENT_PULL_REQUEST,
+      targets: normaliseOpenPullRequests(openPullRequests) ?? candidates,`,
+  );
+
+  const open = Array.from({ length: 126 }, (_, i) => openPr(i + 1));
+  const invoer = { eventName: 'issue_comment', event: commentOpPr(74), openPullRequests: open };
+
+  const sweep = gemuteerd.selectTargets(invoer);
+  assert.equal(sweep.targets.length, 126, 'de mutant meet de hele lijst');
+  const kosten = SELECTION_REQUEST_BUDGET + (sweep.targets.length * PER_PULL_REQUEST_REQUEST_BUDGET);
+  assert.ok(kosten > SHARED_HOURLY_REQUEST_QUOTA,
+    `de mutant kost ${kosten} verzoeken en overschrijdt het gedeelde uurquotum`);
+
+  // De echte selector blijft bij één doel en ruim binnen het budget.
+  assert.deepEqual(selectTargets(invoer).targets, [74]);
+  assert.ok(EVENT_REQUEST_BUDGET < SHARED_HOURLY_REQUEST_QUOTA - QUOTA_RESERVE);
+});
+
+// --- Scheduleselectie: een eindig, eerlijk roterend blok -----------------------------------------
+
+test('S6. de schedulebucket is hoogstens 25 en dekt alle 126 PR\'s over opeenvolgende tijdslots', () => {
+  const open = Array.from({ length: 126 }, (_, i) => openPr(i + 1));
+  const alleNummers = open.map((pr) => pr.number);
+  const uur = SCHEDULE_SLOT_SECONDS;
+
+  const ronde = (slot) => selectTargets({
+    eventName: 'schedule', event: {}, openPullRequests: open, nowEpochSeconds: slot * uur,
+  });
+
+  const eerste = ronde(0);
+  assert.equal(eerste.outcome, TARGET_OUTCOME.MEASURE);
+  assert.equal(eerste.selection, TARGET_SELECTION.SCHEDULE_SLOT_BUCKET);
+  assert.equal(eerste.bucketCount, Math.ceil(126 / SCHEDULE_BUCKET_LIMIT));
+  assert.equal(eerste.bucketCount, 6);
+
+  // Elke bucket blijft binnen de grens, en `bucketCount` opeenvolgende slots dekken de hele lijst
+  // precies één keer — geen PR dubbel, geen PR overgeslagen.
+  const gezien = [];
+  for (let slot = 0; slot < eerste.bucketCount; slot += 1) {
+    const uitkomst = ronde(slot);
+    assert.ok(uitkomst.targets.length <= SCHEDULE_BUCKET_LIMIT, `slot ${slot}`);
+    assert.ok(uitkomst.targets.length > 0, `slot ${slot}: nooit een lege ronde op een niet-lege lijst`);
+    assert.equal(uitkomst.bucketIndex, slot % eerste.bucketCount, `slot ${slot}`);
+    assert.equal(uitkomst.slot, slot, `slot ${slot}`);
+    gezien.push(...uitkomst.targets);
+  }
+  assert.deepEqual([...gezien].sort((a, b) => a - b), alleNummers, 'volledige dekking');
+  assert.equal(new Set(gezien).size, 126, 'geen enkele PR twee keer in dezelfde ronde');
+
+  // De dekking begint niet per se bij slot 0: welk uur er ook toevallig eerst is, `bucketCount`
+  // opeenvolgende uren daarna is iedereen geweest.
+  for (const start of [1, 5, 471234, 999999]) {
+    const dekking = new Set();
+    for (let i = 0; i < eerste.bucketCount; i += 1) for (const n of ronde(start + i).targets) dekking.add(n);
+    assert.equal(dekking.size, 126, `startslot ${start}`);
+  }
+
+  // Een lijst die korter is dan de limiet wordt niet afgekapt en roteert niet.
+  const kort = selectTargets({
+    eventName: 'schedule', event: {}, openPullRequests: [openPr(7), openPr(8)], nowEpochSeconds: 99 * uur,
+  });
+  assert.deepEqual(kort.targets, [7, 8]);
+  assert.equal(kort.bucketCount, 1);
+  assert.equal(kort.bucketIndex, 0);
+
+  // Geen open PR's is geen fout.
+  const leeg = selectTargets({ eventName: 'schedule', event: {}, openPullRequests: [], nowEpochSeconds: 0 });
+  assert.equal(leeg.outcome, TARGET_OUTCOME.NO_OP);
+  assert.equal(leeg.reason, TARGET_REASON.NO_OPEN_PULL_REQUESTS);
+
+  // Een onleesbare lijst is wél een fout: stil doorgaan zou nul statussen opleveren terwijl een
+  // eerder groene head groen blijft staan.
+  for (const stuk of [[{ number: 'x' }], [null], 'geen lijst', 42]) {
+    const kapot = selectTargets({
+      eventName: 'schedule', event: {}, openPullRequests: stuk, nowEpochSeconds: 0,
+    });
+    assert.equal(kapot.outcome, TARGET_OUTCOME.FAIL, JSON.stringify(stuk));
+    assert.equal(kapot.reason, TARGET_REASON.OPEN_PULL_REQUESTS_UNREADABLE, JSON.stringify(stuk));
+  }
+  assert.equal(normaliseOpenPullRequests([[openPr(2)], [openPr(1)]]).join(), '1,2', 'slurp-pagina\'s');
+});
+
+test('S6b. NEGATIEVE CONTROLE: rotatie op RUN-NUMMER verliest PR\'s, rotatie op TIJDSLOT niet', () => {
+  // Bevinding `3834885354`. Een run-nummer telt RUNS — ook runs die als WACHTENDE run geannuleerd
+  // worden en dus nooit draaien. De runs die wél draaien bezoeken daardoor geen opeenvolgende
+  // residuen. Een tijdslot telt UREN en is onafhankelijk van hoeveel runs er zijn gestart,
+  // geannuleerd of overgeslagen.
+  const nummers = Array.from({ length: 126 }, (_, i) => i + 1);
+  const count = Math.ceil(nummers.length / SCHEDULE_BUCKET_LIMIT);
+
+  /** Precies de oude vorm: het blok volgt uit `github.run_number`. */
+  const runNummerBucket = (runNumber) => {
+    const index = (runNumber - 1) % count;
+    return nummers.slice(index * SCHEDULE_BUCKET_LIMIT, (index * SCHEDULE_BUCKET_LIMIT) + SCHEDULE_BUCKET_LIMIT);
   };
 
-  // `gh api …/pulls/11` faalt altijd; de rest levert bruikbare JSON.
-  stub('gh', [
+  // Zes runs die werkelijk draaien, terwijl er tussendoor wachtende runs zijn geannuleerd. De
+  // run-nummers lopen dan wél door maar niet aaneengesloten: 1, 7, 13, 19, 25, 31.
+  const gedraaideRuns = [1, 7, 13, 19, 25, 31];
+  const viaRunNummer = new Set(gedraaideRuns.flatMap(runNummerBucket));
+  assert.equal(viaRunNummer.size, SCHEDULE_BUCKET_LIMIT,
+    'zes draaiende runs bezoeken zes keer hetzelfde blok en zien maar 25 van de 126 PR\'s');
+  assert.ok(viaRunNummer.size < nummers.length, 'de rest verhongert');
+
+  // Dezelfde zes runs, maar dan met het uur waarin ze draaien als sleutel. De schedule staat op één
+  // keer per uur, dus zijn dat per constructie zes OPEENVOLGENDE slots — hoeveel runs er tussendoor
+  // ook geannuleerd zijn.
+  const startUur = 471234;
+  const viaTijdslot = new Set();
+  for (let i = 0; i < gedraaideRuns.length; i += 1) {
+    const slot = scheduleSlotOf((startUur + i) * SCHEDULE_SLOT_SECONDS);
+    for (const n of selectScheduleBucket(nummers, slot).bucket) viaTijdslot.add(n);
+  }
+  assert.equal(viaTijdslot.size, 126, 'iedere PR komt binnen zes uur aan de beurt');
+  assert.deepEqual([...viaTijdslot].sort((a, b) => a - b), nummers);
+
+  // En het slot hangt aan de klok, niet aan de run: hetzelfde uur geeft hetzelfde blok, ongeacht
+  // welke of hoeveelste run het is.
+  assert.equal(scheduleSlotOf(471234 * 3600), scheduleSlotOf((471234 * 3600) + 3599));
+  assert.equal(scheduleSlotOf(471235 * 3600), scheduleSlotOf(471234 * 3600) + 1);
+});
+
+test('S6c. een onbruikbare klok is ROOD, nooit stilzwijgend altijd blok 0', () => {
+  // Zou een onbruikbare klok op blok 0 terugvallen, dan mat elke ronde dezelfde 25 PR's en kwam de
+  // rest nooit aan de beurt. Dat is starvation met een groene run eromheen, dus wordt het rood.
+  for (const klok of [null, undefined, -1, 1.5, Number.NaN, Infinity, '1000', {}]) {
+    assert.equal(scheduleSlotOf(klok), null, String(klok));
+    const uitkomst = selectTargets({
+      eventName: 'schedule', event: {}, openPullRequests: [openPr(1)], nowEpochSeconds: klok,
+    });
+    assert.equal(uitkomst.outcome, TARGET_OUTCOME.FAIL, String(klok));
+    assert.equal(uitkomst.reason, TARGET_REASON.SCHEDULE_SLOT_UNUSABLE, String(klok));
+    assert.deepEqual(uitkomst.targets, [], String(klok));
+  }
+  assert.equal(scheduleSlotOf(3600, 0), null, 'een slotlengte van nul is geen slotlengte');
+  assert.equal(scheduleSlotOf(3600, -1), null);
+
+  // En een negatief of onleesbaar slot in de bucketkiezer snijdt nooit buiten de lijst: `%` levert
+  // in JavaScript een negatief residu, en `slice` met een negatieve index telt vanaf achteren.
+  const nummers = Array.from({ length: 126 }, (_, i) => i + 1);
+  for (const slot of [-1, -7, -126, null, undefined, Number.NaN, 2.5]) {
+    const uitkomst = selectScheduleBucket(nummers, slot);
+    assert.ok(uitkomst.index >= 0 && uitkomst.index < uitkomst.count, String(slot));
+    assert.ok(uitkomst.bucket.length > 0 && uitkomst.bucket.length <= SCHEDULE_BUCKET_LIMIT, String(slot));
+  }
+
+  // Een onbruikbare limiet valt terug op de canonieke limiet in plaats van op `Infinity`: zou
+  // `count` `Infinity` worden, dan is `slot % Infinity` `NaN` en `slice(NaN, NaN)` leeg — een ronde
+  // die niets meet en dus nooit convergeert.
+  const canoniek = selectScheduleBucket(nummers, 0);
+  for (const limiet of [0, -1, 2.5, Number.NaN, Infinity, null, undefined, '25', {}, []]) {
+    const uitkomst = selectScheduleBucket(nummers, 0, limiet);
+    assert.deepEqual(uitkomst, canoniek, `limiet ${String(limiet)}`);
+    assert.ok(Number.isInteger(uitkomst.count) && uitkomst.count > 0, `limiet ${String(limiet)}`);
+    assert.ok(uitkomst.bucket.length > 0, `limiet ${String(limiet)}`);
+  }
+});
+
+// --- Het gedeelde API-budget --------------------------------------------------------------------
+
+test('S7. de API-bovengrenzen liggen vast en blijven onder het gedeelde uurquotum', () => {
+  // De rekensom staat naast de constanten in de selector; hier wordt hij tegen de WERKELIJKE stap
+  // gehouden, zodat bestand en getal niet uit elkaar kunnen lopen.
+  const stap = stapScript(WRITER_TEKST, SCHRIJF_STAP);
+  const hermetingPogingen = stap.match(/for attempt in ([0-9 ]+); do/)[1].trim().split(/\s+/).length;
+  const publicaties = (stap.match(/publish-live-status\.mjs/g) ?? []).length;
+  // De bewijs-GET's staan in één lus over een vaste lijst `pad:naam`-paren; alleen `head-commit`
+  // is ongepagineerd. Zo volgt het getal uit het BESTAND en niet uit een aanname.
+  const endpoints = stap.match(/for endpoint in \\\n([\s\S]*?); do\n/)[1].match(/"[^"]+:[a-z-]+"/g);
+  const gepagineerd = endpoints.filter((e) => !e.includes(':head-commit')).length;
+  const enkelvoudig = endpoints.length - gepagineerd;
+
+  assert.equal(hermetingPogingen, 3, 'hoogstens drie hermetingspogingen');
+  assert.equal(publicaties, 2, 'precies één pending-POST en één eind-POST');
+  assert.equal(endpoints.length, 6);
+  assert.equal(gepagineerd, 5);
+  assert.equal(enkelvoudig, 1);
+  assert.equal(
+    PER_PULL_REQUEST_REQUEST_BUDGET,
+    hermetingPogingen + publicaties + enkelvoudig + (gepagineerd * 4),
+    'het budget per PR volgt uit de stap zelf',
+  );
+  assert.equal(PER_PULL_REQUEST_REQUEST_BUDGET, 26);
+
+  assert.equal(EVENT_REQUEST_BUDGET, SELECTION_REQUEST_BUDGET + PER_PULL_REQUEST_REQUEST_BUDGET);
+  assert.equal(EVENT_REQUEST_BUDGET, 30);
+  assert.equal(SCHEDULE_REQUEST_BUDGET, SELECTION_REQUEST_BUDGET + (25 * PER_PULL_REQUEST_REQUEST_BUDGET));
+  assert.equal(SCHEDULE_REQUEST_BUDGET, 654);
+
+  // Allebei passen ze met de vaste reserve binnen het GEDEELDE uurquotum, en een eventronde kost
+  // minder dan een twintigste daarvan — zodat een druk uur vol events de schedule niet uithongert.
+  assert.ok(EVENT_REQUEST_BUDGET + QUOTA_RESERVE < SHARED_HOURLY_REQUEST_QUOTA);
+  assert.ok(SCHEDULE_REQUEST_BUDGET + QUOTA_RESERVE < SHARED_HOURLY_REQUEST_QUOTA);
+  assert.ok(EVENT_REQUEST_BUDGET * 20 < SHARED_HOURLY_REQUEST_QUOTA);
+  // En de oude volledige ronde over 126 PR's paste er juist NIET in. Dat is de bevinding zelf.
+  assert.ok(SELECTION_REQUEST_BUDGET + (126 * PER_PULL_REQUEST_REQUEST_BUDGET) > SHARED_HOURLY_REQUEST_QUOTA);
+});
+
+test('S7b. de ronde krimpt mechanisch mee met wat er van het GEDEELDE quotum over is', () => {
+  const open = Array.from({ length: 126 }, (_, i) => openPr(i + 1));
+  const schedule = (remainingQuota) => selectTargets({
+    eventName: 'schedule', event: {}, openPullRequests: open, nowEpochSeconds: 0, remainingQuota,
+  });
+
+  // Vol quotum: de volle bucket.
+  assert.equal(schedule(SHARED_HOURLY_REQUEST_QUOTA).targets.length, SCHEDULE_BUCKET_LIMIT);
+  // Onbekend quotum: de vaste bovengrens, die sowieso binnen het uurquotum past.
+  assert.equal(schedule(null).targets.length, SCHEDULE_BUCKET_LIMIT);
+  assert.equal(affordablePullRequests(null), null);
+  assert.equal(affordablePullRequests('900'), null);
+
+  // Halfvol: de bucket krimpt tot wat er ná de reserve nog past.
+  const half = schedule(400);
+  assert.equal(affordablePullRequests(400), Math.floor((400 - QUOTA_RESERVE - SELECTION_REQUEST_BUDGET) / 26));
+  assert.equal(half.targets.length, affordablePullRequests(400));
+  assert.ok(half.targets.length < SCHEDULE_BUCKET_LIMIT && half.targets.length > 0);
+  assert.ok(SELECTION_REQUEST_BUDGET + (half.targets.length * PER_PULL_REQUEST_REQUEST_BUDGET) <= 400 - QUOTA_RESERVE);
+
+  // Bijna leeg: er past niet eens één PR meer bij, dus wordt er niets gepubliceerd. Dat is een
+  // no-op en geen fout — de volgende ronde vangt het op, en de reserve blijft staan.
+  for (const rest of [0, 50, QUOTA_RESERVE, QUOTA_RESERVE + SELECTION_REQUEST_BUDGET + 25]) {
+    const krap = schedule(rest);
+    assert.equal(krap.outcome, TARGET_OUTCOME.NO_OP, String(rest));
+    assert.equal(krap.reason, TARGET_REASON.API_BUDGET_RESERVED, String(rest));
+    assert.deepEqual(krap.targets, [], String(rest));
+  }
+
+  // Ook een EVENT wijkt voor de reserve. Eén PR is 26 verzoeken; past dat er niet meer bij, dan
+  // publiceert deze aanleiding niets in plaats van halverwege leeg te raken.
+  const eventKrap = selectTargets({
+    eventName: 'issue_comment', event: commentOpPr(74), openPullRequests: [], remainingQuota: QUOTA_RESERVE + 10,
+  });
+  assert.equal(eventKrap.outcome, TARGET_OUTCOME.NO_OP);
+  assert.equal(eventKrap.reason, TARGET_REASON.API_BUDGET_RESERVED);
+  const eventRuim = selectTargets({
+    eventName: 'issue_comment', event: commentOpPr(74), openPullRequests: [], remainingQuota: 900,
+  });
+  assert.deepEqual(eventRuim.targets, [74]);
+});
+
+// --- De CLI -------------------------------------------------------------------------------------
+
+test('S8. de CLI leest zijn argumenten fail-closed', () => {
+  const volledig = [
+    '--event-name', 'schedule', '--event', 'e.json', '--open-pulls', 'o.json',
+    '--now-epoch', '1000', '--remaining-quota', '900', '--out', 't.json',
+  ];
+  assert.equal(parseTargetArgs(volledig).ok, true);
+
+  // Ontbrekend, dubbel, onbekend, waardeloos of een optie als waarde: alles wordt geweigerd in
+  // plaats van stilzwijgend geherinterpreteerd.
+  assert.equal(parseTargetArgs(volledig.slice(0, -2)).ok, false, 'ontbrekende optie');
+  assert.equal(parseTargetArgs([...volledig, '--out', 'x.json']).ok, false, 'dubbele optie');
+  assert.equal(parseTargetArgs([...volledig, '--vreemd', 'x']).ok, false, 'onbekende optie');
+  assert.equal(parseTargetArgs([...volledig, '--out']).ok, false, 'optie zonder waarde');
+  assert.equal(
+    parseTargetArgs(volledig.map((v) => (v === 't.json' ? '--event' : v))).ok, false, 'optie als waarde',
+  );
+  assert.equal(parseTargetArgs(volledig.map((v) => (v === '900' ? '' : v))).ok, false, 'lege waarde');
+  assert.equal(parseTargetArgs('geen lijst').ok, false);
+
+  // De teller leest alleen decimale cijfers; `-` is de afgesproken onbekend-vorm.
+  assert.equal(parseCounter('900'), 900);
+  assert.equal(parseCounter('0'), 0);
+  for (const stuk of ['-', '', ' 900', '9e2', '-1', '1.5', '0x10', null, 900]) {
+    assert.equal(parseCounter(stuk), null, String(stuk));
+  }
+});
+
+test('S9. de CLI vertaalt uitkomsten naar exitcodes en schrijft ALTIJD een geldige matrix', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'live-gate-cli-'));
+  const bestanden = new Map();
+  const readFile = (pad) => {
+    if (!bestanden.has(pad)) throw new Error('ENOENT');
+    return bestanden.get(pad);
+  };
+  const geschreven = new Map();
+  const writeFile = (pad, data) => geschreven.set(pad, data);
+  const argv = (eventName) => [
+    '--event-name', eventName, '--event', 'e.json', '--open-pulls', 'o.json',
+    '--now-epoch', '1696118400', '--remaining-quota', '900', '--out', join(dir, 'targets.json'),
+  ];
+  const uit = () => JSON.parse(geschreven.get(join(dir, 'targets.json')));
+
+  // rc 0 met doelen: de matrixvorm die `fromJSON()` inleest.
+  bestanden.set('e.json', JSON.stringify(commentOpPr(74)));
+  bestanden.set('o.json', '[]');
+  assert.equal(runSelect(argv('issue_comment'), { readFile, writeFile }), 0);
+  assert.deepEqual(uit(), [74]);
+
+  // rc 2 bij een no-op, met een LEGE matrix: nooit een oude lijst erven.
+  bestanden.set('e.json', JSON.stringify({ issue: { number: 74 } }));
+  assert.equal(runSelect(argv('issue_comment'), { readFile, writeFile }), 2);
+  assert.deepEqual(uit(), []);
+
+  // rc 1 bij een echte fout, eveneens met een lege matrix.
+  bestanden.set('e.json', '{}');
+  bestanden.set('o.json', '"geen lijst"');
+  assert.equal(runSelect(argv('schedule'), { readFile, writeFile }), 1);
+  assert.deepEqual(uit(), []);
+
+  // Onleesbare invoer is rood, niet stil.
+  bestanden.set('o.json', 'geen json');
+  assert.equal(runSelect(argv('schedule'), { readFile, writeFile }), 1);
+  assert.deepEqual(uit(), []);
+
+  // Kapotte argumenten zijn rood vóór er iets gelezen wordt.
+  assert.equal(runSelect(['--out'], { readFile, writeFile }), 1);
+
+  // En een schedule met open PR's levert een bucket van hoogstens 25 nummers op.
+  bestanden.set('e.json', '{}');
+  bestanden.set('o.json', JSON.stringify(Array.from({ length: 126 }, (_, i) => openPr(i + 1))));
+  assert.equal(runSelect(argv('schedule'), { readFile, writeFile }), 0);
+  const bucket = uit();
+  assert.ok(Array.isArray(bucket) && bucket.length === SCHEDULE_BUCKET_LIMIT);
+  assert.ok(bucket.every((n) => Number.isInteger(n) && n > 0));
+});
+
+// --- De selectiestap van de workflow zelf --------------------------------------------------------
+
+test('S10. de selectiestap haalt de open-PR-lijst alleen op bij een SCHEDULE', () => {
+  // De echte shell uit het workflowbestand, met gestubde `gh` en `date`. Een eventaanleiding mag de
+  // lijst niet aanraken: zou hij dat wel doen, dan kon één comment weer een repositorybrede ronde
+  // veroorzaken. `node` blijft hier ECHT — de selector is de code die gemeten wordt.
+  const script = stapScript(WRITER_TEKST, SELECTIE_STAP);
+
+  const draai = (eventName, event, ghExtra = '') => {
+    const { dir, bin, runnerTemp } = werkmap('live-gate-selectie-');
+    const ghLog = join(dir, 'gh.txt');
+    stub(bin, 'gh', [
+      'echo "$*" >> "$GH_LOG"',
+      'case "$*" in',
+      "  *rate_limit*) echo 900 ;;",
+      ghExtra,
+      '  *) echo "[]" ;;',
+      'esac',
+    ].join('\n'));
+    stub(bin, 'date', 'echo 1696118400');
+    const eventPad = join(dir, 'event.json');
+    writeFileSync(eventPad, JSON.stringify(event));
+    const outputPad = join(dir, 'output.txt');
+    writeFileSync(outputPad, '');
+    const uitkomst = draaiStap(script, {
+      dir,
+      bin,
+      env: {
+        GH_LOG: ghLog,
+        GH_TOKEN: 'x',
+        REPOSITORY: 'owner/repo',
+        EVENT_NAME: eventName,
+        RUNNER_TEMP: runnerTemp,
+        GITHUB_EVENT_PATH: eventPad,
+        GITHUB_OUTPUT: outputPad,
+      },
+    });
+    return {
+      ...uitkomst,
+      output: readFileSync(outputPad, 'utf8'),
+      ghAanroepen: existsSync(ghLog) ? readFileSync(ghLog, 'utf8').trim().split('\n') : [],
+    };
+  };
+
+  const comment = draai('issue_comment', commentOpPr(74));
+  assert.equal(comment.status, 0);
+  assert.match(comment.output, /pull_requests=\[74\]/);
+  assert.match(comment.output, /measure=true/);
+  assert.deepEqual(
+    comment.ghAanroepen.filter((regel) => regel.includes('state=open')), [],
+    'een eventaanleiding raakt de open-PR-lijst niet aan',
+  );
+  assert.equal(comment.ghAanroepen.length, 1, 'alleen de gratis rate_limit-meting');
+
+  // Een comment op een gewoon issue schrijft niets en is geen rode run.
+  const geenPr = draai('issue_comment', { issue: { number: 74 } });
+  assert.equal(geenPr.status, 0);
+  assert.match(geenPr.output, /pull_requests=\[\]/);
+  assert.match(geenPr.output, /measure=false/);
+
+  // De schedule haalt de lijst wél op, en meet er hoogstens 25.
+  const lijst = JSON.stringify(Array.from({ length: 126 }, (_, i) => openPr(i + 1))).replace(/'/g, '');
+  const schedule = draai('schedule', {}, `  *state=open*) echo '${lijst}' ;;`);
+  assert.equal(schedule.status, 0);
+  assert.match(schedule.output, /measure=true/);
+  const doelen = JSON.parse(schedule.output.match(/pull_requests=(\[.*\])/)[1]);
+  assert.equal(doelen.length, SCHEDULE_BUCKET_LIMIT);
+  assert.ok(schedule.ghAanroepen.some((regel) => regel.includes('state=open')));
+
+  // Een onbereikbare lijst is rood en meet niets: stil doorgaan zou nul statussen publiceren.
+  const kapot = draai('schedule', {}, '  *state=open*) exit 1 ;;');
+  assert.equal(kapot.status, 1);
+  assert.match(kapot.stdout, /OPEN_PULL_REQUEST_LIST_UNAVAILABLE/);
+});
+
+// --- De per-PR schrijfrij -------------------------------------------------------------------------
+
+/** De concurrencygroep van de schrijfjob, met een echte matrixwaarde ingevuld. */
+function groepVoor(prNummer, text = WRITER_TEKST) {
+  const schrijf = analyzeWorkflow(text).jobs.find((job) => job.id === 'schrijf');
+  assert.ok(schrijf?.concurrency && !schrijf.concurrency.unparseable, 'de schrijfjob heeft een rij');
+  return schrijf.concurrency.group.replace(/\$\{\{\s*matrix\.pr\s*\}\}/g, String(prNummer));
+}
+
+test('S11. PR 74 en PR 75 krijgen verschillende rijen; twee beurten voor PR 74 delen er één', () => {
+  const analyse = analyzeWorkflow(WRITER_TEKST);
+  const schrijf = analyse.jobs.find((job) => job.id === 'schrijf');
+
+  // Verschillende PR's blokkeren elkaar niet.
+  assert.notEqual(groepVoor(74), groepVoor(75));
+  assert.equal(new Set([74, 75, 76].map((n) => groepVoor(n))).size, 3);
+
+  // Twee AANLEIDINGEN voor dezelfde PR — een comment en een reviewrun, in verschillende workflowruns
+  // met verschillende run-id's — vallen in exact dezelfde groep. Er staat immers niets runafhankelijks
+  // in de sleutel, en dat is precies wat de groep serialiseerbaar maakt.
+  assert.equal(groepVoor(74), groepVoor(74));
+  assert.doesNotMatch(schrijf.concurrency.group, /github\.(run_id|run_number|run_attempt|event|sha|ref|job)/);
+  assert.match(schrijf.concurrency.group, /\$\{\{\s*matrix\.pr\s*\}\}/);
+  assert.deepEqual(schrijf.matrixKeys, ['pr']);
+
+  // De rij WACHT in plaats van te annuleren. Met de standaard `single` zou een derde aanleiding de
+  // tweede opeten en kon een invalidatie stil verdwijnen; `cancel-in-progress: true` zou een lopende
+  // beurt afkappen en een head op `pending` laten staan.
+  assert.equal(schrijf.concurrency.queue, 'max');
+  assert.equal(schrijf.concurrency.cancelInProgress, 'false');
+
+  // En de rij staat op JOBNIVEAU. Een groep op workflowniveau zou hele runs coalesceren, inclusief
+  // hun schrijfjobs, en de per-PR-rijen weer samenvoegen.
+  assert.equal(analyse.workflowLevelConcurrency, false);
+  assert.equal(analyse.jobs.find((job) => job.id === 'selecteer').concurrency, null);
+
+  // De matrix komt uit de selectiejob, dus per doel-PR ontstaat er één job met een eigen rij.
+  assert.match(WRITER_TEKST, /pr: \$\{\{ fromJSON\(needs\.selecteer\.outputs\.pull_requests\) \}\}/);
+});
+
+/**
+ * De structurele eis "er wordt pas ná de lock gemeten", als toetsbare functie. Alle drie de
+ * onderdelen zijn nodig: de rij moet op de schrijfjob zitten (dan is hij verworven vóór de eerste
+ * stap), de selectiefase mag niets dan NUMMERS doorgeven (geen head, geen momentopname), en de
+ * schrijfstap moet zelf hermeten vóór hij publiceert.
+ */
+function lockBevindingen(text) {
+  const bevindingen = [];
+  const analyse = analyzeWorkflow(text);
+  const schrijf = analyse.jobs.find((job) => job.id === 'schrijf');
+  if (!schrijf) return ['SCHRIJFJOB_ONTBREEKT'];
+  if (!schrijf.concurrency || schrijf.concurrency.unparseable) bevindingen.push('SCHRIJFJOB_ZONDER_EIGEN_RIJ');
+  if (analyse.workflowLevelConcurrency) bevindingen.push('RIJ_OP_WORKFLOWNIVEAU');
+
+  // De uitvoer van de selectiefase, letterlijk uit het bestand: alles tussen `outputs:` en de
+  // volgende sleutel op hetzelfde niveau.
+  const uitvoerBlok = text.match(/\n    outputs:\n((?:      \S.*\n)+)/)?.[1] ?? '';
+  if (/^ {6}(heads?|sha|head_sha|snapshot)\s*:/m.test(uitvoerBlok)) {
+    bevindingen.push('SELECTIE_GEEFT_EEN_MOMENTOPNAME_DOOR');
+  }
+
+  const stap = stapScript(text, SCHRIJF_STAP);
+  const hermeting = stap.indexOf('repos/$REPOSITORY/pulls/$number');
+  const publicatie = stap.indexOf('publish-live-status.mjs');
+  if (hermeting === -1) bevindingen.push('GEEN_HERMETING_NA_LOCK');
+  else if (publicatie !== -1 && publicatie < hermeting) bevindingen.push('PUBLICATIE_VOOR_HERMETING');
+  return bevindingen;
+}
+
+test('S12. er wordt pas NA de per-PR-lock gemeten, en elke afwijking daarvan is aantoonbaar rood', () => {
+  assert.deepEqual(lockBevindingen(WRITER_TEKST), []);
+
+  // De schrijfjob krijgt uit de selectiefase uitsluitend het PR-NUMMER mee. Geen head, geen
+  // momentopname, geen artifact, geen cache — anders zou een gequeueëde beurt een toestand
+  // publiceren die vóór haar lock is gemeten.
+  const stap = stapScript(WRITER_TEKST, SCHRIJF_STAP);
+  assert.match(WRITER_TEKST, /PULL_REQUEST: \$\{\{ matrix\.pr \}\}/);
+  assert.doesNotMatch(stap, /needs\.selecteer/);
+  assert.doesNotMatch(stap, /github\.event\.[a-z_]*\.?head/);
+  assert.doesNotMatch(stap, /workflow_run/);
+
+  // MUTATIE 1: de rij naar workflowniveau verplaatsen. Dan coalesceren hele runs weer.
+  const werkstroomRij = WRITER_TEKST.replace(
+    'permissions: {}\n',
+    'permissions: {}\nconcurrency:\n  group: autocoding-shield-live-gate\n  cancel-in-progress: false\n',
+  );
+  assert.ok(lockBevindingen(werkstroomRij).includes('RIJ_OP_WORKFLOWNIVEAU'));
+
+  // MUTATIE 2: de rij van de schrijfjob weghalen. Dan meet elke beurt zonder te wachten.
+  const zonderRij = WRITER_TEKST
+    .replace('    concurrency:\n      group: autocoding-shield-live-gate-pr-${{ matrix.pr }}\n      cancel-in-progress: false\n      queue: max\n', '');
+  assert.ok(lockBevindingen(zonderRij).includes('SCHRIJFJOB_ZONDER_EIGEN_RIJ'));
+
+  // MUTATIE 3: de selectiefase een head laten doorgeven. Dan is de gepubliceerde toestand vóór de
+  // lock gemeten en kan een oudere beurt een nieuwere overschrijven.
+  const metMomentopname = WRITER_TEKST.replace(
+    '      measure: ${{ steps.doelen.outputs.measure }}\n',
+    '      measure: ${{ steps.doelen.outputs.measure }}\n      head_sha: ${{ steps.doelen.outputs.head_sha }}\n',
+  );
+  assert.ok(lockBevindingen(metMomentopname).includes('SELECTIE_GEEFT_EEN_MOMENTOPNAME_DOOR'));
+
+  // MUTATIE 4: publiceren vóór er hermeten is.
+  const teVroeg = WRITER_TEKST.replace(
+    '          overall=0\n',
+    '          overall=0\n          node scripts/autocoding/publish-live-status.mjs --pending\n',
+  );
+  assert.ok(lockBevindingen(teVroeg).includes('PUBLICATIE_VOOR_HERMETING'));
+
+  // MUTATIE 5: helemaal niet hermeten.
+  const zonderHermeting = WRITER_TEKST.replace('repos/$REPOSITORY/pulls/$number', 'repos/$REPOSITORY/pulls/1');
+  assert.ok(lockBevindingen(zonderHermeting).includes('GEEN_HERMETING_NA_LOCK'));
+});
+
+// --- De schrijfstap zelf, in echte bash ----------------------------------------------------------
+
+/**
+ * Voert de echte schrijfstap uit voor één PR, met gestubde `gh`, `node` en `sleep`.
+ *
+ * `gh` en de publisher zijn gestubd omdat ze anders werkelijk het netwerk op zouden gaan; de
+ * VOLGORDE en de bijbehorende argumenten worden in één gedeeld logboek vastgelegd, zodat "eerst
+ * pending, dan bewijs, dan de eindstatus op dezelfde head" meetbaar is in plaats van beloofd.
+ */
+function draaiSchrijfstap({ pr, prJson, ghFaalt = [], publishFaalt = [], beslissing = 'GO' }) {
+  const { dir, bin } = werkmap('live-gate-schrijf-');
+  const runnerTemp = join(dir, 'runner');
+  const log = join(dir, 'log.txt');
+
+  stub(bin, 'gh', [
     'for arg in "$@"; do path="$arg"; done',
+    'echo "GET $path" >> "$LOG"',
     'case "$path" in',
-    '  */pulls/11) exit 1 ;;',
-    '  */pulls/12) echo \'{"head":{"sha":"1212121212121212121212121212121212121212"}}\' ;;',
-    '  */pulls/13) echo \'{"head":{"sha":"1313131313131313131313131313131313131313"}}\' ;;',
+    ...ghFaalt.map((patroon) => `  *${patroon}*) exit 1 ;;`),
+    `  */pulls/${pr}) cat "$PR_JSON" ;;`,
     '  *) echo "[]" ;;',
     'esac',
   ].join('\n'));
-  stub('sleep', 'exit 0');
-  stub('node', [
-    // De head-extractie is echte productiecode en wordt dus door de echte node gedraaid.
-    'if [ "$1" = "-e" ]; then exec "$REAL_NODE" "$@"; fi',
-    'script="$1"; shift',
-    'head=""',
-    'while [ "$#" -gt 0 ]; do',
-    '  if [ "$1" = "--head-sha" ]; then head="$2"; fi',
-    '  shift',
-    'done',
-    'case "$script" in',
-    '  */collect-shield-input.mjs) exit 0 ;;',
-    '  */verify-review-gate.mjs) echo \'{"decision":"NO_GO","reasons":[]}\'; exit 1 ;;',
-    '  */publish-live-status.mjs)',
-    '    echo "$head" >> "$STUB_LOG"',
-    '    case "$head" in',
-    '      13*) exit 0 ;;',
-    '      *) exit 1 ;;',
-    '    esac ;;',
-    'esac',
-    'exit 0',
-  ].join('\n'));
-
-  const log = join(dir, 'gepubliceerd.txt');
-  let status = 0;
-  try {
-    execFileSync('bash', [join(dir, 'ronde.sh')], {
-      env: {
-        PATH: `${bin}:${process.env.PATH}`,
-        HOME: dir,
-        REAL_NODE: process.execPath,
-        RUNNER_TEMP: runnerTemp,
-        REPOSITORY: 'owner/repo',
-        STATUS_CONTEXT: 'autocoding-shield-live-receipts',
-        GH_TOKEN: 'x',
-        GITHUB_TOKEN: 'x',
-        STUB_LOG: log,
-      },
-      stdio: 'pipe',
-    });
-  } catch (error) {
-    status = error.status;
-  }
-
-  assert.equal(status, 1, 'een ronde met een kapotte of niet-groene PR is rood');
-  const gepubliceerd = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [];
-  assert.deepEqual(gepubliceerd, [
-    '1212121212121212121212121212121212121212',
-    '1313131313131313131313131313131313131313',
-  ], 'PR 12 en 13 worden gepubliceerd ondanks de fout bij PR 11');
-});
-
-test('S9. de ronde publiceert op de GEMETEN head, ook zonder bruikbare API-nevenverzoeken', () => {
-  // Alleen `pulls/{n}` levert hier iets bruikbaars; elke andere GET faalt. De uitspraak moet dan
-  // alsnog als `failure` op de gemeten head landen in plaats van te verdwijnen.
-  const script = stepScript(TRUSTED_WRITER, 'Meet, beslis en publiceer per doel-PR');
-  const dir = mkdtempSync(join(tmpdir(), 'live-gate-round-'));
-  const bin = join(dir, 'bin');
-  const runnerTemp = join(dir, 'runner');
-  mkdirSync(bin);
-  mkdirSync(runnerTemp);
-  writeFileSync(join(runnerTemp, 'targets.txt'), '21\n');
-  writeFileSync(join(dir, 'ronde.sh'), script);
-
-  const stub = (name, body) => {
-    const path = join(bin, name);
-    writeFileSync(path, `#!/usr/bin/env bash\n${body}\n`);
-    chmodSync(path, 0o755);
-  };
-  stub('gh', [
-    'for arg in "$@"; do path="$arg"; done',
-    'case "$path" in',
-    '  */pulls/21) echo \'{"head":{"sha":"2121212121212121212121212121212121212121"}}\' ;;',
-    '  *) exit 1 ;;',
-    'esac',
-  ].join('\n'));
-  stub('sleep', 'exit 0');
-  stub('node', [
+  stub(bin, 'sleep', 'exit 0');
+  stub(bin, 'node', [
+    // De head-extractie is echte productiecode en draait dus op de echte node.
     'if [ "$1" = "-e" ]; then exec "$REAL_NODE" "$@"; fi',
     'script="$1"; shift',
     'args="$*"',
     'case "$script" in',
-    '  */publish-live-status.mjs) echo "$args" >> "$STUB_LOG"; exit 1 ;;',
-    'esac',
-    'exit 0',
-  ].join('\n'));
-
-  const log = join(dir, 'aanroep.txt');
-  let status = 0;
-  try {
-    execFileSync('bash', [join(dir, 'ronde.sh')], {
-      env: {
-        PATH: `${bin}:${process.env.PATH}`,
-        HOME: dir,
-        REAL_NODE: process.execPath,
-        RUNNER_TEMP: runnerTemp,
-        REPOSITORY: 'owner/repo',
-        STATUS_CONTEXT: 'autocoding-shield-live-receipts',
-        GH_TOKEN: 'x',
-        GITHUB_TOKEN: 'x',
-        STUB_LOG: log,
-      },
-      stdio: 'pipe',
-    });
-  } catch (error) {
-    status = error.status;
-  }
-
-  assert.equal(status, 1);
-  const aanroep = readFileSync(log, 'utf8').trim();
-  assert.match(aanroep, /--head-sha 2121212121212121212121212121212121212121/);
-  assert.match(aanroep, /--status-context autocoding-shield-live-receipts/);
-  // Mislukte nevenverzoeken worden als uitvoeringsfout doorgegeven, niet verzwegen.
-  assert.match(aanroep, /--execution-error GATE_EXECUTION_ERROR/);
-});
-
-/**
- * Voert de DRIE stappen van de writer echt uit, met gestubde `gh` en `node`, en houdt één gedeeld
- * logboek bij van alles wat de buitenwereld raakt. Daarmee is de VOLGORDE tussen de fasen meetbaar
- * in plaats van beloofd.
- *
- * De selectiestap draait op ECHTE productiecode: alleen `gh` levert de open-PR-lijst. Wat gestubd is
- * zijn de netwerkkant (`gh`) en de publisher, want die zouden anders werkelijk POST'en.
- */
-function draaiRonde({ aantalOpenPrs, runNumber, metMeting = true }) {
-  const dir = mkdtempSync(join(tmpdir(), 'live-gate-budget-'));
-  const bin = join(dir, 'bin');
-  const runnerTemp = join(dir, 'runner');
-  mkdirSync(bin);
-  mkdirSync(runnerTemp);
-
-  const headVan = (n) => String(n).padStart(40, '0');
-  const pagina = (van, tot) => Array.from({ length: tot - van + 1 }, (_, i) => ({
-    number: van + i, head: { sha: headVan(van + i), ref: `branch-${van + i}` },
-  }));
-  // Exact de vorm van `gh api --paginate --slurp`: een array van pagina's van 100.
-  const lijst = [pagina(1, Math.min(100, aantalOpenPrs))];
-  if (aantalOpenPrs > 100) lijst.push(pagina(101, aantalOpenPrs));
-  writeFileSync(join(dir, 'open-pulls.json'), JSON.stringify(lijst));
-  writeFileSync(join(dir, 'event.json'), JSON.stringify({}));
-  writeFileSync(join(dir, 'github-output.txt'), '');
-
-  const stub = (name, body) => {
-    const path = join(bin, name);
-    writeFileSync(path, `#!/usr/bin/env bash\n${body}\n`);
-    chmodSync(path, 0o755);
-  };
-
-  // `gh` logt IEDER verzoek. De lijst-GET is er één; alle andere zijn detailverzoeken per PR.
-  stub('gh', [
-    'for arg in "$@"; do path="$arg"; done',
-    'case "$path" in',
-    '  *state=open*) echo "LIST" >> "$STUB_LOG"; cat "$LIST_JSON"; exit 0 ;;',
-    'esac',
-    'echo "GET $path" >> "$STUB_LOG"',
-    'case "$path" in',
-    '  */pulls/*[0-9]) n="${path##*/}"; printf \'{"head":{"sha":"%040d"}}\\n\' "$n" ;;',
-    '  *) echo "[]" ;;',
-    'esac',
-  ].join('\n'));
-  stub('sleep', 'exit 0');
-  stub('node', [
-    // De doelselectie en de head-extractie zijn productiecode en draaien dus echt.
-    'if [ "$1" = "-e" ] || [ "$1" = "-p" ]; then exec "$REAL_NODE" "$@"; fi',
-    'case "$1" in',
-    '  */select-live-gate-targets.mjs) exec "$REAL_NODE" "$@" ;;',
-    'esac',
-    'script="$1"; shift',
-    'head=""; pending=0',
-    'while [ "$#" -gt 0 ]; do',
-    '  case "$1" in',
-    '    --head-sha) head="$2" ;;',
-    '    --pending) pending=1 ;;',
-    '  esac',
-    '  shift',
-    'done',
-    'case "$script" in',
     '  */publish-live-status.mjs)',
-    '    if [ "$pending" = 1 ]; then echo "PENDING $head" >> "$STUB_LOG";',
-    '    else echo "PUBLISH $head" >> "$STUB_LOG"; fi',
+    '    case "$args" in',
+    '      *--pending*) echo "PENDING $args" >> "$LOG" ;;',
+    '      *) echo "FINAL $args" >> "$LOG" ;;',
+    '    esac',
+    ...publishFaalt.map((patroon) => `    case "$args" in *${patroon}*) exit 1 ;; esac`),
     '    exit 0 ;;',
-    '  */verify-review-gate.mjs) echo \'{"decision":"NO_GO","reasons":[]}\'; exit 1 ;;',
+    '  */collect-shield-input.mjs) echo "COLLECT" >> "$LOG"; exit 0 ;;',
+    `  */verify-review-gate.mjs) echo "VERIFY" >> "$LOG"; echo '{"decision":"${beslissing}"}'; exit 0 ;;`,
     'esac',
     'exit 0',
   ].join('\n'));
 
-  const log = join(dir, 'log.txt');
-  const env = {
-    PATH: `${bin}:${process.env.PATH}`,
-    HOME: dir,
-    REAL_NODE: process.execPath,
-    RUNNER_TEMP: runnerTemp,
-    REPOSITORY: 'owner/repo',
-    EVENT_NAME: 'schedule',
-    RUN_NUMBER: String(runNumber),
-    STATUS_CONTEXT: 'autocoding-shield-live-receipts',
-    GH_TOKEN: 'x',
-    GITHUB_TOKEN: 'x',
-    GITHUB_EVENT_PATH: join(dir, 'event.json'),
-    GITHUB_OUTPUT: join(dir, 'github-output.txt'),
-    LIST_JSON: join(dir, 'open-pulls.json'),
-    STUB_LOG: log,
-  };
+  const prPad = join(dir, 'pr.json');
+  writeFileSync(prPad, JSON.stringify(prJson));
 
-  const stappen = [
-    "Bepaal de doel-PR's opnieuw via read-only API",
-    'Invalideer eerst iedere open head',
-    ...(metMeting ? ['Meet, beslis en publiceer per doel-PR'] : []),
-  ];
-  const codes = [];
-  for (const [i, naam] of stappen.entries()) {
-    const pad = join(dir, `stap-${i}.sh`);
-    writeFileSync(pad, stepScript(TRUSTED_WRITER, naam));
-    try {
-      execFileSync('bash', [pad], { env, stdio: 'pipe' });
-      codes.push(0);
-    } catch (error) {
-      codes.push(error.status);
-    }
-  }
-
-  return {
-    codes,
-    log: existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : [],
-    targets: readFileSync(join(runnerTemp, 'targets.txt'), 'utf8').trim().split('\n').filter(Boolean),
-    heads: readFileSync(join(runnerTemp, 'heads.txt'), 'utf8').trim().split('\n').filter(Boolean),
-    output: readFileSync(join(dir, 'github-output.txt'), 'utf8'),
-    headVan,
-  };
-}
-
-test('S14. bij 126 open PR\'s zijn ALLE 126 heads geïnvalideerd vóór de eerste detail-GET', () => {
-  // Codex P2, review 4998653669, inline 3834812711. Zeven verzoeken per PR maal 126 PR's overschrijdt
-  // het uurlijkse `GITHUB_TOKEN`-quotum van duizend. Wie per PR volledig afhandelt, raakt halverwege
-  // leeg — en de PR's die dan nog niet aan de beurt waren, houden hun oude `success`. Deze test voert
-  // de ECHTE shell van de drie stappen uit en meet de volgorde in één gedeeld logboek.
-  const ronde = draaiRonde({ aantalOpenPrs: 126, runNumber: 1 });
-  const { log, headVan } = ronde;
-
-  // 1. Alle 126 invalidaties zijn geprobeerd.
-  const pending = log.filter((l) => l.startsWith('PENDING '));
-  assert.equal(pending.length, 126, 'iedere open head krijgt een pendingpoging');
-  assert.deepEqual(
-    pending.map((l) => l.slice('PENDING '.length)),
-    Array.from({ length: 126 }, (_, i) => headVan(i + 1)),
-    'en wel op precies de 126 heads uit de open-PR-lijst',
-  );
-
-  // 2. Ze zijn ALLEMAAL geprobeerd vóórdat er één detailverzoek is gedaan. Dit is de hele eis: na
-  //    deze grens kan geen enkele geselecteerde head nog een oude `success` dragen, dus is elke
-  //    verdere budgetuitputting hooguit een uitgestelde uitspraak.
-  const laatstePending = log.findLastIndex((l) => l.startsWith('PENDING '));
-  const eersteDetail = log.findIndex((l) => l.startsWith('GET '));
-  assert.ok(eersteDetail !== -1, 'de meetronde doet werkelijk detailverzoeken');
-  assert.ok(
-    laatstePending < eersteDetail,
-    `de laatste invalidatie (${laatstePending}) moet vóór het eerste detailverzoek (${eersteDetail}) komen`,
-  );
-  // De invalidatieronde zelf kost geen enkele GET: alleen de lijst-GET gaat eraan vooraf.
-  assert.deepEqual(log.slice(0, laatstePending + 1).filter((l) => l.startsWith('GET ')), []);
-
-  // 3. Daarna wordt hoogstens de gekozen batch geëvalueerd, en dat past binnen het budget.
-  assert.deepEqual(ronde.targets, Array.from({ length: 100 }, (_, i) => String(i + 1)));
-  const gemeten = new Set(
-    log.filter((l) => l.startsWith('GET '))
-      .map((l) => /\/(?:pulls|issues)\/(\d+)/.exec(l)?.[1])
-      .filter(Boolean),
-  );
-  assert.deepEqual(
-    [...gemeten].map(Number).sort((a, b) => a - b),
-    Array.from({ length: 100 }, (_, i) => i + 1),
-    'precies de honderd PR\'s van de batch worden doorgemeten, en geen enkele daarbuiten',
-  );
-  // Het budget, exact geteld in plaats van geschat. Vóór de grens: één lijst-GET plus 126 POST's =
-  // 127 verzoeken om ALLE heads niet-groen te krijgen. Daarna hoogstens 100 x (1 + 6) GET's plus
-  // 100 POST's. Samen blijft de hele ronde onder het uurlijkse quotum van duizend.
-  assert.equal(laatstePending + 1, 127, 'alle heads zijn niet-groen na 127 verzoeken');
-  const verzoeken = log.length;
-  assert.equal(verzoeken, 927);
-  assert.ok(verzoeken <= 1000, `de hele ronde kost ${verzoeken} verzoeken, binnen het uurlijkse quotum`);
-  assert.equal(log.filter((l) => l.startsWith('PUBLISH ')).length, 100);
-
-  // 4. En de ronde is groen op de invalidatie: `pending_failed=0`.
-  assert.match(ronde.output, /pending_failed=0/);
-});
-
-test('S15. de batch roteert met het run-nummer, dus komt iedere PR aan de beurt', () => {
-  // Run 1 meet 1..100 (zie S14). Run 2 moet de rest meten — anders zouden PR 101..126 voor altijd
-  // op `pending` blijven staan. De invalidatie is in beide runs volledig; alleen de MEETbatch
-  // verschuift. Zonder meetstap, want die eigenschap is in S14 al gemeten en 26 PR's doormeten kost
-  // alleen tijd.
-  const tweede = draaiRonde({ aantalOpenPrs: 126, runNumber: 2, metMeting: false });
-  assert.equal(tweede.log.filter((l) => l.startsWith('PENDING ')).length, 126,
-    'ook run 2 invalideert alle 126 heads, niet alleen zijn eigen batch');
-  assert.deepEqual(
-    tweede.targets,
-    Array.from({ length: 26 }, (_, i) => String(i + 101)),
-    'run 2 meet precies het tweede blok door',
-  );
-  assert.deepEqual(tweede.codes, [0, 0]);
-
-  // Run 3 begint weer bij het eerste blok: de rotatie is periodiek, dus eindig.
-  const derde = draaiRonde({ aantalOpenPrs: 126, runNumber: 3, metMeting: false });
-  assert.deepEqual(derde.targets, Array.from({ length: 100 }, (_, i) => String(i + 1)));
-});
-
-test('S16. een mislukte invalidatie stopt de volgende niet en maakt de ronde alsnog rood', () => {
-  // Record-lokaal, net als bij de meting: zou de eerste mislukte POST de lus afbreken, dan hielden
-  // alle latere heads hun oude `success`. De stap eindigt bewust rc 0 zodat de meetronde nog draait;
-  // de rode kleur loopt via `pending_failed`, dat de afsluitende stap oppikt.
-  const script = stepScript(TRUSTED_WRITER, 'Invalideer eerst iedere open head');
-  const dir = mkdtempSync(join(tmpdir(), 'live-gate-invalidatie-'));
-  const bin = join(dir, 'bin');
-  const runnerTemp = join(dir, 'runner');
-  mkdirSync(bin);
-  mkdirSync(runnerTemp);
-  const head = (n) => String(n).padStart(40, '0');
-  writeFileSync(join(runnerTemp, 'heads.txt'), [
-    `1 ${head(1)}`,
-    `2 ${head(2)}`,   // deze POST faalt
-    '3 -',            // de lijst gaf geen bruikbare head
-    '4 nogeenhead',   // geen 40 hextekens
-    `5 ${head(5)}`,
-    '',               // lege regel: geen record, geen fout
-  ].join('\n'));
-  writeFileSync(join(dir, 'ronde.sh'), script);
-  writeFileSync(join(dir, 'github-output.txt'), '');
-
-  const path = join(bin, 'node');
-  writeFileSync(path, ['#!/usr/bin/env bash',
-    'head=""',
-    'while [ "$#" -gt 0 ]; do',
-    '  if [ "$1" = "--head-sha" ]; then head="$2"; fi',
-    '  shift',
-    'done',
-    'echo "$head" >> "$STUB_LOG"',
-    'case "$head" in',
-    '  0000000000000000000000000000000000000002) exit 1 ;;',
-    'esac',
-    'exit 0',
-  ].join('\n'));
-  chmodSync(path, 0o755);
-
-  const log = join(dir, 'log.txt');
-  let status = 0;
-  try {
-    execFileSync('bash', [join(dir, 'ronde.sh')], {
-      env: {
-        PATH: `${bin}:${process.env.PATH}`,
-        HOME: dir,
-        RUNNER_TEMP: runnerTemp,
-        REPOSITORY: 'owner/repo',
-        STATUS_CONTEXT: 'autocoding-shield-live-receipts',
-        GITHUB_TOKEN: 'x',
-        GITHUB_OUTPUT: join(dir, 'github-output.txt'),
-        STUB_LOG: log,
-      },
-      stdio: 'pipe',
-    });
-  } catch (error) {
-    status = error.status;
-  }
-
-  assert.equal(status, 0, 'de invalidatiestap blokkeert de meetronde nooit');
-  assert.deepEqual(
-    readFileSync(log, 'utf8').trim().split('\n'),
-    [head(1), head(2), head(5)],
-    'PR 5 krijgt zijn invalidatiepoging ondanks de mislukking bij 2 en de kapotte heads bij 3 en 4',
-  );
-  assert.match(
-    readFileSync(join(dir, 'github-output.txt'), 'utf8'),
-    /pending_failed=1/,
-    'de mislukking wordt doorgegeven en maakt de job rood',
-  );
-});
-
-test('S17. verschuift de head tussen lijst en meting, dan is de OUDE pending en de NIEUWE gemeten', () => {
-  // De lijst gaf head A; tegen de tijd dat de meetronde bij PR 40 is, staat de PR op head B. De eis:
-  // A staat op `pending` (dus niet groen) en de uitspraak landt uitsluitend op de OPNIEUW gemeten
-  // head B. Op B stond nog geen status van deze context, dus is ook B niet groen.
-  const headA = '0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-  const headB = '0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
-  const dir = mkdtempSync(join(tmpdir(), 'live-gate-headshift-'));
-  const bin = join(dir, 'bin');
-  const runnerTemp = join(dir, 'runner');
-  mkdirSync(bin);
-  mkdirSync(runnerTemp);
-  writeFileSync(join(runnerTemp, 'heads.txt'), `40 ${headA}\n`);
-  writeFileSync(join(runnerTemp, 'targets.txt'), '40\n');
-  writeFileSync(join(dir, 'github-output.txt'), '');
-
-  const stub = (name, body) => {
-    const path = join(bin, name);
-    writeFileSync(path, `#!/usr/bin/env bash\n${body}\n`);
-    chmodSync(path, 0o755);
-  };
-  // De API levert bij de detailmeting de NIEUWE head.
-  stub('gh', [
-    'for arg in "$@"; do path="$arg"; done',
-    'case "$path" in',
-    `  */pulls/40) echo '{"head":{"sha":"${headB}"}}' ;;`,
-    '  *) echo "[]" ;;',
-    'esac',
-  ].join('\n'));
-  stub('sleep', 'exit 0');
-  stub('node', [
-    'if [ "$1" = "-e" ]; then exec "$REAL_NODE" "$@"; fi',
-    'script="$1"; shift',
-    'head=""; pending=0',
-    'while [ "$#" -gt 0 ]; do',
-    '  case "$1" in',
-    '    --head-sha) head="$2" ;;',
-    '    --pending) pending=1 ;;',
-    '  esac',
-    '  shift',
-    'done',
-    'case "$script" in',
-    '  */publish-live-status.mjs)',
-    '    if [ "$pending" = 1 ]; then echo "PENDING $head" >> "$STUB_LOG";',
-    '    else echo "PUBLISH $head" >> "$STUB_LOG"; fi',
-    '    exit 0 ;;',
-    '  */verify-review-gate.mjs) echo \'{"decision":"NO_GO","reasons":[]}\'; exit 1 ;;',
-    'esac',
-    'exit 0',
-  ].join('\n'));
-
-  const log = join(dir, 'log.txt');
-  const env = {
-    PATH: `${bin}:${process.env.PATH}`,
-    HOME: dir,
-    REAL_NODE: process.execPath,
-    RUNNER_TEMP: runnerTemp,
-    REPOSITORY: 'owner/repo',
-    STATUS_CONTEXT: 'autocoding-shield-live-receipts',
-    GH_TOKEN: 'x',
-    GITHUB_TOKEN: 'x',
-    GITHUB_OUTPUT: join(dir, 'github-output.txt'),
-    STUB_LOG: log,
-  };
-  for (const naam of ['Invalideer eerst iedere open head', 'Meet, beslis en publiceer per doel-PR']) {
-    const pad = join(dir, `${naam.split(' ')[0]}.sh`);
-    writeFileSync(pad, stepScript(TRUSTED_WRITER, naam));
-    try {
-      execFileSync('bash', [pad], { env, stdio: 'pipe' });
-    } catch { /* de meetronde is rood op een NO_GO; dat is de uitkomst, niet de eigenschap */ }
-  }
-
-  assert.deepEqual(
-    readFileSync(log, 'utf8').trim().split('\n'),
-    [`PENDING ${headA}`, `PUBLISH ${headB}`],
-    'de oude head blijft pending en de uitspraak landt alleen op de opnieuw gemeten head',
-  );
-});
-
-// --- De gedeelde writerlock ---------------------------------------------------------------------
-
-/** Leest de workflowbrede `concurrency`-sleutel: alleen inspringing 0 telt als workflowniveau. */
-function workflowConcurrency(workflowPath) {
-  const lines = readFileSync(workflowPath, 'utf8').split('\n');
-  const start = lines.findIndex((l) => l === 'concurrency:');
-  assert.ok(start !== -1, 'de trusted writer moet een workflowbrede concurrency-sleutel hebben');
-  const out = { line: start };
-  for (let i = start + 1; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (line.trim() === '' || line.startsWith('#')) continue;
-    if (!line.startsWith('  ')) break;
-    const match = /^ {2}([a-z-]+):\s*(.*)$/.exec(line);
-    if (match) out[match[1]] = match[2].trim();
-  }
-  return out;
-}
-
-/**
- * Minimale evaluator voor `${{ a.b || c.d }}` in een concurrency-groep. Genoeg om te METEN of een
- * groep contextafhankelijk is in plaats van dat te beweren.
- */
-function evalGroup(template, context) {
-  const resolvePath = (path) => {
-    let current = context;
-    for (const key of path.split('.')) {
-      if (current === null || typeof current !== 'object') return '';
-      current = current[key];
-    }
-    return current === null || current === undefined ? '' : String(current);
-  };
-  return template.replace(/\$\{\{([^}]*)\}\}/g, (_, expr) => {
-    for (const term of expr.split('||')) {
-      const value = resolvePath(term.trim());
-      if (value !== '') return value;
-    }
-    return '';
+  const uitkomst = draaiStap(stapScript(WRITER_TEKST, SCHRIJF_STAP), {
+    dir,
+    bin,
+    env: {
+      REAL_NODE: process.execPath,
+      RUNNER_TEMP: runnerTemp,
+      REPOSITORY: 'owner/repo',
+      STATUS_CONTEXT: 'autocoding-shield-live-receipts',
+      GH_TOKEN: 'x',
+      GITHUB_TOKEN: 'x',
+      PULL_REQUEST: String(pr),
+      PR_JSON: prPad,
+      LOG: log,
+    },
   });
-}
-
-/** De drie aanleidingen die dezelfde statuscontext op dezelfde head kunnen schrijven. */
-const AANLEIDINGEN = Object.freeze({
-  review: {
-    github: {
-      event_name: 'workflow_run',
-      run_id: '1001',
-      event: { workflow_run: { event: 'pull_request_review', head_branch: 'claude2/pr-74' } },
-    },
-  },
-  comment: {
-    github: {
-      event_name: 'workflow_run',
-      run_id: '1002',
-      event: { workflow_run: { event: 'issue_comment', head_branch: 'main' } },
-    },
-  },
-  schedule: { github: { event_name: 'schedule', run_id: '1003', event: {} } },
-});
-
-test('S10. review-, comment- en scheduleaanleidingen delen exact één writergroep', () => {
-  const concurrency = workflowConcurrency(TRUSTED_WRITER);
-
-  // De groep is een constante. Elke `${{ ... }}` erin zou de groep laten meebewegen met de
-  // aanleiding, en dat is precies hoe twee writers gelijktijdig dezelfde statuscontext gingen
-  // schrijven.
-  assert.doesNotMatch(concurrency.group, /\$\{\{/, 'de writergroep mag geen expressie bevatten');
-  assert.equal(concurrency.group, 'autocoding-shield-live-gate');
-
-  // Een lopende ronde wordt nooit halverwege afgekapt: dat zou al geselecteerde maar nog niet
-  // gepubliceerde PR's stale laten staan.
-  assert.equal(concurrency['cancel-in-progress'], 'false');
-
-  const groepen = new Set(
-    Object.values(AANLEIDINGEN).map((context) => evalGroup(concurrency.group, context)),
-  );
-  assert.equal(groepen.size, 1, 'alle drie de aanleidingen vallen in dezelfde groep');
-
-  const tekst = readFileSync(TRUSTED_WRITER, 'utf8');
-
-  // De lock moet vóór de eerste stap worden verworven, dus vóór ELKE meting. Dat is alleen zo als
-  // `concurrency` op workflowniveau staat — een groep binnen `jobs:` zou pas per job gelden.
-  const jobsRegel = tekst.split('\n').findIndex((l) => l === 'jobs:');
-  assert.ok(jobsRegel !== -1);
-  assert.ok(concurrency.line < jobsRegel, 'de writerlock staat op workflowniveau, boven `jobs:`');
-  assert.equal(
-    tekst.split('\n').filter((l) => l.trimStart().startsWith('concurrency:')).length,
-    1,
-    'één lock, niet per job een tweede',
-  );
-
-  // Er wordt niets gemeten buiten de vergrendelde job: elke API-lezing staat in het enige job-blok.
-  const regels = tekst.split('\n');
-  const jobKeys = regels.slice(jobsRegel + 1).filter((l) => /^ {2}[a-z0-9-]+:$/.test(l));
-  assert.deepEqual(jobKeys, ['  autocoding-shield-live-gate:'], 'precies één job onder de lock');
-  const ghRegels = regels.map((regel, i) => ({ regel, i })).filter(({ regel }) => regel.includes('gh api'));
-  assert.ok(ghRegels.length > 0, 'de writer meet werkelijk via de API');
-  for (const { i } of ghRegels) {
-    assert.ok(i > jobsRegel, 'elke meting gebeurt binnen de job, dus nadat de writerlock er is');
-  }
-});
-
-test('S11. negatieve mutatie: de oude branch-/run-id-groep splitst de writers weer op', () => {
-  // Bewijs dat S10 de regressie vangt. De oude expressie sleutelde op de bronbranch met de run-id
-  // als terugval; hieronder wordt gemeten dat die vorm de drie aanleidingen in DRIE groepen legt,
-  // waardoor een review-run, een commentrun en de uurlijkse ronde gelijktijdig konden draaien en de
-  // oudste momentopname als laatste kon publiceren.
-  const oud = 'autocoding-shield-live-gate-${{ github.event.workflow_run.head_branch || github.run_id }}';
-  const oudeGroepen = Object.values(AANLEIDINGEN).map((context) => evalGroup(oud, context));
-  assert.deepEqual(oudeGroepen, [
-    'autocoding-shield-live-gate-claude2/pr-74',
-    'autocoding-shield-live-gate-main',
-    'autocoding-shield-live-gate-1003',
-  ]);
-  assert.equal(new Set(oudeGroepen).size, 3, 'de oude groep serialiseerde de writers niet');
-
-  // Dezelfde toets als in S10, maar op een workflowtekst waarin de oude groep is teruggezet: die
-  // moet aantoonbaar rood worden.
-  const gemuteerd = readFileSync(TRUSTED_WRITER, 'utf8')
-    .replace('  group: autocoding-shield-live-gate\n', `  group: ${oud}\n`);
-  assert.notEqual(gemuteerd, readFileSync(TRUSTED_WRITER, 'utf8'), 'de mutatie moet aanslaan');
-
-  const dir = mkdtempSync(join(tmpdir(), 'live-gate-lock-mutant-'));
-  const pad = join(dir, 'writer.yml');
-  writeFileSync(pad, gemuteerd);
-  const mutantGroep = workflowConcurrency(pad).group;
-  assert.match(mutantGroep, /\$\{\{/);
-  assert.equal(
-    new Set(Object.values(AANLEIDINGEN).map((context) => evalGroup(mutantGroep, context))).size,
-    3,
-    'de gemuteerde writer valt uiteen in drie groepen en zou S10 rood maken',
-  );
-});
-
-test('S12. een kapotte PR blokkeert de resterende 25 van een ronde van 26 niet', () => {
-  // De limiet is weg, dus een ronde kan nu groter zijn dan 25. De eis uit S8 moet ook op die schaal
-  // gelden: een fout bij het eerste record blijft record-lokaal, alle latere records publiceren
-  // gewoon, en de ronde eindigt rood.
-  const script = stepScript(TRUSTED_WRITER, 'Meet, beslis en publiceer per doel-PR');
-  const dir = mkdtempSync(join(tmpdir(), 'live-gate-grote-ronde-'));
-  const bin = join(dir, 'bin');
-  const runnerTemp = join(dir, 'runner');
-  mkdirSync(bin);
-  mkdirSync(runnerTemp);
-  const nummers = Array.from({ length: 26 }, (_, i) => i + 1);
-  writeFileSync(join(runnerTemp, 'targets.txt'), `${nummers.join('\n')}\n`);
-  writeFileSync(join(dir, 'ronde.sh'), script);
-
-  const stub = (name, body) => {
-    const path = join(bin, name);
-    writeFileSync(path, `#!/usr/bin/env bash\n${body}\n`);
-    chmodSync(path, 0o755);
+  return {
+    ...uitkomst,
+    regels: existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : [],
   };
-
-  // PR 1 levert nooit een head op; elke andere PR krijgt een head van 40 cijfers (geldige hex).
-  stub('gh', [
-    'for arg in "$@"; do path="$arg"; done',
-    'case "$path" in',
-    '  */pulls/1) exit 1 ;;',
-    '  */pulls/[0-9]|*/pulls/[0-9][0-9])',
-    '    n="${path##*/}"',
-    '    printf \'{"head":{"sha":"%040d"}}\\n\' "$n" ;;',
-    '  *) echo "[]" ;;',
-    'esac',
-  ].join('\n'));
-  stub('sleep', 'exit 0');
-  stub('node', [
-    'if [ "$1" = "-e" ]; then exec "$REAL_NODE" "$@"; fi',
-    'script="$1"; shift',
-    'head=""',
-    'while [ "$#" -gt 0 ]; do',
-    '  if [ "$1" = "--head-sha" ]; then head="$2"; fi',
-    '  shift',
-    'done',
-    'case "$script" in',
-    '  */publish-live-status.mjs) echo "$head" >> "$STUB_LOG"; exit 0 ;;',
-    'esac',
-    'exit 0',
-  ].join('\n'));
-
-  const log = join(dir, 'gepubliceerd.txt');
-  let status = 0;
-  try {
-    execFileSync('bash', [join(dir, 'ronde.sh')], {
-      env: {
-        PATH: `${bin}:${process.env.PATH}`,
-        HOME: dir,
-        REAL_NODE: process.execPath,
-        RUNNER_TEMP: runnerTemp,
-        REPOSITORY: 'owner/repo',
-        STATUS_CONTEXT: 'autocoding-shield-live-receipts',
-        GH_TOKEN: 'x',
-        GITHUB_TOKEN: 'x',
-        STUB_LOG: log,
-      },
-      stdio: 'pipe',
-    });
-  } catch (error) {
-    status = error.status;
-  }
-
-  assert.equal(status, 1, 'de niet te meten PR 1 maakt de ronde rood');
-  const gepubliceerd = readFileSync(log, 'utf8').trim().split('\n');
-  assert.deepEqual(
-    gepubliceerd,
-    nummers.slice(1).map((n) => String(n).padStart(40, '0')),
-    'PR 2 tot en met 26 krijgen alle 25 een verse status, in doelvolgorde',
-  );
-});
-
-/**
- * Model van de GitHub-concurrencysemantiek: runs met dezelfde groepssleutel draaien nooit
- * gelijktijdig, runs met verschillende sleutels wel. Dit is een MODEL, geen meting aan GitHub — wat
- * er hier wordt getoetst is de gevolgtrekking uit dat model: bij één gedeelde sleutel kan een
- * oudere momentopname niet ná een nieuwere publiceren, bij gesplitste sleutels wel.
- *
- * Elke run meet de gedeelde toestand op het moment dat hij START (dus nadat hij de lock heeft) en
- * publiceert op het moment dat hij EINDIGT.
- */
-function speelWritersAf({ groupTemplate, runs, bewijsWijzigingen }) {
-  const bewijsOp = (tijd) => bewijsWijzigingen
-    .filter((wijziging) => wijziging.tijd <= tijd)
-    .at(-1).verdict;
-
-  const vrijVanaf = new Map();
-  const publicaties = [];
-  for (const run of [...runs].sort((a, b) => a.aankomst - b.aankomst)) {
-    const groep = evalGroup(groupTemplate, run.context);
-    const start = Math.max(run.aankomst, vrijVanaf.get(groep) ?? 0);
-    const eind = start + run.duur;
-    vrijVanaf.set(groep, eind);
-    publicaties.push({ naam: run.naam, groep, gemeten: bewijsOp(start), eind });
-  }
-  return publicaties.sort((a, b) => a.eind - b.eind);
 }
 
-test('S13. een oudere meting kan de nieuwere uitspraak niet overschrijven', () => {
-  // Het scenario uit de bevinding: een reviewrun meet het bewijs terwijl het receipt er nog is, en
-  // is traag. Ondertussen wordt het receipt verwijderd en start de uurlijkse ronde, die het
-  // ontbreken meteen ziet. Wie als LAATSTE publiceert bepaalt de kleur van de gedeelde
-  // statuscontext op die head.
-  const runs = [
-    { naam: 'review', aankomst: 0, duur: 10, context: AANLEIDINGEN.review },
-    { naam: 'schedule', aankomst: 2, duur: 3, context: AANLEIDINGEN.schedule },
-  ];
-  const bewijsWijzigingen = [
-    { tijd: 0, verdict: 'success' },
-    { tijd: 1, verdict: 'failure' }, // het receipt wordt verwijderd
-  ];
+test('S13. een event voor PR 74 publiceert uitsluitend op PR 74, en op de HERMETEN head', () => {
+  const head = sha(7);
+  const { status, regels } = draaiSchrijfstap({
+    pr: 74, prJson: { state: 'open', merged: false, head: { sha: head } },
+  });
 
-  const oud = 'autocoding-shield-live-gate-${{ github.event.workflow_run.head_branch || github.run_id }}';
-  const zonderLock = speelWritersAf({ groupTemplate: oud, runs, bewijsWijzigingen });
-  assert.equal(new Set(zonderLock.map((p) => p.groep)).size, 2, 'de oude sleutel splitst de runs');
-  assert.equal(
-    zonderLock.at(-1).gemeten,
-    'success',
-    'zonder gedeelde lock publiceert de OUDERE momentopname als laatste: stale groen',
-  );
+  assert.equal(status, 0, 'een bewezen GO is groen');
 
-  const groupTemplate = workflowConcurrency(TRUSTED_WRITER).group;
-  const metLock = speelWritersAf({ groupTemplate, runs, bewijsWijzigingen });
-  assert.equal(new Set(metLock.map((p) => p.groep)).size, 1, 'één gedeelde writergroep');
-  assert.equal(
-    metLock.at(-1).gemeten,
-    'failure',
-    'met de gedeelde lock meet de laatste run pas ná de eerste, dus wint de nieuwste toestand',
-  );
+  // 1. eerst hermeten, 2. dan onmiddellijk pending op die head, 3. dan pas het overige bewijs,
+  // 4. en de eindstatus op precies dezelfde head.
+  assert.equal(regels[0], 'GET repos/owner/repo/pulls/74');
+  assert.match(regels[1], /^PENDING /);
+  assert.match(regels[1], new RegExp(`--head-sha ${head}`));
+  assert.ok(regels.slice(2).some((r) => r.startsWith('GET ')), 'het bewijs komt ná de invalidatie');
+  const finaal = regels.filter((r) => r.startsWith('FINAL '));
+  assert.equal(finaal.length, 1, 'precies één eindstatus');
+  assert.match(finaal[0], new RegExp(`--head-sha ${head}`));
+  assert.match(finaal[0], /--status-context autocoding-shield-live-receipts/);
 
-  // Sterker: onder één lock is de meting van elke volgende publicatie nooit ouder dan de vorige.
-  for (let i = 1; i < metLock.length; i += 1) {
-    assert.ok(
-      metLock[i].eind > metLock[i - 1].eind,
-      'publicaties zijn geserialiseerd, dus er is een strikte volgorde',
-    );
+  // Er wordt precies één PR aangeraakt. Geen andere PR, geen open-PR-lijst, geen tweede head.
+  const gets = regels.filter((r) => r.startsWith('GET '));
+  assert.ok(gets.every((r) => !/pulls\/(?!74\b)[0-9]+/.test(r)), 'geen enkele andere PR');
+  assert.ok(gets.every((r) => !r.includes('state=open')), 'geen repositorybrede lijst');
+  const koppen = new Set(regels.filter((r) => /--head-sha/.test(r)).map((r) => r.match(/--head-sha (\S+)/)[1]));
+  assert.deepEqual([...koppen], [head], 'alle statussen landen op één en dezelfde head');
+
+  // En het aantal API-verzoeken van deze beurt blijft onder de vastgelegde bovengrens per PR.
+  assert.ok(regels.length <= PER_PULL_REQUEST_REQUEST_BUDGET,
+    `${regels.length} verzoeken, budget ${PER_PULL_REQUEST_REQUEST_BUDGET}`);
+});
+
+test('S14. een samengevoegde of gesloten PR krijgt GEEN gegokte status', () => {
+  for (const prJson of [
+    { state: 'closed', merged: true, head: { sha: sha(3) } },
+    { state: 'closed', merged: false, head: { sha: sha(3) } },
+    { state: 'open', merged: true, head: { sha: sha(3) } },
+  ]) {
+    const { status, stdout, regels } = draaiSchrijfstap({ pr: 74, prJson });
+    assert.equal(status, 0, 'geen fout: er is alleen niets meer te meten');
+    assert.match(stdout, /PR_74_NOT_OPEN_NO_STATUS/);
+    assert.deepEqual(regels.filter((r) => /PENDING|FINAL/.test(r)), [], JSON.stringify(prJson));
+  }
+});
+
+test('S15. een head die niet te meten is, is ROOD zonder status', () => {
+  // Zonder head is er geen commit om de uitspraak op te schrijven. Gokken zou de verkeerde head
+  // markeren, dus wordt de run rood en blijft de status ongewijzigd.
+  const drieKeerStuk = draaiSchrijfstap({ pr: 74, prJson: {}, ghFaalt: ['/pulls/74'] });
+  assert.equal(drieKeerStuk.status, 1);
+  assert.match(drieKeerStuk.stdout, /PR_74_HEAD_UNMEASURED/);
+  assert.deepEqual(drieKeerStuk.regels.filter((r) => /PENDING|FINAL/.test(r)), []);
+  assert.equal(drieKeerStuk.regels.filter((r) => r.startsWith('GET ')).length, 3, 'hoogstens drie pogingen');
+
+  // Een leesbaar antwoord zonder bruikbare SHA telt evenmin als meting.
+  for (const prJson of [{ state: 'open', head: {} }, { state: 'open', head: { sha: 'kort' } }, {}]) {
+    const uitkomst = draaiSchrijfstap({ pr: 74, prJson });
+    assert.equal(uitkomst.status, 1, JSON.stringify(prJson));
+    assert.deepEqual(uitkomst.regels.filter((r) => /PENDING|FINAL/.test(r)), [], JSON.stringify(prJson));
   }
 
-  // En dat geldt voor elke volgorde en duur van de drie aanleidingen, niet alleen voor dit ene paar.
-  const alledrie = Object.entries(AANLEIDINGEN)
-    .map(([naam, context], i) => ({ naam, aankomst: i, duur: 7 - i * 2, context }));
-  const geserialiseerd = speelWritersAf({ groupTemplate, runs: alledrie, bewijsWijzigingen });
-  assert.equal(new Set(geserialiseerd.map((p) => p.groep)).size, 1);
-  assert.equal(geserialiseerd.at(-1).gemeten, 'failure');
+  // Een niet-numeriek matrixnummer is een defect, geen ruis.
+  const { status, stdout } = draaiSchrijfstap({ pr: 'x; rm -rf /', prJson: {} });
+  assert.equal(status, 1);
+  assert.match(stdout, /PULL_REQUEST_NUMBER_INVALID/);
+});
+
+test('S16. een mislukte invalidatie stopt de beurt niet, maar maakt hem wel rood', () => {
+  // De eindstatus overschrijft dezelfde head en is de echte invalidatie, dus doorgaan is beter dan
+  // stoppen — maar het record moet rood zijn, anders blijft een gemiste invalidatie onzichtbaar.
+  const head = sha(4);
+  const { status, regels } = draaiSchrijfstap({
+    pr: 74, prJson: { state: 'open', merged: false, head: { sha: head } }, publishFaalt: ['--pending'],
+  });
+  assert.equal(status, 1);
+  assert.equal(regels.filter((r) => r.startsWith('PENDING ')).length, 1);
+  const finaal = regels.filter((r) => r.startsWith('FINAL '));
+  assert.equal(finaal.length, 1, 'de eindstatus wordt alsnog gepubliceerd');
+  assert.match(finaal[0], new RegExp(`--head-sha ${head}`));
+
+  // Mislukte bewijs-GET's worden als uitvoeringsfout doorgegeven, niet verzwegen, en landen alsnog
+  // als uitspraak op de gemeten head.
+  const zonderBewijs = draaiSchrijfstap({
+    pr: 74,
+    prJson: { state: 'open', merged: false, head: { sha: head } },
+    ghFaalt: ['reviews', 'comments', 'files', 'commits'],
+  });
+  const uitspraak = zonderBewijs.regels.filter((r) => r.startsWith('FINAL '));
+  assert.equal(uitspraak.length, 1);
+  assert.match(uitspraak[0], /--execution-error GATE_EXECUTION_ERROR/);
+  assert.match(uitspraak[0], new RegExp(`--head-sha ${head}`));
+  // Bij een uitvoeringsfout wordt de uitspraak niet eens meer berekend: er is geen bewijs om op te
+  // beslissen, dus zou een `GO` een gok zijn.
+  assert.deepEqual(zonderBewijs.regels.filter((r) => r === 'VERIFY'), []);
+});
+
+test('S17. een gequeueëde OUDERE beurt herleest al haar bewijs en publiceert de NIEUWSTE head', () => {
+  // Twee aanleidingen voor PR 74 staan in dezelfde rij en draaien dus na elkaar. De tweede beurt is
+  // ouder — zij is eerder aangemaakt en heeft staan wachten — maar zij leest haar head pas NA de
+  // lock. Tussen de twee beurten verschuift de head; de tweede publicatie moet de nieuwe dragen.
+  const oud = sha(1);
+  const nieuw = sha(9);
+
+  const eerste = draaiSchrijfstap({
+    pr: 74, prJson: { state: 'open', merged: false, head: { sha: oud } },
+  });
+  const tweede = draaiSchrijfstap({
+    pr: 74, prJson: { state: 'open', merged: false, head: { sha: nieuw } },
+  });
+
+  const eindstatus = (uitkomst) => uitkomst.regels.filter((r) => r.startsWith('FINAL '))[0];
+  assert.match(eindstatus(eerste), new RegExp(`--head-sha ${oud}`));
+  assert.match(eindstatus(tweede), new RegExp(`--head-sha ${nieuw}`),
+    'de wachtende beurt publiceert op de head die zij ZELF na de lock mat');
+
+  // De beurt draagt geen enkele waarde uit haar aanleiding mee: haar enige invoer is het PR-nummer,
+  // en al het bewijs komt uit verzoeken die ná de lock worden gedaan.
+  assert.equal(tweede.regels[0], 'GET repos/owner/repo/pulls/74');
+  assert.ok(tweede.regels.filter((r) => r.startsWith('GET ')).length >= 6, 'al het bewijs opnieuw');
+  const stap = stapScript(WRITER_TEKST, SCHRIJF_STAP);
+  assert.doesNotMatch(stap, /GITHUB_EVENT_PATH/, 'geen enkel veld uit de eventpayload');
 });

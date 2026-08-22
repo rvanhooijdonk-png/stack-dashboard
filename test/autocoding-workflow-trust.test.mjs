@@ -22,7 +22,8 @@ import { pathToFileURL } from 'node:url';
 import {
   analyzeWorkflow, structureLines, extractTriggers, extractWriteGrants, extractJobs,
   extractWorkflowRunSources, stripInlineComment, findTrustBoundaryViolations, TRUST_VIOLATION,
-  UNTRUSTED_TRIGGERS, TRUSTED_WRITER_TRIGGERS,
+  UNTRUSTED_TRIGGERS, TRUSTED_WRITER_TRIGGERS, parseFlowMapping, extractJobConcurrency,
+  extractJobMatrixKeys, isPerPullRequestQueuedWriteJob,
 } from '../scripts/autocoding/workflow-trust.mjs';
 
 const WORKFLOW_DIR = '.github/workflows';
@@ -62,39 +63,78 @@ function writerViolations(text) {
   return violations([{ path: PR_SHIELD, text: SCHONE_SHIELD }, { path: TRUSTED_WRITER, text }]);
 }
 
-/** Een verder schone writer met precies één uitcheckref, zodat alleen die ref gemeten wordt. */
-const WRITER_MET_REF = (ref) => [
-  'name: autocoding-shield-live-gate',
+/**
+ * De schone V11-writervorm. Sinds de per-PR-rij bestaat de writer uit TWEE jobs: een lezende
+ * selectiejob die de doel-PR's als matrix uitschrijft, en precies één schrijvende matrixjob die per
+ * gemeten pull request zijn eigen concurrencygroep krijgt met `cancel-in-progress: false` en
+ * `queue: max`. Elke synthetische writer hieronder vertrekt vanaf deze vorm, zodat een test die één
+ * regel varieert ook werkelijk alleen die regel meet en niet per ongeluk de rijvorm sloopt.
+ */
+const WRITER_ON = [
   'on:',
+  '  issue_comment:',
+  '    types: [created, edited, deleted]',
   '  workflow_run:',
   '    workflows: [autocoding-shield]',
   '    types: [completed]',
-  'permissions: {}',
-  'jobs:',
-  '  autocoding-shield-live-gate:',
+  '  schedule:',
+  "    - cron: '23 * * * *'",
+];
+
+const WRITER_SELECTEER = [
+  '  selecteer:',
   '    permissions:',
-  '      statuses: write',
-  '    steps:',
-  '      - uses: actions/checkout@v4',
-  '        with:',
-  `          ref: ${ref}`,
-].join('\n');
+  '      contents: read',
+  '      pull-requests: read',
+  '    outputs:',
+  '      pull_requests: ${{ steps.doelen.outputs.pull_requests }}',
+];
+
+const WRITER_RIJ = [
+  '    concurrency:',
+  '      group: autocoding-shield-live-gate-pr-${{ matrix.pr }}',
+  '      cancel-in-progress: false',
+  '      queue: max',
+];
+
+/**
+ * Bouwt een writer. `on` vervangt het hele triggerblok, `scopes` voegt permissieregels aan de
+ * schrijfjob toe, `rij` vervangt het concurrencyblok van die job, `schrijf` voegt regels binnen de
+ * schrijfjob toe (stappen, env) en `jobs` voegt hele extra jobs achteraan toe.
+ */
+function schoneWriter({ on = WRITER_ON, scopes = [], rij = WRITER_RIJ, schrijf = [], jobs = [] } = {}) {
+  return [
+    'name: autocoding-shield-live-gate',
+    ...on,
+    'permissions: {}',
+    'jobs:',
+    ...WRITER_SELECTEER,
+    '  schrijf:',
+    '    needs: selecteer',
+    '    permissions:',
+    '      statuses: write',
+    ...scopes.map((scope) => `      ${scope}`),
+    '    strategy:',
+    '      matrix:',
+    '        pr: ${{ fromJSON(needs.selecteer.outputs.pull_requests) }}',
+    ...rij,
+    ...schrijf,
+    ...jobs,
+  ].join('\n');
+}
+
+/** Een verder schone writer met precies één uitcheckref, zodat alleen die ref gemeten wordt. */
+const WRITER_MET_REF = (ref) => schoneWriter({
+  schrijf: [
+    '    steps:',
+    '      - uses: actions/checkout@v4',
+    '        with:',
+    `          ref: ${ref}`,
+  ],
+});
 
 /** Idem met precies één extra actie, zodat alleen die `uses:` gemeten wordt. */
-const WRITER_MET_ACTIE = (uses) => [
-  'name: autocoding-shield-live-gate',
-  'on:',
-  '  workflow_run:',
-  '    workflows: [autocoding-shield]',
-  '    types: [completed]',
-  'permissions: {}',
-  'jobs:',
-  '  autocoding-shield-live-gate:',
-  '    permissions:',
-  '      statuses: write',
-  '    steps:',
-  `      - uses: ${uses}`,
-].join('\n');
+const WRITER_MET_ACTIE = (uses) => schoneWriter({ schrijf: ['    steps:', `      - uses: ${uses}`] });
 
 // --- De meter zelf ------------------------------------------------------------------------------
 
@@ -128,6 +168,50 @@ test('T2. triggers worden in alle drie de YAML-vormen gelezen', () => {
   assert.deepEqual(extractTriggers(structureLines('on:\n  - push\n  - pull_request_target\n')), ['push', 'pull_request_target']);
   // Een `schedule:`-sequence mag geen fantoomtrigger opleveren.
   assert.deepEqual(extractTriggers(structureLines("on:\n  schedule:\n    - cron: '0 * * * *'\n")), ['schedule']);
+
+  // Codex P1, review 4998729801, inline 3834885357. De VIERDE vorm is de flow-stijl mapping. Die
+  // stond niet in de lijst hierboven en werd door de oude lezer stilzwijgend als LEEG gelezen:
+  // `on: { pull_request: {} }` leverde `[]` op, waarna een bestand met `statuses: write` geen enkele
+  // untrusted trigger meer leek te hebben. Precies de bypass die deze meter moest afvangen.
+  assert.deepEqual(extractTriggers(structureLines('on: { pull_request: {} }\n')), ['pull_request']);
+  assert.deepEqual(
+    extractTriggers(structureLines('on: { pull_request: { branches: [main] }, schedule: [] }\n')),
+    ['pull_request', 'schedule'],
+  );
+  assert.deepEqual(extractTriggers(structureLines("on: { 'pull_request_target': {} }\n")), ['pull_request_target']);
+  assert.deepEqual(extractTriggers(structureLines('on: {}\n')), []);
+
+  // En wat de lezer NIET betrouwbaar kan ontleden wordt fail-closed `null`, niet stilzwijgend leeg.
+  // `null` is hier het signaal dat de meter geen uitspraak mag doen; `[]` zou "geen triggers,
+  // dus geen risico" betekenen en is daarom de gevaarlijke richting.
+  for (const onaf of [
+    'on: { pull_request: {}\n',
+    'on: { pull_request }\n',
+    'on: { pull_request: {}, pull_request: {} }\n',
+    'on: { : {} }\n',
+    "on: { pull_request: {} } extra\n",
+    'on: [push, pull_request\n',
+    'on: !!python/object/apply:os.system\n',
+  ]) {
+    assert.equal(extractTriggers(structureLines(onaf)), null, onaf);
+  }
+});
+
+test('T2a. de flow-mappinglezer is een eigen, toetsbare parser', () => {
+  const sleutels = (tekst) => {
+    const uitkomst = parseFlowMapping(tekst);
+    return uitkomst.ok ? [...uitkomst.entries.keys()] : null;
+  };
+  assert.deepEqual(sleutels('{}'), []);
+  assert.deepEqual(sleutels('{ a: 1, b: 2 }'), ['a', 'b']);
+  // Geneste haken en `${{ }}`-expressies tellen als één waarde, niet als scheidingsteken.
+  assert.deepEqual(sleutels('{ a: { b: [1, 2] }, c: ${{ github.event.number }} }'), ['a', 'c']);
+  // Een komma binnen aanhalingstekens scheidt niets.
+  assert.deepEqual(sleutels("{ a: 'x, y', b: 2 }"), ['a', 'b']);
+  // En elke onbetrouwbare vorm is `null`.
+  for (const stuk of ['{ a: 1', 'a: 1 }', '{ a }', '{ a: 1, a: 2 }', "{ a: 'onaf }", '{ a: 1 } rest']) {
+    assert.equal(sleutels(stuk), null, stuk);
+  }
 });
 
 test('T3. elke schrijfvorm wordt herkend, ook flow-stijl en write-all', () => {
@@ -190,20 +274,8 @@ test('T5. NEGATIEVE CONTROLE: de gemeten vorm van 07659bd wordt als overtreding 
 });
 
 test('T6. een trusted writer die zelf een PR-event of extra schrijfscope krijgt, valt om', () => {
-  const basis = (extraOn, extraPerm) => [
-    'name: autocoding-shield-live-gate',
-    'on:',
-    '  workflow_run:',
-    '    workflows: [autocoding-shield]',
-    '    types: [completed]',
-    ...extraOn,
-    'permissions: {}',
-    'jobs:',
-    '  autocoding-shield-live-gate:',
-    '    permissions:',
-    '      statuses: write',
-    ...extraPerm,
-  ].join('\n');
+  const basis = (extraOn, extraPerm) =>
+    schoneWriter({ on: [...WRITER_ON, ...extraOn], scopes: extraPerm });
 
   for (const trigger of UNTRUSTED_TRIGGERS) {
     const gevonden = writerViolations(basis([`  ${trigger}:`], []));
@@ -218,32 +290,42 @@ test('T6. een trusted writer die zelf een PR-event of extra schrijfscope krijgt,
   }
 
   for (const scope of ['contents: write', 'actions: write', 'pull-requests: write', 'id-token: write']) {
-    const gevonden = writerViolations(basis([], [`      ${scope}`]));
+    const gevonden = writerViolations(basis([], [scope]));
     assert.ok(
       gevonden.includes(`${TRUST_VIOLATION.TRUSTED_WRITER_WRITE_SCOPE_NOT_ALLOWED}:${TRUSTED_WRITER}`),
       scope,
     );
   }
 
-  // Een tweede job, een schrijfscope op workflowniveau, secrets, PR-headcheckout en PR-cache
-  // zijn allemaal eigen overtredingen.
-  const tweedeJob = `${basis([], [])}\n  extra:\n    runs-on: ubuntu-latest`;
-  assert.ok(writerViolations(tweedeJob)
-    .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_HAS_MULTIPLE_JOBS}:${TRUSTED_WRITER}`));
+  // Een TWEEDE SCHRIJVENDE job, een schrijfscope op workflowniveau, secrets, PR-headcheckout en
+  // PR-cache zijn allemaal eigen overtredingen. De grens is sinds V11 niet meer "precies één job"
+  // maar "precies één job MET een schrijfscope": de lezende selectiejob mag ernaast bestaan, want
+  // die kan zonder schrijfrechten niets publiceren.
+  const tweedeSchrijver = schoneWriter({
+    jobs: ['  extra:', '    permissions:', '      statuses: write'],
+  });
+  assert.ok(writerViolations(tweedeSchrijver)
+    .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_WRITE_JOB_NOT_UNIQUE}:${TRUSTED_WRITER}`));
+
+  // Een tweede LEZENDE job daarentegen is geen overtreding.
+  const tweedeLezer = schoneWriter({
+    jobs: ['  extra:', '    permissions:', '      contents: read'],
+  });
+  assert.deepEqual(writerViolations(tweedeLezer), []);
 
   const topLevelWrite = basis([], []).replace('permissions: {}', 'permissions:\n  statuses: write');
   assert.ok(writerViolations(topLevelWrite)
     .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_WORKFLOW_LEVEL_WRITE}:${TRUSTED_WRITER}`));
 
-  const metSecret = `${basis([], [])}\n    env:\n      TOKEN: \${{ secrets.PAT }}`;
+  const metSecret = schoneWriter({ schrijf: ['    env:', '      TOKEN: ${{ secrets.PAT }}'] });
   assert.ok(writerViolations(metSecret)
     .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_USES_SECRETS}:${TRUSTED_WRITER}`));
 
-  const metPrHead = `${basis([], [])}\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          ref: \${{ github.event.pull_request.head.sha }}`;
+  const metPrHead = WRITER_MET_REF('${{ github.event.pull_request.head.sha }}');
   assert.ok(writerViolations(metPrHead)
     .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_CHECKS_OUT_PR_CODE}:${TRUSTED_WRITER}`));
 
-  const metCache = `${basis([], [])}\n    steps:\n      - uses: actions/cache@v4`;
+  const metCache = WRITER_MET_ACTIE('actions/cache@v4');
   assert.ok(writerViolations(metCache)
     .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_USES_PR_ARTIFACTS}:${TRUSTED_WRITER}`));
 });
@@ -304,24 +386,16 @@ test('T6b. artifact- en cacheacties worden op de ACTIENAAM geweigerd, niet op de
   // Over-benaderend mag, vals alarm op TEKST mag niet: een commentaarregel en een shellregel in een
   // blok-scalar zijn geen `uses:`-structuur. Dat onderscheid komt uit `structureLines()`, dus wordt
   // het hier gemeten en niet aangenomen.
-  const schoon = [
-    'name: autocoding-shield-live-gate',
-    'on:',
-    '  workflow_run:',
-    '    workflows: [autocoding-shield]',
-    '    types: [completed]',
-    'permissions: {}',
-    'jobs:',
-    '  autocoding-shield-live-gate:',
-    '    permissions:',
-    '      statuses: write',
-    '    steps:',
-    '      # nooit: uses: dawidd6/action-download-artifact@v6',
-    '      - uses: actions/checkout@v4',
-    '      - run: |',
-    '          echo "uses: actions/upload-artifact@v4 staat hier alleen als tekst"',
-    '          echo "en uses: buildjet/cache@v4 ook"',
-  ].join('\n');
+  const schoon = schoneWriter({
+    schrijf: [
+      '    steps:',
+      '      # nooit: uses: dawidd6/action-download-artifact@v6',
+      '      - uses: actions/checkout@v4',
+      '      - run: |',
+      '          echo "uses: actions/upload-artifact@v4 staat hier alleen als tekst"',
+      '          echo "en uses: buildjet/cache@v4 ook"',
+    ],
+  });
   assert.equal(analyzeWorkflow(schoon).usesArtifactsOrCache, false);
   assert.deepEqual(writerViolations(schoon), []);
 });
@@ -407,7 +481,12 @@ test('T7. geen enkel workflowbestand in deze repository overtreedt de grens', ()
 
 test('T8. de gemeten vorm van de twee shieldbestanden is precies de bedoelde', () => {
   const shield = analyzeWorkflow(readFileSync(PR_SHIELD, 'utf8'));
-  assert.deepEqual(shield.triggers, ['pull_request', 'issue_comment', 'pull_request_review']);
+  // `issue_comment` is hier per V11 WEG: de trusted writer luistert daar zelf op, en dubbel
+  // signaleren zou één comment twee keer laten meten zonder één extra feit op te leveren.
+  // `pull_request_review_comment` is er juist bij gekomen, want een losse reviewcomment levert geen
+  // `pull_request_review`-event op en moest anders door de uurlijkse schedule opgevangen worden.
+  assert.deepEqual(shield.triggers,
+    ['pull_request', 'pull_request_review', 'pull_request_review_comment']);
   assert.deepEqual(shield.writeGrants, [], 'de PR-shield draagt geen schrijfscope');
   assert.deepEqual(shield.jobs.map((j) => j.id), ['autocoding-shield', 'autocoding-shield-signal']);
   assert.equal(shield.usesSecrets, false);
@@ -417,15 +496,33 @@ test('T8. de gemeten vorm van de twee shieldbestanden is precies de bedoelde', (
   assert.match(shield.jobs[0].condition, /github\.event_name == 'pull_request'/);
 
   const writer = analyzeWorkflow(readFileSync(TRUSTED_WRITER, 'utf8'));
-  assert.deepEqual(writer.triggers, ['workflow_run', 'schedule']);
+  assert.deepEqual(writer.triggers, ['issue_comment', 'workflow_run', 'schedule']);
+  assert.equal(writer.triggersUnparseable, false);
   assert.deepEqual(writer.workflowRunSources, ['autocoding-shield']);
   assert.deepEqual(writer.writeGrants.map((g) => g.scope), ['statuses']);
   assert.deepEqual(writer.workflowLevelWriteGrants, []);
+  // Twee jobs: de selectie leest alleen, de schrijver draagt als enige `statuses: write`.
   assert.deepEqual(writer.jobs.map((j) => [j.id, j.writeGrants.map((g) => g.scope)]),
-    [['autocoding-shield-live-gate', ['statuses']]]);
+    [['selecteer', []], ['schrijf', ['statuses']]]);
+  // En die schrijfjob is per PR geserialiseerd: één matrixwaarde, één rij, niets dat per run
+  // verschilt, en een rij die WACHT in plaats van te annuleren.
+  const schrijf = writer.jobs.find((j) => j.id === 'schrijf');
+  assert.deepEqual(schrijf.matrixKeys, ['pr']);
+  assert.deepEqual(schrijf.concurrency, {
+    unparseable: false,
+    group: 'autocoding-shield-live-gate-pr-${{ matrix.pr }}',
+    cancelInProgress: 'false',
+    queue: 'max',
+  });
+  assert.equal(isPerPullRequestQueuedWriteJob(schrijf), true);
+  // Een concurrency op WORKFLOWNIVEAU zou alle PR's weer in één rij duwen en is daarom afwezig.
+  assert.equal(writer.workflowLevelConcurrency, false);
   assert.equal(writer.usesSecrets, false);
   assert.equal(writer.usesArtifactsOrCache, false);
-  assert.deepEqual(writer.checkoutRefs, ['${{ github.event.repository.default_branch }}']);
+  assert.deepEqual(writer.checkoutRefs, [
+    '${{ github.event.repository.default_branch }}',
+    '${{ github.event.repository.default_branch }}',
+  ]);
 });
 
 test('T9. NEGATIEVE CONTROLE: de gemeten V4-vorm (run 32542688290) wordt afgekeurd', () => {
@@ -457,8 +554,11 @@ test('T9. NEGATIEVE CONTROLE: de gemeten V4-vorm (run 32542688290) wordt afgekeu
   // En allebei de events staan buiten de allowlist van de writer.
   assert.ok(gevonden.includes(`${TRUST_VIOLATION.TRUSTED_WRITER_TRIGGER_NOT_ALLOWED}:${TRUSTED_WRITER}`));
 
-  // Ook de op zichzelf "default-branch" gewaande variant met alleen `issue_comment` valt: een event
-  // dat elke commentator direct op de schrijvende workflow kan richten is geen vertrouwensgrens.
+  // `issue_comment` is sinds V11 wél toegestaan IN de writer, en dat is geen versoepeling van deze
+  // regel maar een gevolg ervan: GitHub draait dat event uitsluitend tegen de definitie op de
+  // DEFAULT BRANCH, precies zoals `workflow_run` en `schedule`. Wat een commentator kan richten is
+  // het moment, niet de code. Wat NIET verandert is de rest van de grens — het onderstaande blijft
+  // vallen op zijn schrijfjob, niet op zijn trigger.
   const alleenComment = [
     'name: autocoding-shield-live-gate',
     'on:',
@@ -470,44 +570,28 @@ test('T9. NEGATIEVE CONTROLE: de gemeten V4-vorm (run 32542688290) wordt afgekeu
     '    permissions:',
     '      statuses: write',
   ].join('\n');
-  assert.ok(writerViolations(alleenComment)
-    .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_TRIGGER_NOT_ALLOWED}:${TRUSTED_WRITER}`));
+  const commentGevonden = writerViolations(alleenComment);
+  assert.ok(!commentGevonden.includes(`${TRUST_VIOLATION.TRUSTED_WRITER_TRIGGER_NOT_ALLOWED}:${TRUSTED_WRITER}`));
+  assert.ok(commentGevonden.includes(
+    `${TRUST_VIOLATION.TRUSTED_WRITER_WRITE_JOB_NOT_PER_PULL_REQUEST_QUEUED}:${TRUSTED_WRITER}`,
+  ));
 
   // De toegestane keten zelf levert geen enkele overtreding op.
-  const trusted = [
-    'name: autocoding-shield-live-gate',
-    'on:',
-    '  workflow_run:',
-    '    workflows: [autocoding-shield]',
-    '    types: [completed]',
-    '  schedule:',
-    "    - cron: '23 * * * *'",
-    'permissions: {}',
-    'jobs:',
-    '  autocoding-shield-live-gate:',
-    '    permissions:',
-    '      contents: read',
-    '      statuses: write',
-    '    steps:',
-    '      - uses: actions/checkout@v4',
-    '        with:',
-    '          ref: ${{ github.event.repository.default_branch }}',
-  ].join('\n');
+  const trusted = schoneWriter({
+    scopes: ['contents: read'],
+    schrijf: [
+      '    steps:',
+      '      - uses: actions/checkout@v4',
+      '        with:',
+      '          ref: ${{ github.event.repository.default_branch }}',
+    ],
+  });
   assert.deepEqual(writerViolations(trusted), []);
-  assert.deepEqual(TRUSTED_WRITER_TRIGGERS, ['workflow_run', 'schedule']);
+  assert.deepEqual(TRUSTED_WRITER_TRIGGERS, ['workflow_run', 'schedule', 'issue_comment']);
 });
 
 test('T10. de workflow_run-bron moet op de shieldnaam gepind zijn', () => {
-  const writer = (onBlock) => [
-    'name: autocoding-shield-live-gate',
-    'on:',
-    ...onBlock,
-    'permissions: {}',
-    'jobs:',
-    '  autocoding-shield-live-gate:',
-    '    permissions:',
-    '      statuses: write',
-  ].join('\n');
+  const writer = (onBlock) => schoneWriter({ on: ['on:', ...onBlock] });
   const unpinned = `${TRUST_VIOLATION.TRUSTED_WRITER_WORKFLOW_RUN_SOURCE_UNPINNED}:${TRUSTED_WRITER}`;
 
   // Geen `workflows:`-pin: elke voltooide workflow in de repository zou de writer starten, ook een
@@ -596,4 +680,267 @@ test('T12. stripInlineComment volgt de escaperegels van beide YAML-quotesoorten'
     '      statuses: write',
   ].join('\n');
   assert.deepEqual(extractWriteGrants(structureLines(yaml)).map((g) => g.scope), ['statuses']);
+});
+
+// --- De flow-stijl bypass en de per-PR-rij ------------------------------------------------------
+
+test('T13. NEGATIEVE CONTROLE: `on: { pull_request: {} }` plus `statuses: write` wordt geweigerd', () => {
+  // Codex P1, review 4998729801, inline 3834885357. YAML kent voor mappings twee schrijfwijzen. De
+  // meter las alleen de blokvorm; de flow-vorm leverde LEEG op. Een bestand met flow-triggers en een
+  // schrijfscope leek daardoor "geen untrusted trigger" te hebben, terwijl GitHub het gewoon op
+  // `pull_request` draait — met de door de PR VOORGESTELDE definitie.
+  const flowShield = [
+    'name: autocoding-shield',
+    'on: { pull_request: { branches: [main] }, pull_request_review: { types: [submitted] } }',
+    'permissions: {}',
+    'jobs:',
+    '  autocoding-shield:',
+    '    permissions:',
+    '      statuses: write',
+  ].join('\n');
+
+  const gevonden = violations([{ path: PR_SHIELD, text: flowShield }, { path: TRUSTED_WRITER, text: schoneWriter() }]);
+  assert.ok(gevonden.includes(`${TRUST_VIOLATION.UNTRUSTED_TRIGGER_WITH_WRITE_PERMISSION}:${PR_SHIELD}`));
+  assert.ok(gevonden.includes(`${TRUST_VIOLATION.PR_SHIELD_HAS_WRITE_PERMISSION}:${PR_SHIELD}`));
+  assert.ok(gevonden.includes(`${TRUST_VIOLATION.STATUSES_WRITE_OUTSIDE_TRUSTED_WRITER}:${PR_SHIELD}`));
+
+  // `pull_request_target` in flow-vorm is even goed zichtbaar.
+  const flowTarget = 'on: { pull_request_target: {} }\njobs:\n  a:\n    permissions:\n      contents: read';
+  assert.ok(
+    violations([{ path: 'x.yml', text: flowTarget }])
+      .includes(`${TRUST_VIOLATION.PULL_REQUEST_TARGET_PRESENT}:x.yml`),
+  );
+});
+
+test('T13a. wat de triggerlezer niet kan ontleden is fail-closed, niet stilzwijgend leeg', () => {
+  // Over-benaderen in de VEILIGE richting. Een vorm die de lezer niet aankan mag nooit als "geen
+  // triggers" doorgaan, want dan verdwijnt elke triggergebonden regel eruit. Hij wordt gemeld.
+  const onleesbaar = [
+    'name: iets',
+    'on: { pull_request: {}',
+    'jobs:',
+    '  a:',
+    '    permissions:',
+    '      contents: read',
+  ].join('\n');
+  const analyse = analyzeWorkflow(onleesbaar);
+  assert.equal(analyse.triggersUnparseable, true);
+  assert.deepEqual(analyse.triggers, []);
+  assert.ok(
+    violations([{ path: 'x.yml', text: onleesbaar }])
+      .includes(`${TRUST_VIOLATION.TRIGGER_MAPPING_UNPARSEABLE}:x.yml`),
+  );
+
+  // Ook een onbekende KINDREGEL in de blokvorm maakt de lijst onbetrouwbaar: als er iets tussen de
+  // triggers staat dat de lezer niet herkent, kan hij niet meer beweren de lijst compleet te hebben.
+  assert.equal(extractTriggers(structureLines('on:\n  pull_request:\n  ???!\n')), null);
+});
+
+test('T13b. NEGATIEVE MUTATIE: de oude blok-only lezer laat de flow-vorm door', async () => {
+  // De regel uit T13 is pas bewezen als de OUDE lezer er aantoonbaar op stukloopt. De mutant krijgt
+  // de vorm van vóór deze commit terug: alles wat niet met `[` begint werd als losse scalar gelezen,
+  // dus `{ pull_request: {} }` werd één onherkenbare "triggernaam" — en daarmee geen `pull_request`.
+  const gemuteerd = await mutantVanDeMeter(
+    'flow-mapping',
+    `  if (inline.startsWith('{')) {
+    const flow = parseFlowMapping(inline);
+    if (!flow.ok) return null;
+    return [...flow.entries.keys()];
+  }`,
+    `  if (inline.startsWith('{')) {
+    return [];
+  }`,
+  );
+
+  const flowShield = [
+    'name: autocoding-shield',
+    'on: { pull_request: { branches: [main] } }',
+    'permissions: {}',
+    'jobs:',
+    '  autocoding-shield:',
+    '    permissions:',
+    '      statuses: write',
+  ].join('\n');
+
+  // De mutant ziet geen enkele untrusted trigger meer en laat de schrijfscope dus staan...
+  assert.deepEqual(gemuteerd.analyzeWorkflow(flowShield).triggers, []);
+  assert.ok(
+    !gemuteerd.findTrustBoundaryViolations({
+      workflows: [{ path: PR_SHIELD, text: flowShield }, { path: TRUSTED_WRITER, text: schoneWriter() }],
+      prShieldPath: PR_SHIELD, trustedWriterPath: TRUSTED_WRITER,
+    }).includes(`${TRUST_VIOLATION.UNTRUSTED_TRIGGER_WITH_WRITE_PERMISSION}:${PR_SHIELD}`),
+  );
+  // ...terwijl de echte meter hem precies daar op afkeurt.
+  assert.deepEqual(analyzeWorkflow(flowShield).triggers, ['pull_request']);
+  assert.ok(
+    violations([{ path: PR_SHIELD, text: flowShield }, { path: TRUSTED_WRITER, text: schoneWriter() }])
+      .includes(`${TRUST_VIOLATION.UNTRUSTED_TRIGGER_WITH_WRITE_PERMISSION}:${PR_SHIELD}`),
+  );
+});
+
+test('T14. de schrijfjob moet PER PULL REQUEST in een WACHTENDE rij staan', () => {
+  // Codex P1, review 4998729801, inline 3834885350/3834885354. Een enkele globale rij betekende dat
+  // twee aanleidingen voor VERSCHILLENDE PR's elkaar verdrongen, en dat één run de heads van alle
+  // openstaande PR's aanraakte. De rij hoort daarom aan de GEMETEN PR te hangen — en te wachten in
+  // plaats van te annuleren, want een geannuleerde wachtende beurt is een PR die niemand hermeet.
+  assert.equal(isPerPullRequestQueuedWriteJob(
+    analyzeWorkflow(schoneWriter()).jobs.find((j) => j.id === 'schrijf'),
+  ), true);
+
+  const nietGeserialiseerd = `${TRUST_VIOLATION.TRUSTED_WRITER_WRITE_JOB_NOT_PER_PULL_REQUEST_QUEUED}:${TRUSTED_WRITER}`;
+
+  // MUTATIE 1: `queue: single` in plaats van `max`. Dan wordt een wachtende beurt geannuleerd zodra
+  // er een nieuwe aanleiding voor DEZELFDE PR binnenkomt, en meet die tweede aanleiding een oudere
+  // toestand nooit opnieuw.
+  const single = schoneWriter({
+    rij: [
+      '    concurrency:',
+      '      group: autocoding-shield-live-gate-pr-${{ matrix.pr }}',
+      '      cancel-in-progress: false',
+      '      queue: single',
+    ],
+  });
+  assert.ok(writerViolations(single).includes(nietGeserialiseerd));
+
+  // MUTATIE 2: annuleren in plaats van wachten.
+  const annuleert = schoneWriter({
+    rij: [
+      '    concurrency:',
+      '      group: autocoding-shield-live-gate-pr-${{ matrix.pr }}',
+      '      cancel-in-progress: true',
+      '      queue: max',
+    ],
+  });
+  assert.ok(writerViolations(annuleert).includes(nietGeserialiseerd));
+
+  // MUTATIE 3: de rij op een RUN-eigenschap sleutelen in plaats van op de PR. Dan valt elke run in
+  // zijn eigen rij en serialiseert er niets meer. `github.run_number` is precies de vorm die de
+  // vorige ronde gebruikte.
+  for (const vluchtig of [
+    'autocoding-shield-live-gate-${{ github.run_number }}',
+    'autocoding-shield-live-gate-${{ github.run_id }}',
+    'autocoding-shield-live-gate-${{ github.event.pull_request.number }}',
+    'autocoding-shield-live-gate',
+  ]) {
+    const vorm = schoneWriter({
+      rij: [
+        '    concurrency:',
+        `      group: ${vluchtig}`,
+        '      cancel-in-progress: false',
+        '      queue: max',
+      ],
+    });
+    assert.ok(writerViolations(vorm).includes(nietGeserialiseerd), vluchtig);
+  }
+
+  // MUTATIE 4: helemaal geen rij.
+  assert.ok(writerViolations(schoneWriter({ rij: [] })).includes(nietGeserialiseerd));
+
+  // MUTATIE 5: een rij die naar een matrixsleutel wijst die de job niet heeft. Dan is de groep in
+  // de praktijk leeg en vallen alle PR's alsnog in één rij.
+  const verkeerdeSleutel = schoneWriter({
+    rij: [
+      '    concurrency:',
+      '      group: autocoding-shield-live-gate-pr-${{ matrix.nummer }}',
+      '      cancel-in-progress: false',
+      '      queue: max',
+    ],
+  });
+  assert.ok(writerViolations(verkeerdeSleutel).includes(nietGeserialiseerd));
+
+  // MUTATIE 6: een concurrency op WORKFLOWNIVEAU. Die geldt voor de hele run en zet alle PR's van
+  // een schedulebeurt weer achter elkaar in één rij — of erger, laat ze elkaar annuleren.
+  const werkstroomRij = [
+    schoneWriter().replace('permissions: {}', 'permissions: {}\nconcurrency:\n  group: live-gate\n  cancel-in-progress: false'),
+  ][0];
+  assert.ok(writerViolations(werkstroomRij)
+    .includes(`${TRUST_VIOLATION.TRUSTED_WRITER_HAS_WORKFLOW_LEVEL_CONCURRENCY}:${TRUSTED_WRITER}`));
+});
+
+test('T14a. verschillende PR-nummers leveren verschillende rijen op, dezelfde PR precies één', () => {
+  // De eigenschap die telt is niet de tekst van de groep maar wat hij per PR OPLEVERT. De groep
+  // wordt hier met echte matrixwaarden ingevuld, zoals Actions dat doet.
+  const job = analyzeWorkflow(schoneWriter()).jobs.find((j) => j.id === 'schrijf');
+  const groepVan = (pr) => job.concurrency.group.replace(/\$\{\{\s*matrix\.pr\s*\}\}/, String(pr));
+
+  assert.notEqual(groepVan(74), groepVan(75));
+  // Twee aanleidingen voor DEZELFDE PR delen de rij, ook al zijn het aparte runs: er staat niets
+  // runafhankelijks in de groep.
+  assert.equal(groepVan(74), groepVan(74));
+  assert.equal(new Set([74, 75, 76, 74].map(groepVan)).size, 3);
+  // En de rij WACHT, dus de tweede beurt voor PR 74 wordt niet weggegooid.
+  assert.equal(job.concurrency.queue, 'max');
+  assert.equal(job.concurrency.cancelInProgress, 'false');
+});
+
+test('T14b. de concurrency- en matrixlezer zijn zelf gemeten, niet aangenomen', () => {
+  const lees = (regels) => extractJobConcurrency({ lines: structureLines(regels.join('\n')) });
+
+  assert.equal(lees(['  a:', '    runs-on: ubuntu-latest']), null);
+  assert.deepEqual(
+    lees(['  a:', '    concurrency:', '      group: g-${{ matrix.pr }}', '      cancel-in-progress: false', '      queue: max']),
+    { unparseable: false, group: 'g-${{ matrix.pr }}', cancelInProgress: 'false', queue: 'max' },
+  );
+  // Flow-vorm en scalarvorm zijn dezelfde YAML.
+  assert.deepEqual(
+    lees(['  a:', '    concurrency: { group: g-${{ matrix.pr }}, cancel-in-progress: false, queue: max }']),
+    { unparseable: false, group: 'g-${{ matrix.pr }}', cancelInProgress: 'false', queue: 'max' },
+  );
+  // De scalarvorm zet alleen de groep; `queue` valt dan terug op de GitHub-standaard `single`, wat
+  // geen wachtende rij is. Fail-closed betekent hier dus: geen aanname over de rest.
+  assert.deepEqual(
+    lees(['  a:', '    concurrency: alleen-een-groep']),
+    { unparseable: false, group: 'alleen-een-groep', cancelInProgress: '', queue: '' },
+  );
+  // En een flow-vorm die niet te ontleden is, is `unparseable` — nooit stilzwijgend goed.
+  assert.equal(lees(['  a:', '    concurrency: { group: g'])?.unparseable, true);
+  assert.equal(isPerPullRequestQueuedWriteJob({ concurrency: lees(['  a:', '    concurrency: { group: g']), matrixKeys: ['pr'] }), false);
+
+  const matrix = (regels) => extractJobMatrixKeys({ lines: structureLines(regels.join('\n')) });
+  assert.deepEqual(matrix(['  a:', '    runs-on: ubuntu-latest']), []);
+  assert.deepEqual(
+    matrix(['  a:', '    strategy:', '      matrix:', '        pr: ${{ fromJSON(x) }}', '        os: [ubuntu]']),
+    ['pr', 'os'],
+  );
+  // `include`/`exclude` zijn geen matrixdimensies om een rij op te sleutelen.
+  assert.deepEqual(
+    matrix(['  a:', '    strategy:', '      fail-fast: false', '      matrix:', '        pr: [1]', '        include:', '          - pr: 2']),
+    ['pr'],
+  );
+});
+
+test('T15. `issue_comment` met schrijfrechten mag alleen in de trusted writer staan', () => {
+  // `issue_comment` draait weliswaar altijd de default-branch-definitie, maar de writer is het enige
+  // bestand waarin de rest van de grens gemeten wordt: één schrijfjob, per-PR-rij, geen PR-code,
+  // geen secrets, alleen `statuses`. Zou een willekeurige andere workflow op datzelfde event mogen
+  // schrijven, dan was die grens een eigenschap van één bestand in plaats van van de repository.
+  const elders = [
+    'name: iets-anders',
+    'on:',
+    '  issue_comment:',
+    '    types: [created]',
+    'jobs:',
+    '  reageer:',
+    '    permissions:',
+    '      pull-requests: write',
+  ].join('\n');
+  const gevonden = violations([
+    { path: PR_SHIELD, text: SCHONE_SHIELD },
+    { path: TRUSTED_WRITER, text: schoneWriter() },
+    { path: 'other.yml', text: elders },
+  ]);
+  assert.ok(gevonden.includes(`${TRUST_VIOLATION.ISSUE_COMMENT_WRITE_OUTSIDE_TRUSTED_WRITER}:other.yml`));
+
+  // Zonder schrijfscope is hetzelfde event geen overtreding: het gaat om de combinatie.
+  const lezendElders = elders.replace('      pull-requests: write', '      contents: read');
+  assert.ok(
+    !violations([
+      { path: PR_SHIELD, text: SCHONE_SHIELD },
+      { path: TRUSTED_WRITER, text: schoneWriter() },
+      { path: 'other.yml', text: lezendElders },
+    ]).includes(`${TRUST_VIOLATION.ISSUE_COMMENT_WRITE_OUTSIDE_TRUSTED_WRITER}:other.yml`),
+  );
+
+  // En in de writer zelf is het toegestaan.
+  assert.deepEqual(writerViolations(schoneWriter()), []);
 });

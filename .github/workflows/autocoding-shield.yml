@@ -12,12 +12,24 @@ name: autocoding-shield
 #
 #   1. Op `pull_request`: de echte shieldcheck. Die checkt de PR-head uit en voert PR-headcode uit
 #      (validator-, adapter-, publisher- en vertrouwensgrenstests, secretscan op de branchdiff).
-#   2. Op `issue_comment` en `pull_request_review`: een SIGNAAL zonder inhoud. Geen checkout, geen
-#      PR-code, `permissions: {}`. Het enige nut van die job is dat deze workflowrun voltooit,
-#      waarna de trusted writer via `workflow_run` vanaf de DEFAULT BRANCH start.
+#   2. Op `pull_request_review` en `pull_request_review_comment`: een SIGNAAL zonder inhoud. Geen
+#      checkout, geen PR-code, `permissions: {}`. Het enige nut van die job is dat deze workflowrun
+#      voltooit, waarna de trusted writer via `workflow_run` vanaf de DEFAULT BRANCH start en de
+#      bijbehorende PR uit `workflow_run.pull_requests` haalt.
 #
-# De statuswriter staat in een fysiek apart bestand dat door geen enkel direct PR-, comment- of
-# reviewevent startbaar is:
+# `issue_comment` is hier PER V11 VERWIJDERD, en dat is geen versobering maar het opheffen van een
+# dubbele dispatch. De trusted writer luistert sinds V11 zélf op `issue_comment` — een event dat
+# GitHub uitsluitend vanaf de default-branch-definitie draait en dat zijn PR-associatie meedraagt in
+# `github.event.issue.number` plus `github.event.issue.pull_request`. Zou de shield hetzelfde event
+# óók nog signaleren, dan leverde één comment twee aanleidingen op: de directe en de `workflow_run`
+# die op deze run volgt. Dat kost dubbel API-budget zonder één extra feit op te leveren.
+#
+# `pull_request_review_comment` is er juist BIJ gekomen. Een losse reviewcomment is bewijs dat de
+# poort meeweegt, maar hij levert geen `pull_request_review`-event op; zonder dit signaal moest de
+# uurlijkse schedule die wijziging opvangen.
+#
+# De statuswriter staat in een fysiek apart bestand dat door geen enkel direct PR- of reviewevent
+# startbaar is:
 #
 #   .github/workflows/autocoding-shield-live-gate.yml
 #
@@ -30,17 +42,17 @@ on:
   pull_request:
     branches: [main]
   # Alleen als onprivileged signaal. Zie de job `autocoding-shield-signal` hieronder.
-  issue_comment:
-    types: [created, edited, deleted]
   pull_request_review:
     types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
 
 permissions: {}
 
 # Het event zit in de groepsleutel, zodat een signaalrun nooit een lopende of wachtende echte
 # shieldcheck op dezelfde PR kan verdringen.
 concurrency:
-  group: autocoding-shield-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  group: autocoding-shield-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -98,12 +110,10 @@ jobs:
 
   # Het onprivileged signaal. Deze job leest niets, checkt niets uit en voert geen repositorycode
   # uit; hij bestaat alleen zodat de voltooiing van deze run de trusted writer via `workflow_run`
-  # kan starten. Ook wanneer hij (op een issue zonder PR) wordt overgeslagen, voltooit de run en
-  # krijgt de writer zijn aanleiding — die meet de doel-PR's toch zelf opnieuw.
+  # kan starten. De writer haalt de doel-PR daarna uit `workflow_run.pull_requests` — een veld dat
+  # GITHUB vult, niet deze run — en meet die PR vervolgens zelf opnieuw.
   autocoding-shield-signal:
-    if: >-
-      github.event_name != 'pull_request'
-      && (github.event_name != 'issue_comment' || github.event.issue.pull_request)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions: {}
     steps:

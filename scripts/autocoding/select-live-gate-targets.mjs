@@ -1,62 +1,52 @@
 /**
  * AUTOCODING_SHIELD — doelselectie voor de trusted statuswriter.
  *
- * De writer wordt gestart door `workflow_run` (na de onprivileged shield) of door `schedule`. Geen
- * van beide events draagt betrouwbare PR-informatie:
+ * WAT HIER VERANDERDE EN WAAROM. De vorige vorm liet iedere aanleiding ALLE open PR's invalideren en
+ * daarna een met `github.run_number` roterende batch doormeten. Dat was een reparatie van één
+ * eigenschap van de toenmalige globale writerlock: er was één groep voor de hele workflow, GitHub
+ * bewaart per groep hooguit één WACHTENDE run, en een derde aanleiding annuleerde die wachtende run.
+ * Een versmalde overlevende run liet de invalidatie van de geannuleerde voorganger dan vallen, dus
+ * moest elke run alles doen.
  *
- *   - De `workflow_run`-payload komt van een run waarvan de DEFINITIE door de PR geleverd kan zijn.
- *     Naam, pad, `head_sha` en `head_branch` zijn dus hooguit een HINT, nooit een feit waarop een
- *     status geschreven mag worden. Outputs, artifacts en cache van die run worden hier niet gelezen
- *     en mogen dat ook nooit gaan doen.
- *   - Bij een `issue_comment` draait de shield op de default branch, dus binden `head_sha` en
- *     `head_branch` aan die branch en niet aan de becommentarieerde PR. Bij `schedule` bestaat er
- *     überhaupt geen hint.
+ * Die globale sweep loste dat op ten koste van twee nieuwe defecten, allebei door Codex gemeten
+ * (review `4998729801`):
  *
- * Daarom bepaalt deze module de doel-PR's OPNIEUW uit een read-only API-lijst van open pull
- * requests, en gebruikt hij de hint HELEMAAL NIET meer om die lijst te versmallen. Iedere
- * geaccepteerde aanleiding meet ALLE open PR's.
+ *   1. Het `GITHUB_TOKEN`-quotum van duizend verzoeken per uur is GEDEELD per repository, niet per
+ *      run. Eén volledige ronde over 126 open PR's kostte ~926 verzoeken. Een tweede aanleiding in
+ *      hetzelfde uur raakte dus halverwege de invalidatiefase leeg, en een PR die daarvóór net
+ *      `success` had gekregen hield die stale groene status terwijl de run rood werd
+ *      (inline `3834885350`).
+ *   2. `github.run_number` loopt óók door voor runs die als wachtende run geannuleerd worden. De
+ *      runs die werkelijk DRAAIEN hoeven daardoor geen opeenvolgende residuen modulo `batchCount` te
+ *      bezoeken: bij twee blokken kan een herhaald aanleidingspatroon alle oneven runs annuleren,
+ *      waarna elke overlevende run hetzelfde blok meet en het andere blok eindeloos op `pending`
+ *      zet (inline `3834885354`).
  *
- * Waarom de hint zelfs bij een head-gebonden bronevent moest sneuvelen — een eigenschap van de
- * writerlock, niet van de hint. Er is één globale writergroep en GitHub houdt daarvan hooguit één
- * WACHTENDE run aan: komt er een derde aanleiding, dan ANNULEERT hij de wachtende. Het gemeten
- * gevolg: iemand verwijdert een receipt op PR A (run A gaat in de wachtrij), er komt een event op
- * PR B, GitHub annuleert run A, en de overlevende run B versmalde op zijn eigen hint tot alleen B.
- * De invalidatie van A was dan weg, en A's eerdere `success` bleef bruikbaar tot de volgende
- * uurlijkse ronde. Een volledige ronde bij elke aanleiding heeft die eigenschap niet: de
- * overlevende run doet automatisch óók het werk van elke geannuleerde voorganger.
+ * De oorzaak van beide was dezelfde: één globale rij dwong iedere aanleiding tot een ronde over de
+ * hele repository. Die rij is nu weg. De writer serialiseert PER PULL REQUEST — jobconcurrency op
+ * exact het gemeten PR-nummer, `cancel-in-progress: false`, `queue: max` — en daarmee mag de
+ * selectie weer klein zijn:
  *
- * Waarom die bovengrens weg moest. `OPEN_PULL_REQUEST_LIMIT = 25` weigerde de hele ronde zodra er
- * meer open PR's waren: nul statussen gepubliceerd en een rode writerrun. Dat is niet fail-closed
- * maar fail-STALE. Een al gepubliceerde `success` op een PR-head blijft namelijk gewoon groen als er
- * niets overheen wordt geschreven. Wie na een groene uitspraak zijn receipt verwijdert of bewerkt,
- * kreeg dus precies wat hij wilde: de writer werd rood op de default branch, de PR-head bleef groen,
- * en de uurlijkse fallback kon dat nooit repareren zolang de teller boven de limiet bleef. Een
- * ontbrekende status is stil; een verkeerde status is groen. Alleen de tweede is gevaarlijk.
+ *   - `issue_comment` draait volgens GitHub uitsluitend de definitie op de DEFAULT BRANCH en draagt
+ *     `github.event.issue.number` plus `github.event.issue.pull_request`. Dat is een feit van
+ *     GitHub, geen veld uit een door een PR geleverde run, dus is het bruikbaar als doelselectie.
+ *     Precies één PR.
+ *   - `workflow_run` na de onprivileged shield draagt `workflow_run.pull_requests`, dat GitHub zelf
+ *     vult. De bronrun wordt eerst op naam, pad én bronevent getoetst; daarna telt uitsluitend een
+ *     EENDUIDIGE associatie met precies één geldig, positief PR-nummer. Nul of meerdere is
+ *     ambigu en levert een no-op op, met de schedule als vangnet.
+ *   - `schedule` is de convergentiefallback en meet een kleine, deterministische bucket.
  *
- * Wat er WEL fail-closed blijft: een onleesbare of onbruikbare lijst. Dan is niet bekend WELKE PR's
- * bestaan, dus is elke ronde per definitie onvolledig en wordt er niets gepubliceerd. Het verschil
- * met de oude limiet is dat een volledig leesbare lijst nu altijd volledig GEÏNVALIDEERD wordt, hoe
- * lang hij ook is. De kosten daarvan (zes GET's per gemeten PR) zijn een budgetkwestie; loopt dat
- * budget leeg, dan faalt dat per record en levert het `failure` op de gemeten head op — zichtbaar,
- * niet stil groen.
+ * Waarom dit nu WEL veilig is terwijl hintversmalling het eerder niet was: met `queue: max` op een
+ * per-PR-groep annuleert een nieuwe aanleiding voor PR B nooit meer de wachtende beurt van PR A. Er
+ * is dus geen aanleiding meer die een andere kan opeten, en daarmee vervalt de reden om alles te
+ * doen. Wat een aanleiding wél nog kan overkomen is samenvallen met een gelijke beurt voor DEZELFDE
+ * PR; dat is onschadelijk, want elke beurt leest ná de lock alle bewijs opnieuw en publiceert dus
+ * dezelfde uitspraak.
  *
- * De uitspraak zelf is een pure functie van de API-momentopname per PR, dus een PR twee keer meten
- * levert twee keer dezelfde status op. Te veel meten kost API-budget; te weinig meten laat een stale
- * status staan. De asymmetrie bepaalt de keuze.
- *
- * INVALIDATE-FIRST. Dat budget is eindig en dus zelf een risico: zeven GET's en een POST per PR
- * betekent bij 126 open PR's meer dan duizend verzoeken, en het uurlijkse `GITHUB_TOKEN`-quotum is
- * duizend. Wie de PR's één voor één volledig afhandelt, raakt halverwege door zijn budget heen — en
- * de PR's die dan nog niet aan de beurt waren, houden hun oude `success`. De volgorde is daarom
- * omgekeerd: EERST krijgt iedere head uit de volledige lijst één goedkope `pending`-POST (126
- * verzoeken, geen GET's), en pas daarna wordt er gemeten. Vanaf dat moment kan geen enkele
- * geselecteerde head nog groen staan, dus is elke verdere uitputting hooguit een uitgestelde
- * uitspraak in plaats van een stale groene.
- *
- * Die tweede fase is begrensd op `EVALUATION_BATCH_LIMIT` PR's en roteert met het run-nummer, zodat
- * elke open PR binnen eindig veel writerruns aan de beurt komt. De rotatie is UITSLUITEND
- * scheduling: ze bepaalt wanneer een head zijn uitspraak terugkrijgt, nooit of hij groen mag
- * blijven.
+ * Van de payload wordt NIETS anders gebruikt dan de PR-ASSOCIATIE. Geen `head_sha`, geen
+ * `head_branch`, geen outputs, geen artifacts, geen cache. De head wordt door de writerjob zelf
+ * opnieuw via de API gemeten, ná het verkrijgen van de per-PR-lock.
  */
 
 import { pathToFileURL } from 'node:url';
@@ -64,62 +54,106 @@ import { pathToFileURL } from 'node:url';
 import { flattenPages } from './collect-shield-input.mjs';
 
 /**
- * De bron die de trusted writer als aanleiding accepteert. Naam ÉN pad moeten kloppen: een PR kan
- * een nieuw workflowbestand toevoegen met de naam `autocoding-shield` op een ander pad, en die mag
- * de writer niet als vertrouwde aanleiding kunnen gebruiken.
+ * De bron die de trusted writer als `workflow_run`-aanleiding accepteert. Naam ÉN pad moeten
+ * kloppen: een PR kan een nieuw workflowbestand toevoegen met de naam `autocoding-shield` op een
+ * ander pad, en die mag de writer niet als vertrouwde aanleiding kunnen gebruiken.
+ *
+ * `issue_comment` staat hier NIET meer bij. De trusted writer verwerkt dat event zelf, direct vanaf
+ * de default branch, en de onprivileged shield is er daarom uit verwijderd. Zou het er nog staan,
+ * dan werd één comment twee keer gedispatcht: één keer direct en één keer via de shieldrun.
  */
 export const EXPECTED_SOURCE = Object.freeze({
   workflowName: 'autocoding-shield',
   workflowPath: '.github/workflows/autocoding-shield.yml',
-  events: Object.freeze(['pull_request', 'issue_comment', 'pull_request_review']),
+  events: Object.freeze(['pull_request', 'pull_request_review', 'pull_request_review_comment']),
 });
 
 /**
- * De bovengrens op het aantal PR's dat ÉÉN writerrun volledig doormeet.
- *
- * Honderd is geen ronde smaak maar de rekensom: zes detail-GET's plus een status-POST per PR, plus
- * de paginering van de open-PR-lijst, past bij honderd PR's ruim binnen het uurlijkse
- * `GITHUB_TOKEN`-quotum van duizend verzoeken — inclusief de invalidatieronde die er in dezelfde run
- * al aan vooraf is gegaan. Bij 126 open PR's kost die eerste ronde 126 POST's en de tweede hoogstens
- * 700 GET's plus 100 POST's: samen onder de duizend.
- *
- * Deze grens weigert NOOIT een ronde. Hij bepaalt alleen hoeveel heads deze run hun uitspraak
- * terugkrijgen; alle andere heads staan op dat moment al op `pending` en zijn dus niet groen.
+ * Eén eventaanleiding meet hooguit ÉÉN pull request. Dit is geen smaak maar de budgetgrens uit
+ * bevinding `3834885350`: zolang een event een volledige ronde kon veroorzaken, kon één comment
+ * 126 heads invalideren en het gedeelde uurbudget leegtrekken.
  */
-export const EVALUATION_BATCH_LIMIT = 100;
+export const EVENT_TARGET_LIMIT = 1;
+
+/** De bovengrens op de scheduledbucket. Zie `SCHEDULE_REQUEST_BUDGET` voor de rekensom. */
+export const SCHEDULE_BUCKET_LIMIT = 25;
+
+/**
+ * De lengte van een tijdslot, in seconden. De schedule draait elk uur, dus is één slot één uur en
+ * krijgen opeenvolgende scheduleruns opeenvolgende slotnummers.
+ */
+export const SCHEDULE_SLOT_SECONDS = 3600;
+
+/**
+ * Het maximale aantal API-verzoeken dat één writerjob aan ÉÉN pull request besteedt, exact geteld
+ * naar de stappen in `.github/workflows/autocoding-shield-live-gate.yml`:
+ *
+ *   3  hermeting van het PR-object (`repos/{r}/pulls/{n}`, hoogstens drie pogingen)
+ *   1  onmiddellijke `pending`-POST op de opnieuw gemeten head
+ *   1  `git/commits/{sha}`
+ *  20  vijf gepagineerde bewijslijsten maal `LIST_PAGE_BUDGET` pagina's
+ *   1  de afsluitende status-POST op diezelfde head
+ *  --
+ *  26
+ */
+export const LIST_PAGE_BUDGET = 4;
+export const PER_PULL_REQUEST_REQUEST_BUDGET = 3 + 1 + 1 + (5 * LIST_PAGE_BUDGET) + 1;
+
+/** De paginering van de open-PR-lijst in de selectiejob: 126 open PR's is twee pagina's van 100. */
+export const SELECTION_REQUEST_BUDGET = 4;
+
+/**
+ * Het gedeelde uurlijkse `GITHUB_TOKEN`-quotum per repository, en de reserve die daar altijd van af
+ * blijft. De reserve is de mechanische invulling van bevinding `3834885350`: het budget hoort niet
+ * bij een RUN maar bij de repository, dus moet een run zijn eigen bovengrens afmeten tegen wat er op
+ * dat moment werkelijk over is.
+ */
+export const SHARED_HOURLY_REQUEST_QUOTA = 1000;
+export const QUOTA_RESERVE = 100;
+
+/** De bovengrenzen per aanleidingssoort, inclusief de selectiejob die eraan voorafgaat. */
+export const EVENT_REQUEST_BUDGET = SELECTION_REQUEST_BUDGET
+  + (EVENT_TARGET_LIMIT * PER_PULL_REQUEST_REQUEST_BUDGET);
+export const SCHEDULE_REQUEST_BUDGET = SELECTION_REQUEST_BUDGET
+  + (SCHEDULE_BUCKET_LIMIT * PER_PULL_REQUEST_REQUEST_BUDGET);
 
 export const TARGET_REASON = Object.freeze({
   SOURCE_NOT_TRUSTED: 'SOURCE_NOT_TRUSTED',
   EVENT_NOT_SUPPORTED: 'EVENT_NOT_SUPPORTED',
+  EVENT_ASSOCIATION_EMPTY: 'EVENT_ASSOCIATION_EMPTY',
+  EVENT_ASSOCIATION_AMBIGUOUS: 'EVENT_ASSOCIATION_AMBIGUOUS',
   OPEN_PULL_REQUESTS_UNREADABLE: 'OPEN_PULL_REQUESTS_UNREADABLE',
+  SCHEDULE_SLOT_UNUSABLE: 'SCHEDULE_SLOT_UNUSABLE',
+  NO_OPEN_PULL_REQUESTS: 'NO_OPEN_PULL_REQUESTS',
+  API_BUDGET_RESERVED: 'API_BUDGET_RESERVED',
   ARGUMENTS_INVALID: 'ARGUMENTS_INVALID',
   EVENT_PAYLOAD_UNREADABLE: 'EVENT_PAYLOAD_UNREADABLE',
 });
 
 /**
- * Er is nog maar ÉÉN selectievorm. De twee `HINT_MATCHED_*`-vormen zijn verwijderd en mogen niet
- * terugkeren: elke hintversmalling herstelt het verlies van invalidaties bij een door GitHub
- * geannuleerde wachtende writerrun.
+ * De selectievormen. `ALL_OPEN_PULL_REQUESTS` bestaat NIET meer en mag niet terugkeren: die vorm was
+ * de globale sweep waarvan bevinding `3834885350` aantoonde dat één event het gedeelde uurbudget kan
+ * leegtrekken.
  */
 export const TARGET_SELECTION = Object.freeze({
-  ALL_OPEN_PULL_REQUESTS: 'ALL_OPEN_PULL_REQUESTS',
+  EVENT_PULL_REQUEST: 'EVENT_PULL_REQUEST',
+  SCHEDULE_SLOT_BUCKET: 'SCHEDULE_SLOT_BUCKET',
 });
 
 /** Uitkomsten die de aanroeper uit elkaar moet houden. */
 export const TARGET_OUTCOME = Object.freeze({
   MEASURE: 'MEASURE',
-  /** Geen fout van ons: een onverwachte aanleiding schrijft niets en is geen rode run. */
+  /** Geen fout van ons: een onverwachte of ambigue aanleiding schrijft niets en is geen rode run. */
   NO_OP: 'NO_OP',
-  /** Wel een fout: de ronde kan niet volledig zijn, dus wordt er niets gepubliceerd en is het rood. */
+  /** Wel een fout: de selectie kon niet worden bepaald, dus wordt er niets gepubliceerd. */
   FAIL: 'FAIL',
 });
-
-const SHA_RE = /^[0-9a-f]{40}$/;
 
 /**
  * Toetst de aanleiding van een `workflow_run`. Alleen de voltooiing van de verwachte onprivileged
  * shield, gestart door een verwacht bronevent, telt. Alles daarbuiten — een andere workflow, een
- * gelijknamige workflow op een ander pad, een `workflow_dispatch`, een `push` — is geen aanleiding.
+ * gelijknamige workflow op een ander pad, een `workflow_dispatch`, een `push`, een `issue_comment` —
+ * is geen aanleiding.
  */
 export function isTrustedWorkflowRunSource(workflowRun, expected = EXPECTED_SOURCE) {
   if (!workflowRun || typeof workflowRun !== 'object' || Array.isArray(workflowRun)) return false;
@@ -128,128 +162,206 @@ export function isTrustedWorkflowRunSource(workflowRun, expected = EXPECTED_SOUR
   return expected.events.includes(workflowRun.event);
 }
 
-/** Normaliseert de API-lijst met open PR's. Eén onbruikbare vermelding maakt de lijst onbruikbaar. */
+/** Alleen een positief geheel getal telt als PR-nummer. */
+function pullRequestNumber(value) {
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+/**
+ * De PR die een `issue_comment` aanwijst.
+ *
+ * `issue.pull_request` is het veld waarmee GitHub een issue van een pull request onderscheidt;
+ * ontbreekt het, dan gaat de comment over een gewoon issue en is er niets te meten. Het nummer komt
+ * uit dezelfde, door GitHub gevulde payload en wordt nergens anders vandaan gehaald.
+ */
+export function issueCommentTarget(event) {
+  const issue = event && typeof event === 'object' ? event.issue : null;
+  if (!issue || typeof issue !== 'object' || Array.isArray(issue)) return null;
+  const link = issue.pull_request;
+  if (!link || typeof link !== 'object' || Array.isArray(link)) return null;
+  return pullRequestNumber(issue.number);
+}
+
+/**
+ * De PR's die GitHub aan een `workflow_run` heeft gekoppeld.
+ *
+ * Dit veld wordt door GitHub gevuld op grond van de branch van de run, niet door de run zelf; het is
+ * dus geen door een PR beheerste waarde. Een onbruikbare vermelding maakt de HELE lijst onbruikbaar
+ * (`null`) in plaats van stilzwijgend te worden overgeslagen: bij een gedeeltelijk leesbare lijst is
+ * niet bekend welke associatie er nog meer had moeten staan.
+ */
+export function workflowRunTargets(workflowRun) {
+  const list = workflowRun && typeof workflowRun === 'object' ? workflowRun.pull_requests : null;
+  if (!Array.isArray(list)) return null;
+  const numbers = [];
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const number = pullRequestNumber(entry.number);
+    if (number === null) return null;
+    numbers.push(number);
+  }
+  return [...new Set(numbers)].sort((a, b) => a - b);
+}
+
+/** Normaliseert de API-lijst met open PR's tot nummers. Eén onbruikbare vermelding is fataal. */
 export function normaliseOpenPullRequests(payload) {
+  // `flattenPages` leest alles wat geen array is als "geen pagina's". Voor de bewijsverzameling is
+  // dat de juiste keuze, maar hier zou het een STILLE lege ronde opleveren op een antwoord dat
+  // helemaal geen lijst is: nul statussen gepubliceerd terwijl een eerder groene head groen blijft.
+  // Een lijst die niet als lijst leesbaar is, is ONLEESBAAR en niet leeg.
+  if (!Array.isArray(payload)) return null;
   const entries = flattenPages(payload);
   const out = [];
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
-    const number = entry.number;
-    if (!Number.isInteger(number) || number <= 0) return null;
-    const head = entry.head && typeof entry.head === 'object' ? entry.head : {};
-    out.push({
-      number,
-      headSha: typeof head.sha === 'string' && SHA_RE.test(head.sha) ? head.sha : '',
-      headRef: typeof head.ref === 'string' ? head.ref : '',
-    });
+    const number = pullRequestNumber(entry.number);
+    if (number === null) return null;
+    out.push(number);
   }
-  return out;
+  return [...new Set(out)].sort((a, b) => a - b);
 }
 
 /**
- * Verdeelt de volledige doellijst in vaste blokken en kiest er één op grond van het RUN-NUMMER.
+ * Het TIJDSLOT waarin een scheduleronde valt: `floor(epochSeconden / slotSeconden)`.
  *
- * `index = (runNumber - 1) % count` betekent dat opeenvolgende writerruns blok 0, 1, … , count-1, 0
- * doorlopen. Elke open PR komt dus binnen `count` runs aan de beurt — bij 126 PR's binnen twee, en
- * met de uurlijkse `schedule` erbij dus binnen twee uur, ook als er verder niets gebeurt.
- *
- * Waarom een ONBRUIKBAAR run-nummer hier niet fataal is: de rotatie is scheduling, geen poort. Bij
- * een onbruikbaar nummer valt hij terug op blok 0. Het gevolg is hoogstens dat sommige heads langer
- * op `pending` blijven staan — en `pending` is niet groen. De ronde weigeren zou juist wél gevaarlijk
- * zijn, want dan wordt er niets geïnvalideerd en blijft élke oude `success` staan.
- *
- * Om diezelfde reden wordt een onbruikbare `limit` genormaliseerd in plaats van geweigerd. Een niet
- * positief-gehele limiet levert anders een blokindeling op die geen indeling is: bij `0` wordt
- * `Math.ceil(length / 0)` `Infinity`, dus is `(runNumber - 1) % count` `NaN` en snijdt
- * `slice(NaN, NaN)` een LEGE batch — een run die alles invalideert en vervolgens niets meet, en dus
- * elke head op `pending` achterlaat. Een negatieve limiet draait de slice om (ook leeg), en een
- * fractionele limiet geeft blokken die elkaar overlappen of gaten laten vallen. Al die vormen zijn
- * een defect in de AANROEP, niet in de lijst, dus valt de functie terug op de canonieke
- * `EVALUATION_BATCH_LIMIT` en gebruikt die daarna overal: voor de vergelijking, het aantal blokken
- * en de slicegrenzen. Zo blijft de dekkingsgarantie (elke PR binnen `count` runs aan de beurt) gelden
- * ongeacht wat de aanroeper meegaf.
+ * Dit vervangt `github.run_number` en dat is de hele reparatie van bevinding `3834885354`. Een
+ * run-nummer telt RUNS, ook runs die als wachtende run geannuleerd worden, dus hoeven de runs die
+ * werkelijk draaien geen opeenvolgende residuen te bezoeken. Een tijdslot telt UREN. Het is
+ * onafhankelijk van hoeveel runs er gestart, geannuleerd of overgeslagen zijn: de scheduletrigger
+ * staat op één keer per uur, dus krijgen opeenvolgende scheduleruns per constructie opeenvolgende
+ * slotnummers, en `count` opeenvolgende slots dekken de hele lijst.
  */
-export function selectEvaluationBatch(numbers, runNumber, limit = EVALUATION_BATCH_LIMIT) {
+export function scheduleSlotOf(nowEpochSeconds, slotSeconds = SCHEDULE_SLOT_SECONDS) {
+  if (!Number.isInteger(nowEpochSeconds) || nowEpochSeconds < 0) return null;
+  if (!Number.isInteger(slotSeconds) || slotSeconds <= 0) return null;
+  return Math.floor(nowEpochSeconds / slotSeconds);
+}
+
+/**
+ * Verdeelt de open-PR-lijst in vaste blokken van hoogstens `limit` en kiest het blok van dit slot.
+ *
+ * De lijst is oplopend gesorteerd en ontdubbeld, dus de indeling is deterministisch: dezelfde lijst
+ * en hetzelfde slot geven altijd dezelfde bucket. Over de slots `s … s + count - 1` komt iedere PR
+ * precies één keer aan de beurt, ongeacht welke runs er tussendoor zijn geannuleerd.
+ *
+ * Een onbruikbare `limit` valt terug op de canonieke `SCHEDULE_BUCKET_LIMIT`. Zou hij op `0` blijven
+ * staan, dan is `Math.ceil(n / 0)` `Infinity`, `slot % Infinity` `NaN` en `slice(NaN, NaN)` leeg —
+ * een ronde die niets meet en dus nooit convergeert.
+ */
+export function selectScheduleBucket(numbers, slot, limit = SCHEDULE_BUCKET_LIMIT) {
   const list = Array.isArray(numbers) ? numbers : [];
-  const safeLimit = Number.isInteger(limit) && limit > 0 ? limit : EVALUATION_BATCH_LIMIT;
-  if (list.length <= safeLimit) return { batch: [...list], index: 0, count: 1, rotated: false };
+  const safeLimit = Number.isInteger(limit) && limit > 0 ? limit : SCHEDULE_BUCKET_LIMIT;
+  if (list.length === 0) return { bucket: [], index: 0, count: 1, limit: safeLimit };
   const count = Math.ceil(list.length / safeLimit);
-  const usable = Number.isInteger(runNumber) && runNumber > 0;
-  const index = usable ? (runNumber - 1) % count : 0;
+  // JavaScript's `%` levert bij een negatief slot een negatief residu; dat zou buiten de lijst
+  // snijden. De dubbele modulo maakt de index altijd een geldig blokindex.
+  const index = Number.isInteger(slot) ? (((slot % count) + count) % count) : 0;
   return {
-    batch: list.slice(index * safeLimit, index * safeLimit + safeLimit), index, count, rotated: usable,
+    bucket: list.slice(index * safeLimit, (index * safeLimit) + safeLimit),
+    index,
+    count,
+    limit: safeLimit,
   };
 }
 
 /**
- * Bepaalt welke PR's deze ronde meedoen, en in welke rol.
- *
- * De uitkomst kent drie lijsten, en het verschil ertussen is het hele ontwerp:
- *
- *   - `heads` — iedere (nummer, head)-combinatie uit de volledige open-PR-lijst. Deze krijgen ALLE
- *     eerst een `pending`-status. De hint uit de bronrun doet hier niets: hij mag de lijst niet
- *     versmallen, want dan verdwijnen de invalidaties van een geannuleerde wachtende run.
- *   - `targets` — dezelfde PR's als nummers, ontdubbeld en oplopend. Dit is de volledige ronde.
- *   - `batch` — het begrensde, met het run-nummer roterende deel van `targets` dat deze run
- *     werkelijk doormeet.
- *
- * `heads` wordt ontdubbeld op de PAAR (nummer, head) en niet op nummer alleen. `--paginate` kan
- * dezelfde PR met twee verschillende heads opleveren als de lijst tussen twee pagina's verschuift;
- * op allebei die heads kan een oude `success` staan, dus worden ze allebei geïnvalideerd. Voor de
- * meting telt de PR daarna gewoon één keer.
+ * Hoeveel pull requests er nog binnen het GEDEELDE uurbudget passen, gegeven wat er van het core-
+ * quotum over is. `null` betekent "het resterende budget is onbekend"; dan wordt er niet gekrompen,
+ * want de vaste bovengrenzen passen sowieso binnen het uurquotum.
+ */
+export function affordablePullRequests(remainingQuota, {
+  perPullRequest = PER_PULL_REQUEST_REQUEST_BUDGET,
+  reserve = QUOTA_RESERVE,
+  selectionCost = SELECTION_REQUEST_BUDGET,
+} = {}) {
+  if (!Number.isInteger(remainingQuota) || remainingQuota < 0) return null;
+  const usable = remainingQuota - reserve - selectionCost;
+  if (usable <= 0) return 0;
+  return Math.floor(usable / perPullRequest);
+}
+
+/**
+ * Bepaalt welke PR's deze aanleiding meet. Hoogstens één bij een event, hoogstens
+ * `SCHEDULE_BUCKET_LIMIT` bij de schedule, en nooit de hele open lijst.
  */
 export function selectTargets({
-  eventName, workflowRun, openPullRequests, runNumber = null,
-  expected = EXPECTED_SOURCE, batchLimit = EVALUATION_BATCH_LIMIT,
+  eventName, event, openPullRequests, nowEpochSeconds = null, remainingQuota = null,
+  expected = EXPECTED_SOURCE, scheduleBucketLimit = SCHEDULE_BUCKET_LIMIT,
+  slotSeconds = SCHEDULE_SLOT_SECONDS,
 }) {
-  if (eventName === 'workflow_run') {
-    if (!isTrustedWorkflowRunSource(workflowRun, expected)) {
-      return { outcome: TARGET_OUTCOME.NO_OP, reason: TARGET_REASON.SOURCE_NOT_TRUSTED, targets: [] };
-    }
-  } else if (eventName !== 'schedule') {
-    // De workflow kent maar twee events. Een derde betekent dat bestand en script uit elkaar zijn
-    // gelopen; dat is een defect en geen ruis, dus wordt het rood in plaats van stil.
-    return { outcome: TARGET_OUTCOME.FAIL, reason: TARGET_REASON.EVENT_NOT_SUPPORTED, targets: [] };
-  }
+  const noOp = (reason) => ({ outcome: TARGET_OUTCOME.NO_OP, reason, targets: [] });
+  const fail = (reason) => ({ outcome: TARGET_OUTCOME.FAIL, reason, targets: [] });
+  const affordable = affordablePullRequests(remainingQuota);
 
-  const open = normaliseOpenPullRequests(openPullRequests);
-  if (open === null) {
+  if (eventName === 'issue_comment' || eventName === 'workflow_run') {
+    let candidates;
+    if (eventName === 'issue_comment') {
+      const number = issueCommentTarget(event);
+      if (number === null) return noOp(TARGET_REASON.EVENT_ASSOCIATION_EMPTY);
+      candidates = [number];
+    } else {
+      const workflowRun = event && typeof event === 'object' ? event.workflow_run : null;
+      if (!isTrustedWorkflowRunSource(workflowRun, expected)) {
+        return noOp(TARGET_REASON.SOURCE_NOT_TRUSTED);
+      }
+      candidates = workflowRunTargets(workflowRun);
+      if (candidates === null || candidates.length === 0) {
+        return noOp(TARGET_REASON.EVENT_ASSOCIATION_EMPTY);
+      }
+      // Meer dan één associatie is ambigu. Gokken zou of te veel meten (budget) of de verkeerde PR
+      // meten; de schedule vangt dit binnen één slot alsnog op.
+      if (candidates.length > EVENT_TARGET_LIMIT) {
+        return noOp(TARGET_REASON.EVENT_ASSOCIATION_AMBIGUOUS);
+      }
+    }
+    if (affordable !== null && affordable < candidates.length) {
+      return noOp(TARGET_REASON.API_BUDGET_RESERVED);
+    }
     return {
-      outcome: TARGET_OUTCOME.FAIL, reason: TARGET_REASON.OPEN_PULL_REQUESTS_UNREADABLE, targets: [],
+      outcome: TARGET_OUTCOME.MEASURE,
+      selection: TARGET_SELECTION.EVENT_PULL_REQUEST,
+      targets: candidates,
+      bucketIndex: 0,
+      bucketCount: 1,
+      slot: null,
     };
   }
 
-  // De volledige lijst, zonder bovengrens en zonder stilzwijgende truncatie. Oplopend gesorteerd en
-  // ontdubbeld, zodat de ronde deterministisch is: `--paginate` kan een PR twee keer opleveren als de
-  // lijst tussen twee pagina's verschuift, en tweemaal dezelfde PR meten is verspilling, geen extra
-  // bewijs. Ontdubbelen verwijdert nooit een PR-NUMMER uit de ronde, alleen een herhaling ervan.
-  const targets = [...new Set(open.map((pr) => pr.number))].sort((a, b) => a - b);
-
-  const seen = new Set();
-  const heads = [];
-  for (const pr of open) {
-    const key = `${pr.number} ${pr.headSha}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    heads.push({ number: pr.number, headSha: pr.headSha });
+  if (eventName !== 'schedule') {
+    // De workflow kent maar drie events. Een vierde betekent dat bestand en script uit elkaar zijn
+    // gelopen; dat is een defect en geen ruis, dus wordt het rood in plaats van stil.
+    return fail(TARGET_REASON.EVENT_NOT_SUPPORTED);
   }
-  heads.sort((a, b) => (a.number - b.number) || (a.headSha < b.headSha ? -1 : 1));
 
-  const { batch, index, count, rotated } = selectEvaluationBatch(targets, runNumber, batchLimit);
+  const open = normaliseOpenPullRequests(openPullRequests);
+  if (open === null) return fail(TARGET_REASON.OPEN_PULL_REQUESTS_UNREADABLE);
+  if (open.length === 0) return noOp(TARGET_REASON.NO_OPEN_PULL_REQUESTS);
+
+  // Zonder bruikbare klok is er geen eerlijk slot, en zou elke ronde blok 0 meten terwijl de rest
+  // van de lijst nooit aan de beurt komt. Dat is starvation, dus wordt het rood en zichtbaar in
+  // plaats van stil scheef.
+  const slot = scheduleSlotOf(nowEpochSeconds, slotSeconds);
+  if (slot === null) return fail(TARGET_REASON.SCHEDULE_SLOT_UNUSABLE);
+
+  const requested = Number.isInteger(scheduleBucketLimit) && scheduleBucketLimit > 0
+    ? scheduleBucketLimit
+    : SCHEDULE_BUCKET_LIMIT;
+  const limit = affordable === null ? requested : Math.min(requested, affordable);
+  if (limit < 1) return noOp(TARGET_REASON.API_BUDGET_RESERVED);
+
+  const { bucket, index, count } = selectScheduleBucket(open, slot, limit);
   return {
     outcome: TARGET_OUTCOME.MEASURE,
-    selection: TARGET_SELECTION.ALL_OPEN_PULL_REQUESTS,
-    targets,
-    heads,
-    batch,
-    batchIndex: index,
-    batchCount: count,
-    batchRotated: rotated,
+    selection: TARGET_SELECTION.SCHEDULE_SLOT_BUCKET,
+    targets: bucket,
+    bucketIndex: index,
+    bucketCount: count,
+    slot,
   };
 }
 
 export const TARGET_VALUE_OPTIONS = Object.freeze([
-  '--event-name', '--event', '--open-pulls', '--out', '--out-heads', '--run-number',
+  '--event-name', '--event', '--open-pulls', '--now-epoch', '--remaining-quota', '--out',
 ]);
 
 /** Zelfde fail-closed argumentlezing als de publisher: geen stilzwijgende herinterpretatie. */
@@ -274,25 +386,24 @@ export function parseTargetArgs(argv) {
   return { ok: true, values };
 }
 
-/** Alleen een decimaal, positief geheel getal telt als run-nummer; al het andere is onbruikbaar. */
-export function parseRunNumber(value) {
+/**
+ * Leest een teller die de aanroeper als decimaal getal doorgeeft. Alleen cijfers tellen; `-` is de
+ * afgesproken "onbekend"-vorm en levert net als elke andere onleesbare waarde `null` op.
+ */
+export function parseCounter(value) {
   if (typeof value !== 'string' || !/^[0-9]+$/.test(value)) return null;
   const parsed = Number.parseInt(value, 10);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 /**
- * Schrijft twee bestanden, in de volgorde waarin de workflow ze gebruikt.
+ * Schrijft de doel-PR's als JSON-array naar `--out`. Dat is de matrixvorm die de writerjob via
+ * `fromJSON()` inleest; per element ontstaat één job met een eigen per-PR concurrencygroep.
  *
- *   - `--out-heads`: `<nummer> <head>` per regel, over de VOLLEDIGE open-PR-lijst. Dit is de
- *     invalidatieronde. Een PR waarvan de lijst geen geldige head opleverde krijgt `-`; de workflow
- *     maakt dat record rood in plaats van het stil over te slaan, want zo'n head kan niet
- *     geïnvalideerd worden.
- *   - `--out`: de PR-nummers van de begrensde, roterende evaluatiebatch.
- *
- * rc 0: de bestanden staan er. rc 2: geen aanleiding, publiceer niets, geen fout. rc 1: de lijst is
- * onleesbaar, dus is niet bekend WELKE PR's bestaan — publiceer niets en word rood. Een lange lijst
- * is géén rc 1 meer.
+ * rc 0: er zijn doelen, en `--out` draagt ze. rc 2: geen aanleiding of geen budget — publiceer
+ * niets, geen fout. rc 1: de selectie kon niet worden bepaald, dus wordt er niets gepubliceerd en is
+ * de run rood. Bij rc 1 en rc 2 wordt `--out` op een lege array gezet, zodat de matrixjob ook bij
+ * een halve mislukking nooit een oude lijst kan erven.
  */
 export function runSelect(argv, { readFile, writeFile } = {}) {
   const parsed = parseTargetArgs(argv);
@@ -302,46 +413,50 @@ export function runSelect(argv, { readFile, writeFile } = {}) {
   }
   const args = parsed.values;
 
+  const emit = (targets) => {
+    writeFile(args.get('--out'), `${JSON.stringify(targets)}\n`);
+  };
+
   let event;
   let openPullRequests;
   try {
     event = JSON.parse(readFile(args.get('--event')));
     openPullRequests = JSON.parse(readFile(args.get('--open-pulls')));
   } catch {
+    try { emit([]); } catch { /* de uitkomst is toch al rood */ }
     console.log(`LIVE_GATE_TARGETS_${TARGET_REASON.EVENT_PAYLOAD_UNREADABLE}`);
     return 1;
   }
 
+  const remainingQuota = parseCounter(args.get('--remaining-quota'));
+  if (remainingQuota === null) console.log('LIVE_GATE_QUOTA_UNKNOWN');
+
   const result = selectTargets({
     eventName: args.get('--event-name'),
-    workflowRun: event?.workflow_run,
+    event,
     openPullRequests,
-    runNumber: parseRunNumber(args.get('--run-number')),
+    nowEpochSeconds: parseCounter(args.get('--now-epoch')),
+    remainingQuota,
   });
+
+  try {
+    emit(result.outcome === TARGET_OUTCOME.MEASURE ? result.targets : []);
+  } catch {
+    console.log('LIVE_GATE_TARGETS_OUTPUT_UNWRITABLE');
+    return 1;
+  }
 
   if (result.outcome !== TARGET_OUTCOME.MEASURE) {
     console.log(`LIVE_GATE_TARGETS_${result.reason}`);
     return result.outcome === TARGET_OUTCOME.NO_OP ? 2 : 1;
   }
 
-  const lines = (rows) => (rows.length === 0 ? '' : `${rows.join('\n')}\n`);
-  try {
-    // De invalidatielijst eerst: raakt de tweede schrijfactie stuk, dan is de fase die de heads
-    // niet-groen maakt in elk geval nog compleet weggeschreven.
-    writeFile(
-      args.get('--out-heads'),
-      lines(result.heads.map((h) => `${h.number} ${h.headSha === '' ? '-' : h.headSha}`)),
-    );
-    writeFile(args.get('--out'), lines(result.batch));
-  } catch {
-    console.log('LIVE_GATE_TARGETS_OUTPUT_UNWRITABLE');
-    return 1;
-  }
   console.log(`LIVE_GATE_TARGETS_${result.selection}_${result.targets.length}`);
-  console.log(
-    `LIVE_GATE_BATCH_${result.batchIndex + 1}_OF_${result.batchCount}_SIZE_${result.batch.length}`,
-  );
-  if (result.batchCount > 1 && !result.batchRotated) console.log('LIVE_GATE_RUN_NUMBER_UNUSABLE');
+  if (result.selection === TARGET_SELECTION.SCHEDULE_SLOT_BUCKET) {
+    console.log(
+      `LIVE_GATE_SLOT_${result.slot}_BUCKET_${result.bucketIndex + 1}_OF_${result.bucketCount}`,
+    );
+  }
   return 0;
 }
 
