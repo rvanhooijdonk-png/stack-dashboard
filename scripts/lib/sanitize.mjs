@@ -16,7 +16,11 @@
 // await i.p.v. een dynamische import binnen de functie: zo blijft `loadDenyTerms` synchroon (zijn
 // bestaande aanroep in build.mjs is dat ook) en kan de rest van dit bestand (sanitizeString/-Tree,
 // puur) toch door de browser geladen worden — die kent geen `node:fs`.
-const isNode = typeof process !== 'undefined' && process.versions?.node;
+// `globalThis.process` en niet de kale global: een kale `process` is in de browser een
+// ReferenceError zodra hij geëvalueerd wordt, een property-lezing op `globalThis` nooit. Zelfde
+// vorm in runtime-feed-input.mjs en runtime-feed-view.mjs, en gebonden door
+// test/browser-zonder-process.test.mjs.
+const isNode = !!globalThis.process?.versions?.node;
 const fsMod = isNode ? await import('node:fs') : null;
 
 /** Langere strings worden vóór regexverwerking afgekapt — ReDoS-plafond én lekplafond. */

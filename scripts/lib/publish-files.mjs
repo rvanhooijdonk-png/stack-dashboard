@@ -18,10 +18,17 @@ export const PUBLISH_ALLOWLIST = Object.freeze([
  * brontekst als de Node-build gebruikt, geen tweede parser. Eén bron hier zodat build.mjs en
  * check-public.mjs dezelfde lijst hanteren — anders keurt de publicatiepoort een geldige
  * opt-in build af.
+ *
+ * DEZE LIJST MOET DE HELE IMPORTBOOM DEKKEN. De browser laadt `runtime-poll.mjs` als module en
+ * volgt zijn `import`-regels zelf; ontbreekt één bestand, dan is dat geen degradatie maar een 404
+ * midden in de modulegraaf en laadt de polling helemaal niet — zichtbaar als een pagina die stil
+ * blijft staan, niet als een foutmelding. `test/publish-files.test.mjs` loopt de graaf daarom
+ * statisch na en faalt zodra een nieuwe import buiten deze lijst valt.
  */
 export const CLIENT_POLL_FILES = Object.freeze([
   'format.mjs', 'validate.mjs', 'sanitize.mjs', 'runtime-feed.mjs',
-  'runtime-feed-input.mjs', 'runtime-feed-view.mjs', 'runtime-poll.mjs',
+  'runtime-feed-input.mjs', 'runtime-feed-view.mjs',
+  'panel-contracts.mjs', 'paneel-nu-bezig.mjs', 'runtime-poll.mjs',
 ]);
 
 /** Een buildoutput blijft altijd onder de repositoryroot; de build verwijdert deze map eerst. */

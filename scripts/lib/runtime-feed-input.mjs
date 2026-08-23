@@ -22,7 +22,8 @@
 // bestand aan en is de client-side ingang (runtime-poll.mjs) — top-level await i.p.v. een
 // dynamische import binnen elke functie houdt hun bestaande async-signatuur ongewijzigd en maakt
 // dit bestand toch door de browser laadbaar, die geen `node:fs` kent.
-const isNode = typeof process !== 'undefined' && process.versions?.node;
+// Zie sanitize.mjs: property-lezing op `globalThis`, nooit de kale global.
+const isNode = !!globalThis.process?.versions?.node;
 const fsMod = isNode ? await import('node:fs/promises') : null;
 const pathMod = isNode ? await import('node:path') : null;
 

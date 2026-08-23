@@ -20,7 +20,7 @@ export const PANEL_CONTRACTS = Object.freeze([
     slot: 'k',
     id: 'paneel-nu-bezig',
     title: 'NU-BEZIG',
-    inputSource: 'runtimefeed van actief werkende actoren (bron nog niet gekoppeld aan deze slot)',
+    inputSource: 'runtimefeed van actief werkende actoren — de telling achter de sectie "Nu actief": hoeveel taakregels de meting noemde en hoeveel daarvan volledig bewijs droegen',
     denominatorLabel: 'aantal actief-bezig-regels',
   }),
   Object.freeze({

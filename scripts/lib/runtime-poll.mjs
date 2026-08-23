@@ -1,9 +1,11 @@
 /**
- * RUNTIME-POLL — dunne browseradapter voor client-side polling van de "Nu actief"-sectie.
+ * RUNTIME-POLL — dunne browseradapter voor client-side polling van de "Nu actief"-sectie en het
+ * NU-BEZIG-paneel dat de telling bij die sectie draagt.
  * Bevat zelf GEEN classificatie-/waarheidslogica: parseren (`runtimeFeedFromText`,
- * runtime-feed-input.mjs) en renderen (`renderActive`, runtime-feed-view.mjs) zijn letterlijk
- * dezelfde functies als de statische Node-build gebruikt — dit bestand doet uitsluitend
- * fetch/timeout/backoff/DOM-vervanging, nooit een tweede interpretatie van de feed.
+ * runtime-feed-input.mjs) en renderen (`renderActive`, runtime-feed-view.mjs; `nuBezigPaneel`,
+ * paneel-nu-bezig.mjs) zijn letterlijk dezelfde functies als de statische Node-build gebruikt —
+ * dit bestand doet uitsluitend fetch/timeout/backoff/DOM-vervanging, nooit een tweede
+ * interpretatie van de feed.
  *
  * Alleen actief wanneer build.mjs met --client-poll-origin draaide (zie render-cockpit.mjs
  * `page()`); zonder die vlag wordt dit bestand niet gekopieerd en niet ingeladen, en verandert er
@@ -16,6 +18,8 @@
  */
 import { runtimeFeedFromText } from './runtime-feed-input.mjs';
 import { renderActive } from './runtime-feed-view.mjs';
+import { PANEL_CONTRACTS, renderPanelSlot } from './panel-contracts.mjs';
+import { nuBezigPaneel, renderNuBezigBody, nuBezigBadge } from './paneel-nu-bezig.mjs';
 
 const ENDPOINT_PATH = '/runtime-feed.json';
 const POLL_MS = 5000;
@@ -37,11 +41,33 @@ function readOrigin() {
   }
 }
 
-/** Vervangt #nu-actief door de gegeven feed-render — fail-closed: geen fetch-/parsefout mag ooit
- * als CURRENT/ACTIVE tonen, dus foutpaden roepen dit aan met `{ available: false }`. */
+/** Het NU-BEZIG-paneel is de telling bij dezelfde feed; het contract wordt hier opgezocht in
+ * plaats van herhaald, zodat id en slot-key niet op twee plekken kunnen gaan uiteenlopen. */
+const NU_BEZIG = PANEL_CONTRACTS.find((contract) => contract.slot === 'k') ?? null;
+
+/** Vervangt #nu-actief én het NU-BEZIG-paneel door de gegeven feed-render — fail-closed: geen
+ * fetch-/parsefout mag ooit als CURRENT/ACTIVE tonen, dus foutpaden roepen dit aan met
+ * `{ available: false }`.
+ *
+ * BEIDE, EN UIT ÉÉN KLOK. De sectie en het paneel lezen dezelfde feed; ververste alleen de sectie,
+ * dan bleef het paneel op de telling van het bouwmoment staan en zou de plaat zichzelf tegenspreken
+ * — "0 van 0" boven een sectie die twee actieve actoren toont. `nowMs` wordt daarom één keer
+ * bepaald en aan beide gegeven, zodat ook de "x geleden"-weergaven niet een tik uiteen kunnen
+ * lopen. */
 function renderFeed(feed) {
+  const nowMs = Date.now();
   const section = document.getElementById('nu-actief');
-  if (section) section.outerHTML = renderActive(feed, Date.now());
+  if (section) section.outerHTML = renderActive(feed, nowMs);
+  const paneel = NU_BEZIG ? document.getElementById(NU_BEZIG.id) : null;
+  if (paneel) {
+    const model = nuBezigPaneel(feed, nowMs);
+    paneel.outerHTML = renderPanelSlot(NU_BEZIG, {
+      measuredAt: model.measuredAt,
+      body: renderNuBezigBody(model),
+      badge: nuBezigBadge(model),
+      statusLabel: model.status,
+    });
+  }
 }
 const renderUnknown = () => renderFeed({ available: false });
 

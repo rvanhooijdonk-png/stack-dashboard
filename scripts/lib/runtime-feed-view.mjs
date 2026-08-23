@@ -88,7 +88,20 @@ export function evidencePointer(runtimeFeed) {
  *    zonder link, en dat is de veilige kant van deze poort.
  */
 const HISTORISCHE_BEWIJS_EIGENAAR = 'rvanhooijdonk-png';
-export function evidenceUrlPrefixes(env = process.env) {
+/**
+ * De omgeving waaruit de tweede eigenaar mag komen. DIT BESTAND DRAAIT OOK IN DE BROWSER
+ * (`CLIENT_POLL_FILES`, publish-files.mjs): daar bestaat `process` niet, en een kale `process.env`
+ * als standaardwaarde wierp een ReferenceError zodra `renderActive()` één record met claimbewijs
+ * tegenkwam. Die fout werd door `pollOnce()` opgevangen en als UNKNOWN getoond, dus de plaat zweeg
+ * erover terwijl client-side polling in werkelijkheid nooit een enkele feed rendrede. Node-tests
+ * konden dat niet zien: daar bestaat `process` altijd. Zelfde vorm als de bestaande wachters in
+ * sanitize.mjs en runtime-feed-input.mjs. Per aanroep gelezen, niet bij het laden van de module,
+ * zodat een test die `GITHUB_REPOSITORY_OWNER` zet nog steeds gemeten wordt.
+ */
+function omgeving() {
+  return globalThis.process?.env ?? {};
+}
+export function evidenceUrlPrefixes(env = omgeving()) {
   const eigenaars = new Set([HISTORISCHE_BEWIJS_EIGENAAR]);
   const nu = typeof env?.GITHUB_REPOSITORY_OWNER === 'string' ? env.GITHUB_REPOSITORY_OWNER : '';
   if (/^[A-Za-z0-9._-]{1,100}$/.test(nu)) eigenaars.add(nu);
@@ -167,7 +180,7 @@ export function renderActive(runtimeFeed, nowMs) {
   }
 
   const processFreshness = Object.entries(runtimeFeed.processes ?? {})
-    .map(([name, process]) => `${name}: ${process?.heartbeat?.freshness ?? 'UNKNOWN'}`).join(' · ');
+    .map(([name, proces]) => `${name}: ${proces?.heartbeat?.freshness ?? 'UNKNOWN'}`).join(' · ');
   const queues = (runtimeFeed.queue_counts ?? [])
     .map((queue) => `${queue.name}: ${queue.valid ? num(queue.count) : 'UNKNOWN'}`).join(' · ');
   const feedAge = ageSince(runtimeFeed.measured_at?.value, nowMs);

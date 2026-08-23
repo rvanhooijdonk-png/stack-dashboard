@@ -27,9 +27,9 @@ test('hoofdpagina bevat uitsluitend de tien rustige hoofdsecties inclusief de dr
   ]);
 });
 
-test('de nog ongekoppelde paneelslots (b/RICHARD-QUEUE, k/NU-BEZIG) renderen altijd, met UNKNOWN zolang hun bron ontbreekt', () => {
+test('het nog ongekoppelde paneelslot (b/RICHARD-QUEUE) rendert altijd, met UNKNOWN zolang zijn bron ontbreekt', () => {
   const html = renderCockpit(snapshot, { products, ticker });
-  for (const id of ['paneel-richard-queue', 'paneel-nu-bezig']) {
+  for (const id of ['paneel-richard-queue']) {
     const section = html.match(new RegExp(`<section id="${id}"[\\s\\S]*?</section>`));
     assert.ok(section, `paneelslot ${id} ontbreekt`);
     assert.match(section[0], /UNKNOWN — bron nog niet gekoppeld\./, `paneelslot ${id} mist de UNKNOWN-regel`);
@@ -40,6 +40,30 @@ test('de nog ongekoppelde paneelslots (b/RICHARD-QUEUE, k/NU-BEZIG) renderen alt
   assert.match(html, /<h2>RICHARD-QUEUE /);
   assert.match(html, /<h2>NU-BEZIG /);
   assert.match(html, /<h2>STATUSGEN /);
+});
+
+test('NU-BEZIG is gekoppeld: zonder runtimefeed toont het slot de gemeten UNKNOWN, niet meer het lege skelet', () => {
+  const html = renderCockpit(snapshot, { products, ticker });
+  const section = html.match(/<section id="paneel-nu-bezig"[\s\S]*?<\/section>/)[0];
+  assert.match(section, /UNKNOWN — de runtimefeed is niet beschikbaar of niet contractgeldig\./);
+  // De skeletregel hoort hier weg te zijn: hij zou beweren dat er nooit naar een bron is gekeken,
+  // terwijl er wél is gekeken en de feed ontbrak.
+  assert.equal(/bron nog niet gekoppeld/.test(section), false, section);
+  assert.equal(/van \d+ taakregels/.test(section), false, section);
+});
+
+test('het NU-BEZIG-paneel kan de sectie "Nu actief" niet tegenspreken', () => {
+  // Beide lezen dezelfde feed via dezelfde `activeWork()`; deze proef meet dat op de plaat zelf.
+  // Een mutant die het paneel zijn eigen telling laat maken, laat hier een paneel achter dat een
+  // ander aantal noemt dan het aantal IN UITVOERING-regels dat de sectie erboven toont.
+  const html = renderCockpit(snapshot, { products, ticker, runtimeFeed: runtimeHealthy });
+  const nuActief = html.match(/<section id="nu-actief"[\s\S]*?<\/section>/)[0];
+  const paneel = html.match(/<section id="paneel-nu-bezig"[\s\S]*?<\/section>/)[0];
+  const regels = [...nuActief.matchAll(/IN UITVOERING · /g)].length;
+  assert.equal(regels, 1);
+  assert.match(paneel, new RegExp(`${regels} van ${regels} taakregels`));
+  assert.match(paneel, /<h2>NU-BEZIG <span class="badge ok">BEZIG<\/span>/);
+  assert.match(paneel, /Gemeten om: 2026-08-12T11:59:00Z\./);
 });
 
 test('het paneelcontract bindt de volledige tuple: slot-key, id en titel horen bij elkaar en liggen vast', () => {
