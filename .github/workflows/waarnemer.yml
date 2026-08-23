@@ -35,9 +35,9 @@ on:
   workflow_dispatch:
     inputs:
       sabotage:
-        description: 'Acceptatietest: forceer één toets te falen (stempel = drempel op nul).'
+        description: 'Acceptatietest: forceer één toets te falen (stempel = drempel op nul, bronnen = bronstand op nul).'
         type: choice
-        options: [geen, stempel]
+        options: [geen, stempel, bronnen]
         default: geen
 
 # Standaard niets; elke job krijgt hieronder precies wat hij nodig heeft.

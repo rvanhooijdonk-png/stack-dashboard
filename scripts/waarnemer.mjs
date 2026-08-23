@@ -135,6 +135,7 @@ const r = toets({
   spiegelTekst: spiegel.tekst,
   contractVersie: contract,
   bronstand,
+  bronContractVersie: gelezen.contract,
   nu,
   drempelMs,
   graceMs: getal('GRACE_MINUTEN', GRACE_MINUTEN) * MIN,
@@ -157,6 +158,11 @@ if (r.gemeten.bronRij) console.log(`bron bovenaan: ${r.gemeten.bronRij.tab} ${r.
 if (r.gemeten.paginaRij) console.log(`plaat bovenaan: ${r.gemeten.paginaRij.tab} ${r.gemeten.paginaRij.datum}`);
 for (const w of r.waarschuwingen) console.log(`waarschuwing: ${w}`);
 
+// Ook op een groene ronde: hoeveel bronnen zich bewezen noemden zonder herkomst hoort in het
+// receipt van de run te staan, niet alleen in een logregel (orderdiscipline R2). De openbare
+// spiegel krijgt op een groene ronde per ontwerp geen regel -- daar is dit het receipt.
+uitvoer('ongeteld', String(r.gemeten.bronnen?.ongeteld ?? 0));
+
 if (r.ok) {
   console.log('✓ geen afwijking: de plaat komt overeen met de bron.');
   uitvoer('afwijking', 'nee');
@@ -165,8 +171,11 @@ if (r.ok) {
 
 for (const b of r.bevindingen) console.log(`AFWIJKING ${b.code}: ${b.uitleg}`);
 
-const rij = alarmRij({ bevindingen: r.bevindingen, nu, sabotage: SABOTAGE !== 'geen' });
-const mag = magAppenden(spiegel.tekst, r.bevindingen.map((b) => b.code), nu);
+const rij = alarmRij({ bevindingen: r.bevindingen, nevenpunten: r.nevenpunten, nu, sabotage: SABOTAGE !== 'geen' });
+// Dezelfde punten aan beide kanten: de herhaalcontrole leest de controlepunten terug UIT de
+// geschreven regel, dus een punt dat wel in de regel staat en niet in deze lijst zou elke melding
+// eeuwig "nieuw" maken.
+const mag = magAppenden(spiegel.tekst, [...r.bevindingen, ...(r.nevenpunten ?? [])].map((b) => b.code), nu);
 const gate = alarmRijPubliceerbaar(rij);
 
 if (!gate) {

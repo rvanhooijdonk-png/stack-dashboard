@@ -19,7 +19,7 @@ import { kanaalpostUitTekst, toPublicKanaalpost } from '../scripts/lib/kanaalpos
 import {
   toets, alarmRij, magAppenden, alarmRijPubliceerbaar, stempelUitHtml, sectieUitHtml,
   eersteKanaalpostRij, rijMoment, versieMinstens, codeWoord, CODES, VEROUDERD_MARKER, KANAALPOST_VANAF,
-  SECTIES_VANAF, zelfRouteUitUrl, statusUitTekst, VERSIE_VORM, KERN_BRONVELDEN,
+  SECTIES_VANAF, zelfRouteUitUrl, statusUitTekst, VERSIE_VORM, KERN_BRONVELDEN, NEVENPUNTEN,
 } from '../scripts/lib/waarnemer.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -612,6 +612,9 @@ function toetsMetStatus(sources, {
     // het statusbestand bepaalde dan mede zijn eigen beoordeling.
     contractVersie: paginaContract,
     bronstand: gelezen.bronnen,
+    // Ook de versie die het STATUSBESTAND van zichzelf beweert gaat mee. Eén bouw kan er maar één
+    // hebben; twee verschillende betekent dat er één verzonnen is (bevinding Codex, ronde 9).
+    bronContractVersie: gelezen.contract,
     nu: NU,
   });
 }
@@ -878,14 +881,110 @@ test('NEGATIEVE CONTROLE — dezelfde vreemde versie mét herkomst wordt gewoon 
 });
 
 test('de kern kan niet van het contract afdrijven', () => {
-  // Orderdiscipline R2: elke met de hand genoemde lijst krijgt een test die hem aan de bron bindt.
-  // De kern mag KRIMPEN maar nooit groeien — een veld toevoegen is precies het venster dat we met
-  // deze constructie vermijden. Deze test bewaakt de bovengrens.
+  // Orderdiscipline R2: elke met de hand genoemde lijst krijgt een test die hem aan vaste literalen
+  // bindt. Deze test bewaakt BEIDE richtingen. Tot ronde 9 stond hier alleen de bovengrens
+  // (`kern ⊆ contract`), en Codex toonde wat die niet zag: de kern zelf laten KRIMPEN — `key`
+  // eruit — hield alle tests groen, terwijl een bron zonder key daarna gewoon als bewijs meetelde.
+  // Krimpen is toegestaan als het contract krimpt, maar nooit stilzwijgend.
   const verplicht = STATUS_SCHEMA.properties.sources.items.required;
   for (const veld of KERN_BRONVELDEN) {
     assert.equal(verplicht.includes(veld), true, `${veld} moet ook in het contract verplicht zijn`);
     assert.equal(typeof veld, 'string');
   }
+  // De ondergrens: dit is de kern, letterlijk. Wie hem wil wijzigen wijzigt deze regel mee en legt
+  // in dezelfde beweging uit waarom een bron zonder dat veld nog herkenbaar is.
+  assert.deepEqual(KERN_BRONVELDEN, ['key', 'trust', 'retrievedAt']);
+});
+
+test('een tijdstip dat geen tijdstip is, koopt geen bewijs', () => {
+  // Reproductie van Codex ronde 9 (P1, deel 1): op een vreemde contractversie bleven van de kern
+  // drie niet-lege strings over, dus `retrievedAt: "geen datum"` telde als herkomst.
+  const gelogen = JSON.stringify({
+    contractVersion: '9.9.9',
+    generatedAt: '2026-07-26T11:55:00.000Z',
+    overallStatus: 'OK',
+    sources: [{ key: 'x', trust: 'VERIFIED_CURRENT', retrievedAt: 'geen datum' }],
+  });
+  const gelezen = lees(200, gelogen);
+  assert.deepEqual([gelezen.bronnen.totaal, gelezen.bronnen.bewezen, gelezen.bronnen.ongeteld], [1, 0, 1]);
+
+  // NEGATIEVE CONTROLE — precies dezelfde bron met een echt tijdstip telt wél mee.
+  const echt = JSON.stringify({
+    contractVersion: '9.9.9',
+    generatedAt: '2026-07-26T11:55:00.000Z',
+    overallStatus: 'OK',
+    sources: [{ key: 'x', trust: 'VERIFIED_CURRENT', retrievedAt: '2026-07-26T11:54:00.000Z' }],
+  });
+  assert.deepEqual([lees(200, echt).bronnen.bewezen, lees(200, echt).bronnen.ongeteld], [1, 0]);
+});
+
+test('plaat en statusbestand uit dezelfde bouw mogen niet twee contractversies noemen', () => {
+  // De volledige reproductie van Codex ronde 9 (P1): een PAGINA op 2.7.0 met nul bewezen bronnen,
+  // naast een statusbestand uit dezelfde bouw dat zich 9.9.9 noemt en zo de volle keuring uitzet.
+  // Eén bouw heeft één contractversie; noemen ze er twee, dan is er één verzonnen of verwisseld.
+  const vreemd = JSON.stringify({
+    contractVersion: '9.9.9',
+    generatedAt: '2026-07-26T11:55:00.000Z',
+    overallStatus: 'OK',
+    sources: [{ key: 'x', trust: 'VERIFIED_CURRENT', retrievedAt: '2026-07-26T11:54:00.000Z' }],
+  });
+  const r = toetsMetStatus(BRONNEN_LEEG, { tekst: vreemd, paginaContract: CONTRACT_NU });
+  assert.equal(r.ok, false, 'een statusbestand mag zichzelf geen andere versie geven dan de plaat');
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['CONTRACT_UITEEN']);
+  assert.match(r.bevindingen[0].uitleg, /plaat 2\.7\.0, statusbestand 9\.9\.9/);
+
+  // NEGATIEVE CONTROLE — een ECHTE nieuwere kopie draagt die versie ook op de PAGINA, en dan is de
+  // milde kernkeuring gewoon op haar plaats.
+  const g = toetsMetStatus(ALLES_BEWEZEN, {
+    contract: '9.9.9', paginaContract: '9.9.9', tekst: statusTekstVan(ALLES_BEWEZEN, '9.9.9'),
+  });
+  assert.deepEqual(g.bevindingen, [], 'dezelfde vreemde versie aan beide kanten is geen afwijking');
+});
+
+test('de categorie van een ongetelde bron haalt de openbare melding', () => {
+  // Orderdiscipline R2: een reductie mag de oorzaak niet weggooien. Tot ronde 9 bleef `ongeteld`
+  // steken in een waarschuwing die alleen in de runlog stond — in de spiegelregel was er niets van
+  // terug te vinden, ook niet als er om een andere reden alarm was (bevinding Codex, ronde 9).
+  const vreemd = JSON.stringify({
+    contractVersion: '9.9.9',
+    generatedAt: '2026-07-26T11:55:00.000Z',
+    overallStatus: 'OK',
+    sources: [{ trust: 'VERIFIED_CURRENT' }],
+  });
+  const r = toetsMetStatus(ALLES_BEWEZEN, { tekst: vreemd, paginaContract: '9.9.9' });
+  assert.deepEqual(r.nevenpunten.map((n) => n.code), ['BRON_ZONDER_HERKOMST']);
+
+  const rij = alarmRij({ bevindingen: r.bevindingen, nevenpunten: r.nevenpunten, nu: NU });
+  assert.match(rij, /controlepunten: [^)]*bron-zonder-herkomst/);
+  assert.match(rij, /zonder herkomst/);
+  assert.equal(alarmRijPubliceerbaar(rij), true, 'de regel moet nog steeds door de publicatiepoort');
+
+  // De herhaalcontrole leest de controlepunten TERUG uit de geschreven regel. Staat het nevenpunt
+  // wel in de regel en niet in de lijst waarmee wordt vergeleken, dan is elke melding eeuwig nieuw.
+  const codes = [...r.bevindingen, ...r.nevenpunten].map((b) => b.code);
+  const spiegelMetRij = `${basisSpiegel}\n${rij}`;
+  assert.equal(magAppenden(spiegelMetRij, codes, NU).mag, false, 'dezelfde melding mag niet twee keer');
+
+  // NEGATIEVE CONTROLE — zonder nevenpunt staat de categorie er niet in.
+  const kaal = alarmRij({ bevindingen: r.bevindingen, nu: NU });
+  assert.equal(/bron-zonder-herkomst/.test(kaal), false);
+});
+
+test('nevenpunten zijn een gesloten lijst van vaste literalen', () => {
+  // Orderdiscipline R2: elke allowlist krijgt een test die bindt dat elk lid een vaste literaal is
+  // én dat het een categorie is die de melding kan uitleggen.
+  assert.deepEqual(NEVENPUNTEN, ['BRON_ZONDER_HERKOMST']);
+  for (const code of NEVENPUNTEN) {
+    assert.equal(typeof CODES[code], 'string', `${code} moet een uitleg in CODES hebben`);
+    assert.match(codeWoord(code), /^[a-z-]+$/);
+  }
+  // Een verzonnen nevenpunt haalt de melding niet: alleen leden van de lijst reizen mee.
+  const rij = alarmRij({
+    bevindingen: [{ code: 'GEEN_GEVERIFIEERDE_BRON', uitleg: CODES.GEEN_GEVERIFIEERDE_BRON }],
+    nevenpunten: [{ code: 'VERZONNEN_PUNT', uitleg: 'dit hoort er niet te staan' }],
+    nu: NU,
+  });
+  assert.equal(/verzonnen-punt|dit hoort er niet/.test(rij), false);
 });
 
 test('een schemabump geeft GEEN vals alarm op een gezonde oudere of nieuwere kopie', () => {

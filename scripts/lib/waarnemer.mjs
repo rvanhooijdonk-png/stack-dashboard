@@ -137,6 +137,10 @@ export const CODES = {
   BRONSTAND_ONLEESBAAR: 'er is niet te lezen hoeveel van de bronnen achter de plaat geverifieerd zijn',
   BRONSTAND_ANDERE_BOUW: 'de bronstand hoort bij een andere bouw dan de pagina die nu geserveerd wordt',
   CONTRACT_ONLEESBAAR: 'er is niet te lezen welke versie van de plaat dit is',
+  CONTRACT_UITEEN: 'de plaat en het statusbestand noemen verschillende contractversies terwijl ze uit dezelfde bouw komen',
+  // Een NEVENPUNT: het maakt op zichzelf geen ronde rood, maar het reist wél mee in de publieke
+  // melding zodra er om een andere reden alarm is. Zie NEVENPUNTEN hieronder.
+  BRON_ZONDER_HERKOMST: 'er zijn bronnen die zich geverifieerd noemen zonder herkomst; die tellen niet mee',
 };
 
 const UUR = 3600 * 1000;
@@ -294,10 +298,16 @@ export const VERSIE_VORM = /^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/;
  */
 export const KERN_BRONVELDEN = ['key', 'trust', 'retrievedAt'];
 
-/** Draagt deze bron de kern? Leeg of niet-tekst telt niet als "draagt". */
+/**
+ * Draagt deze bron de kern? Leeg of niet-tekst telt niet als "draagt", en `retrievedAt` moet een
+ * LEESBAAR TIJDSTIP zijn en niet zomaar tekst: tot ronde 9 kwam `"geen datum"` er gewoon doorheen
+ * en kocht daarmee bewijs (bevinding Codex, ronde 9). Een tijdstip is een tijdstip in elke
+ * contractversie, dus deze eis heeft het bumpvenster niet dat het vormschema wél had.
+ */
 export function kernCompleet(bron) {
-  return !!bron && typeof bron === 'object' && !Array.isArray(bron)
-    && KERN_BRONVELDEN.every((veld) => typeof bron[veld] === 'string' && bron[veld].trim() !== '');
+  if (!bron || typeof bron !== 'object' || Array.isArray(bron)) return false;
+  if (!KERN_BRONVELDEN.every((veld) => typeof bron[veld] === 'string' && bron[veld].trim() !== '')) return false;
+  return Number.isFinite(Date.parse(bron.retrievedAt));
 }
 
 /**
@@ -412,25 +422,36 @@ export function statusUitTekst(httpStatus, tekst, schema = null) {
  * De hele toetsing over binnengehaalde tekst. Geen netwerk, geen klok van zichzelf: `nu` komt van
  * buiten zodat elke uitkomst in een test exact te zetten is.
  */
+/**
+ * Nevenpunten zijn geen bevindingen: ze maken een ronde niet rood. Ze reizen wél mee in de publieke
+ * alarmregel zodra er om een andere reden alarm is, want een reductie mag de oorzaak niet weggooien
+ * (orderdiscipline R2). Tot ronde 9 bleef `ongeteld` steken in een waarschuwing die alleen in de
+ * runlog stond; in de openbare melding was er niets van terug te vinden (bevinding Codex, ronde 9).
+ *
+ * Gesloten lijst van vaste literalen — een nevenpunt is altijd een sleutel uit `CODES`.
+ */
+export const NEVENPUNTEN = ['BRON_ZONDER_HERKOMST'];
+
 export function toets({
   paginaStatus, paginaHtml, spiegelStatus, spiegelTekst,
-  paginaRoute, contractVersie = null, bronstand = null, nu = 0,
+  paginaRoute, contractVersie = null, bronstand = null, bronContractVersie = null, nu = 0,
   drempelMs = DREMPEL_UREN * UUR, graceMs = GRACE_MINUTEN * MIN,
 } = {}) {
   const bevindingen = [];
   const waarschuwingen = [];
+  const nevenpunten = [];
   const gemeten = { stempelIso: null, leeftijdMs: null, paginaRij: null, bronRij: null, contract: contractVersie, bronnen: null, bouwVerschilMs: null };
   const meld = (code, extra = '') => bevindingen.push({ code, uitleg: CODES[code] + (extra ? ` (${extra})` : '') });
 
   // 1 — bereikbaar en bestempeld.
   if (Number(paginaStatus) !== 200) {
     meld('PAGINA_ONBEREIKBAAR');
-    return { ok: false, bevindingen, waarschuwingen, gemeten };
+    return { ok: false, bevindingen, waarschuwingen, nevenpunten, gemeten };
   }
   const html = String(paginaHtml ?? '');
   if (html.trim().length < 200) {
     meld('PAGINA_LEEG');
-    return { ok: false, bevindingen, waarschuwingen, gemeten };
+    return { ok: false, bevindingen, waarschuwingen, nevenpunten, gemeten };
   }
   // 1b -- de plaat moet zelf zeggen welke contractversie haar bouwde. Zonder leesbare versie is
   // ELKE versiepoort hieronder blind: `null` leest daar als "ouder dan", waardoor toets 3, 4 en 5
@@ -614,16 +635,27 @@ export function toets({
           : `de nieuwste van de twee bouwen is ${Math.round((bouwOuderdomMs ?? 0) / 60000)} min oud, ruim buiten het respijt van ${Math.round(graceMs / 60000)} min`));
     }
   } else {
+    // Pagina en statusbestand komen hier aantoonbaar uit DEZELFDE bouw (`zelfdeBouw` hierboven, op
+    // `generatedAt` = de cache-buster van de pagina). Eén bouw kan maar één contractversie hebben.
+    // Noemen ze er twee, dan is minstens één van beide verzonnen of verwisseld -- en precies dat was
+    // het groene pad dat Codex in ronde 9 reproduceerde: een pagina met 2.7.0 en nul bewezen bronnen
+    // naast een statusbestand dat zich 9.9.9 noemde, daarmee de volle keuring uitschakelde en met
+    // drie losse strings zijn eigen bewijs leverde. De milde kernkeuring hoort bij een ECHTE oudere
+    // of nieuwere gepubliceerde kopie -- dan draagt de PAGINA diezelfde vreemde versie ook.
+    if (bronContractVersie !== null && contractLeesbaar && bronContractVersie !== contractVersie) {
+      meld('CONTRACT_UITEEN', `plaat ${contractVersie}, statusbestand ${bronContractVersie}`);
+    }
     if (!gemetenBron.getoetst) {
       waarschuwingen.push('het statusbestand draagt een andere contractversie dan het schema dat de waakvlam kent; alleen de kernvelden per bron zijn gekeurd, niet het volle contract — de telling wordt wél beoordeeld');
     }
     if (gemetenBron.ongeteld) {
       waarschuwingen.push(`${gemetenBron.ongeteld} bron(nen) noemden zich bewezen zonder herkomst (${KERN_BRONVELDEN.join(', ')}) en tellen dus niet mee`);
+      nevenpunten.push({ code: 'BRON_ZONDER_HERKOMST', uitleg: `${CODES.BRON_ZONDER_HERKOMST} (${gemetenBron.ongeteld} van ${gemetenBron.totaal})` });
     }
     if (gemetenBron.bewezen === 0) meld('GEEN_GEVERIFIEERDE_BRON', `0 van ${gemetenBron.totaal} bronnen`);
   }
 
-  return { ok: bevindingen.length === 0, bevindingen, waarschuwingen, gemeten };
+  return { ok: bevindingen.length === 0, bevindingen, waarschuwingen, nevenpunten, gemeten };
 }
 
 /** `STEMPEL_TE_OUD` → `stempel-te-oud`: leesbaar in de spiegel én weer terug te lezen bij de
@@ -654,9 +686,13 @@ export const ALARM_KOP = '**De automatische controle ziet de openbare plaat afwi
  * De tekst blijft bewust arm: wát er afwijkt, in gewone taal, zonder adressen, paden of nummers.
  * Wie het naadje wil weten leest de run; de spiegel is de plek van het signaal.
  */
-export function alarmRij({ bevindingen, nu, sabotage = false, maxOnderwerp = 560 }) {
-  const codes = [...new Set(bevindingen.map((b) => b.code))];
-  const zinnen = [...new Set(bevindingen.map((b) => b.uitleg))].join('; ');
+export function alarmRij({ bevindingen, nevenpunten = [], nu, sabotage = false, maxOnderwerp = 560 }) {
+  // Nevenpunten staan achteraan: de aanleiding van het alarm hoort vooraan te blijven staan, ook als
+  // de tekst wordt afgekapt. Hun categorie zit in de staart met controlepunten en overleeft het
+  // afkappen dus hoe dan ook (orderdiscipline R2).
+  const alles = [...bevindingen, ...nevenpunten.filter((n) => NEVENPUNTEN.includes(n?.code))];
+  const codes = [...new Set(alles.map((b) => b.code))];
+  const zinnen = [...new Set(alles.map((b) => b.uitleg))].join('; ');
   const staart = ` (controlepunten: ${codes.map(codeWoord).join(', ')})`;
   const test = sabotage ? ' Dit is een geplande sabotagetest van de waarnemer zelf, geen echte storing.' : '';
   const kop = ALARM_KOP;
