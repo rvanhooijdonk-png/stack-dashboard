@@ -36,7 +36,7 @@
             STAND: deze waarde draagt de organisatie waarnaar stack-dashboard wordt overgedragen.
             Zij hoort onlosmakelijk bij HOSTING_OWNER_OF_RECORD en bij het Pages-adres in README.md
             — die drie slaan samen om of niet. Let op dat het EXEMPLAAR dat onder launchd draait een
-            aparte kopie is: dit bestand bijwerken verandert niets aan de geinstalleerde plist. De
+            aparte kopie is: dit bestand bijwerken verandert niets aan de geïnstalleerde plist. De
             exacte bestandsafbeelding daarvoor staat in docs/ORG-CUTOVER.md en wordt door een
             aparte activatiegate uitgevoerd, niet door deze wijziging.
         -->

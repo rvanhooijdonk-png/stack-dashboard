@@ -128,9 +128,20 @@ export const UITZONDERINGEN = leesUitzonderingen();
 
 const NAAM = /^[A-Za-z0-9._-]{1,100}$/;
 
+/**
+ * Een eigenaars- of repositorynaam is pas geldig als hij ÉÉRST een string is en DAARNA aan `NAAM`
+ * voldoet — in die volgorde, want `RegExp.test` maakt er zelf een string van. Zonder de typetoets
+ * glipt `123` of `['x']` langs `NAAM` heen en knalt pas een regel verderop op `toLowerCase()`, met
+ * een kale `TypeError` die niets zegt over wat er mis is aan de invoer.
+ */
+const isGeldigeNaam = (naam) => typeof naam === 'string' && NAAM.test(naam);
+
+/** Ongeldige invoer benoemen zonder er zelf over te struikelen: een Symbol overleeft geen `${}`. */
+const toonNaam = (naam) => (typeof naam === 'string' ? JSON.stringify(naam) : typeof naam);
+
 /** Het Pages-adres dat bij vaste tekst in deze boom hoort te staan. */
 export function verwachtPagesVoorvoegsel(eigenaar = HOSTING_OWNER_OF_RECORD, repo = REPOSITORY_NAME) {
-  if (!NAAM.test(eigenaar) || !NAAM.test(repo)) throw new Error('ongeldige eigenaar of repositorynaam');
+  if (!isGeldigeNaam(eigenaar) || !isGeldigeNaam(repo)) throw new Error('ongeldige eigenaar of repositorynaam');
   return `https://${eigenaar.toLowerCase()}.github.io/${repo}`;
 }
 
@@ -190,6 +201,34 @@ function zonderGedekt(regel, budget) {
 const alsPatroon = (tekst) => tekst.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
+ * De namen waarop R1 zoekt: de huidige eigenaar en elke eigenaar die deze repository eerder droeg,
+ * ontdubbeld en met de LANGSTE eerst — zodat een eigenaar wiens naam die van een ander bevat niet
+ * als de kortere wordt gemeld, want dan wijst de bevinding naar de verkeerde remedie.
+ *
+ * FAIL-CLOSED op ongeldige invoer, en dat is hier de hele afweging. Een ongeldige naam stilzwijgend
+ * overslaan lijkt netjes, maar haalt een eigenaar UIT de poort: precies de vorm waarin een
+ * achtergebleven verwijzing daarna ongezien blijft. Een poort die op vervuilde invoer minder gaat
+ * bewaken is geen poort meer. Beter luid stuk dan stil half.
+ *
+ * Ontdubbelen gebeurt hoofdletterongevoelig en met een gewone lus. De vorige vorm gebruikte
+ * `Set.add()` als waarde ín een `.filter()`-predikaat — dat werkt (een `Set` is truthy), maar wie
+ * het leest ziet een toets waar een neveneffect staat.
+ */
+export function eigenaarsKandidaten(eigenaar = HOSTING_OWNER_OF_RECORD, vorigeEigenaars = VORIGE_HOSTING_EIGENAARS) {
+  if (!Array.isArray(vorigeEigenaars)) throw new Error(`ongeldige vorigeEigenaars: geen lijst maar ${typeof vorigeEigenaars}`);
+  const kandidaten = [];
+  const gezien = new Set();
+  for (const naam of [eigenaar, ...vorigeEigenaars]) {
+    if (!isGeldigeNaam(naam)) throw new Error(`ongeldige eigenaarsnaam: ${toonNaam(naam)}`);
+    const sleutel = naam.toLowerCase();
+    if (gezien.has(sleutel)) continue;
+    gezien.add(sleutel);
+    kandidaten.push(naam);
+  }
+  return kandidaten.sort((a, b) => b.length - a.length);
+}
+
+/**
  * Regels ontleden op één bestand, MÉT de stand van het budget na afloop.
  *
  * Die reststand is geen bijproduct maar het bewijsmateriaal voor R3: alleen hier is te zien welke
@@ -209,13 +248,9 @@ function ontleedBestand({ pad, tekst }, {
   // kennen, dan is de poort na de overdracht stil op juist de waarschijnlijkste fout.
   //
   // De vorige eigenaars staan in HETZELFDE patroon en niet in een tweede ronde: één treffer per
-  // regel blijft dan één bevinding, precies zoals vóór de overdracht. De langste naam eerst, zodat
-  // een eigenaar die de tekst van een andere bevat niet als de kortere wordt gemeld — dan wijst de
-  // bevinding naar de verkeerde remedie.
-  const gezien = new Set();
-  const kandidaten = [eigenaar, ...vorigeEigenaars]
-    .filter((naam) => NAAM.test(naam ?? '') && !gezien.has(naam.toLowerCase()) && gezien.add(naam.toLowerCase()))
-    .sort((a, b) => b.length - a.length);
+  // regel blijft dan één bevinding, precies zoals vóór de overdracht. De volgorde en de weigering op
+  // ongeldige invoer staan bij `eigenaarsKandidaten`.
+  const kandidaten = eigenaarsKandidaten(eigenaar, vorigeEigenaars);
   const eigenaarPatroon = new RegExp(`(?:${kandidaten.map(alsPatroon).join('|')})`, 'i');
   const verwachteHost = eigenaar.toLowerCase();
 

@@ -28,6 +28,7 @@ import {
   HOSTING_OWNER_OF_RECORD, REPOSITORY_NAME, OPERATIONELE_PADEN, OVERTREDING, UITZONDERINGEN,
   UITZONDERINGEN_PAD, POORT_MODULE, VORIGE_HOSTING_EIGENAARS, EIGENAARSKLASSE,
   verwachtPagesVoorvoegsel, toetsBestand, toetsBoom, gevolgdeBestanden, leesUitzonderingen,
+  eigenaarsKandidaten,
 } from '../scripts/lib/org-migration.mjs';
 import { claimEvidence, evidenceUrlPrefixes } from '../scripts/lib/runtime-feed-view.mjs';
 
@@ -832,4 +833,89 @@ test('C4 — de identiteit staat op precies één operationele plaats, en de lok
     '~/Stack-Director/launchd/com.rvh.dashboard-feed-generator.plist',
     '~/Library/LaunchAgents/com.rvh.dashboard-feed-generator.plist',
   ]) assert.ok(gids.includes(genoemd), genoemd);
+});
+
+// --- 7. De kandidatenlijst: fail-closed op vervuilde invoer -------------------------------------
+//
+// Deze sectie meet één afweging en niet een typetoets om de typetoets. `eigenaarsKandidaten` bouwt
+// de namen waarop R1 zoekt. Wie daar een ongeldige waarde stilzwijgend uitfiltert, haalt een
+// eigenaar UIT de poort — en juist een achtergebleven vorige eigenaar is de bevinding die deze
+// migratie moet vangen. Vervuilde invoer moet dus luid stuk, niet stil half.
+
+test('R1-kandidaten — een niet-string eigenaar wordt geweigerd, niet naar tekst gedwongen', () => {
+  // `RegExp.test` maakt van 123 gewoon '123' en laat hem door NAAM heen; pas `toLowerCase()` een
+  // regel verderop knalde dan, met een kale TypeError die niets zegt over de invoer.
+  for (const stuk of [123, null, true, {}, ['RVH-Speaking'], Symbol('x')]) {
+    assert.throws(
+      () => eigenaarsKandidaten(stuk, VORIGE_HOSTING_EIGENAARS),
+      (e) => e instanceof Error && !(e instanceof TypeError) && /ongeldige eigenaarsnaam/.test(e.message),
+      String(typeof stuk),
+    );
+  }
+  // `undefined` is de ENIGE uitzondering, en met opzet: dat is de waarde waarmee JavaScript "niet
+  // meegegeven" uitdrukt, dus daar hoort de gedeclareerde stand te gelden. Zou ook die weigeren,
+  // dan kon de poort niet meer zonder argumenten worden aangeroepen — precies hoe zij draait.
+  assert.deepEqual(eigenaarsKandidaten(undefined, undefined), eigenaarsKandidaten());
+  assert.ok(eigenaarsKandidaten().includes(HOSTING_OWNER_OF_RECORD));
+});
+
+test('R1-kandidaten — een niet-string in vorigeEigenaars wordt geweigerd, niet overgeslagen', () => {
+  for (const stuk of [42, null, {}, ['rvanhooijdonk-png']]) {
+    assert.throws(
+      () => eigenaarsKandidaten(HOSTING_OWNER_OF_RECORD, [VORIGE, stuk]),
+      /ongeldige eigenaarsnaam/,
+      String(typeof stuk),
+    );
+  }
+  // En de lijst zelf moet een lijst zijn: een losse string zou anders per teken worden gespreid.
+  assert.throws(() => eigenaarsKandidaten(HOSTING_OWNER_OF_RECORD, VORIGE), /ongeldige vorigeEigenaars/);
+});
+
+test('R1-kandidaten — een ongeldige NAAM wordt geweigerd op beide plaatsen', () => {
+  for (const naam of ['kwaad/pad', 'met spatie', '', 'x'.repeat(101), '../ontsnapping']) {
+    assert.throws(() => eigenaarsKandidaten(naam, []), /ongeldige eigenaarsnaam/, naam);
+    assert.throws(() => eigenaarsKandidaten(HOSTING_OWNER_OF_RECORD, [naam]), /ongeldige eigenaarsnaam/, naam);
+  }
+  // Dezelfde volgorde geldt bij het Pages-voorvoegsel: eerst het type, dan de vorm. Ook daar mag
+  // een niet-string nooit als tekst worden opgevat en pas op `toLowerCase()` stuklopen.
+  assert.throws(() => verwachtPagesVoorvoegsel(123), /ongeldige eigenaar of repositorynaam/);
+  assert.throws(() => verwachtPagesVoorvoegsel(HOSTING_OWNER_OF_RECORD, ['stack-dashboard']), /ongeldige eigenaar of repositorynaam/);
+});
+
+test('R1-kandidaten — een hoofdletterduplicaat blijft precies één kandidaat en één bevinding', () => {
+  // Ontdubbelen gebeurt hoofdletterongevoelig, want het patroon zoekt dat ook. Zonder ontdubbeling
+  // staat dezelfde naam twee keer in de alternatie: geen tweede bevinding, wel een patroon dat
+  // groeit met elke schrijfwijze die iemand toevoegt.
+  assert.deepEqual(eigenaarsKandidaten('RVH-Speaking', ['rvh-speaking', 'RVH-SPEAKING']), ['RVH-Speaking']);
+  // Langste eerst blijft gelden, zodat een naam die een andere bevat niet als de kortere wordt gemeld.
+  assert.deepEqual(eigenaarsKandidaten('rvh', ['rvh-speaking-langer', 'RVH']), ['rvh-speaking-langer', 'rvh']);
+
+  const b = toetsBestand(
+    { pad: 'scripts/nieuw.mjs', tekst: `const OWNER = '${HOSTING_OWNER_OF_RECORD}';\n` },
+    { ...geenUitzonderingen, vorigeEigenaars: [HOSTING_OWNER_OF_RECORD.toLowerCase(), VORIGE] },
+  );
+  assert.equal(b.length, 1);
+  assert.equal(b[0].code, OVERTREDING.OPERATIONELE_EIGENAAR);
+  assert.equal(b[0].gevonden, HOSTING_OWNER_OF_RECORD);
+  // De klasse blijft HUIDIG: het duplicaat mag de eigen eigenaar niet als achtergebleven etiketteren.
+  assert.equal(b[0].eigenaarsklasse, EIGENAARSKLASSE.HUIDIG);
+});
+
+test('R1-kandidaten — de poort zelf weigert vervuilde invoer in plaats van stil minder te bewaken', () => {
+  // Het gevaar dat stil overslaan zou opleveren, hier meetbaar: met een ongeldige waarde ERBIJ moet
+  // de poort stuk, niet doorgaan met alleen de resterende namen. Zou zij doorgaan, dan verdwijnt de
+  // vorige eigenaar geruisloos uit R1 en is een achtergebleven binding ineens groen.
+  const bestand = { pad: 'scripts/nieuw.mjs', tekst: `const OWNER = '${VORIGE}';\n` };
+  assert.throws(
+    () => toetsBestand(bestand, { ...geenUitzonderingen, vorigeEigenaars: [VORIGE, 42] }),
+    /ongeldige eigenaarsnaam/,
+  );
+  assert.throws(
+    () => toetsBoom([bestand], { ...geenUitzonderingen, vorigeEigenaars: [VORIGE, 42] }),
+    /ongeldige eigenaarsnaam/,
+  );
+  // Met schone invoer is diezelfde binding gewoon één ACHTERGEBLEVEN bevinding.
+  const b = toetsBestand(bestand, { ...geenUitzonderingen, vorigeEigenaars: [VORIGE] });
+  assert.equal(b.length, 1);
+  assert.equal(b[0].eigenaarsklasse, EIGENAARSKLASSE.ACHTERGEBLEVEN);
 });
