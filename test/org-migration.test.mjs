@@ -419,8 +419,11 @@ test('de uitvoerende bestanden die het adres opbouwen, doen dat uitsluitend via 
   // De poort weigert de oude eigenaar; deze toets eist daarbovenop dat er ook echt een afleiding
   // voor in de plaats is gekomen. Zonder dit zou "de constante is weg" een geslaagde uitkomst zijn.
   for (const [pad, patroon] of [
-    ['scripts/waarnemer.mjs', /pagesUrl\(IDENTITEIT, 'contentstroom\.html'\)/],
-    ['scripts/waarnemer.mjs', /rawUrl\(IDENTITEIT, 'main', 'data\/kanaalpost-publiek\.md'\)/],
+    // `identiteit()` en niet `IDENTITEIT`: de afleiding is lui, zodat een run die BEIDE adressen zelf
+    // meegeeft niets meer over deze repository hoeft vast te stellen. Zie
+    // `test/waarnemer-adressen.test.mjs` voor wat er dan wél en niet wordt afgeleid.
+    ['scripts/waarnemer.mjs', /pagesUrl\(identiteit\(\), 'contentstroom\.html'\)/],
+    ['scripts/waarnemer.mjs', /rawUrl\(identiteit\(\), 'main', 'data\/kanaalpost-publiek\.md'\)/],
     ['scripts/napublicatie.mjs', /pagesUrl\(detectIdentity\(\)\)/],
     ['scripts/doorstroom.mjs', /pagesUrl\(detectIdentity\(\)\)/],
     ['scripts/kijk.mjs', /repositorySlug\(detectIdentity\(\)\)/],
