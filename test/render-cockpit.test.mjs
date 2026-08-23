@@ -27,9 +27,9 @@ test('hoofdpagina bevat uitsluitend de tien rustige hoofdsecties inclusief de dr
   ]);
 });
 
-test('de drie vaste paneelslots (b/RICHARD-QUEUE, k/NU-BEZIG, STATUSGEN) renderen altijd, met UNKNOWN zolang hun bron ontbreekt', () => {
+test('de nog ongekoppelde paneelslots (b/RICHARD-QUEUE, k/NU-BEZIG) renderen altijd, met UNKNOWN zolang hun bron ontbreekt', () => {
   const html = renderCockpit(snapshot, { products, ticker });
-  for (const id of ['paneel-richard-queue', 'paneel-nu-bezig', 'paneel-statusgen']) {
+  for (const id of ['paneel-richard-queue', 'paneel-nu-bezig']) {
     const section = html.match(new RegExp(`<section id="${id}"[\\s\\S]*?</section>`));
     assert.ok(section, `paneelslot ${id} ontbreekt`);
     assert.match(section[0], /UNKNOWN — bron nog niet gekoppeld\./, `paneelslot ${id} mist de UNKNOWN-regel`);
