@@ -1355,3 +1355,32 @@ test('op het nieuwe oordeelpad reist de categorie van een bron zonder herkomst m
   assert.deepEqual(r.nevenpunten.map((n) => n.code), ['BRON_ZONDER_HERKOMST']);
   assert.match(r.nevenpunten[0].uitleg, /1 van 1/);
 });
+
+test('twee schrijfwijzen van hetzelfde tijdstip laten de nulstand niet ontsnappen', () => {
+  // Codex ronde 12 (P3): `bronIsNieuwste` gebruikt `bronMs >= stempelMs`, en die `=` was door geen
+  // enkele test bewaakt -- de andere tests zetten óf letterlijk dezelfde tekenreeks neer (die loopt
+  // eerder al via `zelfdeBouw`) óf duidelijk verschillende tijden. Codex' mutant `>` liet alle 102
+  // waarnemertests groen en kocht over http `exit 0` op nul bewezen bronnen: pagina `...Z`,
+  // statusbestand `...+00:00`, hetzelfde milliseconde-tijdstip. Twee schrijfwijzen van hetzelfde
+  // moment horen niet minder streng beoordeeld te worden dan één.
+  const zelfdeMoment = new Date(NU - 60000);
+  const metZ = zelfdeMoment.toISOString();                       // ...T11:53:00.000Z
+  const metOffset = metZ.replace(/Z$/, '+00:00');                // ...T11:53:00.000+00:00
+  assert.notEqual(metZ, metOffset, 'de opzet vraagt twee verschillende tekenreeksen');
+  assert.equal(Date.parse(metZ), Date.parse(metOffset), 'die naar hetzelfde tijdstip wijzen');
+
+  const status = lees(200, statusTekstVan(BRONNEN_LEEG, CONTRACT_NU, metOffset));
+  const r = toets({
+    paginaStatus: 200,
+    paginaHtml: paginaMetBronnen(BRONNEN_LEEG, { gebouwdOp: metZ }),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: CONTRACT_NU,
+    bronstand: status.bronnen,
+    bronContractVersie: status.contract,
+    nu: NU,
+  });
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON'],
+    'gelijk is niet ouder: deze stand loopt nergens op achter');
+  assert.match(r.bevindingen[0].uitleg, /uit de nieuwste van de twee bouwen/);
+});
