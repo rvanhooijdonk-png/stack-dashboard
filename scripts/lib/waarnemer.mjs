@@ -276,6 +276,25 @@ export function rijMoment(datum) {
 export const VERSIE_VORM = /^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/;
 
 /**
+ * Het schema zonder de twee dingen die alleen over ÉÉN versie gaan: de pin op `contractVersion` en
+ * de weigering van onbekende velden. Wat overblijft is de vorm die elke gepubliceerde kopie deelt.
+ * Afgeleid uit het schemabestand zelf, nooit met de hand nageschreven — een tweede, handgeschreven
+ * minimumlijst zou van het contract afdrijven zonder dat iemand het merkt.
+ */
+export function vormSchemaVan(schema) {
+  const vorm = structuredClone(schema);
+  const losser = (knoop) => {
+    if (!knoop || typeof knoop !== 'object') return;
+    if (knoop.additionalProperties === false) knoop.additionalProperties = true;
+    for (const kind of Object.values(knoop.properties ?? {})) losser(kind);
+    if (knoop.items) losser(knoop.items);
+  };
+  losser(vorm);
+  delete vorm.properties?.contractVersion?.const;
+  return vorm;
+}
+
+/**
  * Het machineleesbare statusbestand van de plaat (`public/status.json`), gelezen met een parser.
  *
  * Vier reviewrondes lang stond de meting in de HTML-kop en vier keer vond de review daar hetzelfde
@@ -316,14 +335,34 @@ export function statusUitTekst(httpStatus, tekst, schema = null) {
   });
 
   // Het schema is de enige plek waar de vorm van dit bestand vastligt; `JSON.parse` alleen keurt niets
-  // (bevinding Codex, ronde 5). Toetsen mag alleen tegen dezelfde contractversie: het schema pint
-  // `contractVersion` op één waarde, dus een oudere of nieuwere gepubliceerde kopie zou er per
-  // definitie op vallen. Zo'n kopie heet daarom niet fout maar ONGETOETST: haar VORM is niet
-  // gekeurd, en dat is een waarschuwing. Haar TELLING wordt gewoon geveld — ongetoetst was tot
-  // ronde 6 ook een vrijstelling van het oordeel, en die voorwaarde las het bestand uit zichzelf.
+  // (bevinding Codex, ronde 5). Er wordt in TWEE stappen gekeurd, en dat onderscheid is er sinds
+  // ronde 7 met reden: het schema pint `contractVersion` op één waarde, dus keuren tegen het VOLLE
+  // schema kan alleen bij een gelijke versie. Zolang dat de enige keuring was, kon één veld in het
+  // bestand zelf — `contractVersion: "9.9.9"` — de hele keuring uitschakelen, waarna een verzonnen
+  // `{ trust: "VERIFIED_CURRENT" }` zonder key, zonder tijdstip en zonder rijen gewoon als bewijs
+  // meetelde. Het bestand bepaalde dus zijn eigen strengheid (bevinding Codex, ronde 7).
+  //
+  // Daarom eerst de VORM, altijd, ongeacht wat het bestand over zichzelf beweert: hetzelfde schema
+  // met de versiepin eraf. Dat is geen tweede waarheid — het wordt uit het schemabestand afgeleid,
+  // dus het kan er niet van afdrijven. `additionalProperties` gaat daarbij los, zodat een NIEUWERE
+  // gepubliceerde kopie die een veld toevoegt hier niet vals op valt; alles wat het contract
+  // VERPLICHT stelt (de bronkeys, de trust-waarden, `retrievedAt`, `rijen`) blijft staan.
+  // Aanvaarde restrisico, expliciet: een toekomstige versie die een verplicht veld hernoemt of een
+  // trust-waarde toevoegt geeft in het venster tussen schemabump en publicatie één luide ronde.
+  // Luid en zelfherstellend is hier de goede kant om te falen; stil meetellen was de fout van
+  // 22-08-2026. Gemeten op de LIVE 2.6.0-plaat (23-08-2026): nul afwijkingen tegen het vormschema.
   if (schema === null) return onleesbaar('geen schema om het statusbestand aan te toetsen');
+  // `getoetst` zegt één ding en niets meer: is dit bestand tegen het VOLLE contract gehouden? Dat kan
+  // alleen bij een gelijke versie. De vormkeuring hieronder gebeurt hoe dan ook, en verandert die
+  // vlag dus niet — anders zou een vormfout op een vreemde versie zich als "volledig gekeurd"
+  // voordoen in het logboek.
   const schemaVersie = schema?.properties?.contractVersion?.const ?? null;
   const getoetst = schemaVersie !== null && contract !== null && contract === schemaVersie;
+
+  const vormFouten = validate(vormSchemaVan(schema), json);
+  if (vormFouten.length) {
+    return onleesbaar(`statusbestand volgt de vorm van het contract niet (${vormFouten.length} afwijking${vormFouten.length === 1 ? '' : 'en'})`, getoetst);
+  }
   if (getoetst) {
     const fouten = validate(schema, json);
     if (fouten.length) {
@@ -536,11 +575,15 @@ export function toets({
     && gemetenBron.gebouwdOp === gemeten.stempelIso;
   const nieuwsteBouwMs = [stempelMs, bronMs].filter((x) => x !== null && Number.isFinite(x))
     .reduce((a, b) => Math.max(a, b), Number.NEGATIVE_INFINITY);
-  // Het venster loopt naar twee kanten. Naar achteren omdat het respijt eindig hoort te zijn; naar
-  // voren omdat een bouwstempel dat in de toekomst ligt geen verse publicatie is maar een verzet
-  // uurwerk of een verzonnen stempel, en dat mag zich niet als naijling voordoen.
+  // Het venster loopt naar twee kanten, maar niet even ver. Naar ACHTEREN het volle respijt: zo lang
+  // mag een publicatie erover doen om overal aan te komen. Naar VOREN alleen de klokspeling tussen
+  // bouwmachine en controlemachine — een bouwstempel dat verder in de toekomst ligt is geen verse
+  // publicatie maar een verzet uurwerk of een verzonnen stempel, en zo'n stempel mag zichzelf niet
+  // als naijling voordoen. Tot ronde 7 stond hier `-graceMs`, waardoor een stempel tot drie kwartier
+  // vooruit juist wél als vers gold; dat was precies de vrijstelling die een verzonnen tijd kon
+  // kopen (bevinding Codex, ronde 7).
   const bouwOuderdomMs = Number.isFinite(nieuwsteBouwMs) ? nu - nieuwsteBouwMs : null;
-  const verseBouw = bouwOuderdomMs !== null && bouwOuderdomMs >= -graceMs && bouwOuderdomMs <= graceMs;
+  const verseBouw = bouwOuderdomMs !== null && bouwOuderdomMs >= -KLOKSPELING_MS && bouwOuderdomMs <= graceMs;
   gemeten.bouwVerschilMs = stempelMs !== null && bronMs !== null && Number.isFinite(stempelMs) && Number.isFinite(bronMs)
     ? Math.abs(bronMs - stempelMs)
     : null;
@@ -562,11 +605,13 @@ export function toets({
     } else {
       meld('BRONSTAND_ANDERE_BOUW', gemetenBron.gebouwdOp === null
         ? 'geen bouwtijd om aan te knopen'
-        : `de nieuwste van de twee bouwen is ${Math.round((bouwOuderdomMs ?? 0) / 60000)} min oud, ruim buiten het respijt van ${Math.round(graceMs / 60000)} min`);
+        : (bouwOuderdomMs !== null && bouwOuderdomMs < -KLOKSPELING_MS
+          ? `de nieuwste van de twee bouwen ligt ${Math.round(-bouwOuderdomMs / 60000)} min in de toekomst, meer dan de klokspeling van ${Math.round(KLOKSPELING_MS / 60000)} min`
+          : `de nieuwste van de twee bouwen is ${Math.round((bouwOuderdomMs ?? 0) / 60000)} min oud, ruim buiten het respijt van ${Math.round(graceMs / 60000)} min`));
     }
   } else {
     if (!gemetenBron.getoetst) {
-      waarschuwingen.push('het statusbestand draagt een andere contractversie dan het schema dat de waakvlam kent; de vorm is dus niet gekeurd — de telling wordt wél beoordeeld');
+      waarschuwingen.push('het statusbestand draagt een andere contractversie dan het schema dat de waakvlam kent; het is dus alleen op vorm gekeurd, niet tegen het volle contract — de telling wordt wél beoordeeld');
     }
     if (gemetenBron.bewezen === 0) meld('GEEN_GEVERIFIEERDE_BRON', `0 van ${gemetenBron.totaal} bronnen`);
   }

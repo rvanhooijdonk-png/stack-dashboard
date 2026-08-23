@@ -698,18 +698,26 @@ test('het statusbestand wordt tegen zijn EIGEN schema gehouden, niet alleen tege
   // Zonder schemakeuring telde de waakvlam elk object met een `trust`-veld mee. Een bestand met een
   // verzonnen bronkey, een verzonnen trust-waarde of zonder de verplichte velden ging dan door voor
   // een geldige meting — en juist die vorm is wat een halve build oplevert.
-  const gevallen = [
+  // Sinds ronde 7 zijn er twee keuringen. De VORM geldt altijd (schema zonder de versiepin en zonder
+  // de weigering van onbekende velden); het VOLLE contract komt daar bovenop zodra de versie klopt.
+  // Een verzonnen bronkey, een verzonnen trust-waarde en ontbrekende verplichte velden zijn
+  // vormfouten; een onbekend extra veld valt alleen op het volle contract.
+  const vormfouten = [
     [[{ ...ALLES_BEWEZEN[0], key: 'verzonnen-bron' }], 'een bronkey die niet in het contract staat'],
     [[{ ...ALLES_BEWEZEN[0], trust: 'PRIMA' }], 'een trust-waarde die niet in het contract staat'],
     [[{ key: BRONKEYS[0], trust: 'VERIFIED_CURRENT' }], 'een bron zonder retrievedAt en rijen'],
-    [[{ ...ALLES_BEWEZEN[0], extra: 'iets' }], 'een bron met een veld dat het contract niet kent'],
   ];
-  for (const [sources, waarom] of gevallen) {
+  for (const [sources, waarom] of vormfouten) {
     const gelezen = lees(200, statusTekstVan(sources));
     assert.equal(gelezen.bronnen.leesbaar, false, `${waarom} hoort onleesbaar te zijn`);
-    assert.match(gelezen.bronnen.reden, /volgt zijn eigen contract niet/);
+    assert.match(gelezen.bronnen.reden, /volgt de vorm van het contract niet/);
     assert.equal(gelezen.bronnen.getoetst, true, `${waarom} is wél gekeurd — hij viel er alleen op`);
   }
+
+  const gelezen = lees(200, statusTekstVan([{ ...ALLES_BEWEZEN[0], extra: 'iets' }]));
+  assert.equal(gelezen.bronnen.leesbaar, false, 'een onbekend veld op de eigen versie is een afwijking');
+  assert.match(gelezen.bronnen.reden, /volgt zijn eigen contract niet/);
+  assert.equal(gelezen.bronnen.getoetst, true);
 });
 
 test('NEGATIEVE CONTROLE — precies dezelfde vorm mét geldige velden komt er wél door', () => {
@@ -804,24 +812,101 @@ test('een bouwstempel uit de toekomst is geen verse publicatie', () => {
   assert.deepEqual(r.bevindingen.map((b) => b.code), ['BRONSTAND_ANDERE_BOUW']);
 });
 
-test('een statusbestand zonder bouwmoment is nergens aan vast te knopen', () => {
-  // Twee wegen naar hetzelfde antwoord, en allebei nodig. Draagt het bestand de contractversie die
-  // het schema kent, dan valt het al op de schemakeuring: `generatedAt` is daar verplicht. Draagt
-  // het een ándere versie, dan is er geen keuring en vangt de bouwtoets het — want zonder bouwtijd
-  // is er niets om deze meting aan deze pagina vast te knopen.
-  const gekeurd = JSON.stringify({ contractVersion: CONTRACT_NU, overallStatus: 'OK', sources: ALLES_BEWEZEN });
-  const r1 = toetsMetStatus(ALLES_BEWEZEN, { tekst: gekeurd });
-  assert.equal(r1.ok, false);
-  assert.deepEqual(r1.bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR']);
-  assert.match(r1.bevindingen[0].uitleg, /volgt zijn eigen contract niet/);
+// --- Codex ronde 7, P1-A: de toekomstgrens is klokspeling, geen respijt ---
 
-  const ongekeurd = JSON.stringify({ contractVersion: '9.9.9', overallStatus: 'OK', sources: ALLES_BEWEZEN });
+test('een bouwstempel iets in de toekomst is klokspeling en telt nog als naijling', () => {
+  // De bovengrens is klein en met opzet: klokken van twee machines lopen niet gelijk. Vijf minuten
+  // vooruit is speling; daarbuiten begint het bedrog.
+  const r = toetsMetStatus(ALLES_BEWEZEN, {
+    paginaGebouwdOp: '2026-07-26T09:00:00.000Z',
+    tekst: statusTekstVan(ALLES_BEWEZEN, CONTRACT_NU, '2026-07-26T12:04:00.000Z'),
+  });
+  assert.deepEqual(r.bevindingen, [], '4 min vooruit valt binnen de klokspeling');
+  assert.match(r.waarschuwingen.join(' '), /zojuist gepubliceerd/);
+});
+
+test('een bouwstempel ruim in de toekomst koopt géén vrijstelling meer', () => {
+  // De reproductie van Codex: een stempel tot 45 minuten vooruit gold als "verse publicatie" en nam
+  // daarmee het bronoordeel weg — precies de vrijstelling die een verzonnen tijd kon kopen. De zone
+  // `nu < stempel <= nu + graceMs` wordt hier aan beide randen gebonden.
+  for (const [stempel, wat] of [
+    ['2026-07-26T12:06:00.000Z', 'net buiten de klokspeling'],
+    ['2026-07-26T12:44:00.000Z', 'binnen het oude respijt, ruim buiten de speling'],
+  ]) {
+    const r = toetsMetStatus(BRONNEN_LEEG, {
+      paginaGebouwdOp: '2026-07-26T09:00:00.000Z',
+      tekst: statusTekstVan(BRONNEN_LEEG, CONTRACT_NU, stempel),
+    });
+    assert.equal(r.ok, false, `${wat} hoort niet groen te zijn`);
+    assert.deepEqual(r.bevindingen.map((b) => b.code), ['BRONSTAND_ANDERE_BOUW']);
+    assert.match(r.bevindingen[0].uitleg, /in de toekomst/);
+  }
+});
+
+// --- Codex ronde 7, P1-B: het bestand kan zijn eigen keuring niet meer uitzetten ---
+
+test('een vreemde contractversie zet de vormkeuring NIET uit', () => {
+  // De reproductie van Codex: `contractVersion: "9.9.9"` schakelde de hele schemakeuring uit, waarna
+  // één verzonnen `{ trust: "VERIFIED_CURRENT" }` zonder key, tijdstip of rijen als bewijs meetelde
+  // en de waakvlam groen liet. Het bestand bepaalde zo zijn eigen strengheid.
+  const verzonnen = JSON.stringify({
+    contractVersion: '9.9.9',
+    generatedAt: '2026-07-26T11:55:00.000Z',
+    overallStatus: 'OK',
+    sources: [{ trust: 'VERIFIED_CURRENT' }],
+  });
+  const gelezen = lees(200, verzonnen);
+  assert.equal(gelezen.bronnen.leesbaar, false, 'de vorm wordt altijd gekeurd, ook op een vreemde versie');
+  assert.match(gelezen.bronnen.reden, /volgt de vorm van het contract niet/);
+
+  const r = toetsMetStatus(ALLES_BEWEZEN, { tekst: verzonnen, paginaContract: '9.9.9' });
+  assert.equal(r.ok, false, 'een zelfgekozen versie mag geen groen kopen');
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR']);
+});
+
+test('NEGATIEVE CONTROLE — dezelfde vreemde versie mét een geldige vorm wordt wél beoordeeld', () => {
+  // Zo blijft bewezen dat de vormkeuring geen versiepoort in vermomming is: een oudere of nieuwere
+  // gepubliceerde kopie die het contract gewoon volgt, gaat er ongehinderd doorheen en wordt op haar
+  // TELLING geveld — met een waarschuwing dat de vorm niet tegen het volle contract is gehouden.
+  const r = toetsMetStatus(BRONNEN_LEEG, {
+    contract: '9.9.9', paginaContract: '9.9.9',
+    tekst: statusTekstVan(BRONNEN_LEEG, '9.9.9'),
+  });
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON']);
+  assert.match(r.waarschuwingen.join(' '), /andere contractversie/);
+});
+
+test('een nieuwere kopie die een veld TOEVOEGT valt niet vals om op de vormkeuring', () => {
+  // `additionalProperties` staat in het vormschema los. Grond: tijdens het venster tussen een
+  // schemabump en de publicatie serveert de CDN een kopie van de nieuwe bouw terwijl de waakvlam nog
+  // het oude schema kent. Een extra veld mag daar geen vals alarm geven; alles wat het contract
+  // VERPLICHT stelt blijft wél staan.
+  const nieuwer = JSON.parse(statusTekstVan(BRONNEN_LEEG, '9.9.9'));
+  nieuwer.nieuwVeld = 'iets wat 2.8.0 zal kennen';
+  nieuwer.sources[0].nieuwBronveld = 42;
+  const gelezen = lees(200, JSON.stringify(nieuwer));
+  assert.equal(gelezen.bronnen.leesbaar, true, 'een toegevoegd veld is geen vormfout');
+  assert.equal(gelezen.bronnen.getoetst, false, 'maar tegen het volle contract is hij niet gehouden');
+});
+
+test('een statusbestand zonder bouwmoment is nergens aan vast te knopen', () => {
+  // `generatedAt` is verplicht in de VORM, dus deze val staat open ongeacht welke versie het bestand
+  // over zichzelf beweert. Beide wegen worden gebonden: de eigen versie en een vreemde.
+  for (const versie of [CONTRACT_NU, '9.9.9']) {
+    const zonder = JSON.stringify({ contractVersion: versie, overallStatus: 'OK', sources: ALLES_BEWEZEN });
+    const r = toetsMetStatus(ALLES_BEWEZEN, { tekst: zonder, paginaContract: versie });
+    assert.equal(r.ok, false, `versie ${versie} hoort niet groen te worden zonder bouwmoment`);
+    assert.deepEqual(r.bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR']);
+    assert.match(r.bevindingen[0].uitleg, /volgt de vorm van het contract niet/);
+  }
+
+  // En als de vorm wél klopt maar de bouwtijd een andere is, vangt de bouwtoets het alsnog.
   const r2 = toetsMetStatus(ALLES_BEWEZEN, {
-    tekst: ongekeurd, paginaContract: '9.9.9', paginaGebouwdOp: '2026-07-26T09:00:00.000Z',
+    contract: '9.9.9', paginaContract: '9.9.9', paginaGebouwdOp: '2026-07-26T09:00:00.000Z',
+    tekst: statusTekstVan(ALLES_BEWEZEN, '9.9.9', '2026-07-26T08:00:00.000Z'),
   });
   assert.equal(r2.ok, false);
   assert.deepEqual(r2.bevindingen.map((b) => b.code), ['BRONSTAND_ANDERE_BOUW']);
-  assert.match(r2.bevindingen[0].uitleg, /geen bouwtijd/);
 });
 
 test('NEGATIEVE CONTROLE — hetzelfde bestand mét het bouwmoment van de pagina oordeelt wél', () => {
