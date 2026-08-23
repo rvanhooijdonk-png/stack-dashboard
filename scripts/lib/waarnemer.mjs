@@ -33,6 +33,10 @@
 import { kanaalpostUitTekst, toPublicKanaalpost, ontdaan } from './kanaalpost.mjs';
 import { validate } from './validate.mjs';
 import { canoniek } from './spiegelwet.mjs';
+// HERGEBRUIK-EERST: dezelfde strikte tijdstipontleding die de runtime-feed al gebruikt. `Date.parse`
+// is géén validator -- V8 leest `"0"` als 31-12-1999 en rolt `2026-02-30` stilzwijgend door naar
+// 2 maart. Beide kochten daarmee bewijs op de plekken hieronder (bevinding Codex, ronde 10).
+import { parseTijdstempel } from './runtime-feed.mjs';
 
 /** Vanaf deze contractversie MOET de pagina een kanaalpost-sectie hebben. */
 export const KANAALPOST_VANAF = '2.4.0';
@@ -303,11 +307,16 @@ export const KERN_BRONVELDEN = ['key', 'trust', 'retrievedAt'];
  * LEESBAAR TIJDSTIP zijn en niet zomaar tekst: tot ronde 9 kwam `"geen datum"` er gewoon doorheen
  * en kocht daarmee bewijs (bevinding Codex, ronde 9). Een tijdstip is een tijdstip in elke
  * contractversie, dus deze eis heeft het bumpvenster niet dat het vormschema wél had.
+ *
+ * De eis is in ronde 10 aangescherpt van `Date.parse` naar `parseTijdstempel`: `Date.parse("0")`
+ * leverde een geldig getal en dus bewijs, en `2026-02-30` werd stilzwijgend rechtgezet naar 2
+ * maart. Een tijdstip moet zonebewust ISO-8601 zijn én op de kalender bestaan; anders is het geen
+ * herkomst maar tekst die eruitziet als herkomst (bevinding Codex, ronde 10).
  */
 export function kernCompleet(bron) {
   if (!bron || typeof bron !== 'object' || Array.isArray(bron)) return false;
   if (!KERN_BRONVELDEN.every((veld) => typeof bron[veld] === 'string' && bron[veld].trim() !== '')) return false;
-  return Number.isFinite(Date.parse(bron.retrievedAt));
+  return parseTijdstempel(bron.retrievedAt) !== null;
 }
 
 /**
@@ -340,9 +349,10 @@ export function statusUitTekst(httpStatus, tekst, schema = null) {
   // refresh-tag zet; op de live publicatie gemeten (23-08-2026): status.json
   // `2026-08-23T09:14:09.272Z` naast paginabuster `?v=20260823091409272`, dezelfde bouw tot op de
   // milliseconde. Zonder dit veld is een statusbestand niet aan een pagina toe te schrijven.
-  const gebouwdOp = typeof json.generatedAt === 'string' && Number.isFinite(Date.parse(json.generatedAt))
-    ? json.generatedAt
-    : null;
+  // Ook hier de strikte ontleding en niet `Date.parse`: met `generatedAt: "0"` werd 31-12-1999 een
+  // geldig bouwmoment, en dat bouwmoment kocht via het respijt de CDN-vrijstelling waarmee de
+  // bronstand ongemoeid bleef -- groen op nul bronnen (bevinding Codex, ronde 10).
+  const gebouwdOp = parseTijdstempel(json.generatedAt) !== null ? json.generatedAt : null;
   // `getoetst` zegt of de KEURING heeft plaatsgevonden, niet of ze slaagde. Een bestand dat op zijn
   // eigen schema valt is wél gekeurd; het tegenovergestelde melden zou de oorzaak wegpoetsen op
   // precies het pad waar hij gevonden is (orderdiscipline R2).
@@ -430,7 +440,7 @@ export function statusUitTekst(httpStatus, tekst, schema = null) {
  *
  * Gesloten lijst van vaste literalen — een nevenpunt is altijd een sleutel uit `CODES`.
  */
-export const NEVENPUNTEN = ['BRON_ZONDER_HERKOMST'];
+export const NEVENPUNTEN = Object.freeze(['BRON_ZONDER_HERKOMST']);
 
 export function toets({
   paginaStatus, paginaHtml, spiegelStatus, spiegelTekst,

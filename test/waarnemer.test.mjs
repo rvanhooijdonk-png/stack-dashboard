@@ -1104,3 +1104,117 @@ test('de plaat blijft haar bronstand ook zelf zeggen', () => {
   assert.equal(kop.includes('<meta name="bronstand" content="bewezen=0 totaal=8">'), true);
   assert.equal(paginaMetBronnen(ALLES_BEWEZEN).includes('content="bewezen=8 totaal=8"'), true);
 });
+
+test('Date.parse is geen tijdstipkeuring — parseerbare onzin koopt geen bewijs', () => {
+  // Reproductie van Codex ronde 10 (P1). Ronde 9 eiste een "leesbaar tijdstip" en gebruikte daar
+  // `Date.parse` voor. Dat is geen validator: V8 leest `"0"` als 31-12-1999 en rolt `2026-02-30`
+  // stilzwijgend door naar 2 maart. Codex' echte HTTP-reproductie draaide `rc=0` met
+  // `bronnen: 1 van 1 geverifieerd` op één bron met `retrievedAt: "0"`.
+  //
+  // Zonder zone is de derde: `2026-07-26T11:54:00` leest V8 als LOKALE tijd, dus dezelfde tekst
+  // betekent iets anders op een andere machine. Herkomst die van de tijdzone van de controlemachine
+  // afhangt is geen herkomst.
+  const geenTijdstip = ['0', '2026-02-30T11:54:00.000Z', '2026-07-26T11:54:00', '2026-07-26', 'nu'];
+  for (const retrievedAt of geenTijdstip) {
+    const gelezen = lees(200, JSON.stringify({
+      contractVersion: '9.9.9',
+      generatedAt: '2026-07-26T11:55:00.000Z',
+      overallStatus: 'OK',
+      sources: [{ key: 'x', trust: 'VERIFIED_CURRENT', retrievedAt }],
+    }));
+    assert.deepEqual(
+      [gelezen.bronnen.totaal, gelezen.bronnen.bewezen, gelezen.bronnen.ongeteld], [1, 0, 1],
+      `${JSON.stringify(retrievedAt)} is geen tijdstip en mag dus geen bewijs kopen`,
+    );
+  }
+  // NEGATIEVE CONTROLE — de kalender wordt echt gelezen: 28 februari bestaat wél.
+  const bestaat = lees(200, JSON.stringify({
+    contractVersion: '9.9.9',
+    generatedAt: '2026-07-26T11:55:00.000Z',
+    overallStatus: 'OK',
+    sources: [{ key: 'x', trust: 'VERIFIED_CURRENT', retrievedAt: '2026-02-28T11:54:00.000Z' }],
+  }));
+  assert.deepEqual([bestaat.bronnen.bewezen, bestaat.bronnen.ongeteld], [1, 0]);
+});
+
+test('een bouwstempel dat geen tijdstip is, koopt geen naijlingsvrijstelling', () => {
+  // Het tweede been van Codex ronde 10 (P1), op `generatedAt`. De naijlingsvrijstelling — "er is
+  // zojuist gepubliceerd, dus de bronstand wordt deze ronde niet beoordeeld" — hangt aan de
+  // NIEUWSTE van de twee bouwmomenten. Las de waakvlam dat moment met `Date.parse`, dan kon een
+  // statusbestand zichzelf vers rekenen met een stempel zonder zone: dezelfde tekst betekent op de
+  // controlemachine iets anders dan op de bouwmachine. Hieronder staat de pagina drie uur stil en
+  // is er nul bewezen bron; alleen het verzonnen stempel hield de zaak groen.
+  const l = new Date(NU);
+  const tweeCijfers = (n) => String(n).padStart(2, '0');
+  // Exact het lokale wandkloktijdstip van NU, zonder zone: `Date.parse` leest dit als "nu", in elke
+  // tijdzone. Zo is de test niet afhankelijk van de zone van de machine die hem draait.
+  const zonderZone = `${l.getFullYear()}-${tweeCijfers(l.getMonth() + 1)}-${tweeCijfers(l.getDate())}`
+    + `T${tweeCijfers(l.getHours())}:${tweeCijfers(l.getMinutes())}:${tweeCijfers(l.getSeconds())}.000`;
+  assert.equal(Date.parse(zonderZone), NU, 'de opzet klopt alleen als V8 dit als "nu" leest');
+
+  const paginaGebouwdOp = new Date(NU - 3 * 3600 * 1000).toISOString();
+  const gelezen = lees(200, statusTekstVan(BRONNEN_LEEG, CONTRACT_NU, zonderZone));
+  assert.equal(gelezen.bronnen.gebouwdOp, null, 'een stempel zonder zone is geen bouwidentiteit');
+
+  const r = toets({
+    paginaStatus: 200,
+    paginaHtml: paginaMetBronnen(BRONNEN_LEEG, { gebouwdOp: paginaGebouwdOp }),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: CONTRACT_NU,
+    bronstand: gelezen.bronnen,
+    bronContractVersie: gelezen.contract,
+    nu: NU,
+  });
+  assert.equal(r.ok, false, 'nul bewezen bronnen mag niet groen blijven op een verzonnen stempel');
+  assert.equal(r.bevindingen.some((b) => b.code === 'BRONSTAND_ANDERE_BOUW'), true);
+  assert.match(r.bevindingen.find((b) => b.code === 'BRONSTAND_ANDERE_BOUW').uitleg, /geen bouwtijd/);
+
+  // NEGATIEVE CONTROLE — hetzelfde tijdstip mét zone is wél een bouwidentiteit, en dan is de
+  // naijlingsvrijstelling gewoon op haar plaats: er is aantoonbaar zojuist gepubliceerd.
+  const metZone = lees(200, statusTekstVan(BRONNEN_LEEG, CONTRACT_NU, new Date(NU).toISOString()));
+  assert.equal(metZone.bronnen.gebouwdOp, new Date(NU).toISOString());
+  const g = toets({
+    paginaStatus: 200,
+    paginaHtml: paginaMetBronnen(BRONNEN_LEEG, { gebouwdOp: paginaGebouwdOp }),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: CONTRACT_NU,
+    bronstand: metZone.bronnen,
+    bronContractVersie: metZone.contract,
+    nu: NU,
+  });
+  assert.equal(g.bevindingen.some((b) => b.code === 'BRONSTAND_ANDERE_BOUW'), false);
+  assert.equal(g.waarschuwingen.some((w) => /naijling van de CDN/.test(w)), true);
+});
+
+test('de lijst met nevenpunten is bevroren', () => {
+  // Codex ronde 10 (P3): `NEVENPUNTEN` is de allowlist waar de publieke alarmregel op filtert. Een
+  // lijst die in te vullen is vanaf een andere module is geen allowlist maar een suggestie — één
+  // `push` en willekeurige tekst reist mee in de openbare melding.
+  assert.equal(Object.isFrozen(NEVENPUNTEN), true);
+  assert.throws(() => { NEVENPUNTEN.push('VERZONNEN_PUNT'); }, TypeError);
+  assert.deepEqual(NEVENPUNTEN, ['BRON_ZONDER_HERKOMST'], 'en de inhoud is er niet van veranderd');
+});
+
+test('de sabotagekeuze in de workflow biedt precies de proeven die de executor kent', async () => {
+  // Codex ronde 10 (P3): `SABOTAGE=bronnen` is de acceptatieproef van deze hele PR, maar hij was
+  // alleen vanaf de omgevingsvariabele te draaien. De keuzelijst in de workflow en de takken in de
+  // executor moeten elkaar dekken — anders bestaat er een knop die niets doet, of een proef die
+  // niemand kan indrukken. Deze test LEEST `.github/` en wijzigt er niets: die map is in deze order
+  // verboden terrein op die ene, vooraf afgestemde regel na.
+  const yml = await readFile(join(ROOT, '.github/workflows/waarnemer.yml'), 'utf8');
+  const keuze = yml.match(/^\s*options:\s*\[([^\]]*)\]\s*$/m);
+  assert.notEqual(keuze, null, 'de sabotage-invoer moet een keuzelijst hebben');
+  const opties = keuze[1].split(',').map((s) => s.trim());
+  assert.deepEqual(opties, ['geen', 'stempel', 'bronnen']);
+
+  // De andere kant van het contract: elke keuze behalve `geen` grijpt aantoonbaar een tak aan in de
+  // executor, en de standaardwaarde is de tak die niets doet.
+  const executor = await readFile(join(ROOT, 'scripts/waarnemer.mjs'), 'utf8');
+  for (const optie of opties.filter((o) => o !== 'geen')) {
+    assert.match(executor, new RegExp(`SABOTAGE === '${optie}'`), `${optie} moet een tak hebben`);
+  }
+  assert.match(yml, /^\s*default:\s*geen\s*$/m);
+  assert.match(executor, /const SABOTAGE = process\.env\.SABOTAGE \|\| 'geen';/);
+});
