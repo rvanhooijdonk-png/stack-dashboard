@@ -17,6 +17,31 @@
     <string>Background</string>
     <key>EnvironmentVariables</key>
     <dict>
+        <!--
+            WAAR stack-dashboard OP DIT MOMENT STAAT. launchd kent geen Actions-context, dus
+            GITHUB_REPOSITORY bestaat hier niet; zonder deze sleutel slaat de generator de
+            git-events van het dashboard over en publiceert hij elke 900 seconden een feed
+            waarin die bron stilzwijgend ontbreekt.
+
+            Dit is de CONFIGURATIEPUNT-uitzondering uit
+            CONTROL/AUTOCODING/org-migratie-uitzonderingen.json: de ene plaats die bij een
+            overdracht naar een organisatie juist WEL verandert. Hij staat niet los — de poort
+            in test/org-migration.test.mjs houdt deze waarde tegen HOSTING_OWNER_OF_RECORD in
+            de poortmodule onder scripts/lib/, dus wie daar de eigenaar verzet en deze regel
+            laat staan, krijgt een rode toets in plaats van een stille verkeerde meting.
+
+            Een misvormde waarde valt hier niet stil terug: resolveIdentity() werpt en de
+            generator publiceert dan niets.
+
+            STAND: deze waarde draagt de organisatie waarnaar stack-dashboard wordt overgedragen.
+            Zij hoort onlosmakelijk bij HOSTING_OWNER_OF_RECORD en bij het Pages-adres in README.md
+            — die drie slaan samen om of niet. Let op dat het EXEMPLAAR dat onder launchd draait een
+            aparte kopie is: dit bestand bijwerken verandert niets aan de geïnstalleerde plist. De
+            exacte bestandsafbeelding daarvoor staat in docs/ORG-CUTOVER.md en wordt door een
+            aparte activatiegate uitgevoerd, niet door deze wijziging.
+        -->
+        <key>DASHBOARD_REPOSITORY</key>
+        <string>RVH-Speaking/stack-dashboard</string>
         <key>HOME</key>
         <string>/Users/richardvanhooijdonk</string>
         <key>PATH</key>

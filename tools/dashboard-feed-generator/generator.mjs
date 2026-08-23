@@ -33,17 +33,60 @@
  */
 
 import { readFile, readdir, lstat } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join, basename, dirname } from 'node:path';
+import { join, basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DASHBOARD_ROOT =
   process.env.DASHBOARD_FEED_GENERATOR_DASHBOARD_ROOT ?? join(ROOT, '..', 'stack-dashboard');
 
-const OWNER = 'rvanhooijdonk-png';
+// De eigenaar van `stack-control` en van de bewaakte persoonlijke repo's. Die verhuizen NIET mee
+// met een organisatieoverdracht van `stack-dashboard`; dit is dus geen achterstallige hardcodering
+// maar de eigenaar van een ander object. Zie `scripts/lib/repo-identity.mjs`.
+const CONTROL_OWNER = 'rvanhooijdonk-png';
 const CONTROL_REPO = 'stack-control';
 const DASHBOARD_REPO = 'stack-dashboard';
+
+/**
+ * Waar `stack-dashboard` op DIT moment staat. Alleen bronnen die het HEDEN kennen tellen: een
+ * expliciete `DASHBOARD_REPOSITORY` of de Actions-context.
+ *
+ * De afleiding staat hier BEWUST NIET nog een keer opgeschreven. Zij komt uit `resolveIdentity()`
+ * in `scripts/lib/repo-identity.mjs` van de dashboardboom — dezelfde functie die de workflows
+ * gebruiken, langs dezelfde weg als de twee feed-validators hieronder. Een tweede parser met
+ * "ongeveer dezelfde" regels is precies hoe de twee stelsels uit elkaar lopen: die van hierboven
+ * onderscheidde AFWEZIG niet van MISVORMD, zodat een tikfout in de override (de eigenaarsnaam
+ * zonder repositorynaam) als "niets ingevuld" langskwam en de feed daarna zonder dashboardevents werd
+ * gepubliceerd. `??` maakte het dubbel scheef: een lege `DASHBOARD_REPOSITORY` — de vorm waarin
+ * Actions een niet-ingevulde `env:`-waarde doorgeeft — blokkeerde de terugval op een geldige
+ * `GITHUB_REPOSITORY`, want leeg is niet `null`.
+ *
+ * Wat `resolveIdentity()` daarvoor in de plaats geeft:
+ *  - MISVORMD en niet-leeg → werpt. Dat komt hier als een luide FOUT uit `main()` en er wordt niets
+ *    gepubliceerd; een uitdrukkelijke aanwijzing die niet klopt, mag geen halve meting opleveren.
+ *  - LEEG, alleen spaties, of AFWEZIG → geen override, en dan telt `GITHUB_REPOSITORY`.
+ *  - Niets bruikbaars → `null`, en dan slaat deze bron over mét reden in het log.
+ *
+ * De `origin`-remote van de dashboard-werkboom telt niet mee, hoe verleidelijk ook — deze generator
+ * draait juist lokaal onder launchd, waar die remote altijd voorhanden is. Maar hij bewaart wat er
+ * bij het klonen is opgeschreven: GitHub verplaatst een repository server-side en blijft de oude
+ * naam doorverwijzen, dus na de overdracht noemt `origin` nog de vorige eigenaar terwijl alles
+ * blijft werken. Die stand hier vertrouwen levert git-events over een verhuisd object op zonder dat
+ * er iets rood wordt.
+ *
+ * Onder launchd is er geen Actions-context. Het meegeleverde plist zet daarom zelf
+ * `DASHBOARD_REPOSITORY`; zonder die sleutel slaat deze bron over en publiceert de generator een
+ * feed zonder dashboardevents. Zie `README.md` hiernaast.
+ */
+export async function dashboardRepositorySlug(env = process.env) {
+  const { resolveIdentity, repositorySlug } = await import(
+    join(DASHBOARD_ROOT, 'scripts/lib/repo-identity.mjs')
+  );
+  const identiteit = resolveIdentity(env);
+  return identiteit ? repositorySlug(identiteit) : null;
+}
 const FEEDS_REF = 'dashboard-feeds';
 const BASE_REF = 'main';
 const FEEDS_PATH = {
@@ -184,9 +227,19 @@ async function healthEvents() {
 // ---------------------------------------------------------------------------
 async function gitEvents() {
   const events = [];
-  for (const repo of [CONTROL_REPO, DASHBOARD_REPO]) {
+  const dashboardSlug = await dashboardRepositorySlug();
+  if (!dashboardSlug) {
+    log(`kan niet vaststellen waar ${DASHBOARD_REPO} nu staat (geen DASHBOARD_REPOSITORY, geen `
+      + 'GITHUB_REPOSITORY; de origin van de werkboom telt niet, die overleeft een overdracht '
+      + 'ongewijzigd) — git-events voor die repo worden overgeslagen.');
+  }
+  const bronnen = [
+    { repo: CONTROL_REPO, slug: `${CONTROL_OWNER}/${CONTROL_REPO}` },
+    ...(dashboardSlug ? [{ repo: DASHBOARD_REPO, slug: dashboardSlug }] : []),
+  ];
+  for (const { repo, slug } of bronnen) {
     const r = gh([
-      'pr', 'list', '--repo', `${OWNER}/${repo}`, '--state', 'all', '--limit', '30',
+      'pr', 'list', '--repo', slug, '--state', 'all', '--limit', '30',
       '--json', 'number,createdAt,mergedAt',
     ]);
     if (r.status !== 0) {
@@ -333,11 +386,11 @@ async function loadValidators() {
 // Nooit main, nooit de `rapporten`-branch. Alleen committen bij echte inhoudswijziging.
 // ---------------------------------------------------------------------------
 function ensureFeedsBranch() {
-  const existing = ghApiGet(`repos/${OWNER}/${CONTROL_REPO}/git/ref/heads/${FEEDS_REF}`);
+  const existing = ghApiGet(`repos/${CONTROL_OWNER}/${CONTROL_REPO}/git/ref/heads/${FEEDS_REF}`);
   if (existing.status === 200) return;
-  const base = ghApiGet(`repos/${OWNER}/${CONTROL_REPO}/git/ref/heads/${BASE_REF}`);
+  const base = ghApiGet(`repos/${CONTROL_OWNER}/${CONTROL_REPO}/git/ref/heads/${BASE_REF}`);
   if (base.status !== 200) throw new Error(`kan basis-ref ${BASE_REF} niet lezen`);
-  ghApiSend('POST', `repos/${OWNER}/${CONTROL_REPO}/git/refs`, {
+  ghApiSend('POST', `repos/${CONTROL_OWNER}/${CONTROL_REPO}/git/refs`, {
     ref: `refs/heads/${FEEDS_REF}`,
     sha: base.json.object.sha,
   });
@@ -359,7 +412,7 @@ function publishFile(path, obj, label) {
   const contentText = `${JSON.stringify(obj, null, 2)}\n`;
   const contentB64 = Buffer.from(contentText, 'utf8').toString('base64');
   const existing = ghApiGet(
-    `repos/${OWNER}/${CONTROL_REPO}/contents/${path}?ref=${FEEDS_REF}`,
+    `repos/${CONTROL_OWNER}/${CONTROL_REPO}/contents/${path}?ref=${FEEDS_REF}`,
   );
   if (existing.status === 200) {
     const currentText = Buffer.from(existing.json.content, 'base64').toString('utf8');
@@ -380,7 +433,7 @@ function publishFile(path, obj, label) {
     branch: FEEDS_REF,
     ...(existing.status === 200 ? { sha: existing.json.sha } : {}),
   };
-  const res = ghApiSend('PUT', `repos/${OWNER}/${CONTROL_REPO}/contents/${path}`, body);
+  const res = ghApiSend('PUT', `repos/${CONTROL_OWNER}/${CONTROL_REPO}/contents/${path}`, body);
   log(`${label}: gepubliceerd, commit ${res.commit?.sha ?? '?'}`);
   return { published: true, sha: res.commit?.sha };
 }
@@ -410,7 +463,31 @@ async function main() {
   log('klaar.');
 }
 
-main().catch((err) => {
-  log(`FOUT: ${err.stack ?? err.message}`);
-  process.exitCode = 1;
-});
+/**
+ * Alleen draaien als dit bestand ZELF is aangeroepen — zoals launchd het aanroept, met het pad als
+ * `argv[1]`. Zonder deze poort start een `import` van deze module meteen een volledige run met
+ * publicatie, en dan kan geen enkele toets de identiteitsroute hierboven meten zonder de echte
+ * feeds aan te raken.
+ *
+ * De vergelijking loopt over `realpath`, want een LaunchAgent mag naar een symlink wijzen. Faalt
+ * die (het pad bestaat niet meer), dan valt hij terug op de letterlijke vergelijking. Staat de
+ * uitkomst onverhoopt op `false`, dan doet de generator niets en blijven de feeds staan waar ze
+ * stonden — zichtbaar in het log en aan een oude `generatedAt`, en niet als een verkeerde publicatie.
+ */
+export function rechtstreeksAangeroepen() {
+  const aanroep = process.argv[1];
+  if (!aanroep) return false;
+  const zelf = fileURLToPath(import.meta.url);
+  try {
+    return realpathSync(aanroep) === realpathSync(zelf);
+  } catch {
+    return resolve(aanroep) === zelf;
+  }
+}
+
+if (rechtstreeksAangeroepen()) {
+  main().catch((err) => {
+    log(`FOUT: ${err.stack ?? err.message}`);
+    process.exitCode = 1;
+  });
+}

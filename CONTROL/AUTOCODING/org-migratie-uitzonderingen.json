@@ -1,0 +1,70 @@
+{
+  "schema": "ORG_MIGRATIE_UITZONDERINGEN_V1",
+  "toelichting": [
+    "Elke post noemt exact één pad, exact de tekst die daar mag blijven staan, en waarom die tekst",
+    "NIET met een overdracht van dit repository meeverhuist. Wie hier iets bij zet, verbreedt een",
+    "poort — daarom staat deze lijst onder CONTROL/AUTOCODING/ en valt een wijziging eraan onder",
+    "dezelfde eigenaarsgate als de policy zelf.",
+    "blijft=ANDER_OBJECT: de naam hoort bij een ander object (stack-control, het bewaakte account,",
+    "een persoonslogin) dat niet wordt overgedragen.",
+    "blijft=HISTORISCH: een vastgelegde meting of een reeds gepubliceerde verwijzing die naar het",
+    "object van toen moet blijven wijzen.",
+    "blijft=CONFIGURATIEPUNT: de ene plaats die bij de overdracht juist wel verandert."
+  ],
+  "uitzonderingen": [
+    {
+      "pad": "scripts/lib/collect.mjs",
+      "tekst": "process.env.DASHBOARD_OWNER ?? 'rvanhooijdonk-png'",
+      "blijft": "ANDER_OBJECT",
+      "reden": "Het account WAAROVER de plaat rapporteert. stack-control en de bewaakte repo's blijven persoonlijk; dit aan GITHUB_REPOSITORY koppelen laat de plaat na de overdracht over een lege organisatie rapporteren."
+    },
+    {
+      "pad": "scripts/doorstroom.mjs",
+      "tekst": "'rvanhooijdonk-png/stack-control'",
+      "blijft": "ANDER_OBJECT",
+      "reden": "De doorstroombron is stack-control, een ander repository dat niet wordt overgedragen."
+    },
+    {
+      "pad": "scripts/doorstroom.mjs",
+      "tekst": "TWEE BRONNEN, allebei op `rvanhooijdonk-png/stack-control`",
+      "blijft": "ANDER_OBJECT",
+      "reden": "Toelichting bij dezelfde bron; noemt stack-control, niet dit repository."
+    },
+    {
+      "pad": "tools/dashboard-feed-generator/generator.mjs",
+      "tekst": "const CONTROL_OWNER = 'rvanhooijdonk-png';",
+      "blijft": "ANDER_OBJECT",
+      "reden": "Eigenaar van stack-control en van de bewaakte persoonlijke repo's. Waar deze generator stack-dashboard zelf aanspreekt, gebruikt hij dashboardRepositorySlug()."
+    },
+    {
+      "pad": "tools/dashboard-feed-generator/com.rvh.dashboard-feed-generator.plist",
+      "tekst": "<string>RVH-Speaking/stack-dashboard</string>",
+      "blijft": "CONFIGURATIEPUNT",
+      "reden": "launchd kent geen Actions-context, dus DASHBOARD_REPOSITORY moet hier expliciet staan; zonder die sleutel publiceert de generator elk kwartier een feed zonder dashboard-git-events. Dit is de ene plaats die bij de overdracht meeverandert; de waarde draagt nu de organisatie en test/org-migration.test.mjs houdt haar tegen HOSTING_OWNER_OF_RECORD."
+    },
+    {
+      "pad": "scripts/lib/runtime-feed-view.mjs",
+      "tekst": "const HISTORISCHE_BEWIJS_EIGENAAR = 'rvanhooijdonk-png';",
+      "blijft": "HISTORISCH",
+      "reden": "Al gepubliceerd bewijsmateriaal wijst naar commits onder het persoonlijke account. Die URL's blijven geldig en zouden anders na de overdracht hun link verliezen."
+    },
+    {
+      "pad": "scripts/autocoding/verify-review-gate.mjs",
+      "tekst": "GitHub-identiteit (`rvanhooijdonk-png`)",
+      "blijft": "ANDER_OBJECT",
+      "reden": "Persoonslogin van de eigenaar-goedkeurder, niet de eigenaar van het repository. Verhuist per definitie niet mee met een overdracht."
+    },
+    {
+      "pad": "scripts/autocoding/finalize-merge.mjs",
+      "tekst": "stand van `rvanhooijdonk-png/stack-dashboard`",
+      "blijft": "HISTORISCH",
+      "reden": "Vastgelegde V23-meting (owner_type=User, HTTP 422 op een merge-queue-ruleset) die het bestaan van de dormante MERGE_QUEUE-tak verklaart. Herschrijven zou het verslag onwaar maken."
+    },
+    {
+      "pad": ".github/workflows/autocoding-merge-finalizer.yml",
+      "tekst": "Gemeten stand van dit object: `rvanhooijdonk-png/stack-dashboard`",
+      "blijft": "HISTORISCH",
+      "reden": "Zelfde vastgelegde V24-meting, hier als toelichting bij server_gate_mode."
+    }
+  ]
+}

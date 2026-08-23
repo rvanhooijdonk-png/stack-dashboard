@@ -16,6 +16,11 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 
+// LET OP — dit is het account WAAROVER de plaat rapporteert, niet het account waar de plaat zelf
+// staat. `stack-control` en de bewaakte repo's blijven op het persoonlijke account, ook nadat
+// `stack-dashboard` naar een organisatie is overgedragen. Wie deze waarde aan `GITHUB_REPOSITORY`
+// zou koppelen, laat de plaat na die overdracht over een lege organisatie rapporteren: groen en
+// betekenisloos. Het adres van de plaat zelf komt uit `lib/repo-identity.mjs`.
 const OWNER = validName(process.env.DASHBOARD_OWNER ?? 'rvanhooijdonk-png', 'DASHBOARD_OWNER');
 const CONTROL_REPO = validName(process.env.DASHBOARD_CONTROL_REPO ?? 'stack-control', 'DASHBOARD_CONTROL_REPO');
 const TRACKER_PATH = 'AUDIT-INPUT/stack-open-beslispunten.md';

@@ -70,12 +70,15 @@ jobs:
       - id: toets
         continue-on-error: true
         env:
-          # Niet de root: sinds #52 staat de cockpit op de root en zijn de bewaakte secties
-          # (kanaalpost + VERPLICHTE_SECTIES) verhuisd naar contentstroom.html. Beide pagina's
-          # krijgen in dezelfde build wel dezelfde bouwstempel, dus de stempel/leeftijd/contract-
-          # toetsen blijven kloppen.
-          BASE_URL: https://rvanhooijdonk-png.github.io/stack-dashboard/contentstroom.html
-          SPIEGEL_URL: https://raw.githubusercontent.com/rvanhooijdonk-png/stack-dashboard/main/data/kanaalpost-publiek.md
+          # BASE_URL en SPIEGEL_URL staan hier BEWUST NIET MEER. Ze stonden er als letterlijke
+          # adressen met de eigenaar erin, en die adressen zouden bij een overdracht van deze
+          # repository naar een organisatie stil naar een verdwenen plaat zijn blijven wijzen — een
+          # HTTP-fout die deze toets als "plaat niet vers" leest en niet als "adres verhuisd".
+          # `scripts/waarnemer.mjs` leidt beide af uit `GITHUB_REPOSITORY`, dat Actions altijd zelf
+          # zet. Niet de root: sinds #52 staat de cockpit op de root en zijn de bewaakte secties
+          # (kanaalpost + VERPLICHTE_SECTIES) verhuisd naar contentstroom.html — die keuze staat nu
+          # in het script, naast de afleiding van het adres. Beide pagina's krijgen in dezelfde
+          # build wel dezelfde bouwstempel, dus de stempel/leeftijd/contract-toetsen blijven kloppen.
           # Twee wegen naar de sabotagetest. Met de hand (workflow_dispatch) kan pas als deze
           # workflow op de hoofdtak staat; daarvóór — en later ook nog — kan het met een commit die
           # `[sabotage]` in zijn bericht draagt. Zo is het acceptatiebewijs op ELKE tak te herhalen,
