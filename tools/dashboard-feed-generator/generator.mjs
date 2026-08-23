@@ -49,21 +49,23 @@ const CONTROL_REPO = 'stack-control';
 const DASHBOARD_REPO = 'stack-dashboard';
 
 /**
- * Waar `stack-dashboard` op DIT moment staat. Volgorde: expliciete override, Actions-context, en
- * anders de `origin`-remote van de dashboard-werkboom die deze generator toch al leest.
+ * Waar `stack-dashboard` op DIT moment staat. Alleen bronnen die het HEDEN kennen tellen: een
+ * expliciete `DASHBOARD_REPOSITORY` of de Actions-context.
  *
- * Fail-closed en niet terugvallen op `CONTROL_OWNER`: die terugval zou na de overdracht keurig
- * blijven draaien en git-events van een verdwenen object rapporteren. Liever één overgeslagen bron
- * met een reden in het log dan een stille verkeerde meting.
+ * De `origin`-remote van de dashboard-werkboom staat er bewust NIET bij, hoe verleidelijk ook —
+ * deze generator draait juist lokaal onder launchd, waar die remote altijd voorhanden is. Maar hij
+ * bewaart wat er bij het klonen is opgeschreven: GitHub verplaatst een repository server-side en
+ * blijft de oude naam doorverwijzen, dus na de overdracht noemt `origin` nog de vorige eigenaar
+ * terwijl alles blijft werken. Die stand hier vertrouwen levert git-events over een verhuisd object
+ * op zonder dat er iets rood wordt.
+ *
+ * Fail-closed en niet terugvallen op `CONTROL_OWNER`: liever één overgeslagen bron met een reden in
+ * het log dan een stille verkeerde meting. Zet `DASHBOARD_REPOSITORY` in de launchd-omgeving om
+ * deze bron aan te zetten.
  */
 function dashboardRepositorySlug() {
-  const uitOmgeving = process.env.DASHBOARD_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? '';
-  if (/^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/.test(uitOmgeving)) return uitOmgeving;
-  const r = spawnSync('git', ['-C', DASHBOARD_ROOT, 'remote', 'get-url', 'origin'], { encoding: 'utf8' });
-  const m = r.status === 0
-    ? (r.stdout ?? '').trim().match(/^(?:git@github\.com:|(?:ssh:\/\/git@|https?:\/\/)(?:[^@/]+@)?github\.com\/)(.+?)(?:\.git)?\/?$/)
-    : null;
-  return m && /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/.test(m[1]) ? m[1] : null;
+  const uitOmgeving = (process.env.DASHBOARD_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? '').trim();
+  return /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/.test(uitOmgeving) ? uitOmgeving : null;
 }
 const FEEDS_REF = 'dashboard-feeds';
 const BASE_REF = 'main';
@@ -207,8 +209,9 @@ async function gitEvents() {
   const events = [];
   const dashboardSlug = dashboardRepositorySlug();
   if (!dashboardSlug) {
-    log(`kan niet vaststellen waar ${DASHBOARD_REPO} staat (geen DASHBOARD_REPOSITORY, geen `
-      + 'GITHUB_REPOSITORY, geen leesbare origin-remote) — git-events voor die repo worden overgeslagen.');
+    log(`kan niet vaststellen waar ${DASHBOARD_REPO} nu staat (geen DASHBOARD_REPOSITORY, geen `
+      + 'GITHUB_REPOSITORY; de origin van de werkboom telt niet, die overleeft een overdracht '
+      + 'ongewijzigd) — git-events voor die repo worden overgeslagen.');
   }
   const bronnen = [
     { repo: CONTROL_REPO, slug: `${CONTROL_OWNER}/${CONTROL_REPO}` },

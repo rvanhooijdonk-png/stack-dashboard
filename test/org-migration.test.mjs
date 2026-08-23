@@ -16,12 +16,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
   parseRepository, repositoryFromRemoteUrl, pagesOrigin, pagesUrl, rawUrl, repositorySlug,
-  ownerUrlPrefix, resolveIdentity, detectIdentity,
+  ownerUrlPrefix, resolveIdentity, detectIdentity, originRemoteUrl,
 } from '../scripts/lib/repo-identity.mjs';
 import {
   HOSTING_OWNER_OF_RECORD, REPOSITORY_NAME, OPERATIONELE_PADEN, OVERTREDING, UITZONDERINGEN,
@@ -72,14 +73,18 @@ test('een afsluitende slash bij de wortel en geen dubbele slash bij een pad', ()
   assert.equal(pagesUrl(NU, 'status.json'), 'https://rvanhooijdonk-png.github.io/stack-dashboard/status.json');
 });
 
-test('de identiteit komt uit de omgeving in een vaste volgorde: override, Actions, werkboom', () => {
+test('de identiteit komt uit de omgeving in een vaste volgorde: override vóór Actions-context', () => {
   assert.deepEqual(resolveIdentity({ GITHUB_REPOSITORY: 'RVH-Speaking/stack-dashboard' }), STRAKS);
   assert.deepEqual(
     resolveIdentity({ DASHBOARD_REPOSITORY: 'iemand/fork', GITHUB_REPOSITORY: 'RVH-Speaking/stack-dashboard' }),
     { owner: 'iemand', repo: 'fork' },
   );
-  assert.deepEqual(resolveIdentity({}, { remoteUrl: 'git@github.com:RVH-Speaking/stack-dashboard.git' }), STRAKS);
   assert.equal(resolveIdentity({}), null);
+  // LEEG telt als afwezig, en dat is geen slordigheid: een niet ingevulde `env:`-waarde komt in
+  // Actions als lege tekst binnen. Zou dat een harde fout zijn, dan brak elke workflow die de
+  // override netjes optioneel doorgeeft. Zie hieronder voor het verschil met MISVORMD.
+  assert.equal(resolveIdentity({ DASHBOARD_REPOSITORY: '' }), null);
+  assert.equal(resolveIdentity({ DASHBOARD_REPOSITORY: '   ' }), null);
 });
 
 test('een remote wordt in alle vormen gelezen die deze werkboom draagt, en rommel wordt geweigerd', () => {
@@ -105,6 +110,64 @@ test('een onvaststelbare identiteit werpt, en valt niet stilzwijgend terug op de
     () => detectIdentity({}, { cwd: '/' }),
     /kan de eigenaar van deze repository niet vaststellen/,
   );
+  assert.throws(
+    () => detectIdentity({}, { cwd: mkdtempSync(join(tmpdir(), 'orgmig-kaal-')) }),
+    /kan de eigenaar van deze repository niet vaststellen/,
+  );
+});
+
+// --- 1b. De vier reparaties, elk met de fout die zij afsluit ------------------------------------
+
+/**
+ * Een werkboom met precies één eigenschap: een `origin` die naar `slug` wijst. Geen netwerk, geen
+ * commits — een overdracht raakt de opgeslagen remote van een bestaande kloon immers niet aan, en
+ * juist die stand moet hier gemeten worden.
+ */
+function kloonMetOrigin(slug) {
+  const map = mkdtempSync(join(tmpdir(), 'orgmig-kloon-'));
+  execFileSync('git', ['-C', map, 'init', '-q'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', map, 'remote', 'add', 'origin', `git@github.com:${slug}.git`], { stdio: 'ignore' });
+  return map;
+}
+
+test('P1 — een origin die de overdracht niet heeft meegemaakt, geldt niet als actuele identiteit', () => {
+  // De stand van elke kloon die vóór de overdracht is gemaakt. GitHub verplaatst het object
+  // server-side en blijft de oude naam doorverwijzen, dus git blijft werken en niets voelt kapot;
+  // de opgeslagen remote noemt intussen nog letterlijk de vorige eigenaar. Syntactisch geldig, en
+  // precies daarom gevaarlijk: hij zou hier het Pages- en raw-adres van een verdwenen host
+  // opleveren zonder dat er ergens iets rood wordt.
+  const verouderd = kloonMetOrigin('rvanhooijdonk-png/stack-dashboard');
+  assert.equal(originRemoteUrl(verouderd), 'git@github.com:rvanhooijdonk-png/stack-dashboard.git');
+  assert.throws(() => detectIdentity({}, { cwd: verouderd }), /origin/);
+  assert.throws(() => detectIdentity({}, { cwd: verouderd }), /rvanhooijdonk-png\/stack-dashboard/);
+
+  // De uitweg is uitdrukkelijk en nooit impliciet: een actuele runtimecontext of een override die
+  // een mens nú heeft gezet.
+  assert.deepEqual(detectIdentity({ GITHUB_REPOSITORY: 'RVH-Speaking/stack-dashboard' }, { cwd: verouderd }), STRAKS);
+  assert.deepEqual(detectIdentity({ DASHBOARD_REPOSITORY: 'RVH-Speaking/stack-dashboard' }, { cwd: verouderd }), STRAKS);
+
+  // Ook een origin die toevallig al goed staat, opent deze deur niet. Anders zou de toets
+  // hierboven alleen maar meten dat de tekst verschilt, niet dat de bron niet telt.
+  assert.throws(() => detectIdentity({}, { cwd: kloonMetOrigin('RVH-Speaking/stack-dashboard') }), /origin/);
+});
+
+test('P2 — een MISVORMDE expliciete override valt niet terug, maar faalt luid', () => {
+  // Een tikfout in de override die voor een fork-proefdraai bedoeld was, mag niet stilzwijgend
+  // tegen het gewone repository gaan draaien: dan lijkt de proef geslaagd terwijl er aan het
+  // verkeerde object is gemeten — precies de stille misser die deze module opheft.
+  for (const kapot of ['RVH-Speaking', 'RVH-Speaking/stack dashboard', 'a/b/c', '/stack-dashboard', 'RVH-Speaking/']) {
+    assert.throws(
+      () => resolveIdentity({ DASHBOARD_REPOSITORY: kapot, GITHUB_REPOSITORY: 'rvanhooijdonk-png/stack-dashboard' }),
+      /DASHBOARD_REPOSITORY/,
+      kapot,
+    );
+  }
+  assert.throws(
+    () => detectIdentity({ DASHBOARD_REPOSITORY: 'RVH-Speaking' }, { cwd: kloonMetOrigin('rvanhooijdonk-png/stack-dashboard') }),
+    /DASHBOARD_REPOSITORY/,
+  );
+  // AFWEZIG is iets anders dan ONGELDIG: dat pad loopt gewoon door naar de Actions-context.
+  assert.deepEqual(resolveIdentity({ GITHUB_REPOSITORY: 'RVH-Speaking/stack-dashboard' }), STRAKS);
 });
 
 test('een onzinnige eigenaar of repositorynaam levert een fout, geen adres', () => {
@@ -203,6 +266,93 @@ test('R1 — een gedekte uitzondering mag blijven, maar dekt geen tweede vermeld
   }, { uitzonderingen });
   assert.equal(b.length, 1);
   assert.equal(b[0].code, OVERTREDING.OPERATIONELE_EIGENAAR);
+});
+
+test('P2 — één uitzondering dekt één voorkomen, ook als de hele toegestane tekst wordt herhaald', () => {
+  const uitzonderingen = [{
+    pad: 'scripts/lib/collect.mjs', tekst: "?? 'rvanhooijdonk-png'", blijft: 'ANDER_OBJECT',
+    reden: 'het bewaakte account, dat niet meeverhuist met deze repository',
+  }];
+  const tweeKeer = {
+    pad: 'scripts/lib/collect.mjs',
+    tekst: "const A = env.DASHBOARD_OWNER ?? 'rvanhooijdonk-png'; const B = env.PLAAT ?? 'rvanhooijdonk-png';\n",
+  };
+  // Twee keer exact het toegestane fragment op één regel. De eerste is gedocumenteerd; de tweede is
+  // een nieuwe binding waar niemand een reden bij heeft opgeschreven. Zou één post op de lijst álle
+  // herhalingen dekken, dan is die post geen uitzondering meer maar een vrijbrief — en dan zegt de
+  // toelichting bij de lijst iets anders dan de poort doet.
+  const b = toetsBestand(tweeKeer, { uitzonderingen });
+  assert.equal(b.length, 1);
+  assert.equal(b[0].code, OVERTREDING.OPERATIONELE_EIGENAAR);
+
+  // Wie twee voorkomens wil, documenteert er twee. Dan is de lijst weer een eerlijke telling.
+  assert.deepEqual(toetsBestand(tweeKeer, { uitzonderingen: [...uitzonderingen, { ...uitzonderingen[0] }] }), []);
+
+  // Hetzelfde budget geldt over regelgrenzen heen: één post dekt één voorkomen in het bestand, niet
+  // één per regel. Anders verplaatst het gat zich gewoon naar de volgende regel.
+  const tweeRegels = toetsBestand({
+    pad: 'scripts/lib/collect.mjs',
+    tekst: "const A = env.DASHBOARD_OWNER ?? 'rvanhooijdonk-png';\nconst B = env.PLAAT ?? 'rvanhooijdonk-png';\n",
+  }, { uitzonderingen });
+  assert.equal(tweeRegels.length, 1);
+  assert.equal(tweeRegels[0].regel, 2);
+});
+
+test('P2 — een uitzondering die vaker is opgevoerd dan zij dekt, is een VERVALLEN post', () => {
+  // De telling loopt beide kanten op: twee posten voor één voorkomen laat één post zonder werk
+  // achter, en zo'n post is precies wat R3 hoort aan te wijzen.
+  const post = {
+    pad: 'scripts/lib/collect.mjs', tekst: "?? 'rvanhooijdonk-png'", blijft: 'ANDER_OBJECT',
+    reden: 'het bewaakte account, dat niet meeverhuist met deze repository',
+  };
+  const b = toetsBoom(
+    [{ pad: 'scripts/lib/collect.mjs', tekst: "const A = env.DASHBOARD_OWNER ?? 'rvanhooijdonk-png';\n" }],
+    { uitzonderingen: [post, { ...post }] },
+  );
+  assert.equal(b.length, 1);
+  assert.equal(b[0].code, OVERTREDING.VERVALLEN_UITZONDERING);
+});
+
+test('P2 — de operationele eigenaar wordt in ELKE schrijfwijze herkend', () => {
+  // Na de overdracht is `RVH-Speaking` de eigenaar. GitHub aanvaardt `rvh-speaking` net zo goed in
+  // raw- en API-adressen, dus een nieuwe hardcodering wordt eerder in kleine letters getypt dan in
+  // de officiële schrijfwijze. Hoofdlettergevoelig toetsen laat juist die vorm door — en dan is de
+  // poort na de migratie stil op de meest waarschijnlijke fout.
+  for (const geschreven of ['RVH-Speaking', 'rvh-speaking', 'RVH-SPEAKING', 'Rvh-Speaking']) {
+    const b = toetsBestand(
+      {
+        pad: 'scripts/nieuw.mjs',
+        tekst: `const RAW = 'https://raw.githubusercontent.com/${geschreven}/stack-dashboard/main/x.json';\n`,
+      },
+      { ...geenUitzonderingen, eigenaar: 'RVH-Speaking' },
+    );
+    assert.equal(b.length, 1, geschreven);
+    assert.equal(b[0].code, OVERTREDING.OPERATIONELE_EIGENAAR);
+    // De bevinding noemt de gevonden schrijfwijze, niet de officiële: anders moet wie hem leest
+    // zelf nog gaan zoeken waar het dan staat.
+    assert.equal(b[0].gevonden, geschreven, geschreven);
+  }
+
+  // De scheiding tussen de drie eigenaars blijft overeind. Een persoonslogin en het bewaakte
+  // account staan buiten de uitvoerende paden, en die grens verandert hier niet mee.
+  for (const pad of ['CONTROL/AUTOCODING/policy.v1.json', 'docs/RAPPORT.md', 'test/x.test.mjs']) {
+    assert.deepEqual(
+      toetsBestand({ pad, tekst: '"allowed_owner_actors": ["rvh-speaking"]\n' },
+        { ...geenUitzonderingen, eigenaar: 'RVH-Speaking' }),
+      [], pad,
+    );
+  }
+  // En een gedocumenteerde uitzondering blijft gedocumenteerd, ongeacht de schrijfwijze eromheen.
+  assert.deepEqual(
+    toetsBestand({ pad: 'scripts/lib/collect.mjs', tekst: "const OWNER = env.DASHBOARD_OWNER ?? 'rvh-speaking';\n" }, {
+      eigenaar: 'RVH-Speaking',
+      uitzonderingen: [{
+        pad: 'scripts/lib/collect.mjs', tekst: "?? 'rvh-speaking'", blijft: 'ANDER_OBJECT',
+        reden: 'het bewaakte account, dat niet meeverhuist met deze repository',
+      }],
+    }),
+    [],
+  );
 });
 
 test('R2 — een VEROUDERD Pages-adres wordt geweigerd in code, README en documentatie', () => {

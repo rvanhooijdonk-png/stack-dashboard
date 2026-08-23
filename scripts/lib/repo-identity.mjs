@@ -19,9 +19,19 @@
  *     `CONTROL/AUTOCODING/policy.v1.json`). Dat is een persoonslogin en verhuist per definitie
  *     nooit met een repository mee.
  *
- * De identiteit wordt AFGELEID, niet geconfigureerd: in Actions staat `GITHUB_REPOSITORY` altijd
- * klaar, en lokaal wordt de `origin`-remote van de werkboom gelezen. Er is bewust geen letterlijke
- * terugvaloptie — een verkeerde gok is hier erger dan een luide fout.
+ * De identiteit wordt AFGELEID, niet geconfigureerd, en alleen uit bronnen die het HEDEN kennen:
+ * `GITHUB_REPOSITORY`, dat de runtime bij elke draai zelf zet, of `DASHBOARD_REPOSITORY`, dat een
+ * mens uitdrukkelijk meegeeft. Er is bewust geen letterlijke terugvaloptie — een verkeerde gok is
+ * hier erger dan een luide fout.
+ *
+ * WAAROM DE `origin`-REMOTE GEEN BRON IS. Het lag voor de hand om lokaal de remote van de werkboom
+ * te lezen, maar die weet niets van het heden: hij bewaart wat er bij het klonen is opgeschreven.
+ * GitHub verplaatst een repository server-side en blijft de oude naam daarna doorverwijzen, dus na
+ * de overdracht blijven `fetch` en `push` van een bestaande kloon gewoon werken terwijl `origin`
+ * nog letterlijk de vorige eigenaar noemt. Die stand is syntactisch onberispelijk en juist daarom
+ * gevaarlijk: hij zou hier het Pages- en raw-adres van een verdwenen host opleveren, en dat is
+ * precies de stille storing die deze module moet uitsluiten. De remote wordt dus nog wél gelezen,
+ * maar uitsluitend om de foutmelding te kunnen laten zien wat er gevonden is.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -85,17 +95,37 @@ export function ownerUrlPrefix(owner) {
   return `https://github.com/${owner}/`;
 }
 
+/** De expliciete override: bedoeld voor een proefdraai tegen een fork of na een overdracht. */
+export const OVERRIDE_ENV = 'DASHBOARD_REPOSITORY';
+
 /**
- * De identiteit uit de meegegeven omgeving, zonder enige buitenwereld aan te raken. `remoteUrl` is
- * apart en optioneel, zodat de test dit pad zonder git kan meten.
+ * De identiteit uit de meegegeven omgeving, zonder enige buitenwereld aan te raken. Volgorde: de
+ * expliciete override wint, daarna de Actions-context.
  *
- * Volgorde en waarom: een expliciete override wint (`DASHBOARD_REPOSITORY`, bedoeld voor een
- * proefdraai tegen een fork), daarna de Actions-context, daarna de werkboom zelf.
+ * AFWEZIG en ONGELDIG zijn hier twee verschillende dingen. Een override die er niet is, laat het
+ * gewone pad gewoon doorlopen. Een override die er wél is maar geen `owner/repo` vormt, is een
+ * tikfout in een uitdrukkelijke aanwijzing; stilletjes terugvallen op het gewone repository zou de
+ * proefdraai laten slagen tegen het verkeerde object, en dat leest achteraf als een geldige meting.
+ * Daarom werpt dat geval.
+ *
+ * Leeg of alleen spaties telt als AFWEZIG. Dat is geen slordigheid maar de vorm waarin Actions een
+ * niet-ingevulde `env:`-waarde doorgeeft; daar een harde fout van maken zou elke workflow breken
+ * die de override netjes optioneel doorgeeft.
  */
-export function resolveIdentity(env = {}, { remoteUrl = null } = {}) {
-  return parseRepository(env.DASHBOARD_REPOSITORY)
-    ?? parseRepository(env.GITHUB_REPOSITORY)
-    ?? repositoryFromRemoteUrl(remoteUrl);
+export function resolveIdentity(env = {}) {
+  const ruw = env[OVERRIDE_ENV];
+  if (typeof ruw === 'string' && ruw.trim() !== '') {
+    const expliciet = parseRepository(ruw);
+    if (!expliciet) {
+      throw new Error(
+        `${OVERRIDE_ENV} is gezet op ${JSON.stringify(ruw)}, en dat is geen \`owner/repo\`. Een `
+        + 'override is een uitdrukkelijke aanwijzing: terugvallen op het gewone repository zou hier '
+        + 'stilzwijgend het verkeerde object meten.',
+      );
+    }
+    return expliciet;
+  }
+  return parseRepository(env.GITHUB_REPOSITORY);
 }
 
 /** De `origin`-remote van een werkboom, of `null` als er geen git of geen remote is. */
@@ -113,14 +143,20 @@ export function originRemoteUrl(cwd = process.cwd()) {
  * De identiteit van de repository waarin dit draait. Fail-closed: kan hij niet worden vastgesteld,
  * dan werpt dit. Een stilzwijgende terugval op de vorige eigenaar is precies het defect dat deze
  * module opheft — dan zou de overdracht groen doorlopen en naar het oude, verdwenen adres kijken.
+ *
+ * De `origin`-remote wordt hier alleen nog gelezen om de fout bruikbaar te maken. Wie lokaal draait
+ * krijgt zo te zien wat er in de werkboom staat, waarom dat geen bewijs van de huidige plaats is,
+ * en met welke ene omgevingsvariabele hij het zelf kan zeggen.
  */
 export function detectIdentity(env = process.env, { cwd = process.cwd() } = {}) {
-  const direct = resolveIdentity(env);
-  if (direct) return direct;
-  const viaGit = repositoryFromRemoteUrl(originRemoteUrl(cwd));
-  if (viaGit) return viaGit;
-  throw new Error(
-    'kan de eigenaar van deze repository niet vaststellen: geen DASHBOARD_REPOSITORY, geen '
-    + 'GITHUB_REPOSITORY en geen leesbare origin-remote',
-  );
+  const actueel = resolveIdentity(env);
+  if (actueel) return actueel;
+  const gekloond = repositoryFromRemoteUrl(originRemoteUrl(cwd));
+  throw new Error(gekloond
+    ? `de origin van deze werkboom wijst naar ${gekloond.owner}/${gekloond.repo}, maar dat is `
+      + 'git-configuratie uit het moment van klonen: een overdracht laat hem ongewijzigd en GitHub '
+      + `blijft de oude naam doorverwijzen. Zet ${OVERRIDE_ENV}=owner/repo als je zeker weet waar `
+      + 'deze repository nu staat, of draai dit in een context die GITHUB_REPOSITORY zet.'
+    : 'kan de eigenaar van deze repository niet vaststellen: geen DASHBOARD_REPOSITORY, geen '
+      + 'GITHUB_REPOSITORY en geen leesbare origin-remote');
 }

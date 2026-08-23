@@ -119,19 +119,52 @@ const isBindend = (pad) => !NIET_BINDENDE_PADEN.some((p) => pad.startsWith(p));
 
 const isOperationeel = (pad) => pad !== POORT_MODULE && OPERATIONELE_PADEN.some((p) => pad.startsWith(p));
 
-/** Alle uitzonderingsteksten voor één pad. */
-const uitzonderingenVoor = (pad, lijst) => lijst.filter((u) => u.pad === pad).map((u) => u.tekst);
+/**
+ * Hoeveel voorkomens elke uitzonderingstekst voor dit pad mag dekken: precies één per POST op de
+ * lijst. Wie twee identieke vermeldingen wil houden, schrijft er twee posten voor op — dan blijft
+ * de lijst een eerlijke telling van wat er is toegestaan.
+ *
+ * De langste teksten eerst. Uitzonderingen kunnen elkaar bevatten (een toelichtingszin die het
+ * codefragment citeert); zou de korte tekst eerst worden afgeschreven, dan verbruikte die haar
+ * budget binnen de lange zin en bleef het echte codefragment verderop onverwacht onbedekt.
+ */
+function dekkingsbudget(pad, lijst) {
+  const budget = new Map();
+  for (const u of [...lijst].filter((x) => x.pad === pad).sort((a, b) => b.tekst.length - a.tekst.length)) {
+    budget.set(u.tekst, (budget.get(u.tekst) ?? 0) + 1);
+  }
+  return budget;
+}
 
 /**
- * Verwijdert alle gedekte teksten uit een regel. Wat overblijft is wat NIET gedekt is — zo telt één
- * uitzondering nooit als vrijbrief voor een tweede vermelding in dezelfde regel.
+ * Verwijdert uit een regel wat het nog beschikbare budget dekt, en schrijft dat verbruik af. Wat
+ * overblijft is wat NIET gedekt is.
+ *
+ * Het budget gaat over het hele BESTAND, niet over één regel: één post dekt één voorkomen. Anders
+ * draagt één gedocumenteerde uitzondering een onbeperkt aantal ongedocumenteerde bindingen mee —
+ * en dan is de post geen uitzondering meer maar een vrijbrief voor dat bestand.
  */
-function zonderGedekt(regel, teksten) {
+function zonderGedekt(regel, budget) {
   let rest = regel;
-  for (const t of teksten) {
-    while (rest.includes(t)) rest = rest.replace(t, '');
+  for (const [tekst, over] of budget) {
+    let resterend = over;
+    while (resterend > 0 && rest.includes(tekst)) {
+      rest = rest.replace(tekst, '');
+      resterend -= 1;
+    }
+    budget.set(tekst, resterend);
   }
   return rest;
+}
+
+/** Regex-veilige vorm van een eigenaarsnaam. GitHub-namen dragen `.` en `-`, en die tellen mee. */
+const alsPatroon = (tekst) => tekst.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Hoe vaak `tekst` letterlijk in `bron` staat. Zonder overlap: dit telt posten, geen substrings. */
+function telVoorkomens(bron, tekst) {
+  let aantal = 0;
+  for (let i = bron.indexOf(tekst); i !== -1; i = bron.indexOf(tekst, i + tekst.length)) aantal += 1;
+  return aantal;
 }
 
 /** Regels ontleden op één bestand. Puur: neemt tekst, geeft bevindingen. */
@@ -139,15 +172,23 @@ export function toetsBestand({ pad, tekst }, {
   eigenaar = HOSTING_OWNER_OF_RECORD, repo = REPOSITORY_NAME, uitzonderingen = UITZONDERINGEN,
 } = {}) {
   const bevindingen = [];
-  const gedekt = uitzonderingenVoor(pad, uitzonderingen);
+  const budget = dekkingsbudget(pad, uitzonderingen);
   const pagesPatroon = new RegExp(`https?://([a-z0-9][a-z0-9.-]*)\\.github\\.io/${repo}`, 'gi');
+  // HOOFDLETTERONGEVOELIG, en dat is geen netheid maar het gat zelf: GitHub aanvaardt `rvh-speaking`
+  // in raw- en API-adressen even goed als `RVH-Speaking`, dus een nieuwe hardcodering wordt eerder
+  // in kleine letters getypt dan in de officiële schrijfwijze. Zou R1 alleen de officiële vorm
+  // kennen, dan is de poort na de overdracht stil op juist de waarschijnlijkste fout.
+  const eigenaarPatroon = new RegExp(alsPatroon(eigenaar), 'i');
   const verwachteHost = eigenaar.toLowerCase();
 
   tekst.split('\n').forEach((regel, i) => {
-    const rest = zonderGedekt(regel, gedekt);
-    if (isOperationeel(pad) && rest.includes(eigenaar)) {
+    const rest = zonderGedekt(regel, budget);
+    const treffer = isOperationeel(pad) ? rest.match(eigenaarPatroon) : null;
+    if (treffer) {
+      // De GEVONDEN schrijfwijze, niet de officiële: wie de bevinding leest hoeft dan niet zelf te
+      // gaan zoeken in welke vorm het er staat.
       bevindingen.push({
-        code: OVERTREDING.OPERATIONELE_EIGENAAR, pad, regel: i + 1, gevonden: eigenaar,
+        code: OVERTREDING.OPERATIONELE_EIGENAAR, pad, regel: i + 1, gevonden: treffer[0],
       });
     }
     for (const m of (isBindend(pad) ? rest.matchAll(pagesPatroon) : [])) {
@@ -166,14 +207,28 @@ export function toetsBestand({ pad, tekst }, {
   return bevindingen;
 }
 
-/** De hele boom in één keer, plus R3 over de uitzonderingenlijst zelf. */
+/**
+ * De hele boom in één keer, plus R3 over de uitzonderingenlijst zelf.
+ *
+ * R3 telt, en vergelijkt niet alleen op aanwezigheid: staan er twee posten voor een tekst die maar
+ * één keer voorkomt, dan doet één post geen werk meer. Dat is dezelfde vervallen post als een tekst
+ * die helemaal verdwenen is, en hij hoort net zo hard te worden aangewezen — anders sluipt er via
+ * een dubbele post ongebruikt budget de lijst in.
+ */
 export function toetsBoom(bestanden, opties = {}) {
   const uitzonderingen = opties.uitzonderingen ?? UITZONDERINGEN;
   const bevindingen = bestanden.flatMap((b) => toetsBestand(b, { ...opties, uitzonderingen }));
   const perPad = new Map(bestanden.map((b) => [b.pad, b.tekst]));
+  const gevraagd = new Map();
   for (const u of uitzonderingen) {
-    if (!(perPad.get(u.pad) ?? '').includes(u.tekst)) {
-      bevindingen.push({ code: OVERTREDING.VERVALLEN_UITZONDERING, pad: u.pad, gevonden: u.tekst });
+    const sleutel = JSON.stringify([u.pad, u.tekst]);
+    gevraagd.set(sleutel, (gevraagd.get(sleutel) ?? 0) + 1);
+  }
+  for (const [sleutel, aantal] of gevraagd) {
+    const [pad, tekst] = JSON.parse(sleutel);
+    const voorkomens = telVoorkomens(perPad.get(pad) ?? '', tekst);
+    for (let i = voorkomens; i < aantal; i += 1) {
+      bevindingen.push({ code: OVERTREDING.VERVALLEN_UITZONDERING, pad, gevonden: tekst });
     }
   }
   return bevindingen;

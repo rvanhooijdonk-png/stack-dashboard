@@ -13,6 +13,13 @@ kijken. Wat er wél bij een overdracht verandert is één regel — `HOSTING_OWN
 `scripts/lib/org-migration.mjs` — en de poort in `test/org-migration.test.mjs` wijst daarna zelf elke
 plaats aan die nog niet mee is.
 
+De afleiding kijkt bewust alleen naar `GITHUB_REPOSITORY` en naar een uitdrukkelijke
+`DASHBOARD_REPOSITORY`, en niet naar de `origin` van je werkboom: die bewaart wat er bij het klonen
+in stond, en GitHub blijft na een overdracht de oude naam doorverwijzen — een bestaande kloon zou
+dus stilletjes het adres van een verdwenen host blijven opbouwen. Draai je een script als
+`scripts/waarnemer.mjs` lokaal, zet dan zelf `DASHBOARD_REPOSITORY=owner/repo`; zonder dat stopt het
+met een foutmelding in plaats van met een gok.
+
 De publicatie bestaat uit vier vaste, scriptloze pagina's:
 
 - `/` — rustige cockpit met echte ownerpoorten, bewijsbaar actief werk en incidentrollup;
