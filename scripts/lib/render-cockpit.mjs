@@ -9,6 +9,7 @@ export { activeWork, renderActive } from './runtime-feed-view.mjs';
 import { renderActive } from './runtime-feed-view.mjs';
 import { renderPanelSlots } from './panel-contracts.mjs';
 import { statusgenPaneel, renderStatusgenBody, statusgenBadge } from './paneel-statusgen.mjs';
+import { nuBezigPaneel, renderNuBezigBody, nuBezigBadge } from './paneel-nu-bezig.mjs';
 
 const PAGE_PATHS = new Set(['./', './producten.html', './stack-ticker.html']);
 const SOURCE_NAMES = {
@@ -180,6 +181,15 @@ export function renderCockpit(snapshot, {
   const incidents = incidentFacts(snapshot, runtimeFeed);
   const productCards = (products?.products ?? []).map((p) => `<a class="card product" href="./producten.html#${esc(p.id)}"><h3>${esc(p.name)}</h3><span class="metric unknown">UNKNOWN</span><p class="muted">${num(p.denominator)} canonieke features · geen gekoppeld featurebewijs</p></a>`);
   const events = (ticker?.events ?? []).slice(0, 3).map((e) => `<li><span class="tag">${esc(e.lifecycle)}</span> <span class="repo">${esc(e.product)}</span> <span class="muted">${esc(e.at)}</span></li>`);
+  // Zelfde feed, zelfde klok en dezelfde `activeWork()` als `renderActive()` hierboven — het paneel
+  // is de telling bij die sectie, geen tweede lezing ernaast.
+  const nuBezig = nuBezigPaneel(runtimeFeed, nowMs);
+  const nuBezigVulling = {
+    measuredAt: nuBezig.measuredAt,
+    body: renderNuBezigBody(nuBezig),
+    badge: nuBezigBadge(nuBezig),
+    statusLabel: nuBezig.status,
+  };
   const statusgen = statusgenPaneel(snapshot, { now });
   const statusgenVulling = {
     measuredAt: statusgen.measuredAt,
@@ -192,7 +202,7 @@ export function renderCockpit(snapshot, {
     : '';
   const body = `${previewBanner}${renderOwnerGates(snapshot)}
 ${renderActive(runtimeFeed, nowMs)}
-${renderPanelSlots({ statusgen: statusgenVulling })}
+${renderPanelSlots({ k: nuBezigVulling, statusgen: statusgenVulling })}
 <section id="vandaag-geleverd" class="card"><h2>Vandaag geleverd</h2>${snapshot.planning?.available ? list(delivered.map((f) => `<li>${featureName(f)}</li>`), 'Niets met een gevalideerde opleverdatum van vandaag.') : '<p class="unknown">UNKNOWN — planningbron niet beschikbaar.</p>'}</section>
 <section id="producten" class="card wide"><h2>Producten</h2><div class="product-grid">${productCards.join('')}</div></section>
 <section id="incidenten" class="card"><h2>Incidenten</h2>${incidents.length ? `<ul class="lights incident-list">${incidents.map((x) => `<li><span class="repo">${esc(x.label)}</span> <span class="unknown">${esc(x.detail)}</span></li>`).join('')}</ul>` : '<p class="empty">Geen gevalideerde bron-, vloot- of CI-incidenten.</p>'}</section>
