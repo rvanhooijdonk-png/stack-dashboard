@@ -64,8 +64,15 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  *        ID's en de bewijsverwijzingen zijn onvoorwaardelijk intern. Publiek blijft alleen de
  *        structuur: tellers per status (gesloten enum) en het tijdstip van de laatste
  *        bestandswijziging. De volledige laatste-5 staat alleen in `.local/snapshot.json`.
+ * 2.7.0: bronstand-merk in de kop van elke pagina (`bronstandMerk`) — hoeveel bronnen gelezen zijn
+ *        en hoeveel daarvan bewezen. Aanleiding: op 22-08-2026 publiceerde de plaat vijftien uur
+ *        lang zonder één geverifieerde bron terwijl de waarnemer 81 keer groen draaide; hij toetste
+ *        de vorm van de pagina en niet of er nog iets achter zat. De bump is hier geen administratie
+ *        maar de poort zelf: de waarnemer eist het merk vanaf precies deze versie
+ *        (`BRONSTAND_VANAF`), zodat een oudere gepubliceerde kopie er niet vals rood van wordt en
+ *        niemand een schakelaar hoeft om te zetten.
  */
-const CONTRACT_VERSION = '2.6.0';
+const CONTRACT_VERSION = '2.7.0';
 const REFRESH_SECONDS = 900;
 /** Alleen de cockpit ("Nu actief") is de real-time waarheidslaag; producten/ticker/drill-down
  * blijven op REFRESH_SECONDS. Let op: GitHub Pages serveert met cache-control max-age=600 —

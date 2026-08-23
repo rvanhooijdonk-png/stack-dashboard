@@ -16,11 +16,13 @@
  * Aanroep:
  *   node scripts/waarnemer.mjs            → toetst en rapporteert; exit 1 bij afwijking
  *   SABOTAGE=stempel node scripts/waarnemer.mjs → dwingt de stempeltoets te falen (acceptatiebewijs)
+ *   SABOTAGE=bronnen node scripts/waarnemer.mjs → dwingt de bronstandtoets te falen (acceptatiebewijs)
  */
 
 import { writeFileSync } from 'node:fs';
 import {
-  toets, alarmRij, magAppenden, alarmRijPubliceerbaar, zelfRouteUitUrl, DREMPEL_UREN, GRACE_MINUTEN,
+  toets, alarmRij, magAppenden, alarmRijPubliceerbaar, zelfRouteUitUrl, bronstandUitHtml, contractUitHtml,
+  DREMPEL_UREN, GRACE_MINUTEN,
 } from './lib/waarnemer.mjs';
 
 const BASE_URL = process.env.BASE_URL || 'https://rvanhooijdonk-png.github.io/stack-dashboard/contentstroom.html';
@@ -61,11 +63,7 @@ const uitvoer = (sleutel, waarde) => {
 };
 
 const [pagina, spiegel] = await Promise.all([haal(BASE_URL), haal(SPIEGEL_URL)]);
-// Bewust de volledige voettekstvorm, niet de eerste losse "(contract x.y.z)" in het document: de
-// INHOUD van de plaat kan die haakjes ook bevatten, en een lager gelezen versienummer zou de
-// zelf-bewapening van toets 3 stilletjes uitzetten.
-const contract = pagina.tekst
-  .match(/Gegenereerd door <code>stack-dashboard<\/code> \(contract ([0-9]+\.[0-9]+\.[0-9]+)\)/)?.[1] ?? null;
+const contract = contractUitHtml(pagina.tekst);
 const nu = Date.now();
 
 // De sabotage grijpt precies één toets aan en verandert verder niets: de drempel gaat naar nul, dus
@@ -73,9 +71,41 @@ const nu = Date.now();
 // automatische spiegelregel) zonder dat er iets echts stuk hoeft.
 const drempelMs = SABOTAGE === 'stempel' ? 0 : getal('DREMPEL_UREN', DREMPEL_UREN) * UUR;
 
+/**
+ * Dezelfde gedachte voor toets 5, maar aan de andere kant: hier gaat er geen drempel naar nul, hier
+ * wordt het BRONSTAND-MERK in de opgehaalde kop verlaagd naar nul bewezen. De toets zelf blijft
+ * ongemoeid, zodat de proef de echte keten bewijst (rode run + spiegelregel) en niet zijn eigen
+ * uitzondering.
+ *
+ * MET POSTCONDITIES, want een sabotage die stilletjes niets doet is geen proef maar een vals bewijs
+ * (bevinding Codex, 23-08-2026). De uitgangsstand moet leesbaar zijn en minstens één bewezen bron
+ * hebben — anders was de pagina al stuk en bewijst het rood niets — en na de ingreep moet de stand
+ * leesbaar zijn met hetzelfde totaal en nul bewezen. Klopt dat niet, dan stopt de proef hardop.
+ */
+function saboteerBronnen(html) {
+  const voor = bronstandUitHtml(html);
+  if (!voor.leesbaar || voor.bewezen < 1) {
+    console.log(`::error::sabotageproef kan niets bewijzen: de pagina had geen leesbare bronstand met minstens één bewezen bron (${JSON.stringify(voor)}).`);
+    process.exit(2);
+  }
+  // Een functie als vervanger, geen `$1`-sjabloon: `$10` zou daar "groep 10" kunnen betekenen.
+  const uit = html.replace(
+    /(<meta name="bronstand" content="bewezen=)\d{1,9}( totaal=\d{1,9}">)/,
+    (_m, kop, staart) => `${kop}0${staart}`,
+  );
+  const na = bronstandUitHtml(uit);
+  if (!na.leesbaar || na.bewezen !== 0 || na.totaal !== voor.totaal) {
+    console.log(`::error::sabotageproef greep niet aan: stand ging van ${JSON.stringify(voor)} naar ${JSON.stringify(na)}.`);
+    process.exit(2);
+  }
+  console.log(`sabotage: bronstand verlaagd van ${voor.bewezen} naar 0 van ${voor.totaal}`);
+  return uit;
+}
+const paginaHtml = SABOTAGE === 'bronnen' ? saboteerBronnen(pagina.tekst) : pagina.tekst;
+
 const r = toets({
   paginaStatus: pagina.status,
-  paginaHtml: pagina.tekst,
+  paginaHtml,
   paginaRoute: PAGINA_ROUTE,
   spiegelStatus: spiegel.status,
   spiegelTekst: spiegel.tekst,
@@ -89,6 +119,10 @@ console.log(`waarnemer — pagina http ${pagina.status}, logboek http ${spiegel.
 console.log(`stempel ${r.gemeten.stempelIso ?? 'onbekend'}, leeftijd ${
   r.gemeten.leeftijdMs === null ? 'onbekend' : `${Math.round(r.gemeten.leeftijdMs / MIN)} min`}, drempel ${
   SABOTAGE === 'stempel' ? '0 (SABOTAGE)' : `${getal('DREMPEL_UREN', DREMPEL_UREN)} uur`}`);
+const bs = r.gemeten.bronnen;
+console.log(`bronnen: ${bs && bs.leesbaar
+  ? `${bs.bewezen} van ${bs.totaal} geverifieerd${SABOTAGE === 'bronnen' ? ' (SABOTAGE)' : ''}`
+  : 'geen leesbaar bronstand-merk in de kop'}`);
 if (r.gemeten.bronRij) console.log(`bron bovenaan: ${r.gemeten.bronRij.tab} ${r.gemeten.bronRij.datum}`);
 if (r.gemeten.paginaRij) console.log(`plaat bovenaan: ${r.gemeten.paginaRij.tab} ${r.gemeten.paginaRij.datum}`);
 for (const w of r.waarschuwingen) console.log(`waarschuwing: ${w}`);

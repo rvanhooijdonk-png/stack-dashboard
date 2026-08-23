@@ -132,6 +132,9 @@ export const CODES = {
   SECTIE_ONTBREEKT: 'een verplichte sectie ontbreekt op de pagina',
   SECTIE_LEEG: 'een sectie op de pagina is leeg zonder uitleg',
   PAGINA_KAPOT: 'op de pagina staat een lege of onberekende waarde in plaats van gegevens',
+  GEEN_GEVERIFIEERDE_BRON: 'de pagina staat er wel, maar geen enkele bron erachter is geverifieerd',
+  BRONSTAND_ONLEESBAAR: 'op de pagina is niet te lezen hoeveel van haar bronnen geverifieerd zijn',
+  CONTRACT_ONLEESBAAR: 'op de pagina is niet te lezen welke versie van de plaat dit is',
 };
 
 const UUR = 3600 * 1000;
@@ -263,6 +266,158 @@ export function rijMoment(datum) {
 }
 
 /**
+ * De contractversie zoals de plaat die zelf in haar voettekst zet. Stond eerst als losse regex in
+ * `scripts/waarnemer.mjs`, waardoor de tests de versie injecteerden terwijl productie haar uit de
+ * HTML haalde — precies het soort scheiding waarin een gat kan blijven zitten dat groen test
+ * (bevinding Codex P1, 23-08-2026). Eén bron, door beide gebruikt.
+ *
+ * Bewust de volledige voettekstvorm en niet de eerste losse "(contract x.y.z)" in het document: de
+ * INHOUD van de plaat kan die haakjes ook bevatten, en een lager gelezen versienummer zou de
+ * zelf-bewapening van de versiepoorten stilletjes uitzetten.
+ */
+export function contractUitHtml(html) {
+  // Precies één treffer, net als bij de bouwstempel en het bronstand-merk. De eerste treffer nemen
+  // was fout: Codex zette een 2.6-voettekst in een comment vóór de echte 2.7-voettekst en kreeg
+  // `contract=2.6.0` terug — waarmee de overgangsuitzondering weer aan stond op een pagina die het
+  // merk hoorde te dragen (bevinding Codex ronde 2, 23-08-2026). Tegenspraak is geen versie.
+  const treffers = [...String(html ?? '').matchAll(
+    /Gegenereerd door <code>stack-dashboard<\/code> \(contract ([0-9]+\.[0-9]+\.[0-9]+)\)/g,
+  )];
+  return treffers.length === 1 ? treffers[0][1] : null;
+}
+
+/**
+ * Vanaf deze contractversie MOET de pagina het bronstand-merk in haar kop dragen. Zelfde
+ * zelf-bewapening als `KANAALPOST_VANAF` en `SECTIES_VANAF`: een kopie die vóór deze versie is
+ * gebouwd kan het merk onmogelijk hebben en mag daar niet rood van worden, maar de uitzondering is
+ * gebonden aan een versie en niet aan een datum of aan iemands geheugen. Zodra de plaat 2.7.0
+ * stempelt is de toets hard, zonder dat iemand een schakelaar hoeft om te zetten.
+ *
+ * Dit vervangt een eerdere opzet waarin de oude vorm een onbeperkte waarschuwing kreeg: die
+ * verontschuldigde ook een toekomstige rendererregressie voor altijd (bevinding Codex, 23-08-2026).
+ */
+export const BRONSTAND_VANAF = '2.7.0';
+
+/**
+ * Hoeveel bronnen achter de pagina zijn bewezen? De plaat draagt dat als machinemerk in haar kop
+ * (`bronstandMerk` in render.mjs). Alleen de KOP wordt gelezen en er moet precies één treffer zijn
+ * — dezelfde tuchtregel als bij de bouwstempel, en om dezelfde reden: de body van de plaat bevat
+ * gesaneerde bronregels, en die mogen een meetwaarde nooit kunnen namaken of verdubbelen.
+ *
+ * Onmogelijke getallen tellen als onleesbaar, niet als stand. Meer bewezen dan gelezen bronnen,
+ * een negatief aantal of iets buiten het veilige integerbereik betekent dat de kop niet klopt; dan
+ * hoort de waarnemer te zeggen dat hij het niet weet in plaats van door te rekenen op onzin.
+ */
+/**
+ * Elementen waarvan de INHOUD geen opmaak is. Wat hierin staat ziet de browser als tekst, dus de
+ * waarnemer mag het ook niet als element lezen. `template` staat er bewust bij: de inhoud daarvan
+ * is wél DOM, maar inert — een merk daarin meet niets.
+ */
+const INERTE_ELEMENTEN = new Set(['script', 'style', 'title', 'textarea', 'template']);
+
+/**
+ * De `<meta>`-elementen die in de kop ECHT werken — niet de tekst die er alleen maar uitziet als
+ * een element. Dit is met opzet een kleine scanner en geen regex meer.
+ *
+ * Drie keer op rij vond de review hier hetzelfde soort gat, en telkens was de oorzaak dezelfde:
+ * een regex kent de grammatica van HTML niet. `<meta\b[^>]*>` stopt bij een `>` BINNEN een
+ * aanhalingsteken, waardoor een merk dat als tekst in een andere attribuutwaarde staat als echt
+ * element werd gelezen (Codex ronde 3). Een globale comment-regex knipt vanaf een `<!--` binnen
+ * een attribuutwaarde tot een veel latere `-->` en neemt het ECHTE merk mee (Codex ronde 3).
+ * En een uitgecommentarieerd merk werd als meting geteld (Codex ronde 2). Eén scanner die
+ * aanhalingstekens, commentaar en inerte elementen kent, maakt die hele klasse onmogelijk in
+ * plaats van er per geval een regex bij te zetten.
+ *
+ * Levert `null` als de kop niet wordt afgesloten: dan is de pagina geen pagina en hoort de
+ * waarnemer te zeggen dat hij het niet weet.
+ */
+function metasUitKop(html) {
+  const tekst = String(html ?? '');
+  const metas = [];
+  let i = 0;
+  while (i < tekst.length) {
+    const punt = tekst.indexOf('<', i);
+    if (punt === -1) return null;
+    // Commentaar: alles tot `-->`. Zonder afsluiting leest een browser de REST van het document als
+    // commentaar — dan is er geen kop meer en dus geen meting.
+    if (tekst.startsWith('<!--', punt)) {
+      const eind = tekst.indexOf('-->', punt + 4);
+      if (eind === -1) return null;
+      i = eind + 3;
+      continue;
+    }
+    const naam = tekst.slice(punt).match(/^<(\/?)([a-zA-Z][a-zA-Z0-9-]*)/);
+    if (!naam) { i = punt + 1; continue; }
+    // Het einde van de tag, met aanhalingstekens: een `>` binnen een waarde sluit niets af.
+    let j = punt + 1 + naam[0].length - 1;
+    let aanhaling = null;
+    while (j < tekst.length) {
+      const c = tekst[j];
+      if (aanhaling) { if (c === aanhaling) aanhaling = null; }
+      else if (c === '"' || c === "'") aanhaling = c;
+      else if (c === '>') break;
+      j += 1;
+    }
+    if (j >= tekst.length) return null;
+    const tag = tekst.slice(punt, j + 1);
+    const element = naam[2].toLowerCase();
+    const sluit = naam[1] === '/';
+    if (sluit && element === 'head') return metas;
+    if (!sluit && element === 'meta') metas.push(tag);
+    if (!sluit && INERTE_ELEMENTEN.has(element) && !/\/>$/.test(tag)) {
+      const dicht = tekst.slice(j + 1).search(new RegExp(`</${element}\\s*>`, 'i'));
+      if (dicht === -1) return null;
+      i = j + 1 + dicht;
+      continue;
+    }
+    i = j + 1;
+  }
+  return null;
+}
+
+/**
+ * Alle attributen van één tag, links naar rechts, INCLUSIEF losse (waardeloze) attributen en
+ * herhalingen. Bewust een lijst en geen object: met een object verdwenen
+ * `<meta disabled name=... content=...>` en een tweede, tegensprekende `content=` stilletjes uit
+ * de telling, waardoor ze langs de eis "precies twee attributen" glipten (bevinding Codex ronde 2).
+ */
+function attribuutlijst(tag) {
+  const binnen = String(tag).replace(/^<\s*[a-zA-Z][^\s/>]*/, '').replace(/\/?>$/, '');
+  const uit = [];
+  for (const a of binnen.matchAll(/([^\s"'>/=]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'>]*))?/g)) {
+    uit.push([a[1].toLowerCase(), a[2] === undefined ? null : a[2].replace(/^["']|["']$/g, '')]);
+  }
+  return uit;
+}
+
+export function bronstandUitHtml(html) {
+  const onbekend = { leesbaar: false, totaal: null, bewezen: null };
+  const metas = metasUitKop(html);
+  if (metas === null) return onbekend;
+  // Eerst ELKE meta tellen die zich bronstand noemt, ongeacht schrijfwijze — pas als er precies één
+  // kandidaat is, wordt die gelezen. Zou hier meteen op één vaste schrijfwijze worden gezocht, dan
+  // telt een tweede merk in een ándere attribuutvolgorde niet mee: het eerste blijft dan "de enige
+  // treffer" en de tegenspraak ernaast wordt stil ingeslikt (bevinding Codex ronde 1).
+  const kandidaten = metas.map(attribuutlijst)
+    .filter((attrs) => attrs.some(([k, v]) => k === 'name' && String(v).toLowerCase() === 'bronstand'));
+  if (kandidaten.length !== 1) return onbekend;
+  // Getoetst wordt de BETEKENIS, niet de typografie: precies deze twee attributen, elk één keer,
+  // en een content-waarde die exact aan de afgesproken vorm voldoet. Hoofdletters of een omgekeerde
+  // volgorde veranderen niets aan wat er staat en horen de bewaker dus niet blind te maken
+  // (bevinding Gemini P2/P4) — een waarde die iets ánders zegt, of een attribuut te veel, wel.
+  const namen = kandidaten[0].map(([k]) => k).sort();
+  if (namen.length !== 2 || namen[0] !== 'content' || namen[1] !== 'name') return onbekend;
+  const inhoud = kandidaten[0].find(([k]) => k === 'content')[1];
+  const vorm = String(inhoud).match(/^bewezen=(\d{1,9}) totaal=(\d{1,9})$/);
+  if (!vorm) return onbekend;
+  const bewezen = Number(vorm[1]);
+  const totaal = Number(vorm[2]);
+  if (!Number.isSafeInteger(bewezen) || !Number.isSafeInteger(totaal)) return onbekend;
+  if (bewezen > totaal) return onbekend;
+  return { leesbaar: true, totaal, bewezen };
+}
+
+/**
  * De hele toetsing over binnengehaalde tekst. Geen netwerk, geen klok van zichzelf: `nu` komt van
  * buiten zodat elke uitkomst in een test exact te zetten is.
  */
@@ -273,7 +428,7 @@ export function toets({
 } = {}) {
   const bevindingen = [];
   const waarschuwingen = [];
-  const gemeten = { stempelIso: null, leeftijdMs: null, paginaRij: null, bronRij: null, contract: contractVersie };
+  const gemeten = { stempelIso: null, leeftijdMs: null, paginaRij: null, bronRij: null, contract: contractVersie, bronnen: null };
   const meld = (code, extra = '') => bevindingen.push({ code, uitleg: CODES[code] + (extra ? ` (${extra})` : '') });
 
   // 1 — bereikbaar en bestempeld.
@@ -286,6 +441,15 @@ export function toets({
     meld('PAGINA_LEEG');
     return { ok: false, bevindingen, waarschuwingen, gemeten };
   }
+  // 1b -- de plaat moet zelf zeggen welke contractversie haar bouwde. Zonder leesbare versie is
+  // ELKE versiepoort hieronder blind: `null` leest daar als "ouder dan", waardoor toets 3, 4 en 5
+  // zichzelf uitschakelen op precies de pagina die de waarnemer niet herkent. Codex bewees dat gat
+  // (P2, 23-08-2026): met de contractvoettekst weggehaald gaf `toets()` `contract=null, ok=true,
+  // bevindingen=[]`. Een onherkenbare plaat is daarom zelf een bevinding, en die valt VOOR de
+  // poorten -- niet erna, want dan zou de bevinding afhangen van de poort die ze moet redden.
+  const contractLeesbaar = /^[0-9]+\.[0-9]+\.[0-9]+$/.test(String(contractVersie ?? ''));
+  if (!contractLeesbaar) meld('CONTRACT_ONLEESBAAR');
+
   const stempel = stempelUitHtml(html, { route: paginaRoute });
   if (!stempel.gevonden) meld('STEMPEL_ONTBREEKT');
   else if (!stempel.iso) meld('STEMPEL_ONLEESBAAR');
@@ -386,6 +550,29 @@ export function toets({
   }
   const spoor = KAPOT_SPOREN.find((k) => html.includes(k));
   if (spoor) meld('PAGINA_KAPOT');
+
+  // 5 — de plaat rust op minstens een bewezen bron. Toets 1 t/m 4 kijken naar de VORM van de
+  // pagina: staat ze er, is ze vers, staan de secties erin. Ze kijken niet naar de vraag of er nog
+  // iets ACHTER die vorm zit. Op 22-08-2026 bleek dat gat echt: vanaf 14:24 UTC leverde de bouw
+  // vijftien uur lang een plaat af waarin geen enkele bron geverifieerd was, en de waarnemer draaide
+  // in datzelfde venster 81 keer groen (gemeten met `gh run list --workflow=waarnemer.yml`). De
+  // pagina was namelijk keurig vers en compleet; alleen leeg vanbinnen. Een bewaker die dat groen
+  // noemt bewaakt de lijst en niet de plaat.
+  //
+  // GEEN PUBLICATIEPOORT. Deze toets houdt niets tegen. De plaat hoort eerlijk te publiceren met
+  // "niet geverifieerd" erop -- dat is haar fail-closed-gedrag en dat is goed. Wat ontbrak was het
+  // SIGNAAL: rood in de run en een regel in de spiegel, zodat een lege plaat niet stil kan blijven.
+  const bronstand = bronstandUitHtml(html);
+  gemeten.bronnen = bronstand;
+  // De overgangsuitzondering geldt alleen voor een pagina die zélf zegt dat ze ouder is. Kan de
+  // contractversie niet uit de plaat worden gelezen, dan is dat GEEN oude kopie maar een pagina
+  // die de waarnemer niet herkent (zie 1b), en dan hoort ook deze toets hard te zijn.
+  if (contractLeesbaar && !versieMinstens(contractVersie, BRONSTAND_VANAF)) {
+    waarschuwingen.push('deze kopie van de plaat is gebouwd vóór de bronstand op de pagina kwam; die telt nog niet als afwijking');
+  } else if (!bronstand.leesbaar) meld('BRONSTAND_ONLEESBAAR');
+  else if (bronstand.bewezen === 0) {
+    meld('GEEN_GEVERIFIEERDE_BRON', `0 van ${bronstand.totaal} bronnen`);
+  }
 
   return { ok: bevindingen.length === 0, bevindingen, waarschuwingen, gemeten };
 }

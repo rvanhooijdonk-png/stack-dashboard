@@ -1,5 +1,5 @@
 /** Rustige cockpit en drill-downs; pure renderers op reeds gesaneerde modellen. */
-import { esc, num, buildStamp, titelStamp, STYLE, TRUST_LABEL } from './render.mjs';
+import { esc, num, buildStamp, titelStamp, STYLE, TRUST_LABEL, bronstandMerk } from './render.mjs';
 import { list } from './format.mjs';
 import { ALARM_KOP } from './waarnemer.mjs';
 // activeWork/renderActive verhuisd naar runtime-feed-view.mjs (puur, ook door de browser
@@ -36,7 +36,7 @@ const page = (s, title, body, nav, refreshSeconds = 900, pagePath = './', client
     : '';
   return `<!doctype html>
 <html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="${refresh}; url=${refreshPath}?v=${bust}"><meta name="robots" content="noindex,nofollow">
+<meta http-equiv="refresh" content="${refresh}; url=${refreshPath}?v=${bust}"><meta name="robots" content="noindex,nofollow">${bronstandMerk(s.sources)}
 <meta http-equiv="content-security-policy" content="${csp}">
 ${pollTags}<title>${esc(title)} — ${esc(titelStamp(s.generatedAt))}</title><style>${STYLE}
 .product-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(16rem,100%),1fr));gap:1rem}.product{display:block;text-decoration:none;color:inherit}.metric{font-size:1.35rem;font-weight:700}.unknown{color:#936b00}.feature{margin:1rem 0;padding-top:1rem;border-top:1px solid #ddd}.feature dl{display:grid;grid-template-columns:minmax(8rem,12rem) minmax(0,1fr);gap:.35rem 1rem}.feature dt{color:#667}.feature dd{margin:0;overflow-wrap:anywhere}.ticker{list-style:none;padding:0}.ticker li{padding:.8rem 0;border-bottom:1px solid #ddd;overflow-wrap:anywhere}.topnav{display:flex;flex-wrap:wrap;gap:.5rem 1rem;margin-bottom:1rem}.topnav a{min-height:2.75rem;display:inline-flex;align-items:center}.evidence-warning{border-left:.25rem solid #936b00;padding-left:.75rem}

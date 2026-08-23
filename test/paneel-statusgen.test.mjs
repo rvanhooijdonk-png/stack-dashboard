@@ -17,7 +17,7 @@ const bron = (trust, key = 'tracker') => ({ key, trust, retrievedAt: nuPlus(-100
 
 const snapshot = (extra = {}) => ({
   generatedAt: nuPlus(-1000),
-  contractVersion: '2.6.0',
+  contractVersion: '2.7.0',
   overallStatus: 'DEGRADED',
   sources: [bron('VERIFIED_CURRENT', 'tracker'), bron('STALE', 'logbook')],
   ...extra,
@@ -109,7 +109,7 @@ test('het slot op de echte cockpitpagina is gevuld, niet meer het lege skelet', 
   const slot = html.slice(html.indexOf('data-panel-slot="statusgen"'));
   const eind = slot.indexOf('</section>');
   const paneel = slot.slice(0, eind);
-  assert.ok(paneel.includes('2.6.0'), 'contractversie hoort op de plaat te staan');
+  assert.ok(paneel.includes('2.7.0'), 'contractversie hoort op de plaat te staan');
   assert.ok(paneel.includes('DEGRADED'), 'overall-status hoort op de plaat te staan');
   assert.ok(paneel.includes('2 gelezen · 1 niet-geverifieerd'));
   assert.ok(!paneel.includes('bron nog niet gekoppeld'), 'het lege skelet hoort weg te zijn');

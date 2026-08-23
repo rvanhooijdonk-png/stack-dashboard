@@ -5,7 +5,10 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { renderHtml } from '../scripts/lib/render.mjs';
-import { renderCockpit } from '../scripts/lib/render-cockpit.mjs';
+import { renderCockpit, renderProducts, renderTicker } from '../scripts/lib/render-cockpit.mjs';
+import { renderTransactieTicker, renderCodeTicker } from '../scripts/lib/render-tickers.mjs';
+import { PUBLISH_ALLOWLIST } from '../scripts/lib/publish-files.mjs';
+import { bronstandUitHtml } from '../scripts/lib/waarnemer.mjs';
 import { failurePageHtml } from '../scripts/failure-page.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -98,4 +101,64 @@ test('beide pagina\'s zeggen wél wat er dan wel gebeurt', () => {
   // Whitespace-tolerant per woordgrens: dit toetst de inhoud, niet waar de regelafbreking van de
   // heredoc toevallig valt — een herformattering van de <p> mag deze bewaking niet stil breken.
   assert.match(fout, /pas nadat\s+build\s+én\s+publicatie\s+slagen/i);
+});
+
+// ── het bronstand-merk in de kop ────────────────────────────────────────────────
+// De waakvlam leest op elke gepubliceerde pagina hoeveel bronnen geverifieerd zijn. Dat merk
+// wordt op één plek gezet (render.mjs) en op twee plekken in een kop gemonteerd: renderHtml
+// heeft zijn eigen kop, de drie cockpit-routes delen `page()`. Zonder deze test kan het uit
+// die gedeelde kop verdwijnen zonder dat iets rood wordt — de waakvlam zou dan BRONSTAND_-
+// ONLEESBAAR melden op een verder gezonde pagina, of erger: iemand zet de melding uit omdat
+// "hij toch altijd afgaat". Het merk wordt hier gelezen met de parser van de waarnemer zelf,
+// niet met een eigen regex, zodat producent en consument aan elkaar vastzitten.
+// De vier SNAPSHOT-routes: de pagina's die op de dashboard-snapshot rusten en dus een bronstand
+// hébben. De twee ticker-pagina's staan óók in de publicatielijst maar renderen een eigen feed
+// zonder `sources`; zij krijgen bewust geen merk (bevinding Codex P4: "elke gepubliceerde pagina"
+// was een te brede claim). De test hieronder maakt die beperktere invariant hard, zodat een
+// zevende route niet ongeclassificeerd langs de bewaking kan glippen.
+const alleRoutes = [
+  ['index.html (cockpit)', () => renderCockpit(fixture)],
+  ['contentstroom.html', () => renderHtml(fixture)],
+  ['producten.html', () => renderProducts(fixture, { products: [] })],
+  ['stack-ticker.html', () => renderTicker(fixture, { freshness: 'UNKNOWN', events: [] })],
+];
+
+for (const [naam, maak] of alleRoutes) {
+  test(`${naam} draagt het bronstand-merk leesbaar in de kop`, () => {
+    const html = maak();
+    const gelezen = bronstandUitHtml(html);
+    assert.equal(gelezen.leesbaar, true,
+      `${naam} heeft geen leesbaar <meta name="bronstand"> vóór </head> — de waakvlam is dan blind`);
+    assert.equal(gelezen.totaal, fixture.sources.length);
+    assert.equal(gelezen.bewezen,
+      fixture.sources.filter((s) => s.trust === 'VERIFIED_CURRENT').length);
+
+    // Onafhankelijk van de parser van de waarnemer (Codex ronde 2: producent en consument met
+    // dezelfde parser toetsen kan een gat aan beide kanten tegelijk verbergen). Domme telling op
+    // de ruwe kop: er hoort precies één bronstand-element te staan, en geen enkele in de body.
+    const kop = html.slice(0, html.indexOf('</head>'));
+    assert.equal(kop.split('name="bronstand"').length - 1, 1, `${naam} hoort precies één merk in de kop te hebben`);
+    assert.equal(html.slice(html.indexOf('</head>')).includes('name="bronstand"'), false,
+      `${naam} hoort geen bronstand-merk in de body te hebben`);
+  });
+}
+
+test('de publicatielijst valt uiteen in "draagt een bronstand" en "hoort er geen te hebben"', () => {
+  // Zonder deze test is de dekking hierboven een handmatige lijst van vier: wie een zevende pagina
+  // publiceert, krijgt nergens een rode test als die pagina geen merk draagt — en de waarnemer zou
+  // haar, zodra hij ooit ook daarheen kijkt, als BRONSTAND_ONLEESBAAR melden. De partitie is
+  // daarom expliciet en uitputtend.
+  const metBronstand = ['index.html', 'contentstroom.html', 'producten.html', 'stack-ticker.html'];
+  // Deze twee tonen een eigen ticker-feed; de snapshot met haar `sources` komt er niet aan te pas.
+  // Een bronstand op zo'n pagina zou een meting suggereren die er niet is.
+  const zonderBronstand = ['transacties.html', 'code-ticker.html'];
+
+  const gepubliceerd = PUBLISH_ALLOWLIST.filter((f) => f.endsWith('.html')).sort();
+  assert.deepEqual(gepubliceerd, [...metBronstand, ...zonderBronstand].sort(),
+    'nieuwe of verdwenen HTML-route: deel haar hierboven in vóór ze publiceert');
+
+  for (const maak of [() => renderTransactieTicker({ available: false }), () => renderCodeTicker({ available: false })]) {
+    assert.equal(bronstandUitHtml(maak()).leesbaar, false,
+      'een ticker-pagina hoort geen bronstand te dragen — zij meet geen bronnen');
+  }
 });

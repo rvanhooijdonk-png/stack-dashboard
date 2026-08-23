@@ -26,7 +26,7 @@
   "properties": {
     "contractVersion": {
       "type": "string",
-      "const": "2.6.0",
+      "const": "2.7.0",
       "description": "Vastgepind: een DTO die zich niet als exact deze contractversie meldt, hoort niet bij dit schema. Bump dit samen met CONTRACT_VERSION in scripts/build.mjs."
     },
     "generatedAt": {
