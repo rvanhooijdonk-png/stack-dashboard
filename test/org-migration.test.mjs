@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -695,6 +695,10 @@ test('C3 — R3 meet verbruik, niet aanwezigheid: dekking op een niet-uitvoerend
 
 const VORIGE = VORIGE_HOSTING_EIGENAARS[0];
 
+// Het mappad dat de negatieve controle van C4 aanmaakt, zodat de toets erna kan meten dat het
+// werkelijk is opgeruimd. Een opgeruimde map bewijst zichzelf niet; hij moet bij naam worden gemist.
+let C4_NEGATIEVE_CONTROLE_MAP = null;
+
 test('C4 — de eigenaarsstand, het Pages-adres en het launchd-plist slaan als één geheel om', () => {
   // De declaratie zelf, één keer letterlijk. Dit is de enige plaats in deze toetsen waar de naam
   // van de doelorganisatie als verwachting wordt opgeschreven; al het andere hangt eraan.
@@ -720,14 +724,41 @@ test('C4 — de eigenaarsstand, het Pages-adres en het launchd-plist slaan als �
   // NEGATIEVE CONTROLE op dezelfde meting: hetzelfde plist met de oude waarde erin moet hier
   // omvallen. Anders meet C1 hierboven alleen dat er íéts geldigs staat.
   const map = mkdtempSync(join(tmpdir(), 'orgmig-plist-'));
-  const achtergebleven = join(map, 'oud.plist');
-  writeFileSync(achtergebleven, readFileSync(PLIST, 'utf8')
-    .replace(`<string>${HOSTING_OWNER_OF_RECORD}/${REPOSITORY_NAME}</string>`, `<string>${VORIGE}/${REPOSITORY_NAME}</string>`));
-  assert.notDeepEqual(
-    resolveIdentity(plistOmgeving(achtergebleven)),
-    { owner: HOSTING_OWNER_OF_RECORD, repo: REPOSITORY_NAME },
-  );
-  assert.deepEqual(resolveIdentity(plistOmgeving(achtergebleven)), { owner: VORIGE, repo: REPOSITORY_NAME });
+  C4_NEGATIEVE_CONTROLE_MAP = map;
+  try {
+    const achtergebleven = join(map, 'oud.plist');
+    writeFileSync(achtergebleven, readFileSync(PLIST, 'utf8')
+      .replace(`<string>${HOSTING_OWNER_OF_RECORD}/${REPOSITORY_NAME}</string>`, `<string>${VORIGE}/${REPOSITORY_NAME}</string>`));
+    assert.notDeepEqual(
+      resolveIdentity(plistOmgeving(achtergebleven)),
+      { owner: HOSTING_OWNER_OF_RECORD, repo: REPOSITORY_NAME },
+    );
+    assert.deepEqual(resolveIdentity(plistOmgeving(achtergebleven)), { owner: VORIGE, repo: REPOSITORY_NAME });
+  } finally {
+    // Opruimen hoort in `finally`, niet achter de laatste assertie: juist de run waarin een
+    // assertie omvalt is de run die zich herhaalt, en dan groeit /tmp mee met het aantal pogingen.
+    rmSync(map, { recursive: true, force: true });
+  }
+});
+
+test('C4 — de negatieve controle hierboven laat geen tijdelijke map achter', () => {
+  // Kant 1: de map die de toets werkelijk heeft gemaakt, is er niet meer. Deze toets draait ná
+  // C4 in hetzelfde bestand, dus dit meet de echte uitvoering en niet een nagespeelde vorm.
+  assert.ok(C4_NEGATIEVE_CONTROLE_MAP, 'de negatieve controle heeft een tijdelijke map gemaakt');
+  assert.equal(existsSync(C4_NEGATIEVE_CONTROLE_MAP), false, C4_NEGATIEVE_CONTROLE_MAP);
+
+  // Kant 2: en het opruimen hangt niet aan het slagen van de asserties. Zonder `finally` zou deze
+  // binding groen blijven zolang alles toevallig goed gaat — precies dan valt het lek niet op.
+  const SLEUTEL = "mkdtempSync(join(tmpdir(), 'orgmig-plist-'))";
+  const bron = readFileSync('test/org-migration.test.mjs', 'utf8');
+  // `[1]` is het stuk na het EERSTE voorkomen: de toets hierboven. Het tweede voorkomen is deze
+  // regel zelf, en dat stuk wordt hier bewust niet gemeten.
+  const toets = bron.split(SLEUTEL)[1].split('\n});')[0];
+  const opruiming = toets.split('} finally {');
+  assert.equal(opruiming.length, 2, 'de negatieve controle ruimt op in een finally-blok');
+  assert.match(opruiming[1], /rmSync\(map, \{ recursive: true, force: true \}\)/);
+  // En de asserties staan erbóven, in de try: alleen dan loopt het opruimen ook als er één omvalt.
+  assert.match(opruiming[0], /assert\.deepEqual\(resolveIdentity\(plistOmgeving\(achtergebleven\)\)/);
 });
 
 test('C4 — één vergeten operationele binding aan de VORIGE eigenaar wordt fail-closed rood', () => {
@@ -833,6 +864,25 @@ test('C4 — de identiteit staat op precies één operationele plaats, en de lok
     '~/Stack-Director/launchd/com.rvh.dashboard-feed-generator.plist',
     '~/Library/LaunchAgents/com.rvh.dashboard-feed-generator.plist',
   ]) assert.ok(gids.includes(genoemd), genoemd);
+});
+
+test('C4 — de te plakken regels in de gids dragen geen hoekhakenplaceholder', () => {
+  // De handeling wordt onder tijdsdruk uitgevoerd, uit dit blok, met kopiëren en plakken. `<` en
+  // `>` zijn in bash omleidingstekens: `cd <map>` leest niet als "vul hier de map in" maar knipt
+  // stil een bestand leeg of valt om. Een placeholder hoort dus een variabele te zijn, geen haken.
+  const gids = readFileSync('docs/ORG-CUTOVER.md', 'utf8');
+  const blokken = [...gids.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
+  assert.ok(blokken.length > 0, 'de gids draagt ten minste één bash-blok');
+  for (const blok of blokken) {
+    for (const regel of blok.split('\n')) {
+      const code = regel.split('#')[0];
+      assert.doesNotMatch(code, /<[^<>\s]+>/, regel);
+    }
+  }
+  // En de omschrijving is er nog: zonder de uitleg zou de haakloze vorm hierboven ook te halen zijn
+  // door de plaatsaanduiding helemaal weg te laten, en dan weet de lezer niet meer wát hij invult.
+  assert.match(gids, /KLOON=/);
+  assert.ok(gids.includes('de kloon van stack-dashboard'), 'de gids zegt wat KLOON is');
 });
 
 // --- 7. De kandidatenlijst: fail-closed op vervuilde invoer -------------------------------------

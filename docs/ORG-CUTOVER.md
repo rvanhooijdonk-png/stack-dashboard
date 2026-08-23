@@ -73,8 +73,11 @@ in dezelfde map en hernoem: een `mv` binnen één bestandssysteem is atomisch, z
 toevallig tegelijk start nooit een half bestand leest.
 
 ```bash
-# 0. controleer dat de bron werkelijk de bedoelde stand is
-cd <klone-van-stack-dashboard-op-main-na-merge>
+# 0. controleer dat de bron werkelijk de bedoelde stand is.
+#    Vul KLOON zelf in: de map met de kloon van stack-dashboard, op main, na de merge.
+#    Geen hoekhaken in een te plakken regel — < en > zijn in bash omleidingstekens.
+KLOON="$HOME/pad/naar/stack-dashboard"
+cd "$KLOON"
 shasum -a 256 tools/dashboard-feed-generator/generator.mjs \
               tools/dashboard-feed-generator/com.rvh.dashboard-feed-generator.plist
 
