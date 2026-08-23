@@ -142,7 +142,9 @@ const r = toets({
 
 console.log(`waarnemer — pagina http ${pagina.status}, logboek http ${spiegel.status}, statusbestand http ${statusbestand.status}, contract pagina ${contract ?? 'onbekend'}, contract statusbestand ${gelezen.contract ?? 'onbekend'}`);
 console.log(`bronstand — bouw ${gelezen.bronnen.gebouwdOp ?? 'onbekend'}, ${
-  gelezen.bronnen.getoetst ? 'tegen het volle contract getoetst' : 'alleen op vorm getoetst'}, verschil met de pagina ${
+  gelezen.bronnen.getoetst ? 'tegen het volle contract getoetst'
+    : gelezen.bronnen.leesbaar ? 'alleen op de kernvelden getoetst'
+      : 'niet gekeurd'}, verschil met de pagina ${
   r.gemeten.bouwVerschilMs === null ? 'onbekend' : `${Math.round(r.gemeten.bouwVerschilMs / 1000)} s`}`);
 console.log(`stempel ${r.gemeten.stempelIso ?? 'onbekend'}, leeftijd ${
   r.gemeten.leeftijdMs === null ? 'onbekend' : `${Math.round(r.gemeten.leeftijdMs / MIN)} min`}, drempel ${

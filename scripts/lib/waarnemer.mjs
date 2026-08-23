@@ -276,22 +276,28 @@ export function rijMoment(datum) {
 export const VERSIE_VORM = /^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/;
 
 /**
- * Het schema zonder de twee dingen die alleen over ÉÉN versie gaan: de pin op `contractVersion` en
- * de weigering van onbekende velden. Wat overblijft is de vorm die elke gepubliceerde kopie deelt.
- * Afgeleid uit het schemabestand zelf, nooit met de hand nageschreven — een tweede, handgeschreven
- * minimumlijst zou van het contract afdrijven zonder dat iemand het merkt.
+ * De velden die een bron IDENTIFICEERBAAR en DATEERBAAR maken. Alleen een bron die ze alle drie
+ * draagt mag als bewijs meetellen; dat is wat een verzonnen `{ trust: "VERIFIED_CURRENT" }` zonder
+ * herkomst tegenhoudt (bevinding Codex, ronde 7).
+ *
+ * Dit is met opzet een KORTE, met de hand genoemde kern en niet het hele schema. Ronde 8 liet zien
+ * waarom: een uit het schema afgeleide vormkeuring bindt onvermijdelijk óók de `required`-lijst en
+ * de enums van ÉÉN versie, en dan geeft elke schemabump een luide ronde op een kerngezonde oudere
+ * kopie — Codex reproduceerde dat met een 2.8-schema tegen een gezonde 2.7-plaat (8 afwijkingen) en
+ * met een nieuwe trust-waarde tegen het oude schema (1 afwijking). Zo'n alarm komt bovendien
+ * blijvend in het openbare logboek te staan. De kern hieronder verandert niet mee met het contract
+ * en heeft dat venster dus niet.
+ *
+ * De prijs is afdrijving, en die is afgedekt: een test bindt dat elk kernveld ook in het schema
+ * `required` is (orderdiscipline R2 — elke lijst met vaste literalen krijgt een test). De kern mag
+ * krimpen, nooit groeien: een veld toevoegen is precies het venster dat we hier vermijden.
  */
-export function vormSchemaVan(schema) {
-  const vorm = structuredClone(schema);
-  const losser = (knoop) => {
-    if (!knoop || typeof knoop !== 'object') return;
-    if (knoop.additionalProperties === false) knoop.additionalProperties = true;
-    for (const kind of Object.values(knoop.properties ?? {})) losser(kind);
-    if (knoop.items) losser(knoop.items);
-  };
-  losser(vorm);
-  delete vorm.properties?.contractVersion?.const;
-  return vorm;
+export const KERN_BRONVELDEN = ['key', 'trust', 'retrievedAt'];
+
+/** Draagt deze bron de kern? Leeg of niet-tekst telt niet als "draagt". */
+export function kernCompleet(bron) {
+  return !!bron && typeof bron === 'object' && !Array.isArray(bron)
+    && KERN_BRONVELDEN.every((veld) => typeof bron[veld] === 'string' && bron[veld].trim() !== '');
 }
 
 /**
@@ -311,7 +317,7 @@ export function vormSchemaVan(schema) {
  * aan wie de pagina zelf bekijkt, maar het is niet meer wat de waakvlam beoordeelt.
  */
 export function statusUitTekst(httpStatus, tekst, schema = null) {
-  const leeg = { totaal: null, bewezen: null, gebouwdOp: null, getoetst: false };
+  const leeg = { totaal: null, bewezen: null, ongeteld: null, gebouwdOp: null, getoetst: false };
   const mis = (reden) => ({ contract: null, bronnen: { leesbaar: false, reden, ...leeg } });
 
   if (Number(httpStatus) !== 200) return mis(`statusbestand http ${Number(httpStatus) || 0}`);
@@ -334,35 +340,29 @@ export function statusUitTekst(httpStatus, tekst, schema = null) {
     contract, bronnen: { leesbaar: false, reden, ...leeg, gebouwdOp, getoetst: gekeurd },
   });
 
-  // Het schema is de enige plek waar de vorm van dit bestand vastligt; `JSON.parse` alleen keurt niets
-  // (bevinding Codex, ronde 5). Er wordt in TWEE stappen gekeurd, en dat onderscheid is er sinds
-  // ronde 7 met reden: het schema pint `contractVersion` op één waarde, dus keuren tegen het VOLLE
-  // schema kan alleen bij een gelijke versie. Zolang dat de enige keuring was, kon één veld in het
-  // bestand zelf — `contractVersion: "9.9.9"` — de hele keuring uitschakelen, waarna een verzonnen
-  // `{ trust: "VERIFIED_CURRENT" }` zonder key, zonder tijdstip en zonder rijen gewoon als bewijs
-  // meetelde. Het bestand bepaalde dus zijn eigen strengheid (bevinding Codex, ronde 7).
-  //
-  // Daarom eerst de VORM, altijd, ongeacht wat het bestand over zichzelf beweert: hetzelfde schema
-  // met de versiepin eraf. Dat is geen tweede waarheid — het wordt uit het schemabestand afgeleid,
-  // dus het kan er niet van afdrijven. `additionalProperties` gaat daarbij los, zodat een NIEUWERE
-  // gepubliceerde kopie die een veld toevoegt hier niet vals op valt; alles wat het contract
-  // VERPLICHT stelt (de bronkeys, de trust-waarden, `retrievedAt`, `rijen`) blijft staan.
-  // Aanvaarde restrisico, expliciet: een toekomstige versie die een verplicht veld hernoemt of een
-  // trust-waarde toevoegt geeft in het venster tussen schemabump en publicatie één luide ronde.
-  // Luid en zelfherstellend is hier de goede kant om te falen; stil meetellen was de fout van
-  // 22-08-2026. Gemeten op de LIVE 2.6.0-plaat (23-08-2026): nul afwijkingen tegen het vormschema.
-  if (schema === null) return onleesbaar('geen schema om het statusbestand aan te toetsen');
-  // `getoetst` zegt één ding en niets meer: is dit bestand tegen het VOLLE contract gehouden? Dat kan
-  // alleen bij een gelijke versie. De vormkeuring hieronder gebeurt hoe dan ook, en verandert die
-  // vlag dus niet — anders zou een vormfout op een vreemde versie zich als "volledig gekeurd"
-  // voordoen in het logboek.
-  const schemaVersie = schema?.properties?.contractVersion?.const ?? null;
-  const getoetst = schemaVersie !== null && contract !== null && contract === schemaVersie;
+  // Een onleesbare contractversie is zelf een afwijking, precies zoals bij de PAGINA. Zonder
+  // leesbare versie is niet te zeggen welk contract dit bestand beweert te volgen, en tot ronde 8
+  // kocht juist die onleesbaarheid een vrijstelling van de volle keuring: `getoetst` werd `false`
+  // en daarmee gold alleen de kern (bevinding Codex, ronde 8).
+  if (contract === null) return onleesbaar('contractversie van het statusbestand is niet te lezen');
 
-  const vormFouten = validate(vormSchemaVan(schema), json);
-  if (vormFouten.length) {
-    return onleesbaar(`statusbestand volgt de vorm van het contract niet (${vormFouten.length} afwijking${vormFouten.length === 1 ? '' : 'en'})`, getoetst);
-  }
+  // Het schema is de enige plek waar de vorm van dit bestand vastligt; `JSON.parse` alleen keurt
+  // niets (bevinding Codex, ronde 5). Er wordt op TWEE niveaus gekeurd:
+  //
+  //  - Beweert het bestand ONZE contractversie, dan is ons schema er het gezag over en geldt het
+  //    volle contract, `additionalProperties: false` incluis. Vals alarm kan hier niet: het bestand
+  //    zegt zelf dat het deze versie is.
+  //  - Beweert het een ANDERE versie, dan mag ons schema niet het laatste woord hebben — een oudere
+  //    of nieuwere gepubliceerde kopie kent per definitie andere verplichte velden en andere enums.
+  //    Daar geldt alleen de kern (`KERN_BRONVELDEN`), en die geldt per bron, niet over het hele
+  //    bestand: een bron zonder herkomst telt niet mee, de rest wordt gewoon geteld.
+  //
+  // Wat hier NIET meer staat is een versiepoort: er is geen tak die het oordeel overslaat op gezag
+  // van het bestand zelf. Een vreemde versie maakt de keuring milder, nooit afwezig, en de TELLING
+  // wordt altijd geveld.
+  if (schema === null) return onleesbaar('geen schema om het statusbestand aan te toetsen');
+  const schemaVersie = schema?.properties?.contractVersion?.const ?? null;
+  const getoetst = schemaVersie !== null && contract === schemaVersie;
   if (getoetst) {
     const fouten = validate(schema, json);
     if (fouten.length) {
@@ -371,10 +371,14 @@ export function statusUitTekst(httpStatus, tekst, schema = null) {
   }
 
   if (!Array.isArray(json.sources)) return onleesbaar('statusbestand noemt geen bronnen');
-  const bewezen = json.sources.filter((x) => x && typeof x === 'object' && x.trust === 'VERIFIED_CURRENT').length;
+  // Alleen een bron met de kern telt als bewijs. `ongeteld` houdt bij hoeveel er zich WEL bewezen
+  // noemden maar geen herkomst droegen — dat mag niet in stilte verdwijnen (orderdiscipline R2).
+  const beweren = json.sources.filter((x) => x && typeof x === 'object' && x.trust === 'VERIFIED_CURRENT');
+  const bewezen = beweren.filter(kernCompleet).length;
+  const ongeteld = beweren.length - bewezen;
   return {
     contract,
-    bronnen: { leesbaar: true, reden: null, totaal: json.sources.length, bewezen, gebouwdOp, getoetst },
+    bronnen: { leesbaar: true, reden: null, totaal: json.sources.length, bewezen, ongeteld, gebouwdOp, getoetst },
   };
 }
 
@@ -553,7 +557,7 @@ export function toets({
   // De meting komt binnen als al gelezen feit uit `statusUitTekst()` -- het statusbestand van de
   // plaat, niet haar opmaak. Deze toets oordeelt, hij parseert niet.
   const gemetenBron = bronstand
-    ?? { leesbaar: false, reden: 'geen bronstand gemeten', totaal: null, bewezen: null, gebouwdOp: null, getoetst: false };
+    ?? { leesbaar: false, reden: 'geen bronstand gemeten', totaal: null, bewezen: null, ongeteld: null, gebouwdOp: null, getoetst: false };
   gemeten.bronnen = gemetenBron;
 
   // De bouwidentiteit bindt de meting aan DEZE pagina. Zonder die band oordeelt de waakvlam over een
@@ -611,7 +615,10 @@ export function toets({
     }
   } else {
     if (!gemetenBron.getoetst) {
-      waarschuwingen.push('het statusbestand draagt een andere contractversie dan het schema dat de waakvlam kent; het is dus alleen op vorm gekeurd, niet tegen het volle contract — de telling wordt wél beoordeeld');
+      waarschuwingen.push('het statusbestand draagt een andere contractversie dan het schema dat de waakvlam kent; alleen de kernvelden per bron zijn gekeurd, niet het volle contract — de telling wordt wél beoordeeld');
+    }
+    if (gemetenBron.ongeteld) {
+      waarschuwingen.push(`${gemetenBron.ongeteld} bron(nen) noemden zich bewezen zonder herkomst (${KERN_BRONVELDEN.join(', ')}) en tellen dus niet mee`);
     }
     if (gemetenBron.bewezen === 0) meld('GEEN_GEVERIFIEERDE_BRON', `0 van ${gemetenBron.totaal} bronnen`);
   }
