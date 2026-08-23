@@ -85,7 +85,9 @@ jobs:
 
       - id: wachten
         env:
-          BASE_URL: https://rvanhooijdonk-png.github.io/stack-dashboard/
+          # BASE_URL komt uit `scripts/napublicatie.mjs`, afgeleid uit `GITHUB_REPOSITORY`. Zie
+          # `scripts/lib/repo-identity.mjs`: een ingetypt adres met de eigenaar erin overleeft geen
+          # organisatieoverdracht en faalt dan als "niet vers" in plaats van als "verhuisd".
           REFERENTIE: ${{ steps.referentie.outputs.moment }}
           # Twee wegen naar de acceptatietest, net als bij de waarnemer: met de hand, of met
           # `[sabotage-napublicatie]` in een commit-bericht — zodat het bewijs op elke tak

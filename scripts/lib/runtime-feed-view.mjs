@@ -71,16 +71,33 @@ export function evidencePointer(runtimeFeed) {
 /**
  * Claimbewijs per record — géén prose meer, maar een echte verwijzing naar het onveranderlijke
  * bewijskenmerk achter DEZE claim (`pickup.evidence_ref` voor actief werk, `closed[].evidence_ref`
- * voor AFGEROND OK). Alleen een `https://github.com/rvanhooijdonk-png/...`-URL wordt klikbaar
+ * voor AFGEROND OK). Alleen een github.com-URL onder een TOEGESTANE EIGENAAR wordt klikbaar
  * gemaakt — elke andere of ontbrekende URL toont uitsluitend het opaque kenmerk (`kind:ref`), nooit
  * een verzonnen link. `ref`/`url` zijn al door de SANITIZE-GATE in runtime-feed.mjs; hier alleen
  * nog HTML-escapen voor opname in de pagina.
+ *
+ * De lijst toegestane eigenaars is opzettelijk klein en groeit alleen op twee manieren:
+ *
+ *  - `HISTORISCHE_BEWIJS_EIGENAAR` staat er ALTIJD in. Al het bewijsmateriaal dat vóór de
+ *    organisatieoverdracht is vastgelegd, wijst naar commits onder dat account; die commits
+ *    verhuizen niet mee met een repository-overdracht en zouden anders na de overdracht hun link
+ *    verliezen. Dit is dus geen achterstallige hardcodering maar een gedocumenteerde historische
+ *    verwijzing.
+ *  - de eigenaar waaronder deze repository nu draait, en alleen als de Actions-context die noemt.
+ *    Ontbreekt die context, dan wordt de lijst NIET geraden: er verschijnt dan hooguit een label
+ *    zonder link, en dat is de veilige kant van deze poort.
  */
-const EVIDENCE_URL_PREFIX = 'https://github.com/rvanhooijdonk-png/';
-export function claimEvidence(evidenceRef) {
+const HISTORISCHE_BEWIJS_EIGENAAR = 'rvanhooijdonk-png';
+export function evidenceUrlPrefixes(env = process.env) {
+  const eigenaars = new Set([HISTORISCHE_BEWIJS_EIGENAAR]);
+  const nu = typeof env?.GITHUB_REPOSITORY_OWNER === 'string' ? env.GITHUB_REPOSITORY_OWNER : '';
+  if (/^[A-Za-z0-9._-]{1,100}$/.test(nu)) eigenaars.add(nu);
+  return [...eigenaars].map((eigenaar) => `https://github.com/${eigenaar}/`);
+}
+export function claimEvidence(evidenceRef, { prefixes = evidenceUrlPrefixes() } = {}) {
   if (!evidenceRef || typeof evidenceRef.ref !== 'string' || !evidenceRef.ref) return '';
   const idLabel = `${evidenceRef.kind}:${evidenceRef.ref}`;
-  const url = typeof evidenceRef.url === 'string' && evidenceRef.url.startsWith(EVIDENCE_URL_PREFIX)
+  const url = typeof evidenceRef.url === 'string' && prefixes.some((p) => evidenceRef.url.startsWith(p))
     ? evidenceRef.url : null;
   return url
     ? ` · claimbewijs: <a href="${esc(url)}" rel="noopener">${esc(idLabel)}</a>`

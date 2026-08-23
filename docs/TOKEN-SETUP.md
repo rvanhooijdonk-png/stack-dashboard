@@ -24,7 +24,7 @@ Daarom is een apart, expliciet gescoopt token nodig.
 | Veld | Waarde |
 | --- | --- |
 | Token name | `stack-dashboard-read` |
-| Resource owner | `rvanhooijdonk-png` |
+| Resource owner | `rvanhooijdonk-png` — het account waarover de plaat rapporteert (`stack-control` en de bewaakte repo's), níét noodzakelijk het account waar deze repository zelf staat |
 | Expiration | 90 dagen (korter mag; zet een herinnering) |
 | Repository access | **All repositories** — org-breed lezen is het hele doel |
 | Repository permissions → **Pull requests** | **Read-only** |

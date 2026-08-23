@@ -97,7 +97,9 @@ jobs:
         if: steps.tests.outcome == 'success'
         env:
           CONTROL_READ_TOKEN: ${{ secrets.ORG_PR_READ_TOKEN }}
-          DOORSTROOM_PLAAT_URL: https://rvanhooijdonk-png.github.io/stack-dashboard/
+          # DOORSTROOM_PLAAT_URL komt uit `scripts/doorstroom.mjs`, afgeleid uit
+          # `GITHUB_REPOSITORY` (zie `scripts/lib/repo-identity.mjs`). De BRON blijft
+          # `stack-control` op het persoonlijke account: dat object verhuist niet mee.
         run: |
           set -euo pipefail
           if [ "${{ github.ref_name }}" = "main" ]; then

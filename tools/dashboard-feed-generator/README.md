@@ -33,3 +33,26 @@ Uitzetten:
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.rvh.dashboard-feed-generator.plist
 ```
+
+### `DASHBOARD_REPOSITORY` — waarom die sleutel in het plist staat
+Onder launchd is er geen Actions-context: `GITHUB_REPOSITORY` bestaat daar niet. De generator leidt
+de plaats van het dashboard af met `resolveIdentity()` uit `scripts/lib/repo-identity.mjs`, en zonder
+bron levert die eerlijk niets op — dan slaat de git-eventbron voor het dashboard over en publiceert
+elke run een feed waarin die bron stilzwijgend ontbreekt. Daarom draagt het plist de identiteit zelf,
+in `EnvironmentVariables`; het is geen handmatige stap die je apart moet onthouden.
+
+Wat er gebeurt bij de drie vormen, en dat is met opzet niet één ding:
+
+| `DASHBOARD_REPOSITORY` | Gevolg |
+| --- | --- |
+| geldig `owner/repo` | die repository wordt gelezen |
+| niet-leeg maar misvormd | `resolveIdentity()` werpt: **luide fout, geen publicatie** — een uitdrukkelijke aanwijzing die niet klopt mag geen halve meting opleveren |
+| leeg, alleen spaties, of afwezig | telt als niet gezet; dan pas telt `GITHUB_REPOSITORY`, en levert ook die niets op, dan slaat de bron over mét reden in het log |
+
+De `origin` van de werkboom telt bewust niet mee, hoe voor de hand liggend ook: GitHub verwijst na een
+overdracht de oude naam door, dus die remote blijft de vorige eigenaar noemen terwijl alles werkt.
+
+**Bij een overdracht naar een organisatie verandert deze waarde mee.** Dat hoef je niet te onthouden:
+de poort in `test/org-migration.test.mjs` houdt de waarde uit dit plist tegen de eigenaarsstand in de
+poortmodule onder `scripts/lib/`, dus een vergeten regel is een rode toets en geen stille verkeerde
+meting.

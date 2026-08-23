@@ -22,10 +22,25 @@ import { writeFileSync } from 'node:fs';
 import {
   toets, alarmRij, magAppenden, alarmRijPubliceerbaar, zelfRouteUitUrl, DREMPEL_UREN, GRACE_MINUTEN,
 } from './lib/waarnemer.mjs';
+import { detectIdentity, pagesUrl, rawUrl } from './lib/repo-identity.mjs';
 
-const BASE_URL = process.env.BASE_URL || 'https://rvanhooijdonk-png.github.io/stack-dashboard/contentstroom.html';
+// Afgeleid, niet ingetypt: de bewaakte plaat is de Pages-plaat van DEZE repository, waar die ook
+// staat. Zie `lib/repo-identity.mjs` voor waarom dat een andere eigenaar is dan het account
+// waarover de plaat rapporteert. De omgevingsvariabelen blijven bestaan zodat een proefdraai naar
+// een andere plaat kan wijzen; ze zijn alleen niet langer de enige bron van het adres.
+//
+// LUI, en dat is het hele punt. De identiteit wordt pas opgelost voor de URL die WERKELIJK
+// ontbreekt. Wie beide adressen zelf meegeeft — de vorm uit
+// `docs/RAPPORT-2026-07-26-napublicatie-en-spiegelwet.md` (`BASE_URL=… SPIEGEL_URL=… node
+// scripts/waarnemer.mjs`) — vraagt niets over deze repository en hoort dus ook niet te stranden op
+// een identiteit die buiten Actions nergens uit valt af te leiden. Andersom blijft elk ontbrekend
+// adres onverkort fail-closed: dan is de identiteit wél nodig, en dan mag een onbekende of kapotte
+// herkomst luid falen in plaats van een gok op te leveren.
+let identiteitCache = null;
+const identiteit = () => (identiteitCache ??= detectIdentity());
+const BASE_URL = process.env.BASE_URL || pagesUrl(identiteit(), 'contentstroom.html');
 const SPIEGEL_URL = process.env.SPIEGEL_URL
-  || 'https://raw.githubusercontent.com/rvanhooijdonk-png/stack-dashboard/main/data/kanaalpost-publiek.md';
+  || rawUrl(identiteit(), 'main', 'data/kanaalpost-publiek.md');
 const SABOTAGE = process.env.SABOTAGE || 'geen';
 const RIJ_BESTAND = process.env.RIJ_BESTAND || '';
 const PAGINA_ROUTE = zelfRouteUitUrl(BASE_URL);
