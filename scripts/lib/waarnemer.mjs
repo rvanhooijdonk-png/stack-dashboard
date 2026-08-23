@@ -348,14 +348,22 @@ function metasUitKop(html) {
     }
     const naam = tekst.slice(punt).match(/^<(\/?)([a-zA-Z][a-zA-Z0-9-]*)/);
     if (!naam) { i = punt + 1; continue; }
-    // Het einde van de tag, met aanhalingstekens: een `>` binnen een waarde sluit niets af.
+    // Het einde van de tag, met aanhalingstekens: een `>` binnen een waarde sluit niets af. Een
+    // aanhalingsteken OPENT alleen een waarde als het op de plek van een waarde staat, dus direct
+    // na de `=`. Midden in een ongequote waarde is het gewoon een letter -- `<meta class=don't ...>`
+    // leest een browser als waarde `don't` en sluit de tag netjes bij de eerste `>` (bevinding
+    // Gemini, 23-08-2026). Wie daar de aanhalingsstand aanzet, scant de rest van het document mee
+    // en verklaart een gezonde pagina onleesbaar.
     let j = punt + 1 + naam[0].length - 1;
     let aanhaling = null;
+    let opWaardeplek = false;
     while (j < tekst.length) {
       const c = tekst[j];
-      if (aanhaling) { if (c === aanhaling) aanhaling = null; }
-      else if (c === '"' || c === "'") aanhaling = c;
+      if (aanhaling) { if (c === aanhaling) { aanhaling = null; opWaardeplek = false; } }
+      else if (c === '=') opWaardeplek = true;
+      else if (opWaardeplek && (c === '"' || c === "'")) { aanhaling = c; opWaardeplek = false; }
       else if (c === '>') break;
+      else if (!/\s/.test(c)) opWaardeplek = false;
       j += 1;
     }
     if (j >= tekst.length) return null;
@@ -363,8 +371,15 @@ function metasUitKop(html) {
     const element = naam[2].toLowerCase();
     const sluit = naam[1] === '/';
     if (sluit && element === 'head') return metas;
+    // Een browser sluit de kop ook zonder `</head>`, namelijk zodra de body begint. Zonder deze
+    // regel zou een geldige pagina die `</head>` weglaat vals onleesbaar heten (Gemini).
+    if (!sluit && element === 'body') return metas;
     if (!sluit && element === 'meta') metas.push(tag);
-    if (!sluit && INERTE_ELEMENTEN.has(element) && !/\/>$/.test(tag)) {
+    // De schuine streep in `<script src=".." />` sluit NIETS: HTML5 kent geen zelfsluitende
+    // script/style/title/textarea/template, de inhoud loopt door tot de sluittag. De streep
+    // honoreren was de gevaarlijke kant op: een merk in een scriptlichaam ging dan als echte
+    // meting tellen (bevinding Gemini, 23-08-2026).
+    if (!sluit && INERTE_ELEMENTEN.has(element)) {
       const dicht = tekst.slice(j + 1).search(new RegExp(`</${element}\\s*>`, 'i'));
       if (dicht === -1) return null;
       i = j + 1 + dicht;
@@ -384,7 +399,7 @@ function metasUitKop(html) {
 function attribuutlijst(tag) {
   const binnen = String(tag).replace(/^<\s*[a-zA-Z][^\s/>]*/, '').replace(/\/?>$/, '');
   const uit = [];
-  for (const a of binnen.matchAll(/([^\s"'>/=]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'>]*))?/g)) {
+  for (const a of binnen.matchAll(/([^\s"'>/=]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s>]*))?/g)) {
     uit.push([a[1].toLowerCase(), a[2] === undefined ? null : a[2].replace(/^["']|["']$/g, '')]);
   }
   return uit;

@@ -894,3 +894,63 @@ test('een onleesbare contractversie is zelf een afwijking, vóór de versiepoort
   assert.equal(r.ok, false);
   assert.equal(r.gemeten.bronnen.bewezen, 8, 'de bronstand blijft gewoon leesbaar');
 });
+
+// --- Gemini ronde 2: waar de scanner anders leest dan een browser (23-08-2026) ---
+
+test('een aanhalingsteken midden in een ongequote waarde is een letter, geen quote', () => {
+  // Gemini's probe. Een browser leest `class=don't` als de waarde `don't` en sluit de tag bij de
+  // eerste `>`. De scanner zette de aanhalingsstand aan en scande daarna de rest van het document
+  // mee — waarmee een volstrekt gezonde plaat vals `BRONSTAND_ONLEESBAAR` kreeg.
+  // De ruis staat op een ANDER element: het merk zelf blijft ongemoeid. Precies daar zat het gat,
+  // want één verkeerd gelezen tag verderop in de kop nam het echte merk mee de mist in.
+  const html = paginaMetBronnen(ALLES_BEWEZEN).replace('<head>', "<head><meta name=viewport content=don't-care>");
+  assert.deepEqual(bronstandUitHtml(html), { leesbaar: true, totaal: 8, bewezen: 8 });
+  assert.deepEqual(toetsVan(html, BRONSTAND_VANAF).bevindingen, []);
+});
+
+test('een merk in een scriptlichaam telt niet, ook niet achter <script />', () => {
+  // Gemini's tweede probe, en de gevaarlijke kant op. HTML5 kent geen zelfsluitende <script/>:
+  // de inhoud loopt door tot </script>. De scanner honoreerde de schuine streep en las het merk
+  // in het scriptlichaam als echte meting — een pagina zonder bronnen die groen bleef.
+  const gezond = paginaMetBronnen(ALLES_BEWEZEN);
+  const scriptje = '<script src="x.js" /><meta name="bronstand" content="bewezen=9 totaal=9"></script>';
+  const html = gezond.replace(/<meta name="bronstand"[^>]*>/, scriptje);
+  assert.deepEqual(bronstandUitHtml(html), { leesbaar: false, totaal: null, bewezen: null });
+  assert.deepEqual(toetsVan(html, BRONSTAND_VANAF).bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR']);
+});
+
+test('de kop sluit ook zonder </head>, namelijk waar de body begint', () => {
+  // Een browser sluit de kop impliciet bij <body>. Zonder die regel heette een geldige pagina
+  // die </head> weglaat onleesbaar (vals rood), én werd de body alsnog meegescand.
+  const html = paginaMetBronnen(ALLES_BEWEZEN).replace('</head>', '');
+  assert.deepEqual(bronstandUitHtml(html), { leesbaar: true, totaal: 8, bewezen: 8 });
+  // De body blijft buiten beeld: een merk ná <body> verandert de meting niet.
+  const metBody = html.replace('<body', '<meta name="bronstand" content="bewezen=9 totaal=9"><body');
+  assert.deepEqual(bronstandUitHtml(metBody), { leesbaar: false, totaal: null, bewezen: null },
+    'twee merken vóór de body = geen meting; de body zelf telt niet mee');
+});
+
+test('gegevens die de voettekst letterlijk citeren maken de versie niet onleesbaar', () => {
+  // Gemini vreesde hier een vals alarm: `contractUitHtml()` eist PRECIES één voettekst, dus een
+  // bronnaam of logboekregel die de voettekst citeert zou de teller op twee zetten en de hele
+  // plaat `CONTRACT_ONLEESBAAR` maken. Dat kan niet: alles wat uit gegevens komt, gaat ontsnapt de
+  // pagina op, dus `<code>` wordt `&lt;code&gt;` en matcht de voettekst nooit. De eis van Codex
+  // ronde 2 (twee voetteksten = geen versie) blijft daarmee overeind zonder vals-positieven.
+  const citaat = 'Gegenereerd door <code>stack-dashboard</code> (contract 2.6.0)';
+  const snap = structuredClone(fixture);
+  snap.contractVersion = BRONSTAND_VANAF;
+  snap.generatedAt = '2026-07-26T11:55:00.000Z';
+  const spiegel = spiegelMet(
+    rij('2026-07-26 08:00', 'CONTROL', 'Een eerdere melding uit de vloot.'),
+    rij('2026-07-26 09:00', 'DASHBOARD', citaat),
+  );
+  snap.kanaalpost = toPublicKanaalpost(kanaalpostUitTekst(spiegel));
+  snap.sources = ALLES_BEWEZEN;
+  const html = renderHtml(snap, {});
+  assert.equal(html.includes('&lt;code&gt;stack-dashboard&lt;/code&gt;'), true, 'het citaat staat ontsnapt op de plaat');
+  assert.equal(contractUitHtml(html), BRONSTAND_VANAF);
+  assert.deepEqual(toets({
+    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: spiegel,
+    contractVersie: contractUitHtml(html), nu: NU,
+  }).bevindingen, []);
+});
