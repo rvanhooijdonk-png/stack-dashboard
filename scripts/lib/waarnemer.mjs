@@ -635,7 +635,14 @@ export function toets({
   // dat het niet gekeurd kon worden is een waarschuwing, geen vrijbrief.
   if (!gemetenBron.leesbaar) meld('BRONSTAND_ONLEESBAAR', gemetenBron.reden ?? undefined);
   else if (!zelfdeBouw) {
-    if (verseBouw) {
+    // De naijlingsvrijstelling stelt het oordeel over de bronstand één ronde uit omdat er zojuist
+    // gepubliceerd is en een mengsel van oud en nieuw dan te verwachten is. Ze vraagt daarom een
+    // statusbestand dat AAN EEN BOUW VASTZIT: zonder bruikbaar `generatedAt` is er niets om het
+    // oordeel naar door te schuiven, en is het bestand niet "onderweg" maar niet toe te schrijven.
+    // Zonder deze eis kocht een stempel als `"0"` de vrijstelling zolang de PAGINA maar vers was --
+    // en de vrijstelling slaat juist de telling over. Echte reproductie: pagina 5 min oud,
+    // `generatedAt: "0"`, `bronnen: 0 van 2 geverifieerd`, exit 0 (bevinding Gemini, ronde 8).
+    if (verseBouw && gemetenBron.gebouwdOp !== null) {
       waarschuwingen.push('het statusbestand komt van een andere bouw dan de pagina die nu geserveerd wordt; er is zojuist gepubliceerd, dus dit telt als naijling van de CDN en de bronstand is deze ronde niet beoordeeld');
     } else {
       meld('BRONSTAND_ANDERE_BOUW', gemetenBron.gebouwdOp === null

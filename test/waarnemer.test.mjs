@@ -1218,3 +1218,53 @@ test('de sabotagekeuze in de workflow biedt precies de proeven die de executor k
   assert.match(yml, /^\s*default:\s*geen\s*$/m);
   assert.match(executor, /const SABOTAGE = process\.env\.SABOTAGE \|\| 'geen';/);
 });
+
+test('een verse PAGINA koopt geen vrijstelling voor een statusbestand zonder bouwtijd', () => {
+  // Reproductie van Gemini ronde 8 (P1), zelf nagedraaid over http vóór de reparatie: pagina 5 min
+  // oud, `generatedAt: "0"` in het statusbestand, `bronnen: 0 van 2 geverifieerd` -- en tóch exit 0.
+  // De naijlingsvrijstelling keek naar de NIEUWSTE van de twee bouwen; was de pagina vers, dan was
+  // die de nieuwste, en werd de telling van een bestand dat aan geen enkele bouw vastzit
+  // overgeslagen. Dat is het incident van 22-08 opnieuw, gekocht met één ongeldig stempel.
+  const zonderBouwtijd = JSON.stringify({
+    contractVersion: CONTRACT_NU,
+    generatedAt: '0',
+    overallStatus: 'OK',
+    sources: BRONNEN_LEEG,
+  });
+  const gelezen = lees(200, zonderBouwtijd);
+  assert.equal(gelezen.bronnen.gebouwdOp, null, 'de opzet klopt alleen zonder bruikbaar bouwmoment');
+
+  const r = toets({
+    paginaStatus: 200,
+    // De PAGINA is kersvers -- dat was precies de voorwaarde die de vrijstelling kocht.
+    paginaHtml: paginaMetBronnen(BRONNEN_LEEG, { gebouwdOp: new Date(NU - 5 * 60000).toISOString() }),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: CONTRACT_NU,
+    bronstand: gelezen.bronnen,
+    bronContractVersie: gelezen.contract,
+    nu: NU,
+  });
+  assert.equal(r.ok, false, 'nul bewezen bronnen mag niet groen blijven op een verse pagina alleen');
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['BRONSTAND_ANDERE_BOUW']);
+  assert.match(r.bevindingen[0].uitleg, /geen bouwtijd om aan te knopen/);
+  assert.equal(r.waarschuwingen.some((w) => /naijling van de CDN/.test(w)), false,
+    'een bestand zonder bouwtijd is niet "onderweg" maar niet toe te schrijven');
+
+  // NEGATIEVE CONTROLE — de vrijstelling zelf blijft bestaan: mét een geldig bouwmoment uit een
+  // andere, verse bouw is een mengsel van oud en nieuw gewoon te verwachten en oordeelt de
+  // waakvlam deze ronde niet.
+  const metBouwtijd = lees(200, statusTekstVan(BRONNEN_LEEG, CONTRACT_NU, new Date(NU - 60000).toISOString()));
+  const g = toets({
+    paginaStatus: 200,
+    paginaHtml: paginaMetBronnen(BRONNEN_LEEG, { gebouwdOp: new Date(NU - 5 * 60000).toISOString() }),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: CONTRACT_NU,
+    bronstand: metBouwtijd.bronnen,
+    bronContractVersie: metBouwtijd.contract,
+    nu: NU,
+  });
+  assert.deepEqual(g.bevindingen, []);
+  assert.equal(g.waarschuwingen.some((w) => /naijling van de CDN/.test(w)), true);
+});

@@ -218,3 +218,55 @@ test('NEGATIEVE CONTROLE — dezelfde opzet zonder ongetelde bron levert geen ca
   assert.equal(r.code, 0);
   assert.equal(r.receipt.ongeteld, '0');
 });
+
+test('de sabotageproef grijpt aan en zegt dat ook — of hij stopt hardop', async () => {
+  // Gemini ronde 8 wees erop dat de postcondities van `saboteerBronnen()` door geen enkele test
+  // geraakt werden. Juist daar hoort dekking: dit IS de acceptatieproef van deze PR, en een
+  // sabotage die stilletjes niets doet levert een rood dat niets bewijst (orderdiscipline R1).
+  const gebouwdOp = nuIso();
+  const gezond = {
+    html: plaat({ contract: CONTRACT_VREEMD, gebouwdOp, spiegelTekst: spiegelBasis }),
+    status: statusTekst({ contract: CONTRACT_VREEMD, gebouwdOp, sources: [bewezenBron(gebouwdOp)] }),
+  };
+  // Zonder sabotage is dezelfde opzet groen: het rood hieronder komt van de ingreep, niet van de
+  // opstelling.
+  assert.equal((await draaiWaarnemer(gezond)).code, 0);
+
+  const gesaboteerd = await draaiWaarnemer({ ...gezond, env: { SABOTAGE: 'bronnen' } });
+  assert.equal(gesaboteerd.code, 1);
+  assert.match(gesaboteerd.stdout, /sabotage: bronstand verlaagd van 1 naar 0 van 1/);
+  assert.match(gesaboteerd.stdout, /bronnen: 0 van 1 geverifieerd \(SABOTAGE\)/);
+  assert.match(gesaboteerd.stdout, /AFWIJKING GEEN_GEVERIFIEERDE_BRON/);
+  // De geschreven regel zegt zelf dat het een proef is: een acceptatietest hoort in de openbare
+  // spiegel niet als echte storing te lezen zijn.
+  assert.match(gesaboteerd.rij, /geplande sabotagetest/);
+});
+
+test('een sabotageproef op een al kapotte plaat stopt met exitcode 2', async () => {
+  // De postconditie vooraf: is er geen leesbare stand met minstens één bewezen bron, dan bewijst
+  // het rood niets — de plaat was al stuk. Dan hoort de proef hardop te stoppen in plaats van een
+  // vals bewijs af te leveren.
+  const gebouwdOp = nuIso();
+  const r = await draaiWaarnemer({
+    html: plaat({ contract: CONTRACT_VREEMD, gebouwdOp, spiegelTekst: spiegelBasis }),
+    status: statusTekst({ contract: CONTRACT_VREEMD, gebouwdOp, sources: [BRON_ZONDER_HERKOMST] }),
+    env: { SABOTAGE: 'bronnen' },
+  });
+  assert.equal(r.code, 2, 'niet 1: een mislukte proef is geen geslaagd alarm');
+  assert.match(r.stdout, /::error::sabotageproef kan niets bewijzen/);
+  assert.equal(r.rij, '', 'en er gaat niets naar de openbare spiegel');
+});
+
+test('de stempelsabotage zet de drempel op nul en zegt dat erbij', async () => {
+  // De andere keuze uit `sabotage.options`. Dezelfde eis: de ingreep moet zichtbaar zijn in de
+  // uitvoer, zodat een groene sabotageronde niet als geslaagde proef kan doorgaan.
+  const gebouwdOp = nuIso();
+  const r = await draaiWaarnemer({
+    html: plaat({ contract: CONTRACT_VREEMD, gebouwdOp, spiegelTekst: spiegelBasis }),
+    status: statusTekst({ contract: CONTRACT_VREEMD, gebouwdOp, sources: [bewezenBron(gebouwdOp)] }),
+    env: { SABOTAGE: 'stempel' },
+  });
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /drempel 0 \(SABOTAGE\)/);
+  assert.match(r.stdout, /AFWIJKING STEMPEL_TE_OUD/);
+});
