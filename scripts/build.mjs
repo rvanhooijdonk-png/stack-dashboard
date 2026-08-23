@@ -67,10 +67,10 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  * 2.7.0: bronstand-merk in de kop van elke pagina (`bronstandMerk`) — hoeveel bronnen gelezen zijn
  *        en hoeveel daarvan bewezen. Aanleiding: op 22-08-2026 publiceerde de plaat vijftien uur
  *        lang zonder één geverifieerde bron terwijl de waarnemer 81 keer groen draaide; hij toetste
- *        de vorm van de pagina en niet of er nog iets achter zat. De bump is hier geen administratie
- *        maar de poort zelf: de waarnemer eist het merk vanaf precies deze versie
- *        (`BRONSTAND_VANAF`), zodat een oudere gepubliceerde kopie er niet vals rood van wordt en
- *        niemand een schakelaar hoeft om te zetten.
+ *        de vorm van de pagina en niet of er nog iets achter zat. Het merk is er voor wie de plaat
+ *        zelf bekijkt; de waakvlam oordeelt niet op de kop maar op `status.json`, en die droeg de
+ *        bronnen al vóór deze versie — er hoort dus geen versiepoort tussen die meting en haar
+ *        oordeel (bevinding Codex, ronde 6).
  */
 const CONTRACT_VERSION = '2.7.0';
 const REFRESH_SECONDS = 900;

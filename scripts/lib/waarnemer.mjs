@@ -308,20 +308,26 @@ export function statusUitTekst(httpStatus, tekst, schema = null) {
   const gebouwdOp = typeof json.generatedAt === 'string' && Number.isFinite(Date.parse(json.generatedAt))
     ? json.generatedAt
     : null;
-  const onleesbaar = (reden) => ({ contract, bronnen: { leesbaar: false, reden, ...leeg, gebouwdOp } });
+  // `getoetst` zegt of de KEURING heeft plaatsgevonden, niet of ze slaagde. Een bestand dat op zijn
+  // eigen schema valt is wél gekeurd; het tegenovergestelde melden zou de oorzaak wegpoetsen op
+  // precies het pad waar hij gevonden is (orderdiscipline R2).
+  const onleesbaar = (reden, gekeurd = false) => ({
+    contract, bronnen: { leesbaar: false, reden, ...leeg, gebouwdOp, getoetst: gekeurd },
+  });
 
   // Het schema is de enige plek waar de vorm van dit bestand vastligt; `JSON.parse` alleen keurt niets
   // (bevinding Codex, ronde 5). Toetsen mag alleen tegen dezelfde contractversie: het schema pint
   // `contractVersion` op één waarde, dus een oudere of nieuwere gepubliceerde kopie zou er per
-  // definitie op vallen. Zo'n kopie heet daarom niet fout maar ONGETOETST — toets 5 velt er geen
-  // bronstandoordeel over in plaats van een vals rood of een vals groen.
+  // definitie op vallen. Zo'n kopie heet daarom niet fout maar ONGETOETST: haar VORM is niet
+  // gekeurd, en dat is een waarschuwing. Haar TELLING wordt gewoon geveld — ongetoetst was tot
+  // ronde 6 ook een vrijstelling van het oordeel, en die voorwaarde las het bestand uit zichzelf.
   if (schema === null) return onleesbaar('geen schema om het statusbestand aan te toetsen');
   const schemaVersie = schema?.properties?.contractVersion?.const ?? null;
   const getoetst = schemaVersie !== null && contract !== null && contract === schemaVersie;
   if (getoetst) {
     const fouten = validate(schema, json);
     if (fouten.length) {
-      return onleesbaar(`statusbestand volgt zijn eigen contract niet (${fouten.length} afwijking${fouten.length === 1 ? '' : 'en'})`);
+      return onleesbaar(`statusbestand volgt zijn eigen contract niet (${fouten.length} afwijking${fouten.length === 1 ? '' : 'en'})`, true);
     }
   }
 
@@ -333,17 +339,15 @@ export function statusUitTekst(httpStatus, tekst, schema = null) {
   };
 }
 
-/**
- * Vanaf deze contractversie MOET de pagina het bronstand-merk in haar kop dragen. Zelfde
- * zelf-bewapening als `KANAALPOST_VANAF` en `SECTIES_VANAF`: een kopie die vóór deze versie is
- * gebouwd kan het merk onmogelijk hebben en mag daar niet rood van worden, maar de uitzondering is
- * gebonden aan een versie en niet aan een datum of aan iemands geheugen. Zodra de plaat 2.7.0
- * stempelt is de toets hard, zonder dat iemand een schakelaar hoeft om te zetten.
- *
- * Dit vervangt een eerdere opzet waarin de oude vorm een onbeperkte waarschuwing kreeg: die
- * verontschuldigde ook een toekomstige rendererregressie voor altijd (bevinding Codex, 23-08-2026).
+/*
+ * Hier stond `BRONSTAND_VANAF = '2.7.0'`: de versiepoort waarmee een oudere kopie van de plaat
+ * buiten de bronstandtoets viel. Die is weg (Codex ronde 6). Hij hoorde bij het merk in de KOP van
+ * de pagina, dat pas vanaf 2.7.0 bestaat — maar de meting komt niet uit de kop, ze komt uit
+ * `status.json`, en dat draagt `sources` met `trust` al veel langer. De poort stelde dus niets vrij
+ * dat vrijstelling nodig had, en las zijn voorwaarde uit hetzelfde bestand dat hij vrijstelde.
+ * De rest van de zelf-bewapening (`KANAALPOST_VANAF`, `SECTIES_VANAF`) blijft ongemoeid: díe
+ * toetsen lezen wél de pagina, en daar is de versiepoort op zijn plaats.
  */
-export const BRONSTAND_VANAF = '2.7.0';
 
 /**
  * Hoeveel bronnen achter de pagina zijn bewezen? De plaat draagt dat als machinemerk in haar kop
@@ -518,34 +522,53 @@ export function toets({
   // de versie waarmee die telling zichzelf vrijstelt (bevinding Codex, ronde 5). De vergelijking is
   // exact — `generatedAt` en de cache-buster van de pagina zijn hetzelfde tijdstip.
   //
-  // Naijling van de CDN is echt en gemeten (publish.yml: tot ongeveer tien minuten), dus binnen het
-  // respijt is een verschil geen defect maar ruis: dan luidt het oordeel "deze ronde niet te
-  // beoordelen", zichtbaar als waarschuwing. Daarbuiten is het wél een bevinding — een statusbestand
-  // dat uren achterloopt op de pagina betekent dat de publicatie halverwege is blijven steken.
-  const bouwVerschilMs = gemetenBron.gebouwdOp !== null && gemeten.stempelIso !== null
-    ? Math.abs(Date.parse(gemetenBron.gebouwdOp) - Date.parse(gemeten.stempelIso))
-    : null;
+  // Het respijt meet hoe VERS de nieuwste van de twee bouwen is, niet hoe ver ze uit elkaar liggen.
+  // Dat onderscheid is een correctie op ronde 6: naijling van de CDN duurt hooguit ongeveer tien
+  // minuten, maar twee opeenvolgende bouwen kunnen uren uit elkaar liggen (publish draait 05:45 en
+  // 15:45). Op het verschil tussen de bouwen afgaan gaf daardoor vals rood op precies het moment dat
+  // een gezonde publicatie half was doorgezakt naar de CDN. Wat telt is: is er zojuist gepubliceerd?
+  // Dan is een mengsel van oud en nieuw te verwachten en oordeelt de waakvlam deze ronde niet, met
+  // een zichtbare waarschuwing. Staat de nieuwste bouw al langer dan het respijt stil en lopen de
+  // twee bestanden nog steeds uiteen, dan is de publicatie blijven steken en is dat een bevinding.
+  const stempelMs = gemeten.stempelIso === null ? null : Date.parse(gemeten.stempelIso);
+  const bronMs = gemetenBron.gebouwdOp === null ? null : Date.parse(gemetenBron.gebouwdOp);
   const zelfdeBouw = gemetenBron.gebouwdOp !== null && gemeten.stempelIso !== null
     && gemetenBron.gebouwdOp === gemeten.stempelIso;
-  gemeten.bouwVerschilMs = bouwVerschilMs;
+  const nieuwsteBouwMs = [stempelMs, bronMs].filter((x) => x !== null && Number.isFinite(x))
+    .reduce((a, b) => Math.max(a, b), Number.NEGATIVE_INFINITY);
+  // Het venster loopt naar twee kanten. Naar achteren omdat het respijt eindig hoort te zijn; naar
+  // voren omdat een bouwstempel dat in de toekomst ligt geen verse publicatie is maar een verzet
+  // uurwerk of een verzonnen stempel, en dat mag zich niet als naijling voordoen.
+  const bouwOuderdomMs = Number.isFinite(nieuwsteBouwMs) ? nu - nieuwsteBouwMs : null;
+  const verseBouw = bouwOuderdomMs !== null && bouwOuderdomMs >= -graceMs && bouwOuderdomMs <= graceMs;
+  gemeten.bouwVerschilMs = stempelMs !== null && bronMs !== null && Number.isFinite(stempelMs) && Number.isFinite(bronMs)
+    ? Math.abs(bronMs - stempelMs)
+    : null;
 
+  // Geen enkele tak mag het bronstandoordeel nog OVERSLAAN op gezag van het statusbestand zelf.
+  // Er stonden hier twee zulke ontsnappingen — een versiepoort (`BRONSTAND_VANAF`) en de
+  // schemakeuring — en allebei lazen ze hun voorwaarde uit hetzelfde bestand dat ze vrijstelden
+  // (bevinding Codex, ronde 6). De versiepoort was bovendien een overblijfsel: hij hoorde bij het
+  // merk in de kop van de pagina, dat pas vanaf 2.7.0 bestond. `status.json` draagt `sources` met
+  // `trust` al veel langer — de LIVE 2.6.0-plaat levert er gewoon `4 van 8` uit — dus een oudere
+  // kopie kán deze toets doorstaan en hoeft er niet van vrijgesteld te worden. Wat overblijft is één
+  // regel zonder uitzonderingen: is de stand leesbaar en hoort hij bij deze bouw, dan wordt hij
+  // beoordeeld. Een ongekeurd bestand (andere contractversie dan het schema) wordt óók beoordeeld;
+  // dat het niet gekeurd kon worden is een waarschuwing, geen vrijbrief.
   if (!gemetenBron.leesbaar) meld('BRONSTAND_ONLEESBAAR', gemetenBron.reden ?? undefined);
   else if (!zelfdeBouw) {
-    if (bouwVerschilMs !== null && bouwVerschilMs <= graceMs) {
-      waarschuwingen.push('het statusbestand komt van een andere bouw dan de pagina die nu geserveerd wordt; binnen het respijt telt dat als naijling van de CDN, dus de bronstand is deze ronde niet beoordeeld');
+    if (verseBouw) {
+      waarschuwingen.push('het statusbestand komt van een andere bouw dan de pagina die nu geserveerd wordt; er is zojuist gepubliceerd, dus dit telt als naijling van de CDN en de bronstand is deze ronde niet beoordeeld');
     } else {
-      meld('BRONSTAND_ANDERE_BOUW', bouwVerschilMs === null ? 'geen bouwtijd om aan te knopen' : undefined);
+      meld('BRONSTAND_ANDERE_BOUW', gemetenBron.gebouwdOp === null
+        ? 'geen bouwtijd om aan te knopen'
+        : `de nieuwste van de twee bouwen is ${Math.round((bouwOuderdomMs ?? 0) / 60000)} min oud, ruim buiten het respijt van ${Math.round(graceMs / 60000)} min`);
     }
-  // De overgangsuitzondering geldt alleen voor een plaat die zélf zegt dat ze ouder is. Kan de
-  // contractversie niet worden gelezen, dan is dat GEEN oude kopie maar een plaat die de waarnemer
-  // niet herkent (zie 1b), en dan hoort ook deze toets hard te zijn. Deze tak komt bewust ná de
-  // bouwtoets: anders kan een vreemd, ouder statusbestand zichzelf nog altijd vrijstellen.
-  } else if (contractLeesbaar && !versieMinstens(contractVersie, BRONSTAND_VANAF)) {
-    waarschuwingen.push('deze kopie van de plaat is gebouwd vóór de bronstand werd gemeten; die telt nog niet als afwijking');
-  } else if (!gemetenBron.getoetst) {
-    waarschuwingen.push('het statusbestand draagt een andere contractversie dan het schema dat de waakvlam kent; zonder schemakeuring wordt de bronstand niet beoordeeld');
-  } else if (gemetenBron.bewezen === 0) {
-    meld('GEEN_GEVERIFIEERDE_BRON', `0 van ${gemetenBron.totaal} bronnen`);
+  } else {
+    if (!gemetenBron.getoetst) {
+      waarschuwingen.push('het statusbestand draagt een andere contractversie dan het schema dat de waakvlam kent; de vorm is dus niet gekeurd — de telling wordt wél beoordeeld');
+    }
+    if (gemetenBron.bewezen === 0) meld('GEEN_GEVERIFIEERDE_BRON', `0 van ${gemetenBron.totaal} bronnen`);
   }
 
   return { ok: bevindingen.length === 0, bevindingen, waarschuwingen, gemeten };

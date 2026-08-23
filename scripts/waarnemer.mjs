@@ -82,7 +82,18 @@ const STATUS_SCHEMA = schemaLezen();
 
 const [pagina, spiegel, statusbestand] = await Promise.all([haal(BASE_URL), haal(SPIEGEL_URL), haal(STATUS_URL)]);
 const gelezen = statusUitTekst(statusbestand.status, statusbestand.tekst, STATUS_SCHEMA);
-const contract = gelezen.contract;
+
+// De contractversie van de PAGINA, uit haar eigen voettekst. Deze regel stond hier al vóór de
+// bronstandtoets en is bij het invoeren daarvan per ongeluk vervangen door de versie uit
+// `status.json` — waardoor een pagina die haar voettekst kwijt was groen bleef en het statusbestand
+// bovendien zijn eigen keuring kon sturen (bevinding Codex, ronde 6). De twee versies zijn
+// verschillende dingen en blijven daarom gescheiden: `contract` beschrijft de plaat, `gelezen.contract`
+// het statusbestand.
+// Bewust de volledige voettekstvorm, niet de eerste losse "(contract x.y.z)" in het document: de
+// INHOUD van de plaat kan die haakjes ook bevatten, en een lager gelezen versienummer zou de
+// zelf-bewapening van toets 3 stilletjes uitzetten.
+const contract = pagina.tekst
+  .match(/Gegenereerd door <code>stack-dashboard<\/code> \(contract ([0-9]+\.[0-9]+\.[0-9]+)\)/)?.[1] ?? null;
 const nu = Date.now();
 
 // De sabotage grijpt precies één toets aan en verandert verder niets: de drempel gaat naar nul, dus
@@ -129,7 +140,7 @@ const r = toets({
   graceMs: getal('GRACE_MINUTEN', GRACE_MINUTEN) * MIN,
 });
 
-console.log(`waarnemer — pagina http ${pagina.status}, logboek http ${spiegel.status}, statusbestand http ${statusbestand.status}, contract ${contract ?? 'onbekend'}`);
+console.log(`waarnemer — pagina http ${pagina.status}, logboek http ${spiegel.status}, statusbestand http ${statusbestand.status}, contract pagina ${contract ?? 'onbekend'}, contract statusbestand ${gelezen.contract ?? 'onbekend'}`);
 console.log(`bronstand — bouw ${gelezen.bronnen.gebouwdOp ?? 'onbekend'}, ${
   gelezen.bronnen.getoetst ? 'tegen het schema getoetst' : 'niet tegen het schema getoetst'}, verschil met de pagina ${
   r.gemeten.bouwVerschilMs === null ? 'onbekend' : `${Math.round(r.gemeten.bouwVerschilMs / 1000)} s`}`);
