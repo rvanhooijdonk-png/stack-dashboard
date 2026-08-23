@@ -19,8 +19,10 @@
  *     waarnemer gelezen als "de plaat is niet vers" — niet als "het adres is verhuisd". Dat is
  *     precies een storing die niemand ziet.
  *
- *  R3 `VERVALLEN_UITZONDERING` — elke uitzondering moet in de boom ook echt gevonden worden. Een
- *     lijst met vervallen posten wordt vanzelf een lijst waar alles op mag.
+ *  R3 `VERVALLEN_UITZONDERING` — elke uitzondering moet in de boom ook echt WERK DOEN. Niet: haar
+ *     tekst komt ergens voor. Wél: zij heeft daadwerkelijk een voorkomen gedekt dat anders een
+ *     R1-bevinding was geweest. Een lijst met vervallen posten wordt vanzelf een lijst waar alles
+ *     op mag.
  *
  * WAT BEWUST BUITEN DE POORT VALT, en waarom — dit is geen vergetelheid maar een afbakening:
  *
@@ -160,15 +162,14 @@ function zonderGedekt(regel, budget) {
 /** Regex-veilige vorm van een eigenaarsnaam. GitHub-namen dragen `.` en `-`, en die tellen mee. */
 const alsPatroon = (tekst) => tekst.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** Hoe vaak `tekst` letterlijk in `bron` staat. Zonder overlap: dit telt posten, geen substrings. */
-function telVoorkomens(bron, tekst) {
-  let aantal = 0;
-  for (let i = bron.indexOf(tekst); i !== -1; i = bron.indexOf(tekst, i + tekst.length)) aantal += 1;
-  return aantal;
-}
-
-/** Regels ontleden op één bestand. Puur: neemt tekst, geeft bevindingen. */
-export function toetsBestand({ pad, tekst }, {
+/**
+ * Regels ontleden op één bestand, MÉT de stand van het budget na afloop.
+ *
+ * Die reststand is geen bijproduct maar het bewijsmateriaal voor R3: alleen hier is te zien welke
+ * post werkelijk iets heeft gedekt en welke niets deed. `toetsBestand` geeft daarvan alleen de
+ * bevindingen door; `toetsBoom` heeft ook de rest nodig.
+ */
+function ontleedBestand({ pad, tekst }, {
   eigenaar = HOSTING_OWNER_OF_RECORD, repo = REPOSITORY_NAME, uitzonderingen = UITZONDERINGEN,
 } = {}) {
   const bevindingen = [];
@@ -204,31 +205,55 @@ export function toetsBestand({ pad, tekst }, {
       }
     }
   });
-  return bevindingen;
+  return { bevindingen, restbudget: budget };
+}
+
+/** Regels ontleden op één bestand. Puur: neemt tekst, geeft bevindingen. */
+export function toetsBestand(bestand, opties = {}) {
+  return ontleedBestand(bestand, opties).bevindingen;
 }
 
 /**
  * De hele boom in één keer, plus R3 over de uitzonderingenlijst zelf.
  *
- * R3 telt, en vergelijkt niet alleen op aanwezigheid: staan er twee posten voor een tekst die maar
- * één keer voorkomt, dan doet één post geen werk meer. Dat is dezelfde vervallen post als een tekst
- * die helemaal verdwenen is, en hij hoort net zo hard te worden aangewezen — anders sluipt er via
- * een dubbele post ongebruikt budget de lijst in.
+ * R3 meet VERBRUIK, niet aanwezigheid. Het verschil is niet academisch; het is een gat dat zichzelf
+ * dichttrekt zodra je ernaar kijkt. Uitzonderingen mogen elkaar bevatten — een toelichtingszin die
+ * het codefragment citeert is een gewoon geval — en `zonderGedekt` schrijft dan eerst de lange post
+ * af. Zou R3 daarna alleen tellen of de KORTE tekst ergens in het bestand voorkomt, dan vindt hij
+ * hem terug binnen die al opgegeten lange zin en verklaart hij de korte post voor levend, terwijl
+ * die in werkelijkheid niets heeft gedekt. Zo'n post is dan onzichtbaar ongebruikt budget: wie later
+ * een losse eigenaarsnaam toevoegt, krijgt hem stilzwijgend gedekt en passeert R1 zonder dat er
+ * ergens iets rood wordt — precies de sluipweg die deze poort moet uitsluiten.
+ *
+ * Door de reststand van het budget te lezen, verdwijnt dat: een post die niets heeft afgeschreven is
+ * vervallen en wordt aangewezen, of de tekst nu nergens meer staat óf alleen nog binnen een andere
+ * uitzondering. Beide gevallen zijn dezelfde ziekte — een lijst die groter is dan het werk dat zij
+ * doet — en beide horen bij dezelfde bevindingscode.
+ *
+ * Dat de telling ook de andere kant op loopt, blijft: twee posten voor één voorkomen laten er één
+ * zonder werk achter, en die wordt net zo hard aangewezen.
  */
 export function toetsBoom(bestanden, opties = {}) {
   const uitzonderingen = opties.uitzonderingen ?? UITZONDERINGEN;
-  const bevindingen = bestanden.flatMap((b) => toetsBestand(b, { ...opties, uitzonderingen }));
-  const perPad = new Map(bestanden.map((b) => [b.pad, b.tekst]));
-  const gevraagd = new Map();
-  for (const u of uitzonderingen) {
-    const sleutel = JSON.stringify([u.pad, u.tekst]);
-    gevraagd.set(sleutel, (gevraagd.get(sleutel) ?? 0) + 1);
+  const bevindingen = [];
+  const rest = new Map();
+  for (const b of bestanden) {
+    const uitkomst = ontleedBestand(b, { ...opties, uitzonderingen });
+    bevindingen.push(...uitkomst.bevindingen);
+    // Eén pad kan maar één keer in de boom staan; wie hem tweemaal aanlevert, krijgt de laatste
+    // stand. De echte boom komt uit `git ls-files` en levert elk pad precies één keer.
+    rest.set(b.pad, uitkomst.restbudget);
   }
-  for (const [sleutel, aantal] of gevraagd) {
-    const [pad, tekst] = JSON.parse(sleutel);
-    const voorkomens = telVoorkomens(perPad.get(pad) ?? '', tekst);
-    for (let i = voorkomens; i < aantal; i += 1) {
-      bevindingen.push({ code: OVERTREDING.VERVALLEN_UITZONDERING, pad, gevonden: tekst });
+  // Een pad dat helemaal niet meer in de boom voorkomt, heeft niets kunnen dekken: dan is het volle
+  // budget van die post over. Hetzelfde geval, dezelfde bevinding.
+  for (const pad of new Set(uitzonderingen.map((u) => u.pad))) {
+    if (!rest.has(pad)) rest.set(pad, dekkingsbudget(pad, uitzonderingen));
+  }
+  for (const [pad, budget] of rest) {
+    for (const [tekst, over] of budget) {
+      for (let i = 0; i < over; i += 1) {
+        bevindingen.push({ code: OVERTREDING.VERVALLEN_UITZONDERING, pad, gevonden: tekst });
+      }
     }
   }
   return bevindingen;

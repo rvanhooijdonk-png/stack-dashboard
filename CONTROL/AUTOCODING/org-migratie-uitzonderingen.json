@@ -37,6 +37,12 @@
       "reden": "Eigenaar van stack-control en van de bewaakte persoonlijke repo's. Waar deze generator stack-dashboard zelf aanspreekt, gebruikt hij dashboardRepositorySlug()."
     },
     {
+      "pad": "tools/dashboard-feed-generator/com.rvh.dashboard-feed-generator.plist",
+      "tekst": "<string>rvanhooijdonk-png/stack-dashboard</string>",
+      "blijft": "CONFIGURATIEPUNT",
+      "reden": "launchd kent geen Actions-context, dus DASHBOARD_REPOSITORY moet hier expliciet staan; zonder die sleutel publiceert de generator elk kwartier een feed zonder dashboard-git-events. Dit is de ene plaats die bij de overdracht meeverandert, en test/org-migration.test.mjs houdt de waarde tegen HOSTING_OWNER_OF_RECORD."
+    },
+    {
       "pad": "scripts/lib/runtime-feed-view.mjs",
       "tekst": "const HISTORISCHE_BEWIJS_EIGENAAR = 'rvanhooijdonk-png';",
       "blijft": "HISTORISCH",

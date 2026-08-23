@@ -477,3 +477,193 @@ test('de eigenaarsstand en het verwachte Pages-voorvoegsel horen bij elkaar', ()
   assert.equal(verwachtPagesVoorvoegsel(), `https://${HOSTING_OWNER_OF_RECORD.toLowerCase()}.github.io/${REPOSITORY_NAME}`);
   assert.ok(readFileSync('README.md', 'utf8').includes(`${verwachtPagesVoorvoegsel()}/`));
 });
+
+// --- 5. De tweede Codex-ronde: launchd, de generatorparser en overlappende uitzonderingen -------
+
+/**
+ * De EnvironmentVariables uit een launchd-plist, gelezen uit het bestand dat werkelijk wordt
+ * verscheept. Bewust geen plist-bibliotheek en bewust geen `plutil`: die laatste bestaat alleen op
+ * macOS en de toets moet ook op de ubuntu-runner meten. Dat maakt dit een kleine lezer, en een
+ * kleine lezer kan zelf fout zijn — daarom controleert de toets hieronder hem tegen `plutil` zodra
+ * die voorhanden is, en meet hij nooit iets anders dan de bytes die in de repository staan.
+ */
+function plistOmgeving(pad) {
+  const xml = readFileSync(pad, 'utf8');
+  const blok = xml.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
+  if (!blok) return null;
+  // Commentaar eerst weg: een uitleg die een `<key>` noemt is geen sleutel.
+  const zonderCommentaar = blok[1].replace(/<!--[\s\S]*?-->/g, '');
+  const env = {};
+  for (const m of zonderCommentaar.matchAll(/<key>([^<]+)<\/key>\s*<string>([^<]*)<\/string>/g)) {
+    env[m[1]] = m[2];
+  }
+  return env;
+}
+
+const PLIST = 'tools/dashboard-feed-generator/com.rvh.dashboard-feed-generator.plist';
+
+test('C1 — het verscheepte launchd-plist draagt zelf een ACTUELE dashboardidentiteit', () => {
+  // De bevinding die dit afsluit: het plist gaf noch DASHBOARD_REPOSITORY noch GITHUB_REPOSITORY
+  // mee, en launchd zet die laatste niet uit zichzelf — dat is een Actions-variabele. Elke
+  // geplande run nam daarmee het lege pad, liet alle PR-events van het dashboard weg, en
+  // publiceerde die onvolledige feed alsof er niets aan de hand was. Stil, elk kwartier opnieuw.
+  const env = plistOmgeving(PLIST);
+  assert.ok(env, 'het plist draagt een EnvironmentVariables-blok');
+  assert.ok(
+    'DASHBOARD_REPOSITORY' in env || 'GITHUB_REPOSITORY' in env,
+    'het plist levert zelf een identiteit; launchd geeft er geen',
+  );
+  // En de identiteit die eruit komt is de HUIDIGE, niet zomaar een geldige tekst. Dit is de draad
+  // naar de ene declaratie: verzet iemand HOSTING_OWNER_OF_RECORD bij de overdracht en laat hij
+  // dit plist staan, dan wordt deze toets rood in plaats van dat er een kwartaal lang naar een
+  // verhuisd object wordt gekeken.
+  assert.deepEqual(
+    resolveIdentity(env),
+    { owner: HOSTING_OWNER_OF_RECORD, repo: REPOSITORY_NAME },
+  );
+});
+
+test('C1 — de plist-lezer van deze toets komt overeen met de echte plist-parser van het systeem', (t) => {
+  // Zonder deze controle meet de toets hierboven misschien alleen haar eigen regex. `plutil` is de
+  // parser die macOS zelf gebruikt; waar hij bestaat, moet hij hetzelfde zeggen.
+  let uit;
+  try {
+    uit = execFileSync('plutil', ['-extract', 'EnvironmentVariables', 'json', '-o', '-', PLIST], { encoding: 'utf8' });
+  } catch {
+    t.skip('plutil niet beschikbaar (geen macOS) — de draagbare lezer blijft ongecontroleerd');
+    return;
+  }
+  assert.deepEqual(JSON.parse(uit), plistOmgeving(PLIST));
+});
+
+test('C1 — negatieve controle: zonder die sleutel valt de dashboardbron stil weg', () => {
+  // Precies de stand van vóór deze reparatie: HOME en PATH, verder niets. Geen fout, geen alarm —
+  // alleen een feed zonder dashboardevents. Dat is waarom de sleutel in het plist hoort en niet in
+  // een niet-genoemde handmatige omgevingsstap.
+  const zonder = { HOME: '/Users/iemand', PATH: '/usr/bin:/bin' };
+  assert.equal(resolveIdentity(zonder), null);
+});
+
+// De generator is een REVIEWKOPIE van het exemplaar dat onder launchd draait; hij haalt zijn
+// validators en nu ook zijn identiteitsafleiding uit de dashboardboom. Voor deze toets wijst die
+// wortel naar deze repository. Zetten vóór de import: de generator leest hem op moduleniveau.
+process.env.DASHBOARD_FEED_GENERATOR_DASHBOARD_ROOT = process.cwd();
+const generator = await import('../tools/dashboard-feed-generator/generator.mjs');
+
+test('C2 — de generator kent AFWEZIG, LEEG en MISVORMD elk hun eigen afloop', async () => {
+  const GELDIG = 'RVH-Speaking/stack-dashboard';
+
+  // MISVORMD en niet-leeg: een tikfout in een uitdrukkelijke aanwijzing. Vóór deze reparatie gaf de
+  // eigen parser van de generator hier `null` terug — niet te onderscheiden van "niets ingevuld" —
+  // en publiceerde hij daarna doodleuk een feed zonder dashboardevents. Nu werpt het, en dat komt
+  // als een luide FOUT uit main(): geen halve meting die achteraf als een geldige leest.
+  for (const kapot of ['RVH-Speaking', 'RVH-Speaking/stack dashboard', 'a/b/c', '/stack-dashboard']) {
+    await assert.rejects(
+      () => generator.dashboardRepositorySlug({ DASHBOARD_REPOSITORY: kapot, GITHUB_REPOSITORY: GELDIG }),
+      /DASHBOARD_REPOSITORY/,
+      kapot,
+    );
+  }
+
+  // LEEG en ALLEEN SPATIES: de vorm waarin Actions een niet-ingevulde `env:`-waarde doorgeeft. Dat
+  // is geen fout maar "niet gezet", en dan telt de Actions-context. De oude `??`-keten liet die
+  // terugval juist NIET toe, want leeg is niet `null`; de gedocumenteerde terugval bestond dus niet.
+  assert.equal(await generator.dashboardRepositorySlug({ DASHBOARD_REPOSITORY: '', GITHUB_REPOSITORY: GELDIG }), GELDIG);
+  assert.equal(await generator.dashboardRepositorySlug({ DASHBOARD_REPOSITORY: '   ', GITHUB_REPOSITORY: GELDIG }), GELDIG);
+
+  // AFWEZIG: hetzelfde pad.
+  assert.equal(await generator.dashboardRepositorySlug({ GITHUB_REPOSITORY: GELDIG }), GELDIG);
+
+  // De override wint van de context, en helemaal niets levert eerlijk niets op — dan slaat de bron
+  // over mét reden in het log, in plaats van tegen een geraden object te meten.
+  assert.equal(await generator.dashboardRepositorySlug({ DASHBOARD_REPOSITORY: GELDIG, GITHUB_REPOSITORY: 'iemand/anders' }), GELDIG);
+  assert.equal(await generator.dashboardRepositorySlug({}), null);
+});
+
+test('C2 — de generator draagt geen eigen tweede parser meer', () => {
+  const bron = readFileSync('tools/dashboard-feed-generator/generator.mjs', 'utf8');
+  assert.match(bron, /repo-identity\.mjs/);
+  assert.match(bron, /resolveIdentity\(env\)/);
+  // De vorige eigen ontleding — een losse regex op `owner/repo` — mag niet terugkomen. Twee
+  // parsers voor één begrip is precies hoe AFWEZIG en MISVORMD weer uit elkaar gaan lopen.
+  assert.doesNotMatch(bron, /A-Za-z0-9\._-\]\{1,100\}\\\//);
+  assert.doesNotMatch(bron, /process\.env\.DASHBOARD_REPOSITORY \?\? process\.env\.GITHUB_REPOSITORY/);
+});
+
+test('C2 — het plist en de generator sluiten op elkaar aan: de sleutel dekt de bron', async () => {
+  // De hele route in één keer, over de werkelijk verscheepte bestanden: wat het plist meegeeft,
+  // moet de generator ook echt tot een repository maken. Vóór de reparatie liep deze keten dood op
+  // een plist zonder identiteit; er wordt hier niets geladen, geïnstalleerd of gedraaid.
+  const env = plistOmgeving(PLIST);
+  assert.equal(
+    await generator.dashboardRepositorySlug(env),
+    `${HOSTING_OWNER_OF_RECORD}/${REPOSITORY_NAME}`,
+  );
+  assert.equal(await generator.dashboardRepositorySlug({ HOME: env.HOME, PATH: env.PATH }), null);
+});
+
+test('C2 — de generator draait nog steeds wél als launchd hem rechtstreeks aanroept', () => {
+  // De uitvoerpoort die het meten hierboven mogelijk maakt, mag de productieroute niet uitzetten.
+  // launchd roept `node <pad>` aan, dus `argv[1]` is het scriptpad zelf.
+  const bewaard = process.argv[1];
+  try {
+    process.argv[1] = 'tools/dashboard-feed-generator/generator.mjs';
+    assert.equal(generator.rechtstreeksAangeroepen(), true);
+    process.argv[1] = 'test/org-migration.test.mjs';
+    assert.equal(generator.rechtstreeksAangeroepen(), false);
+  } finally {
+    process.argv[1] = bewaard;
+  }
+});
+
+test('C3 — een korte uitzondering die binnen een lange valt, vervalt en dekt niets nieuws', () => {
+  // De exacte Codex-reproductie. Twee posten voor één pad, waarvan de korte tekst letterlijk in de
+  // lange zit — de vorm die in deze lijst gewoon voorkomt: een toelichtingszin die het codefragment
+  // citeert. `zonderGedekt` schrijft de lange post eerst af, dus de korte doet dan niets.
+  const LANG = "allowed rvanhooijdonk-png text";
+  const KORT = 'rvanhooijdonk-png';
+  const post = (tekst) => ({
+    pad: 'scripts/x.mjs', tekst, blijft: 'ANDER_OBJECT',
+    reden: 'verzonnen post, uitsluitend om het gedrag van R3 te meten',
+  });
+  const beide = [post(LANG), post(KORT)];
+  const alleenLang = [{ pad: 'scripts/x.mjs', tekst: `const A = '${LANG}';\n` }];
+
+  // VÓÓR de reparatie was dit leeg: R3 vond `rvanhooijdonk-png` terug als substring binnen de al
+  // opgegeten lange zin en verklaarde de korte post voor levend. Zij was dan onzichtbaar ongebruikt
+  // budget — de kern van de bevinding.
+  const vervallen = toetsBoom(alleenLang, { uitzonderingen: beide });
+  assert.equal(vervallen.length, 1);
+  assert.equal(vervallen[0].code, OVERTREDING.VERVALLEN_UITZONDERING);
+  assert.equal(vervallen[0].gevonden, KORT);
+
+  // En dat is precies wat een verborgen budget mogelijk maakte: wie er daarna een losse
+  // eigenaarsnaam bij zette, kreeg die stilzwijgend gedekt. Nu kán die stand niet meer ongemerkt
+  // bestaan — de poort staat al rood op de lijst zelf. Haalt iemand de vervallen post weg, zoals R3
+  // eist, dan blijft de nieuwe binding over als een gewone R1-overtreding.
+  const langPlusLos = [{ pad: 'scripts/x.mjs', tekst: `const A = '${LANG}';\nconst OWNER = '${KORT}';\n` }];
+  const naOpruimen = toetsBoom(langPlusLos, { uitzonderingen: [post(LANG)] });
+  assert.equal(naOpruimen.length, 1);
+  assert.equal(naOpruimen[0].code, OVERTREDING.OPERATIONELE_EIGENAAR);
+  assert.equal(naOpruimen[0].regel, 2);
+
+  // Laat iemand de korte post juist staan en zet hij er een losse binding bij, dan is de lijst weer
+  // een eerlijke telling: twee posten, twee voorkomens, allebei gedekt en allebei aan het werk. Dat
+  // is de enige stand waarin die tweede naam mag blijven staan, en hij is nu zichtbaar geworden in
+  // plaats van meegelift.
+  assert.deepEqual(toetsBoom(langPlusLos, { uitzonderingen: beide }), []);
+});
+
+test('C3 — R3 meet verbruik, niet aanwezigheid: dekking op een niet-uitvoerend pad telt gewoon mee', () => {
+  // Een post op een pad waar R1 niet geldt, doet nog steeds werk zodra haar tekst er staat; dat is
+  // geen R1-bevinding, maar de post is ook niet vervallen. Zonder dit onderscheid zou de nieuwe
+  // telling elke post buiten `scripts/`, `tools/` en de workflows ten onrechte doodverklaren.
+  const post = {
+    pad: 'docs/RAPPORT.md', tekst: 'rvanhooijdonk-png', blijft: 'HISTORISCH',
+    reden: 'verzonnen post, uitsluitend om het gedrag van R3 te meten',
+  };
+  assert.deepEqual(toetsBoom([{ pad: 'docs/RAPPORT.md', tekst: 'gemeten op rvanhooijdonk-png\n' }], { uitzonderingen: [post] }), []);
+  const weg = toetsBoom([{ pad: 'docs/RAPPORT.md', tekst: 'geen naam meer\n' }], { uitzonderingen: [post] });
+  assert.equal(weg.length, 1);
+  assert.equal(weg[0].code, OVERTREDING.VERVALLEN_UITZONDERING);
+});

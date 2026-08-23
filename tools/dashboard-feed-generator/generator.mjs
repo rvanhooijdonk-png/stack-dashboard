@@ -33,8 +33,9 @@
  */
 
 import { readFile, readdir, lstat } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join, basename, dirname } from 'node:path';
+import { join, basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -52,20 +53,39 @@ const DASHBOARD_REPO = 'stack-dashboard';
  * Waar `stack-dashboard` op DIT moment staat. Alleen bronnen die het HEDEN kennen tellen: een
  * expliciete `DASHBOARD_REPOSITORY` of de Actions-context.
  *
- * De `origin`-remote van de dashboard-werkboom staat er bewust NIET bij, hoe verleidelijk ook —
- * deze generator draait juist lokaal onder launchd, waar die remote altijd voorhanden is. Maar hij
- * bewaart wat er bij het klonen is opgeschreven: GitHub verplaatst een repository server-side en
- * blijft de oude naam doorverwijzen, dus na de overdracht noemt `origin` nog de vorige eigenaar
- * terwijl alles blijft werken. Die stand hier vertrouwen levert git-events over een verhuisd object
- * op zonder dat er iets rood wordt.
+ * De afleiding staat hier BEWUST NIET nog een keer opgeschreven. Zij komt uit `resolveIdentity()`
+ * in `scripts/lib/repo-identity.mjs` van de dashboardboom — dezelfde functie die de workflows
+ * gebruiken, langs dezelfde weg als de twee feed-validators hieronder. Een tweede parser met
+ * "ongeveer dezelfde" regels is precies hoe de twee stelsels uit elkaar lopen: die van hierboven
+ * onderscheidde AFWEZIG niet van MISVORMD, zodat een tikfout in de override (`RVH-Speaking` zonder
+ * repositorynaam) als "niets ingevuld" langskwam en de feed daarna zonder dashboardevents werd
+ * gepubliceerd. `??` maakte het dubbel scheef: een lege `DASHBOARD_REPOSITORY` — de vorm waarin
+ * Actions een niet-ingevulde `env:`-waarde doorgeeft — blokkeerde de terugval op een geldige
+ * `GITHUB_REPOSITORY`, want leeg is niet `null`.
  *
- * Fail-closed en niet terugvallen op `CONTROL_OWNER`: liever één overgeslagen bron met een reden in
- * het log dan een stille verkeerde meting. Zet `DASHBOARD_REPOSITORY` in de launchd-omgeving om
- * deze bron aan te zetten.
+ * Wat `resolveIdentity()` daarvoor in de plaats geeft:
+ *  - MISVORMD en niet-leeg → werpt. Dat komt hier als een luide FOUT uit `main()` en er wordt niets
+ *    gepubliceerd; een uitdrukkelijke aanwijzing die niet klopt, mag geen halve meting opleveren.
+ *  - LEEG, alleen spaties, of AFWEZIG → geen override, en dan telt `GITHUB_REPOSITORY`.
+ *  - Niets bruikbaars → `null`, en dan slaat deze bron over mét reden in het log.
+ *
+ * De `origin`-remote van de dashboard-werkboom telt niet mee, hoe verleidelijk ook — deze generator
+ * draait juist lokaal onder launchd, waar die remote altijd voorhanden is. Maar hij bewaart wat er
+ * bij het klonen is opgeschreven: GitHub verplaatst een repository server-side en blijft de oude
+ * naam doorverwijzen, dus na de overdracht noemt `origin` nog de vorige eigenaar terwijl alles
+ * blijft werken. Die stand hier vertrouwen levert git-events over een verhuisd object op zonder dat
+ * er iets rood wordt.
+ *
+ * Onder launchd is er geen Actions-context. Het meegeleverde plist zet daarom zelf
+ * `DASHBOARD_REPOSITORY`; zonder die sleutel slaat deze bron over en publiceert de generator een
+ * feed zonder dashboardevents. Zie `README.md` hiernaast.
  */
-function dashboardRepositorySlug() {
-  const uitOmgeving = (process.env.DASHBOARD_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? '').trim();
-  return /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/.test(uitOmgeving) ? uitOmgeving : null;
+export async function dashboardRepositorySlug(env = process.env) {
+  const { resolveIdentity, repositorySlug } = await import(
+    join(DASHBOARD_ROOT, 'scripts/lib/repo-identity.mjs')
+  );
+  const identiteit = resolveIdentity(env);
+  return identiteit ? repositorySlug(identiteit) : null;
 }
 const FEEDS_REF = 'dashboard-feeds';
 const BASE_REF = 'main';
@@ -207,7 +227,7 @@ async function healthEvents() {
 // ---------------------------------------------------------------------------
 async function gitEvents() {
   const events = [];
-  const dashboardSlug = dashboardRepositorySlug();
+  const dashboardSlug = await dashboardRepositorySlug();
   if (!dashboardSlug) {
     log(`kan niet vaststellen waar ${DASHBOARD_REPO} nu staat (geen DASHBOARD_REPOSITORY, geen `
       + 'GITHUB_REPOSITORY; de origin van de werkboom telt niet, die overleeft een overdracht '
@@ -443,7 +463,31 @@ async function main() {
   log('klaar.');
 }
 
-main().catch((err) => {
-  log(`FOUT: ${err.stack ?? err.message}`);
-  process.exitCode = 1;
-});
+/**
+ * Alleen draaien als dit bestand ZELF is aangeroepen — zoals launchd het aanroept, met het pad als
+ * `argv[1]`. Zonder deze poort start een `import` van deze module meteen een volledige run met
+ * publicatie, en dan kan geen enkele toets de identiteitsroute hierboven meten zonder de echte
+ * feeds aan te raken.
+ *
+ * De vergelijking loopt over `realpath`, want een LaunchAgent mag naar een symlink wijzen. Faalt
+ * die (het pad bestaat niet meer), dan valt hij terug op de letterlijke vergelijking. Staat de
+ * uitkomst onverhoopt op `false`, dan doet de generator niets en blijven de feeds staan waar ze
+ * stonden — zichtbaar in het log en aan een oude `generatedAt`, en niet als een verkeerde publicatie.
+ */
+export function rechtstreeksAangeroepen() {
+  const aanroep = process.argv[1];
+  if (!aanroep) return false;
+  const zelf = fileURLToPath(import.meta.url);
+  try {
+    return realpathSync(aanroep) === realpathSync(zelf);
+  } catch {
+    return resolve(aanroep) === zelf;
+  }
+}
+
+if (rechtstreeksAangeroepen()) {
+  main().catch((err) => {
+    log(`FOUT: ${err.stack ?? err.message}`);
+    process.exitCode = 1;
+  });
+}
