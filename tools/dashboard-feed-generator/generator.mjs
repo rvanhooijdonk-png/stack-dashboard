@@ -57,8 +57,8 @@ const DASHBOARD_REPO = 'stack-dashboard';
  * in `scripts/lib/repo-identity.mjs` van de dashboardboom — dezelfde functie die de workflows
  * gebruiken, langs dezelfde weg als de twee feed-validators hieronder. Een tweede parser met
  * "ongeveer dezelfde" regels is precies hoe de twee stelsels uit elkaar lopen: die van hierboven
- * onderscheidde AFWEZIG niet van MISVORMD, zodat een tikfout in de override (`RVH-Speaking` zonder
- * repositorynaam) als "niets ingevuld" langskwam en de feed daarna zonder dashboardevents werd
+ * onderscheidde AFWEZIG niet van MISVORMD, zodat een tikfout in de override (de eigenaarsnaam
+ * zonder repositorynaam) als "niets ingevuld" langskwam en de feed daarna zonder dashboardevents werd
  * gepubliceerd. `??` maakte het dubbel scheef: een lege `DASHBOARD_REPOSITORY` — de vorm waarin
  * Actions een niet-ingevulde `env:`-waarde doorgeeft — blokkeerde de terugval op een geldige
  * `GITHUB_REPOSITORY`, want leeg is niet `null`.

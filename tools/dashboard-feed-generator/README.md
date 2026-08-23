@@ -56,3 +56,8 @@ overdracht de oude naam door, dus die remote blijft de vorige eigenaar noemen te
 de poort in `test/org-migration.test.mjs` houdt de waarde uit dit plist tegen de eigenaarsstand in de
 poortmodule onder `scripts/lib/`, dus een vergeten regel is een rode toets en geen stille verkeerde
 meting.
+
+Let wel op wat een merge hier NIET doet: de kopie die onder launchd draait staat buiten git, dus zij
+blijft ongewijzigd tot iemand haar bijtrekt. De exacte bestandsafbeelding en de atomische volgorde
+daarvoor staan in [`docs/ORG-CUTOVER.md`](../../docs/ORG-CUTOVER.md) §3; dat is een aparte,
+uitdrukkelijke handeling onder de eigenaarsgate en geen onderdeel van deze wijziging.

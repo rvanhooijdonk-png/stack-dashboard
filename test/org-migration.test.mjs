@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -26,11 +26,18 @@ import {
 } from '../scripts/lib/repo-identity.mjs';
 import {
   HOSTING_OWNER_OF_RECORD, REPOSITORY_NAME, OPERATIONELE_PADEN, OVERTREDING, UITZONDERINGEN,
-  UITZONDERINGEN_PAD, POORT_MODULE, verwachtPagesVoorvoegsel, toetsBestand, toetsBoom,
-  gevolgdeBestanden, leesUitzonderingen,
+  UITZONDERINGEN_PAD, POORT_MODULE, VORIGE_HOSTING_EIGENAARS, EIGENAARSKLASSE,
+  verwachtPagesVoorvoegsel, toetsBestand, toetsBoom, gevolgdeBestanden, leesUitzonderingen,
+  eigenaarsKandidaten,
 } from '../scripts/lib/org-migration.mjs';
 import { claimEvidence, evidenceUrlPrefixes } from '../scripts/lib/runtime-feed-view.mjs';
 
+// Deze twee dragen de namen uit de tijd waarin sectie 1 is geschreven: `NU` is het persoonlijke
+// account waar deze repository vandaan komt, `STRAKS` de organisatie waarnaar zij wordt
+// overgedragen. Sectie 1 meet ZUIVERE ADRESOPBOUW voor twee genoemde eigenaars, en die metingen
+// blijven waar aan beide kanten van de overdracht — daarom zijn ze hier niet hernoemd. Wat de
+// DECLARATIE van vandaag is, staat in sectie 6, en dat bindt aan `HOSTING_OWNER_OF_RECORD` in
+// plaats van aan een naam in een toets.
 const NU = { owner: 'rvanhooijdonk-png', repo: 'stack-dashboard' };
 const STRAKS = { owner: 'RVH-Speaking', repo: 'stack-dashboard' };
 
@@ -669,4 +676,334 @@ test('C3 — R3 meet verbruik, niet aanwezigheid: dekking op een niet-uitvoerend
   const weg = toetsBoom([{ pad: 'docs/RAPPORT.md', tekst: 'geen naam meer\n' }], { uitzonderingen: [post] });
   assert.equal(weg.length, 1);
   assert.equal(weg[0].code, OVERTREDING.VERVALLEN_UITZONDERING);
+});
+
+// --- 6. De overdracht zelf: de drie plaatsen die als één geheel omslaan -------------------------
+
+/**
+ * Sectie 1 tot en met 5 meten dat deze repository OVERDRAAGBAAR is. Deze sectie meet de
+ * overdracht: de stand die zegt waar het dashboard staat, en de plaatsen die daar onlosmakelijk aan
+ * vastzitten.
+ *
+ * Waarom dat een eigen sectie is en geen extra regel bij C1: de drie carriers falen elk op hun
+ * eigen manier als er één achterblijft, en die manieren zijn niet inwisselbaar. Een achtergebleven
+ * README-adres is zichtbaar verkeerd; een achtergebleven `HOSTING_OWNER_OF_RECORD` maakt de poort
+ * blind voor precies de fout die dan telt; een achtergebleven plist laat de feedgenerator elk
+ * kwartier stil een onvolledige feed publiceren. Alleen als alle drie tegen dezelfde declaratie
+ * worden gehouden, is "vergeten" onmogelijk in plaats van onwaarschijnlijk.
+ */
+
+const VORIGE = VORIGE_HOSTING_EIGENAARS[0];
+
+/**
+ * Een tijdelijke map die zichzelf opruimt, ook als het werk erin omvalt. Het opruimen hoort in
+ * `finally` en niet achter de laatste assertie: juist de run waarin een assertie omvalt is de run
+ * die zich herhaalt, en dan groeit /tmp mee met het aantal pogingen.
+ *
+ * Dit is met opzet een functie en geen afspraak in commentaar. Een afspraak moet je nalezen om te
+ * weten of zij is nagekomen; een functie is nagekomen of zij bestaat niet. De toets erna meet dat
+ * gedrag rechtstreeks — door hier een fout doorheen te gooien — in plaats van deze bron te lezen.
+ */
+function inTijdelijkeMap(voorvoegsel, werk) {
+  const map = mkdtempSync(join(tmpdir(), voorvoegsel));
+  try {
+    return werk(map);
+  } finally {
+    rmSync(map, { recursive: true, force: true });
+  }
+}
+
+// Het mappad dat de negatieve controle van C4 aanmaakt, zodat de toets erna kan meten dat het
+// werkelijk is opgeruimd. Een opgeruimde map bewijst zichzelf niet; hij moet bij naam worden gemist.
+let C4_NEGATIEVE_CONTROLE_MAP = null;
+
+test('C4 — de eigenaarsstand, het Pages-adres en het launchd-plist slaan als één geheel om', () => {
+  // De declaratie zelf, één keer letterlijk. Dit is de enige plaats in deze toetsen waar de naam
+  // van de doelorganisatie als verwachting wordt opgeschreven; al het andere hangt eraan.
+  assert.equal(HOSTING_OWNER_OF_RECORD, STRAKS.owner);
+  assert.equal(REPOSITORY_NAME, STRAKS.repo);
+  assert.deepEqual([...VORIGE_HOSTING_EIGENAARS], [NU.owner]);
+
+  // Carrier 1 — het Pages-adres dat bij vaste tekst hoort, met de host in kleine letters.
+  assert.equal(verwachtPagesVoorvoegsel(), 'https://rvh-speaking.github.io/stack-dashboard');
+  const readme = readFileSync('README.md', 'utf8');
+  assert.ok(readme.includes(`${verwachtPagesVoorvoegsel()}/`), 'README noemt het actuele Pages-adres');
+  // Carrier 2 — en niet meer dat van de vorige eigenaar. Zonder deze kant zou de toets hierboven ook
+  // groen zijn met beide adressen in de README, en dan wijst de helft van de lezers nog verkeerd.
+  assert.ok(
+    !readme.includes(verwachtPagesVoorvoegsel(VORIGE)),
+    'de README draagt het Pages-adres van de vorige eigenaar niet meer',
+  );
+
+  // Carrier 3 — het plist, gelezen uit de bytes die werkelijk worden verscheept.
+  const env = plistOmgeving(PLIST);
+  assert.deepEqual(resolveIdentity(env), { owner: HOSTING_OWNER_OF_RECORD, repo: REPOSITORY_NAME });
+
+  // NEGATIEVE CONTROLE op dezelfde meting: hetzelfde plist met de oude waarde erin moet hier
+  // omvallen. Anders meet C1 hierboven alleen dat er íéts geldigs staat.
+  inTijdelijkeMap('orgmig-plist-', (map) => {
+    C4_NEGATIEVE_CONTROLE_MAP = map;
+    const achtergebleven = join(map, 'oud.plist');
+    writeFileSync(achtergebleven, readFileSync(PLIST, 'utf8')
+      .replace(`<string>${HOSTING_OWNER_OF_RECORD}/${REPOSITORY_NAME}</string>`, `<string>${VORIGE}/${REPOSITORY_NAME}</string>`));
+    assert.notDeepEqual(
+      resolveIdentity(plistOmgeving(achtergebleven)),
+      { owner: HOSTING_OWNER_OF_RECORD, repo: REPOSITORY_NAME },
+    );
+    assert.deepEqual(resolveIdentity(plistOmgeving(achtergebleven)), { owner: VORIGE, repo: REPOSITORY_NAME });
+  });
+});
+
+test('C4 — de negatieve controle hierboven laat geen tijdelijke map achter', () => {
+  // Kant 1: de map die de toets werkelijk heeft gemaakt, is er niet meer. Deze toets draait ná
+  // C4 in hetzelfde bestand, dus dit meet de echte uitvoering en niet een nagespeelde vorm.
+  assert.ok(C4_NEGATIEVE_CONTROLE_MAP, 'de negatieve controle heeft een tijdelijke map gemaakt');
+  assert.equal(existsSync(C4_NEGATIEVE_CONTROLE_MAP), false, C4_NEGATIEVE_CONTROLE_MAP);
+});
+
+test('C4 — de tijdelijke map wordt ook opgeruimd als het werk erin omvalt', () => {
+  // Kant 1 hierboven is groen zolang alles toevallig goed gaat. Juist de run waarin een assertie
+  // omvalt is de run die zich herhaalt, en dat is de run waarin het lek ontstaat. Die kant wordt
+  // hier gedragsmatig gemeten: een eigen fout door dezelfde helper heen gooien en daarna kijken.
+  //
+  // Gedragsmatig en niet door deze bron te lezen: een bronlezer meet de vorm van vandaag en valt om
+  // op een formatter, terwijl hij blind is voor een `finally` die er wél staat maar niets doet.
+  const sentinel = new Error('sentinel-fout van de opruimtoets — hoort naar buiten te komen');
+  let gemaakt = null;
+
+  assert.throws(
+    () => inTijdelijkeMap('orgmig-opruimen-', (map) => {
+      gemaakt = map;
+      // Een niet-lege map: zonder `recursive` faalt het opruimen precies hier, en dat is de vorm
+      // waarin dit lek in de praktijk voorkomt — de map bevat immers altijd het bestand van de toets.
+      writeFileSync(join(map, 'inhoud.txt'), 'x');
+      assert.equal(existsSync(map), true, map);
+      throw sentinel;
+    }),
+    // Dezelfde fout, niet alleen "een" fout: het opruimen mag de oorzaak niet inslikken of vervangen.
+    (e) => e === sentinel,
+  );
+
+  assert.ok(gemaakt, 'de helper heeft de map aangemaakt en aan het werk doorgegeven');
+  assert.equal(existsSync(gemaakt), false, gemaakt);
+});
+
+test('C4 — één vergeten operationele binding aan de VORIGE eigenaar wordt fail-closed rood', () => {
+  // Dit is het gat dat op het moment van de overdracht opengaat. R1 kende alleen de eigenaar van
+  // vandaag; op de dag dat die eigenaar verandert, zou elke verwijzing die is blijven staan in één
+  // klap buiten de poort vallen — precies wanneer die verwijzingen het gevaarlijkst zijn, want
+  // GitHub blijft de oude naam doorverwijzen en niets voelt kapot.
+  for (const pad of ['scripts/nieuw.mjs', 'scripts/lib/nieuw.mjs', 'tools/x/y.mjs', '.github/workflows/nieuw.yml']) {
+    for (const geschreven of [VORIGE, VORIGE.toUpperCase(), 'Rvanhooijdonk-PNG']) {
+      const b = toetsBestand({ pad, tekst: `const OWNER = '${geschreven}';\n` }, geenUitzonderingen);
+      assert.equal(b.length, 1, `${pad} ${geschreven}`);
+      assert.equal(b[0].code, OVERTREDING.OPERATIONELE_EIGENAAR);
+      assert.equal(b[0].gevonden, geschreven);
+      // De remedie verschilt per klasse, dus de bevinding zegt zelf welke het is.
+      assert.equal(b[0].eigenaarsklasse, EIGENAARSKLASSE.ACHTERGEBLEVEN, `${pad} ${geschreven}`);
+    }
+  }
+
+  // De huidige eigenaar blijft even hard geweigerd, en wordt anders geëtiketteerd: daar is niets
+  // vergeten, daar hoort een afleiding te staan.
+  const nu = toetsBestand({ pad: 'scripts/nieuw.mjs', tekst: `const OWNER = '${HOSTING_OWNER_OF_RECORD}';\n` }, geenUitzonderingen);
+  assert.equal(nu.length, 1);
+  assert.equal(nu[0].eigenaarsklasse, EIGENAARSKLASSE.HUIDIG);
+
+  // En de grens verschuift niet mee: buiten de uitvoerende paden is de oude naam gewoon invoer,
+  // verslag of persoonslogin. Zou dit meeverhuizen, dan haalt de poort de drie eigenaars door
+  // elkaar die deze hele migratie juist uit elkaar houdt.
+  for (const pad of ['test/x.test.mjs', 'docs/RAPPORT.md', 'CONTROL/AUTOCODING/policy.v1.json', 'contracts/z.schema.json']) {
+    assert.deepEqual(toetsBestand({ pad, tekst: `"allowed_owner_actors": ["${VORIGE}"]\n` }, geenUitzonderingen), [], pad);
+  }
+});
+
+test('C4 — het Pages-adres van de vorige eigenaar wordt geweigerd in code, README en documentatie', () => {
+  // Hetzelfde gat als hierboven, maar dan voor R2 en met de werkelijke vorige eigenaar in plaats
+  // van een verzonnen naam: na de overdracht levert dit adres een HTTP-fout op, en die fout leest
+  // de waarnemer als "de plaat is niet vers" — niet als "het adres is verhuisd".
+  for (const pad of ['README.md', 'docs/X.md', 'CONTROL/AUTOCODING/README.md', 'scripts/x.mjs']) {
+    const b = toetsBestand({ pad, tekst: `zie ${verwachtPagesVoorvoegsel(VORIGE)}/status.json\n` }, geenUitzonderingen)
+      .filter((x) => x.code === OVERTREDING.VEROUDERD_PAGES_ADRES);
+    assert.equal(b.length, 1, pad);
+    assert.equal(b[0].verwacht, verwachtPagesVoorvoegsel(), pad);
+  }
+});
+
+test('C4 — simulatie: met GITHUB_REPOSITORY op de organisatie leidt de keten exact de verwachte adressen af', () => {
+  // De twee lagen komen langs verschillende wegen tot een adres: de poort houdt VASTE TEKST tegen
+  // `HOSTING_OWNER_OF_RECORD`, de publicatieketen LEIDT AF uit de runtime. Ze mogen nooit uit
+  // elkaar lopen, en dat is hier meetbaar in plaats van aangenomen.
+  const slug = `${HOSTING_OWNER_OF_RECORD}/${REPOSITORY_NAME}`;
+  const uitActions = detectIdentity({ GITHUB_REPOSITORY: slug }, { cwd: '/' });
+  assert.deepEqual(uitActions, { owner: HOSTING_OWNER_OF_RECORD, repo: REPOSITORY_NAME });
+  assert.equal(pagesUrl(uitActions), `${verwachtPagesVoorvoegsel()}/`);
+  assert.equal(pagesUrl(uitActions, 'contentstroom.html'), `${verwachtPagesVoorvoegsel()}/contentstroom.html`);
+  // raw en de REST-API zijn geen hostnamen: daar blijft de schrijfwijze van de organisatie staan.
+  assert.equal(
+    rawUrl(uitActions, 'main', 'data/kanaalpost-publiek.md'),
+    `https://raw.githubusercontent.com/${HOSTING_OWNER_OF_RECORD}/${REPOSITORY_NAME}/main/data/kanaalpost-publiek.md`,
+  );
+  assert.equal(repositorySlug(uitActions), slug);
+
+  // En launchd komt langs de derde weg — de sleutel uit het verscheepte plist — op exact hetzelfde
+  // object uit. Drie wegen, één plaats; dat is wat "als één geheel omslaan" hier betekent.
+  assert.deepEqual(resolveIdentity(plistOmgeving(PLIST)), uitActions);
+});
+
+test('C4 — wat NIET meeverhuist blijft aantoonbaar staan', () => {
+  // De keerzijde van de vorige toetsen. Een migratie die te ver doorslaat is net zo stuk als een
+  // die blijft steken: het bewaakte account, `stack-control` en de persoonslogin horen bij ANDERE
+  // objecten, en die zijn niet overgedragen.
+  assert.match(readFileSync('scripts/lib/collect.mjs', 'utf8'), new RegExp(`DASHBOARD_OWNER \\?\\? '${VORIGE}'`));
+  assert.match(readFileSync('tools/dashboard-feed-generator/generator.mjs', 'utf8'), new RegExp(`CONTROL_OWNER = '${VORIGE}'`));
+  const policy = JSON.parse(readFileSync('CONTROL/AUTOCODING/policy.v1.json', 'utf8'));
+  assert.ok(policy.owner_gate.allowed_owner_actors.includes(VORIGE), 'de persoonslogin verhuist niet mee');
+
+  // Historisch bewijs blijft klikbaar. Dit is de reden dat de vorige eigenaar op de bewijslijst
+  // staat: al gepubliceerde commit-URL's wijzen naar het persoonlijke account en die links zouden
+  // anders bij de overdracht doodvallen.
+  const prefixes = evidenceUrlPrefixes({ GITHUB_REPOSITORY_OWNER: HOSTING_OWNER_OF_RECORD });
+  assert.deepEqual(prefixes, [`https://github.com/${VORIGE}/`, `https://github.com/${HOSTING_OWNER_OF_RECORD}/`]);
+  assert.match(claimEvidence(BEWIJS_OUD, { prefixes }), /<a href="https:\/\/github\.com\/rvanhooijdonk-png\//);
+  assert.match(claimEvidence(BEWIJS_NIEUW, { prefixes }), /<a href="https:\/\/github\.com\/RVH-Speaking\//);
+});
+
+test('C4 — de identiteit staat op precies één operationele plaats, en de lokale afbeelding wijst ernaar', () => {
+  // Een tweede plaats met dezelfde waarde is geen extra zekerheid maar een tweede plaats om te
+  // vergeten. Deze toets houdt dat aantal op één: het plist, dat launchd nodig heeft omdat daar
+  // geen Actions-context is. Alles wat draait, leidt af.
+  const dragers = gevolgdeBestanden()
+    .filter((b) => OPERATIONELE_PADEN.some((p) => b.pad.startsWith(p)))
+    .filter((b) => b.tekst.includes(`${HOSTING_OWNER_OF_RECORD}/${REPOSITORY_NAME}`))
+    .map((b) => b.pad);
+  assert.deepEqual(dragers, [PLIST]);
+
+  // De kopie die onder launchd draait staat buiten git; een merge raakt haar niet aan. Dat is geen
+  // detail maar het verschil tussen "de overdracht is doorgevoerd" en "de overdracht is doorgevoerd
+  // behalve op de machine die elk kwartier publiceert". De afbeelding hoort dus vast te liggen
+  // vóórdat iemand hem nodig heeft.
+  const gids = readFileSync('docs/ORG-CUTOVER.md', 'utf8');
+  for (const genoemd of [
+    'tools/dashboard-feed-generator/generator.mjs',
+    'tools/dashboard-feed-generator/com.rvh.dashboard-feed-generator.plist',
+    '~/Stack-Director/bin/dashboard-feed-generator.mjs',
+    '~/Stack-Director/launchd/com.rvh.dashboard-feed-generator.plist',
+    '~/Library/LaunchAgents/com.rvh.dashboard-feed-generator.plist',
+  ]) assert.ok(gids.includes(genoemd), genoemd);
+});
+
+test('C4 — de te plakken regels in de gids dragen geen hoekhakenplaceholder', () => {
+  // De handeling wordt onder tijdsdruk uitgevoerd, uit dit blok, met kopiëren en plakken. `<` en
+  // `>` zijn in bash omleidingstekens: `cd <map>` leest niet als "vul hier de map in" maar knipt
+  // stil een bestand leeg of valt om. Een placeholder hoort dus een variabele te zijn, geen haken.
+  const gids = readFileSync('docs/ORG-CUTOVER.md', 'utf8');
+  const blokken = [...gids.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
+  assert.ok(blokken.length > 0, 'de gids draagt ten minste één bash-blok');
+  let cdRegels = 0;
+  for (const blok of blokken) {
+    for (const regel of blok.split('\n')) {
+      const code = regel.split('#')[0];
+      assert.doesNotMatch(code, /<[^<>\s]+>/, regel);
+      // Dezelfde plakfout, één stap verder. `cd` naar een map die de lezer verkeerd invulde faalt
+      // met een melding en gaat dán gewoon door: de regels erna draaien in de map waar hij toevallig
+      // stond, dus de shasums en de `cp` wijzen naar een andere bron dan bedoeld. Fail-closed is hier
+      // niet netjes maar noodzakelijk, want het blok kopieert bestanden naar een draaiende agent.
+      if (/^\s*cd\s/.test(code)) {
+        cdRegels += 1;
+        assert.match(code, /\|\|\s*exit 1\s*$/, regel);
+      }
+    }
+  }
+  assert.ok(cdRegels > 0, 'de gids stapt ergens een map binnen; anders meet de eis hierboven niets');
+  assert.ok(gids.includes('cd "$KLOON" || exit 1'), 'de gids stapt fail-closed de kloon binnen');
+  // En de omschrijving is er nog: zonder de uitleg zou de haakloze vorm hierboven ook te halen zijn
+  // door de plaatsaanduiding helemaal weg te laten, en dan weet de lezer niet meer wát hij invult.
+  assert.match(gids, /KLOON=/);
+  assert.ok(gids.includes('de kloon van stack-dashboard'), 'de gids zegt wat KLOON is');
+});
+
+// --- 7. De kandidatenlijst: fail-closed op vervuilde invoer -------------------------------------
+//
+// Deze sectie meet één afweging en niet een typetoets om de typetoets. `eigenaarsKandidaten` bouwt
+// de namen waarop R1 zoekt. Wie daar een ongeldige waarde stilzwijgend uitfiltert, haalt een
+// eigenaar UIT de poort — en juist een achtergebleven vorige eigenaar is de bevinding die deze
+// migratie moet vangen. Vervuilde invoer moet dus luid stuk, niet stil half.
+
+test('R1-kandidaten — een niet-string eigenaar wordt geweigerd, niet naar tekst gedwongen', () => {
+  // `RegExp.test` maakt van 123 gewoon '123' en laat hem door NAAM heen; pas `toLowerCase()` een
+  // regel verderop knalde dan, met een kale TypeError die niets zegt over de invoer.
+  for (const stuk of [123, null, true, {}, ['RVH-Speaking'], Symbol('x')]) {
+    assert.throws(
+      () => eigenaarsKandidaten(stuk, VORIGE_HOSTING_EIGENAARS),
+      (e) => e instanceof Error && !(e instanceof TypeError) && /ongeldige eigenaarsnaam/.test(e.message),
+      String(typeof stuk),
+    );
+  }
+  // `undefined` is de ENIGE uitzondering, en met opzet: dat is de waarde waarmee JavaScript "niet
+  // meegegeven" uitdrukt, dus daar hoort de gedeclareerde stand te gelden. Zou ook die weigeren,
+  // dan kon de poort niet meer zonder argumenten worden aangeroepen — precies hoe zij draait.
+  assert.deepEqual(eigenaarsKandidaten(undefined, undefined), eigenaarsKandidaten());
+  assert.ok(eigenaarsKandidaten().includes(HOSTING_OWNER_OF_RECORD));
+});
+
+test('R1-kandidaten — een niet-string in vorigeEigenaars wordt geweigerd, niet overgeslagen', () => {
+  for (const stuk of [42, null, {}, ['rvanhooijdonk-png']]) {
+    assert.throws(
+      () => eigenaarsKandidaten(HOSTING_OWNER_OF_RECORD, [VORIGE, stuk]),
+      /ongeldige eigenaarsnaam/,
+      String(typeof stuk),
+    );
+  }
+  // En de lijst zelf moet een lijst zijn: een losse string zou anders per teken worden gespreid.
+  assert.throws(() => eigenaarsKandidaten(HOSTING_OWNER_OF_RECORD, VORIGE), /ongeldige vorigeEigenaars/);
+});
+
+test('R1-kandidaten — een ongeldige NAAM wordt geweigerd op beide plaatsen', () => {
+  for (const naam of ['kwaad/pad', 'met spatie', '', 'x'.repeat(101), '../ontsnapping']) {
+    assert.throws(() => eigenaarsKandidaten(naam, []), /ongeldige eigenaarsnaam/, naam);
+    assert.throws(() => eigenaarsKandidaten(HOSTING_OWNER_OF_RECORD, [naam]), /ongeldige eigenaarsnaam/, naam);
+  }
+  // Dezelfde volgorde geldt bij het Pages-voorvoegsel: eerst het type, dan de vorm. Ook daar mag
+  // een niet-string nooit als tekst worden opgevat en pas op `toLowerCase()` stuklopen.
+  assert.throws(() => verwachtPagesVoorvoegsel(123), /ongeldige eigenaar of repositorynaam/);
+  assert.throws(() => verwachtPagesVoorvoegsel(HOSTING_OWNER_OF_RECORD, ['stack-dashboard']), /ongeldige eigenaar of repositorynaam/);
+});
+
+test('R1-kandidaten — een hoofdletterduplicaat blijft precies één kandidaat en één bevinding', () => {
+  // Ontdubbelen gebeurt hoofdletterongevoelig, want het patroon zoekt dat ook. Zonder ontdubbeling
+  // staat dezelfde naam twee keer in de alternatie: geen tweede bevinding, wel een patroon dat
+  // groeit met elke schrijfwijze die iemand toevoegt.
+  assert.deepEqual(eigenaarsKandidaten('RVH-Speaking', ['rvh-speaking', 'RVH-SPEAKING']), ['RVH-Speaking']);
+  // Langste eerst blijft gelden, zodat een naam die een andere bevat niet als de kortere wordt gemeld.
+  assert.deepEqual(eigenaarsKandidaten('rvh', ['rvh-speaking-langer', 'RVH']), ['rvh-speaking-langer', 'rvh']);
+
+  const b = toetsBestand(
+    { pad: 'scripts/nieuw.mjs', tekst: `const OWNER = '${HOSTING_OWNER_OF_RECORD}';\n` },
+    { ...geenUitzonderingen, vorigeEigenaars: [HOSTING_OWNER_OF_RECORD.toLowerCase(), VORIGE] },
+  );
+  assert.equal(b.length, 1);
+  assert.equal(b[0].code, OVERTREDING.OPERATIONELE_EIGENAAR);
+  assert.equal(b[0].gevonden, HOSTING_OWNER_OF_RECORD);
+  // De klasse blijft HUIDIG: het duplicaat mag de eigen eigenaar niet als achtergebleven etiketteren.
+  assert.equal(b[0].eigenaarsklasse, EIGENAARSKLASSE.HUIDIG);
+});
+
+test('R1-kandidaten — de poort zelf weigert vervuilde invoer in plaats van stil minder te bewaken', () => {
+  // Het gevaar dat stil overslaan zou opleveren, hier meetbaar: met een ongeldige waarde ERBIJ moet
+  // de poort stuk, niet doorgaan met alleen de resterende namen. Zou zij doorgaan, dan verdwijnt de
+  // vorige eigenaar geruisloos uit R1 en is een achtergebleven binding ineens groen.
+  const bestand = { pad: 'scripts/nieuw.mjs', tekst: `const OWNER = '${VORIGE}';\n` };
+  assert.throws(
+    () => toetsBestand(bestand, { ...geenUitzonderingen, vorigeEigenaars: [VORIGE, 42] }),
+    /ongeldige eigenaarsnaam/,
+  );
+  assert.throws(
+    () => toetsBoom([bestand], { ...geenUitzonderingen, vorigeEigenaars: [VORIGE, 42] }),
+    /ongeldige eigenaarsnaam/,
+  );
+  // Met schone invoer is diezelfde binding gewoon één ACHTERGEBLEVEN bevinding.
+  const b = toetsBestand(bestand, { ...geenUitzonderingen, vorigeEigenaars: [VORIGE] });
+  assert.equal(b.length, 1);
+  assert.equal(b[0].eigenaarsklasse, EIGENAARSKLASSE.ACHTERGEBLEVEN);
 });

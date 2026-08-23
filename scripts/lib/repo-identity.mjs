@@ -61,9 +61,10 @@ export function repositoryFromRemoteUrl(url) {
 
 /**
  * De Pages-HOST is de eigenaar in KLEINE LETTERS — GitHub maakt daar geen uitzondering op, ook
- * niet voor een organisatie die met hoofdletters is aangemaakt. Voor het huidige, al kleine
- * account verandert er hierdoor geen byte; voor `RVH-Speaking` is dit precies het verschil tussen
- * een werkend en een verzonnen adres. Het PAD houdt de schrijfwijze van de repositorynaam.
+ * niet voor een organisatie die met hoofdletters is aangemaakt. Bij het persoonlijke account waar
+ * deze repository vandaan komt was dat verschil onzichtbaar, want die naam was al klein; bij de
+ * organisatie is het precies het verschil tussen een werkend en een verzonnen adres. Het PAD houdt
+ * de schrijfwijze van de repositorynaam.
  */
 export function pagesOrigin(owner) {
   if (!NAME.test(owner ?? '')) throw new Error('ongeldige eigenaar voor een Pages-adres');

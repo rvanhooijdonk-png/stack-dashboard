@@ -4,14 +4,21 @@ Externe, zelfverversende statuspagina over de stack. **Weergave van bestaande ca
 tweede waarheid.** De generator leest, aggregeert, saneert en rendert; hij schrijft nergens iets
 terug.
 
-Live: **https://rvanhooijdonk-png.github.io/stack-dashboard/**
+Live: **https://rvh-speaking.github.io/stack-dashboard/**
 
 Dat adres volgt de eigenaar van deze repository en staat hier alleen als leesbare tekst. De
 workflows en scripts leiden het zelf af uit `GITHUB_REPOSITORY` (`scripts/lib/repo-identity.mjs`),
 zodat een overdracht naar een organisatie de publicatieketen niet stil op een verdwenen adres laat
-kijken. Wat er wél bij een overdracht verandert is één regel — `HOSTING_OWNER_OF_RECORD` in
-`scripts/lib/org-migration.mjs` — en de poort in `test/org-migration.test.mjs` wijst daarna zelf elke
-plaats aan die nog niet mee is.
+kijken. Wat er bij de overdracht wél verandert zijn drie plaatsen die als één geheel omslaan:
+`HOSTING_OWNER_OF_RECORD` in `scripts/lib/org-migration.mjs`, `DASHBOARD_REPOSITORY` in het
+launchd-plist van de feedgenerator, en de regel hierboven. De poort in `test/org-migration.test.mjs`
+houdt die drie tegen elkaar en wijst daarnaast elke plaats aan die nog niet mee is — óók een
+operationele verwijzing naar de vórige eigenaar die is blijven staan.
+
+Deze stand hóórt bij de overdracht en loopt er niet op vooruit: zolang deze wijziging niet is
+gemerged staat het dashboard nog onder het persoonlijke account. Wat er verder bij komt kijken —
+wat met opzet níét meeverhuist, en hoe de lokaal geïnstalleerde feedgenerator wordt bijgetrokken —
+staat in [`docs/ORG-CUTOVER.md`](docs/ORG-CUTOVER.md).
 
 De afleiding kijkt bewust alleen naar `GITHUB_REPOSITORY` en naar een uitdrukkelijke
 `DASHBOARD_REPOSITORY`, en niet naar de `origin` van je werkboom: die bewaart wat er bij het klonen
