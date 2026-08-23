@@ -24,8 +24,10 @@ import { join } from 'node:path';
 import {
   leesBronvast, kijkStateUitSpiegel, manifestVoor, oordeel, publiekeRegel, kanoniekeBytes,
 } from './lib/kijk.mjs';
+import { detectIdentity, repositorySlug } from './lib/repo-identity.mjs';
 
-const REPO = process.env.KIJK_REPO || 'rvanhooijdonk-png/stack-dashboard';
+// De gelezen repository is per definitie deze repository; het adres volgt de eigenaar mee.
+const REPO = process.env.KIJK_REPO || repositorySlug(detectIdentity());
 const TAK = process.env.KIJK_TAK || 'main';
 const PAD = process.env.KIJK_PAD || 'data/kanaalpost-publiek.md';
 const args = process.argv.slice(2);

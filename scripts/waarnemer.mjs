@@ -22,10 +22,16 @@ import { writeFileSync } from 'node:fs';
 import {
   toets, alarmRij, magAppenden, alarmRijPubliceerbaar, zelfRouteUitUrl, DREMPEL_UREN, GRACE_MINUTEN,
 } from './lib/waarnemer.mjs';
+import { detectIdentity, pagesUrl, rawUrl } from './lib/repo-identity.mjs';
 
-const BASE_URL = process.env.BASE_URL || 'https://rvanhooijdonk-png.github.io/stack-dashboard/contentstroom.html';
+// Afgeleid, niet ingetypt: de bewaakte plaat is de Pages-plaat van DEZE repository, waar die ook
+// staat. Zie `lib/repo-identity.mjs` voor waarom dat een andere eigenaar is dan het account
+// waarover de plaat rapporteert. De omgevingsvariabelen blijven bestaan zodat een proefdraai naar
+// een andere plaat kan wijzen; ze zijn alleen niet langer de enige bron van het adres.
+const IDENTITEIT = detectIdentity();
+const BASE_URL = process.env.BASE_URL || pagesUrl(IDENTITEIT, 'contentstroom.html');
 const SPIEGEL_URL = process.env.SPIEGEL_URL
-  || 'https://raw.githubusercontent.com/rvanhooijdonk-png/stack-dashboard/main/data/kanaalpost-publiek.md';
+  || rawUrl(IDENTITEIT, 'main', 'data/kanaalpost-publiek.md');
 const SABOTAGE = process.env.SABOTAGE || 'geen';
 const RIJ_BESTAND = process.env.RIJ_BESTAND || '';
 const PAGINA_ROUTE = zelfRouteUitUrl(BASE_URL);

@@ -21,8 +21,11 @@ import {
   versheidRonde, versheidEindstand, POLL_MS, DEADLINE_MS, MAX_RONDEN, SPIEGELALARM_AAN,
 } from './lib/napublicatie.mjs';
 import { zelfRouteUitUrl } from './lib/waarnemer.mjs';
+import { detectIdentity, pagesUrl } from './lib/repo-identity.mjs';
 
-const BASE_URL = process.env.BASE_URL || 'https://rvanhooijdonk-png.github.io/stack-dashboard/';
+// Zelfde afleiding als in `waarnemer.mjs` en `doorstroom.mjs`: het adres volgt de eigenaar van deze
+// repository en overleeft daarmee een organisatieoverdracht.
+const BASE_URL = process.env.BASE_URL || pagesUrl(detectIdentity());
 const SABOTAGE = process.env.SABOTAGE || 'geen';
 const PAGINA_ROUTE = zelfRouteUitUrl(BASE_URL);
 // Alleen de WACHTTIJD wordt korter, niet de logica: zelfde rondes, zelfde beslissingen. Een groene

@@ -49,6 +49,7 @@ import { bronRijenUitKanaalpost, weigeringsregel } from './lib/kanaalpostbron.mj
 import { LANES } from './lib/kijk.mjs';
 import { loadDenyTerms } from './lib/sanitize.mjs';
 import { alleenAangevuld } from './lib/spiegelwet.mjs';
+import { detectIdentity, pagesUrl } from './lib/repo-identity.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -210,7 +211,7 @@ async function leesStempel() {
   // Zelfde standaard als `waarnemer.mjs` en `napublicatie.mjs`: één adres, op één plek te wijzigen
   // via de omgeving, maar nooit stilzwijgend afwezig — een ontbrekend adres zou de stempeltoets uit
   // zetten en dat is precies de blinde vlek die deze toets moet dichten.
-  const url = process.env.DOORSTROOM_PLAAT_URL || 'https://rvanhooijdonk-png.github.io/stack-dashboard/';
+  const url = process.env.DOORSTROOM_PLAAT_URL || pagesUrl(detectIdentity());
   const r = await haal(`${url.replace(/\/$/, '')}/status.json`);
   if (r.status !== 200) return { generatedAt: null, sources: null, herkomst: `PLAAT_HTTP_${r.status}` };
   try {

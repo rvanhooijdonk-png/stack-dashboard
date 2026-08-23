@@ -6,6 +6,13 @@ terug.
 
 Live: **https://rvanhooijdonk-png.github.io/stack-dashboard/**
 
+Dat adres volgt de eigenaar van deze repository en staat hier alleen als leesbare tekst. De
+workflows en scripts leiden het zelf af uit `GITHUB_REPOSITORY` (`scripts/lib/repo-identity.mjs`),
+zodat een overdracht naar een organisatie de publicatieketen niet stil op een verdwenen adres laat
+kijken. Wat er wél bij een overdracht verandert is één regel — `HOSTING_OWNER_OF_RECORD` in
+`scripts/lib/org-migration.mjs` — en de poort in `test/org-migration.test.mjs` wijst daarna zelf elke
+plaats aan die nog niet mee is.
+
 De publicatie bestaat uit vier vaste, scriptloze pagina's:
 
 - `/` — rustige cockpit met echte ownerpoorten, bewijsbaar actief werk en incidentrollup;
@@ -71,8 +78,11 @@ staan — hij kost hier geen Actions-minuten en levert winst zodra hij wél aans
 niet als garantie. De trigger die je zelf in de hand hebt:
 
 ```
-gh workflow run publish.yml --repo rvanhooijdonk-png/stack-dashboard
+gh workflow run publish.yml
 ```
+
+Vanuit een kloon van deze repository; `gh` leidt het doelrepository zelf uit de `origin`-remote af,
+zodat dit commando ook na een overdracht naar een organisatie ongewijzigd klopt.
 
 Dat commando garandeert een *aanvraag*, niet dat build en deploy slagen — controleer de run.
 

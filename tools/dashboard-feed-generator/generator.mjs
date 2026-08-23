@@ -41,9 +41,30 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DASHBOARD_ROOT =
   process.env.DASHBOARD_FEED_GENERATOR_DASHBOARD_ROOT ?? join(ROOT, '..', 'stack-dashboard');
 
-const OWNER = 'rvanhooijdonk-png';
+// De eigenaar van `stack-control` en van de bewaakte persoonlijke repo's. Die verhuizen NIET mee
+// met een organisatieoverdracht van `stack-dashboard`; dit is dus geen achterstallige hardcodering
+// maar de eigenaar van een ander object. Zie `scripts/lib/repo-identity.mjs`.
+const CONTROL_OWNER = 'rvanhooijdonk-png';
 const CONTROL_REPO = 'stack-control';
 const DASHBOARD_REPO = 'stack-dashboard';
+
+/**
+ * Waar `stack-dashboard` op DIT moment staat. Volgorde: expliciete override, Actions-context, en
+ * anders de `origin`-remote van de dashboard-werkboom die deze generator toch al leest.
+ *
+ * Fail-closed en niet terugvallen op `CONTROL_OWNER`: die terugval zou na de overdracht keurig
+ * blijven draaien en git-events van een verdwenen object rapporteren. Liever één overgeslagen bron
+ * met een reden in het log dan een stille verkeerde meting.
+ */
+function dashboardRepositorySlug() {
+  const uitOmgeving = process.env.DASHBOARD_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? '';
+  if (/^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/.test(uitOmgeving)) return uitOmgeving;
+  const r = spawnSync('git', ['-C', DASHBOARD_ROOT, 'remote', 'get-url', 'origin'], { encoding: 'utf8' });
+  const m = r.status === 0
+    ? (r.stdout ?? '').trim().match(/^(?:git@github\.com:|(?:ssh:\/\/git@|https?:\/\/)(?:[^@/]+@)?github\.com\/)(.+?)(?:\.git)?\/?$/)
+    : null;
+  return m && /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/.test(m[1]) ? m[1] : null;
+}
 const FEEDS_REF = 'dashboard-feeds';
 const BASE_REF = 'main';
 const FEEDS_PATH = {
@@ -184,9 +205,18 @@ async function healthEvents() {
 // ---------------------------------------------------------------------------
 async function gitEvents() {
   const events = [];
-  for (const repo of [CONTROL_REPO, DASHBOARD_REPO]) {
+  const dashboardSlug = dashboardRepositorySlug();
+  if (!dashboardSlug) {
+    log(`kan niet vaststellen waar ${DASHBOARD_REPO} staat (geen DASHBOARD_REPOSITORY, geen `
+      + 'GITHUB_REPOSITORY, geen leesbare origin-remote) — git-events voor die repo worden overgeslagen.');
+  }
+  const bronnen = [
+    { repo: CONTROL_REPO, slug: `${CONTROL_OWNER}/${CONTROL_REPO}` },
+    ...(dashboardSlug ? [{ repo: DASHBOARD_REPO, slug: dashboardSlug }] : []),
+  ];
+  for (const { repo, slug } of bronnen) {
     const r = gh([
-      'pr', 'list', '--repo', `${OWNER}/${repo}`, '--state', 'all', '--limit', '30',
+      'pr', 'list', '--repo', slug, '--state', 'all', '--limit', '30',
       '--json', 'number,createdAt,mergedAt',
     ]);
     if (r.status !== 0) {
@@ -333,11 +363,11 @@ async function loadValidators() {
 // Nooit main, nooit de `rapporten`-branch. Alleen committen bij echte inhoudswijziging.
 // ---------------------------------------------------------------------------
 function ensureFeedsBranch() {
-  const existing = ghApiGet(`repos/${OWNER}/${CONTROL_REPO}/git/ref/heads/${FEEDS_REF}`);
+  const existing = ghApiGet(`repos/${CONTROL_OWNER}/${CONTROL_REPO}/git/ref/heads/${FEEDS_REF}`);
   if (existing.status === 200) return;
-  const base = ghApiGet(`repos/${OWNER}/${CONTROL_REPO}/git/ref/heads/${BASE_REF}`);
+  const base = ghApiGet(`repos/${CONTROL_OWNER}/${CONTROL_REPO}/git/ref/heads/${BASE_REF}`);
   if (base.status !== 200) throw new Error(`kan basis-ref ${BASE_REF} niet lezen`);
-  ghApiSend('POST', `repos/${OWNER}/${CONTROL_REPO}/git/refs`, {
+  ghApiSend('POST', `repos/${CONTROL_OWNER}/${CONTROL_REPO}/git/refs`, {
     ref: `refs/heads/${FEEDS_REF}`,
     sha: base.json.object.sha,
   });
@@ -359,7 +389,7 @@ function publishFile(path, obj, label) {
   const contentText = `${JSON.stringify(obj, null, 2)}\n`;
   const contentB64 = Buffer.from(contentText, 'utf8').toString('base64');
   const existing = ghApiGet(
-    `repos/${OWNER}/${CONTROL_REPO}/contents/${path}?ref=${FEEDS_REF}`,
+    `repos/${CONTROL_OWNER}/${CONTROL_REPO}/contents/${path}?ref=${FEEDS_REF}`,
   );
   if (existing.status === 200) {
     const currentText = Buffer.from(existing.json.content, 'base64').toString('utf8');
@@ -380,7 +410,7 @@ function publishFile(path, obj, label) {
     branch: FEEDS_REF,
     ...(existing.status === 200 ? { sha: existing.json.sha } : {}),
   };
-  const res = ghApiSend('PUT', `repos/${OWNER}/${CONTROL_REPO}/contents/${path}`, body);
+  const res = ghApiSend('PUT', `repos/${CONTROL_OWNER}/${CONTROL_REPO}/contents/${path}`, body);
   log(`${label}: gepubliceerd, commit ${res.commit?.sha ?? '?'}`);
   return { published: true, sha: res.commit?.sha };
 }
