@@ -27,19 +27,20 @@ test('hoofdpagina bevat uitsluitend de tien rustige hoofdsecties inclusief de dr
   ]);
 });
 
-test('het nog ongekoppelde paneelslot (b/RICHARD-QUEUE) rendert altijd, met UNKNOWN zolang zijn bron ontbreekt', () => {
+test('elk paneelslot uit het contract rendert altijd, met kop, contract-, noemer- en stempelregel', () => {
   const html = renderCockpit(snapshot, { products, ticker });
-  for (const id of ['paneel-richard-queue']) {
+  for (const id of ['paneel-richard-queue', 'paneel-nu-bezig', 'paneel-statusgen']) {
     const section = html.match(new RegExp(`<section id="${id}"[\\s\\S]*?</section>`));
     assert.ok(section, `paneelslot ${id} ontbreekt`);
-    assert.match(section[0], /UNKNOWN — bron nog niet gekoppeld\./, `paneelslot ${id} mist de UNKNOWN-regel`);
     assert.match(section[0], /Contract: /, `paneelslot ${id} mist de contractregel`);
     assert.match(section[0], /Noemer: /, `paneelslot ${id} mist de noemerregel`);
-    assert.match(section[0], /Gemeten om: <span class="unknown">UNKNOWN<\/span>\./, `paneelslot ${id} mist de gemeten-om-stempel`);
+    assert.match(section[0], /Gemeten om: /, `paneelslot ${id} mist de gemeten-om-stempel`);
   }
   assert.match(html, /<h2>RICHARD-QUEUE /);
   assert.match(html, /<h2>NU-BEZIG /);
   assert.match(html, /<h2>STATUSGEN /);
+  // Alle drie de slots zijn nu aan een bron gekoppeld; de skeletregel hoort nergens meer te staan.
+  assert.equal(/bron nog niet gekoppeld/.test(html), false);
 });
 
 test('NU-BEZIG is gekoppeld: zonder runtimefeed toont het slot de gemeten UNKNOWN, niet meer het lege skelet', () => {
@@ -185,7 +186,7 @@ test('nul non-draft PRs is geen gate en een ongeldige telling blijft UNKNOWN', (
   corrupt.pullRequests.totals.ready = '2';
   const result = ownerGates(corrupt);
   assert.equal(result.unavailable.length, 1);
-  assert.match(result.unavailable[0], /geldige pull-requesttelling ontbreekt/);
+  assert.match(result.unavailable[0].message, /geldige pull-requesttelling ontbreekt/);
 
   const inconsistent = structuredClone(empty);
   inconsistent.pullRequests.totals.open += 1;
@@ -203,7 +204,7 @@ test('een beschikbare maar niet-geverifieerde PR-bron blijft UNKNOWN, ook bij ee
     const result = ownerGates(input);
     assert.equal(result.gates.length, 0, trust);
     assert.equal(result.unavailable.length, 1, trust);
-    assert.match(result.unavailable[0], /pull-requestbron niet geverifieerd/, trust);
+    assert.match(result.unavailable[0].message, /pull-requestbron niet geverifieerd/, trust);
 
     const html = renderCockpit(input, { products: buildProductModel(canon, input), ticker });
     assert.match(html, /Mergepoorten UNKNOWN/, trust);

@@ -10,6 +10,8 @@ import { renderActive } from './runtime-feed-view.mjs';
 import { renderPanelSlots } from './panel-contracts.mjs';
 import { statusgenPaneel, renderStatusgenBody, statusgenBadge } from './paneel-statusgen.mjs';
 import { nuBezigPaneel, renderNuBezigBody, nuBezigBadge } from './paneel-nu-bezig.mjs';
+import { richardQueuePaneel, renderRichardQueueBody, richardQueueBadge } from './paneel-richard-queue.mjs';
+import { OWNER_SOURCE_COUNT } from './ownerbronnen.mjs';
 
 const PAGE_PATHS = new Set(['./', './producten.html', './stack-ticker.html']);
 const SOURCE_NAMES = {
@@ -53,10 +55,27 @@ const isSelfReport = (row) => normalized(row?.tab) === 'waarnemer'
   && String(row?.onderwerp ?? '').replace(/^[\s*]+/, '').startsWith(SELF_REPORT_PREFIX);
 const OWNER_SOURCE_TRUST = new Set(['VERIFIED_CURRENT', 'STALE']);
 
-/** Alleen expliciete ownerhandelingen; meetstoringen zijn waarschuwingen en tellen niet als gate. */
+/**
+ * Alleen expliciete ownerhandelingen; meetstoringen zijn waarschuwingen en tellen niet als gate.
+ *
+ * `unavailable` draagt sinds ronde 1 van de review op het RICHARD-QUEUE-paneel BRONSTATUSSEN
+ * (`{source, message}`) in plaats van kale tekst. Reden: het paneel telt hoeveel ownerbronnen niets
+ * konden meten, en op een `string[]` is dat niet te tellen — twee diagnoses van één bron zien er
+ * daar hetzelfde uit als twee zwijgende bronnen. Elke bron levert nog steeds hoogstens één status,
+ * maar dat is nu een leesbare eigenschap van de uitkomst en geen aanname van de lezer.
+ *
+ * "Beschikbaar" is bovendien niet genoeg om GEMETEN te heten: een bron die zegt beschikbaar te zijn
+ * maar geen leesbare verzameling meelevert (`planning.features` of `kanaalpost.rows` ontbreekt of is
+ * geen array) leverde vóór deze ronde stilzwijgend nul poorten op — een nulstand uit een bron die
+ * niets liet zien (bevinding Codex, P1). Zo'n bron heet nu ongemeten, en een niet-array laat deze
+ * functie ook niet meer werpen.
+ */
 export function ownerGates(snapshot) {
+  /** @type {{source: string, message: string}[]} */
   const unavailable = [];
   const gates = [];
+  const ongemeten = (source, message) => unavailable.push({ source, message });
+
   if (snapshot?.pullRequests?.available === true
       && OWNER_SOURCE_TRUST.has(snapshot.pullRequests.evidence?.trust)) {
     const totals = snapshot.pullRequests.totals;
@@ -71,25 +90,29 @@ export function ownerGates(snapshot) {
     const validTotals = [open, draft, ready].every((value) => Number.isInteger(value) && value >= 0)
       && open === draft + ready;
     if (!validTotals) {
-      unavailable.push('Mergepoorten UNKNOWN — geldige pull-requesttelling ontbreekt.');
+      ongemeten('pull-requests', 'Mergepoorten UNKNOWN — geldige pull-requesttelling ontbreekt.');
     } else if (ready > 0) {
-      unavailable.push(`Mergepoorten UNKNOWN — ${ready} niet-draft PR${ready === 1 ? '' : 's'}; mergebaarheid en vereiste checks zijn niet gemeten.`);
+      ongemeten('pull-requests', `Mergepoorten UNKNOWN — ${ready} niet-draft PR${ready === 1 ? '' : 's'}; mergebaarheid en vereiste checks zijn niet gemeten.`);
     }
   } else if (snapshot?.pullRequests?.available === true) {
-    unavailable.push('Mergepoorten UNKNOWN — pull-requestbron niet geverifieerd.');
-  } else unavailable.push('Mergepoorten UNKNOWN — pull-requestbron niet leesbaar.');
+    ongemeten('pull-requests', 'Mergepoorten UNKNOWN — pull-requestbron niet geverifieerd.');
+  } else ongemeten('pull-requests', 'Mergepoorten UNKNOWN — pull-requestbron niet leesbaar.');
 
-  if (snapshot?.planning?.available === true) {
-    for (const feature of snapshot.planning.features ?? []) {
+  const features = snapshot?.planning?.available === true ? snapshot.planning.features : undefined;
+  if (Array.isArray(features)) {
+    for (const feature of features) {
       const dependency = typeof feature?.afhankelijkheid === 'string' ? feature.afhankelijkheid.trim() : '';
       if (feature?.status === 'wacht-op-Richard' && normalized(feature.worker) === 'richard' && dependency) {
         gates.push({ identity: `planning:${normalized(feature.label)}`, label: feature.label, detail: dependency });
       }
     }
-  } else unavailable.push('Planning-ownerpoorten UNKNOWN — planningbron niet leesbaar.');
+  } else if (snapshot?.planning?.available === true) {
+    ongemeten('planning', 'Planning-ownerpoorten UNKNOWN — planningbron leverde geen leesbare featurelijst.');
+  } else ongemeten('planning', 'Planning-ownerpoorten UNKNOWN — planningbron niet leesbaar.');
 
-  if (snapshot?.kanaalpost?.available === true) {
-    for (const row of snapshot.kanaalpost.rows ?? []) {
+  const rows = snapshot?.kanaalpost?.available === true ? snapshot.kanaalpost.rows : undefined;
+  if (Array.isArray(rows)) {
+    for (const row of rows) {
       const isOwner = /\brichard\b/i.test(String(row?.actie ?? ''));
       if (isOwner && row?.status === 'WACHT OP AKKOORD' && !isSelfReport(row)) {
         gates.push({
@@ -99,20 +122,32 @@ export function ownerGates(snapshot) {
         });
       }
     }
-  } else unavailable.push('Kanaalpost-ownerpoorten UNKNOWN — spiegel niet leesbaar.');
+  } else if (snapshot?.kanaalpost?.available === true) {
+    ongemeten('kanaalpost', 'Kanaalpost-ownerpoorten UNKNOWN — spiegel leverde geen leesbare rijen.');
+  } else ongemeten('kanaalpost', 'Kanaalpost-ownerpoorten UNKNOWN — spiegel niet leesbaar.');
 
   const seen = new Set();
   return { unavailable, gates: gates.filter((gate) => !seen.has(gate.identity) && seen.add(gate.identity)) };
 }
 
-function renderOwnerGates(snapshot) {
-  const result = ownerGates(snapshot);
-  const warnings = result.unavailable.map((message) => `<li><span class="dot bad"></span><span class="repo">${esc(message)}</span><span class="muted">geen meting — geen nulstand</span></li>`);
+/** Neemt het REEDS GEMETEN ownerresultaat aan in plaats van zelf `ownerGates()` aan te roepen.
+ * Het RICHARD-QUEUE-paneel telt dezelfde poorten; zou elk van beide zelf meten, dan konden de
+ * badge van deze sectie en het getal in het paneel uiteenlopen zodra `ownerGates()` ooit van een
+ * gedeelde toestand afhangt. Nu is het per constructie dezelfde array — deze functie kán niet meer
+ * zelf meten, want ze krijgt de snapshot niet.
+ *
+ * De badge toont UNKNOWN in plaats van een getal zodra GEEN ENKELE ownerbron kon meten. Tot deze
+ * ronde stond daar `0` naast drie UNKNOWN-bronnen: een nul die niemand had waargenomen, precies
+ * naast een paneel dat om diezelfde reden weigert te tellen (bevinding Codex, P1). */
+function renderOwnerGates(result) {
+  const warnings = result.unavailable.map(({ message }) => `<li><span class="dot bad"></span><span class="repo">${esc(message)}</span><span class="muted">geen meting — geen nulstand</span></li>`);
   const gates = result.gates.map((gate) => `<li><span class="dot warn"></span><span class="repo">${esc(gate.label)}</span><span class="muted">${esc(gate.detail)}</span></li>`);
+  const stilleBronnen = new Set(result.unavailable.map(({ source }) => source)).size;
+  const telbaar = stilleBronnen < OWNER_SOURCE_COUNT;
   const body = warnings.length || gates.length
     ? `<ul class="lights owner-gates">${[...warnings, ...gates].join('')}</ul>`
     : '<p class="empty">Alle drie de ownerbronnen zijn gelezen; er staat geen gevalideerde ownerpoort open.</p>';
-  return `<section id="wacht-op-richard" class="card wide"><h2>Wacht op Richard <span class="badge warn">${num(gates.length)}</span>${warnings.length ? ` <span class="badge bad">${num(warnings.length)} bron${warnings.length === 1 ? '' : 'nen'} UNKNOWN</span>` : ''}</h2>${body}</section>`;
+  return `<section id="wacht-op-richard" class="card wide"><h2>Wacht op Richard <span class="badge warn">${telbaar ? num(gates.length) : 'UNKNOWN'}</span>${warnings.length ? ` <span class="badge bad">${num(warnings.length)} bron${warnings.length === 1 ? '' : 'nen'} UNKNOWN</span>` : ''}</h2>${body}</section>`;
 }
 
 function renderAccounts(runtimeFeed) {
@@ -190,6 +225,16 @@ export function renderCockpit(snapshot, {
     badge: nuBezigBadge(nuBezig),
     statusLabel: nuBezig.status,
   };
+  // Eén meting van de ownerbronnen, gedeeld door de sectie "Wacht op Richard" en het
+  // RICHARD-QUEUE-paneel dat de telling erbij draagt.
+  const owner = ownerGates(snapshot);
+  const richardQueue = richardQueuePaneel(snapshot, owner, { now });
+  const richardQueueVulling = {
+    measuredAt: richardQueue.measuredAt,
+    body: renderRichardQueueBody(richardQueue),
+    badge: richardQueueBadge(richardQueue),
+    statusLabel: richardQueue.status,
+  };
   const statusgen = statusgenPaneel(snapshot, { now });
   const statusgenVulling = {
     measuredAt: statusgen.measuredAt,
@@ -200,9 +245,9 @@ export function renderCockpit(snapshot, {
   const previewBanner = preview
     ? '<p class="unknown evidence-warning"><strong>TESTPREVIEW</strong> — synthetische runtimefeed; dit is geen live stand.</p>'
     : '';
-  const body = `${previewBanner}${renderOwnerGates(snapshot)}
+  const body = `${previewBanner}${renderOwnerGates(owner)}
 ${renderActive(runtimeFeed, nowMs)}
-${renderPanelSlots({ k: nuBezigVulling, statusgen: statusgenVulling })}
+${renderPanelSlots({ b: richardQueueVulling, k: nuBezigVulling, statusgen: statusgenVulling })}
 <section id="vandaag-geleverd" class="card"><h2>Vandaag geleverd</h2>${snapshot.planning?.available ? list(delivered.map((f) => `<li>${featureName(f)}</li>`), 'Niets met een gevalideerde opleverdatum van vandaag.') : '<p class="unknown">UNKNOWN — planningbron niet beschikbaar.</p>'}</section>
 <section id="producten" class="card wide"><h2>Producten</h2><div class="product-grid">${productCards.join('')}</div></section>
 <section id="incidenten" class="card"><h2>Incidenten</h2>${incidents.length ? `<ul class="lights incident-list">${incidents.map((x) => `<li><span class="repo">${esc(x.label)}</span> <span class="unknown">${esc(x.detail)}</span></li>`).join('')}</ul>` : '<p class="empty">Geen gevalideerde bron-, vloot- of CI-incidenten.</p>'}</section>

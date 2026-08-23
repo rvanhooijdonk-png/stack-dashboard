@@ -13,7 +13,7 @@ export const PANEL_CONTRACTS = Object.freeze([
     slot: 'b',
     id: 'paneel-richard-queue',
     title: 'RICHARD-QUEUE',
-    inputSource: 'openstaande Richard-acties (queue-achtige samenvatting van ownergates/kanaalpost — bron nog niet gekoppeld aan deze slot)',
+    inputSource: 'de drie ownerbronnen achter de sectie "Wacht op Richard" (pull-requests, planning, kanaalpost-spiegel) — hoeveel ownerpoorten bij deze bouw bewezen open stonden en hoeveel bronnen daarbij niets konden meten',
     denominatorLabel: 'aantal openstaande queue-items',
   }),
   Object.freeze({
