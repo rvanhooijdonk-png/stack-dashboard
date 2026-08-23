@@ -695,6 +695,24 @@ test('C3 — R3 meet verbruik, niet aanwezigheid: dekking op een niet-uitvoerend
 
 const VORIGE = VORIGE_HOSTING_EIGENAARS[0];
 
+/**
+ * Een tijdelijke map die zichzelf opruimt, ook als het werk erin omvalt. Het opruimen hoort in
+ * `finally` en niet achter de laatste assertie: juist de run waarin een assertie omvalt is de run
+ * die zich herhaalt, en dan groeit /tmp mee met het aantal pogingen.
+ *
+ * Dit is met opzet een functie en geen afspraak in commentaar. Een afspraak moet je nalezen om te
+ * weten of zij is nagekomen; een functie is nagekomen of zij bestaat niet. De toets erna meet dat
+ * gedrag rechtstreeks — door hier een fout doorheen te gooien — in plaats van deze bron te lezen.
+ */
+function inTijdelijkeMap(voorvoegsel, werk) {
+  const map = mkdtempSync(join(tmpdir(), voorvoegsel));
+  try {
+    return werk(map);
+  } finally {
+    rmSync(map, { recursive: true, force: true });
+  }
+}
+
 // Het mappad dat de negatieve controle van C4 aanmaakt, zodat de toets erna kan meten dat het
 // werkelijk is opgeruimd. Een opgeruimde map bewijst zichzelf niet; hij moet bij naam worden gemist.
 let C4_NEGATIEVE_CONTROLE_MAP = null;
@@ -723,9 +741,8 @@ test('C4 — de eigenaarsstand, het Pages-adres en het launchd-plist slaan als �
 
   // NEGATIEVE CONTROLE op dezelfde meting: hetzelfde plist met de oude waarde erin moet hier
   // omvallen. Anders meet C1 hierboven alleen dat er íéts geldigs staat.
-  const map = mkdtempSync(join(tmpdir(), 'orgmig-plist-'));
-  C4_NEGATIEVE_CONTROLE_MAP = map;
-  try {
+  inTijdelijkeMap('orgmig-plist-', (map) => {
+    C4_NEGATIEVE_CONTROLE_MAP = map;
     const achtergebleven = join(map, 'oud.plist');
     writeFileSync(achtergebleven, readFileSync(PLIST, 'utf8')
       .replace(`<string>${HOSTING_OWNER_OF_RECORD}/${REPOSITORY_NAME}</string>`, `<string>${VORIGE}/${REPOSITORY_NAME}</string>`));
@@ -734,11 +751,7 @@ test('C4 — de eigenaarsstand, het Pages-adres en het launchd-plist slaan als �
       { owner: HOSTING_OWNER_OF_RECORD, repo: REPOSITORY_NAME },
     );
     assert.deepEqual(resolveIdentity(plistOmgeving(achtergebleven)), { owner: VORIGE, repo: REPOSITORY_NAME });
-  } finally {
-    // Opruimen hoort in `finally`, niet achter de laatste assertie: juist de run waarin een
-    // assertie omvalt is de run die zich herhaalt, en dan groeit /tmp mee met het aantal pogingen.
-    rmSync(map, { recursive: true, force: true });
-  }
+  });
 });
 
 test('C4 — de negatieve controle hierboven laat geen tijdelijke map achter', () => {
@@ -746,19 +759,33 @@ test('C4 — de negatieve controle hierboven laat geen tijdelijke map achter', (
   // C4 in hetzelfde bestand, dus dit meet de echte uitvoering en niet een nagespeelde vorm.
   assert.ok(C4_NEGATIEVE_CONTROLE_MAP, 'de negatieve controle heeft een tijdelijke map gemaakt');
   assert.equal(existsSync(C4_NEGATIEVE_CONTROLE_MAP), false, C4_NEGATIEVE_CONTROLE_MAP);
+});
 
-  // Kant 2: en het opruimen hangt niet aan het slagen van de asserties. Zonder `finally` zou deze
-  // binding groen blijven zolang alles toevallig goed gaat — precies dan valt het lek niet op.
-  const SLEUTEL = "mkdtempSync(join(tmpdir(), 'orgmig-plist-'))";
-  const bron = readFileSync('test/org-migration.test.mjs', 'utf8');
-  // `[1]` is het stuk na het EERSTE voorkomen: de toets hierboven. Het tweede voorkomen is deze
-  // regel zelf, en dat stuk wordt hier bewust niet gemeten.
-  const toets = bron.split(SLEUTEL)[1].split('\n});')[0];
-  const opruiming = toets.split('} finally {');
-  assert.equal(opruiming.length, 2, 'de negatieve controle ruimt op in een finally-blok');
-  assert.match(opruiming[1], /rmSync\(map, \{ recursive: true, force: true \}\)/);
-  // En de asserties staan erbóven, in de try: alleen dan loopt het opruimen ook als er één omvalt.
-  assert.match(opruiming[0], /assert\.deepEqual\(resolveIdentity\(plistOmgeving\(achtergebleven\)\)/);
+test('C4 — de tijdelijke map wordt ook opgeruimd als het werk erin omvalt', () => {
+  // Kant 1 hierboven is groen zolang alles toevallig goed gaat. Juist de run waarin een assertie
+  // omvalt is de run die zich herhaalt, en dat is de run waarin het lek ontstaat. Die kant wordt
+  // hier gedragsmatig gemeten: een eigen fout door dezelfde helper heen gooien en daarna kijken.
+  //
+  // Gedragsmatig en niet door deze bron te lezen: een bronlezer meet de vorm van vandaag en valt om
+  // op een formatter, terwijl hij blind is voor een `finally` die er wél staat maar niets doet.
+  const sentinel = new Error('sentinel-fout van de opruimtoets — hoort naar buiten te komen');
+  let gemaakt = null;
+
+  assert.throws(
+    () => inTijdelijkeMap('orgmig-opruimen-', (map) => {
+      gemaakt = map;
+      // Een niet-lege map: zonder `recursive` faalt het opruimen precies hier, en dat is de vorm
+      // waarin dit lek in de praktijk voorkomt — de map bevat immers altijd het bestand van de toets.
+      writeFileSync(join(map, 'inhoud.txt'), 'x');
+      assert.equal(existsSync(map), true, map);
+      throw sentinel;
+    }),
+    // Dezelfde fout, niet alleen "een" fout: het opruimen mag de oorzaak niet inslikken of vervangen.
+    (e) => e === sentinel,
+  );
+
+  assert.ok(gemaakt, 'de helper heeft de map aangemaakt en aan het werk doorgegeven');
+  assert.equal(existsSync(gemaakt), false, gemaakt);
 });
 
 test('C4 — één vergeten operationele binding aan de VORIGE eigenaar wordt fail-closed rood', () => {
@@ -873,12 +900,23 @@ test('C4 — de te plakken regels in de gids dragen geen hoekhakenplaceholder', 
   const gids = readFileSync('docs/ORG-CUTOVER.md', 'utf8');
   const blokken = [...gids.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
   assert.ok(blokken.length > 0, 'de gids draagt ten minste één bash-blok');
+  let cdRegels = 0;
   for (const blok of blokken) {
     for (const regel of blok.split('\n')) {
       const code = regel.split('#')[0];
       assert.doesNotMatch(code, /<[^<>\s]+>/, regel);
+      // Dezelfde plakfout, één stap verder. `cd` naar een map die de lezer verkeerd invulde faalt
+      // met een melding en gaat dán gewoon door: de regels erna draaien in de map waar hij toevallig
+      // stond, dus de shasums en de `cp` wijzen naar een andere bron dan bedoeld. Fail-closed is hier
+      // niet netjes maar noodzakelijk, want het blok kopieert bestanden naar een draaiende agent.
+      if (/^\s*cd\s/.test(code)) {
+        cdRegels += 1;
+        assert.match(code, /\|\|\s*exit 1\s*$/, regel);
+      }
     }
   }
+  assert.ok(cdRegels > 0, 'de gids stapt ergens een map binnen; anders meet de eis hierboven niets');
+  assert.ok(gids.includes('cd "$KLOON" || exit 1'), 'de gids stapt fail-closed de kloon binnen');
   // En de omschrijving is er nog: zonder de uitleg zou de haakloze vorm hierboven ook te halen zijn
   // door de plaatsaanduiding helemaal weg te laten, en dan weet de lezer niet meer wát hij invult.
   assert.match(gids, /KLOON=/);

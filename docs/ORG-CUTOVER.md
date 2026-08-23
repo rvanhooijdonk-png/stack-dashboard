@@ -76,8 +76,10 @@ toevallig tegelijk start nooit een half bestand leest.
 # 0. controleer dat de bron werkelijk de bedoelde stand is.
 #    Vul KLOON zelf in: de map met de kloon van stack-dashboard, op main, na de merge.
 #    Geen hoekhaken in een te plakken regel — < en > zijn in bash omleidingstekens.
+#    De `|| exit 1` is geen stijl: zonder die staart loopt de rest van dit blok door in de
+#    map waar je toevallig stond, en dan wijzen de shasums en de `cp` naar een andere bron.
 KLOON="$HOME/pad/naar/stack-dashboard"
-cd "$KLOON"
+cd "$KLOON" || exit 1
 shasum -a 256 tools/dashboard-feed-generator/generator.mjs \
               tools/dashboard-feed-generator/com.rvh.dashboard-feed-generator.plist
 
