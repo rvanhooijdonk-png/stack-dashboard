@@ -124,6 +124,8 @@ const BRON_ZONDER_HERKOMST = { trust: 'VERIFIED_CURRENT' };
 
 /** Vers genoeg om alle tijdtoetsen te halen; de tests die alarm willen forceren doen dat expliciet. */
 const nuIso = () => new Date(Date.now() - 5 * 60 * 1000).toISOString();
+/** Een bron die gelezen is maar niet bewezen — de vorm van 22-08-2026. */
+const ONBEWEZEN_BRON = (gebouwdOp) => ({ key: 'ci', trust: 'SOURCE_UNAVAILABLE', retrievedAt: gebouwdOp, rijen: null });
 
 test('de executor geeft de contractversie van het statusbestand door aan het oordeel', async () => {
   // Mutant 1 van Codex ronde 10: `bronContractVersie` weglaten uit de aanroep in scripts/waarnemer.mjs.
@@ -269,4 +271,41 @@ test('de stempelsabotage zet de drempel op nul en zegt dat erbij', async () => {
   assert.equal(r.code, 1);
   assert.match(r.stdout, /drempel 0 \(SABOTAGE\)/);
   assert.match(r.stdout, /AFWIJKING STEMPEL_TE_OUD/);
+});
+
+test('het nieuwste bestand van de twee koopt over http geen respijt voor zijn eigen nulstand', async () => {
+  // De HTTP-reproductie die Codex in ronde 11 vroeg, hier als bedradingstest. De PAGINA komt vier uur
+  // oud uit de CDN-cache, het STATUSBESTAND is één minuut oud, beide dragen dezelfde contractversie
+  // en het statusbestand meldt nul bewezen bronnen. Vóór de reparatie: exit 0 met alleen een
+  // naijlingswaarschuwing — het incident van 22-08 opnieuw, nu gekocht met een verse publicatie.
+  const paginaGebouwdOp = new Date(Date.now() - 4 * 3600 * 1000).toISOString();
+  const statusGebouwdOp = new Date(Date.now() - 60 * 1000).toISOString();
+  const r = await draaiWaarnemer({
+    html: plaat({ contract: CONTRACT_NU, gebouwdOp: paginaGebouwdOp, spiegelTekst: spiegelBasis }),
+    status: statusTekst({
+      contract: CONTRACT_NU,
+      gebouwdOp: statusGebouwdOp,
+      sources: [ONBEWEZEN_BRON(statusGebouwdOp), ONBEWEZEN_BRON(statusGebouwdOp)],
+    }),
+  });
+  assert.equal(r.code, 1, 'nul bewezen bronnen in het nieuwste bestand hoort rood te zijn');
+  assert.match(r.stdout, /AFWIJKING GEEN_GEVERIFIEERDE_BRON/);
+  assert.match(r.stdout, /uit de nieuwste van de twee bouwen/);
+  assert.match(r.rij, /geen-geverifieerde-bron/, 'en de regel gaat de openbare spiegel in');
+
+  // NEGATIEVE CONTROLE — dezelfde twee bouwen, maar nu loopt het NUL-statusbestand achter op een
+  // nieuwere pagina: dat is de gezonde verse publicatie die het respijt hoort te beschermen.
+  const versePagina = new Date(Date.now() - 60 * 1000).toISOString();
+  const ouderStatus = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const g = await draaiWaarnemer({
+    html: plaat({ contract: CONTRACT_NU, gebouwdOp: versePagina, spiegelTekst: spiegelBasis }),
+    status: statusTekst({
+      contract: CONTRACT_NU,
+      gebouwdOp: ouderStatus,
+      sources: [ONBEWEZEN_BRON(ouderStatus), ONBEWEZEN_BRON(ouderStatus)],
+    }),
+  });
+  assert.equal(g.code, 0, 'een achterlopend nul-bestand houdt het respijt');
+  assert.match(g.stdout, /niet beoordeeld/);
+  assert.equal(g.rij, '', 'en er gaat geen regel de spiegel in');
 });

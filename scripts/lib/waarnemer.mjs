@@ -622,6 +622,18 @@ export function toets({
   gemeten.bouwVerschilMs = stempelMs !== null && bronMs !== null && Number.isFinite(stempelMs) && Number.isFinite(bronMs)
     ? Math.abs(bronMs - stempelMs)
     : null;
+  // Is het statusbestand het VERSTE dat we van deze publicatie kunnen zien? Dan loopt het nergens op
+  // achter en is er geen reden om zijn telling uit te stellen (bevinding Codex, ronde 11).
+  const bronIsNieuwste = bronMs !== null && Number.isFinite(bronMs)
+    && (stempelMs === null || !Number.isFinite(stempelMs) || bronMs >= stempelMs);
+
+  // Dezelfde categorie op elke plek waar de telling werkelijk beoordeeld wordt: een reductie mag de
+  // oorzaak niet weggooien, ook niet op een tweede pad (orderdiscipline R2).
+  const meldOngeteld = () => {
+    if (!gemetenBron.ongeteld) return;
+    waarschuwingen.push(`${gemetenBron.ongeteld} bron(nen) noemden zich bewezen zonder herkomst (${KERN_BRONVELDEN.join(', ')}) en tellen dus niet mee`);
+    nevenpunten.push({ code: 'BRON_ZONDER_HERKOMST', uitleg: `${CODES.BRON_ZONDER_HERKOMST} (${gemetenBron.ongeteld} van ${gemetenBron.totaal})` });
+  };
 
   // Geen enkele tak mag het bronstandoordeel nog OVERSLAAN op gezag van het statusbestand zelf.
   // Er stonden hier twee zulke ontsnappingen — een versiepoort (`BRONSTAND_VANAF`) en de
@@ -642,14 +654,26 @@ export function toets({
     // Zonder deze eis kocht een stempel als `"0"` de vrijstelling zolang de PAGINA maar vers was --
     // en de vrijstelling slaat juist de telling over. Echte reproductie: pagina 5 min oud,
     // `generatedAt: "0"`, `bronnen: 0 van 2 geverifieerd`, exit 0 (bevinding Gemini, ronde 8).
-    if (verseBouw && gemetenBron.gebouwdOp !== null) {
-      waarschuwingen.push('het statusbestand komt van een andere bouw dan de pagina die nu geserveerd wordt; er is zojuist gepubliceerd, dus dit telt als naijling van de CDN en de bronstand is deze ronde niet beoordeeld');
-    } else {
+    if (!(verseBouw && gemetenBron.gebouwdOp !== null)) {
       meld('BRONSTAND_ANDERE_BOUW', gemetenBron.gebouwdOp === null
         ? 'geen bouwtijd om aan te knopen'
         : (bouwOuderdomMs !== null && bouwOuderdomMs < -KLOKSPELING_MS
           ? `de nieuwste van de twee bouwen ligt ${Math.round(-bouwOuderdomMs / 60000)} min in de toekomst, meer dan de klokspeling van ${Math.round(KLOKSPELING_MS / 60000)} min`
           : `de nieuwste van de twee bouwen is ${Math.round((bouwOuderdomMs ?? 0) / 60000)} min oud, ruim buiten het respijt van ${Math.round(graceMs / 60000)} min`));
+    } else if (bronIsNieuwste && gemetenBron.bewezen === 0) {
+      // Het respijt bestaat om NIET te oordelen op een bestand dat mogelijk achterloopt. Is het
+      // statusbestand juist de NIEUWSTE van de twee, dan loopt het nergens op achter: dan is het het
+      // verste dat we van deze publicatie kunnen zien, en meldt het nul bewezen bronnen. Daar valt
+      // niets meer op te wachten -- dat IS het incident van 22-08, alleen tijdens een publicatie.
+      // Echte reproductie: pagina 4 uur oud uit de cache, statusbestand 1 min oud, beide 2.7.0,
+      // beide nul bewezen -- `exit 0` met een naijlingswaarschuwing (bevinding Codex, ronde 11).
+      // De andere kant blijft ongemoeid: een OUDER nul-statusbestand naast een NIEUWERE pagina mag
+      // een gezonde verse publicatie niet vals rood maken, en houdt dus het respijt.
+      waarschuwingen.push('het statusbestand komt van een andere bouw dan de pagina die nu geserveerd wordt; het is wél de nieuwste van de twee, dus de bronstand wordt beoordeeld en niet uitgesteld');
+      meldOngeteld();
+      meld('GEEN_GEVERIFIEERDE_BRON', `0 van ${gemetenBron.totaal} bronnen (uit de nieuwste van de twee bouwen)`);
+    } else {
+      waarschuwingen.push('het statusbestand komt van een andere bouw dan de pagina die nu geserveerd wordt; er is zojuist gepubliceerd, dus dit telt als naijling van de CDN en de bronstand is deze ronde niet beoordeeld');
     }
   } else {
     // Pagina en statusbestand komen hier aantoonbaar uit DEZELFDE bouw (`zelfdeBouw` hierboven, op
@@ -665,10 +689,7 @@ export function toets({
     if (!gemetenBron.getoetst) {
       waarschuwingen.push('het statusbestand draagt een andere contractversie dan het schema dat de waakvlam kent; alleen de kernvelden per bron zijn gekeurd, niet het volle contract — de telling wordt wél beoordeeld');
     }
-    if (gemetenBron.ongeteld) {
-      waarschuwingen.push(`${gemetenBron.ongeteld} bron(nen) noemden zich bewezen zonder herkomst (${KERN_BRONVELDEN.join(', ')}) en tellen dus niet mee`);
-      nevenpunten.push({ code: 'BRON_ZONDER_HERKOMST', uitleg: `${CODES.BRON_ZONDER_HERKOMST} (${gemetenBron.ongeteld} van ${gemetenBron.totaal})` });
-    }
+    meldOngeteld();
     if (gemetenBron.bewezen === 0) meld('GEEN_GEVERIFIEERDE_BRON', `0 van ${gemetenBron.totaal} bronnen`);
   }
 

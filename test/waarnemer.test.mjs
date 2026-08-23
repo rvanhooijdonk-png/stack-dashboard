@@ -1172,7 +1172,10 @@ test('een bouwstempel dat geen tijdstip is, koopt geen naijlingsvrijstelling', (
 
   // NEGATIEVE CONTROLE — hetzelfde tijdstip mét zone is wél een bouwidentiteit, en dan is de
   // naijlingsvrijstelling gewoon op haar plaats: er is aantoonbaar zojuist gepubliceerd.
-  const metZone = lees(200, statusTekstVan(BRONNEN_LEEG, CONTRACT_NU, new Date(NU).toISOString()));
+  // (De bronnen zijn hier bewezen: sinds ronde 11 wordt een NIEUWSTE statusbestand dat zélf nul
+  // bewezen bronnen meldt wél beoordeeld, dus met een lege stand zou deze controle om een andere
+  // reden rood worden en niets meer over de vrijstelling zeggen.)
+  const metZone = lees(200, statusTekstVan(ALLES_BEWEZEN, CONTRACT_NU, new Date(NU).toISOString()));
   assert.equal(metZone.bronnen.gebouwdOp, new Date(NU).toISOString());
   const g = toets({
     paginaStatus: 200,
@@ -1254,7 +1257,9 @@ test('een verse PAGINA koopt geen vrijstelling voor een statusbestand zonder bou
   // NEGATIEVE CONTROLE — de vrijstelling zelf blijft bestaan: mét een geldig bouwmoment uit een
   // andere, verse bouw is een mengsel van oud en nieuw gewoon te verwachten en oordeelt de
   // waakvlam deze ronde niet.
-  const metBouwtijd = lees(200, statusTekstVan(BRONNEN_LEEG, CONTRACT_NU, new Date(NU - 60000).toISOString()));
+  // Bewezen bronnen, om dezelfde reden als hierboven: sinds ronde 11 oordeelt de waakvlam wél op een
+  // NIEUWSTE statusbestand dat nul bewezen bronnen meldt.
+  const metBouwtijd = lees(200, statusTekstVan(ALLES_BEWEZEN, CONTRACT_NU, new Date(NU - 60000).toISOString()));
   const g = toets({
     paginaStatus: 200,
     paginaHtml: paginaMetBronnen(BRONNEN_LEEG, { gebouwdOp: new Date(NU - 5 * 60000).toISOString() }),
@@ -1267,4 +1272,86 @@ test('een verse PAGINA koopt geen vrijstelling voor een statusbestand zonder bou
   });
   assert.deepEqual(g.bevindingen, []);
   assert.equal(g.waarschuwingen.some((w) => /naijling van de CDN/.test(w)), true);
+});
+
+test('het NIEUWSTE bestand van de twee koopt geen respijt voor zijn eigen nulstand', () => {
+  // Reproductie van Codex ronde 11 (P1), zelf nagedraaid over http vóór de reparatie: de PAGINA komt
+  // vier uur oud uit de CDN-cache, het STATUSBESTAND is één minuut oud, beide dragen 2.7.0 en het
+  // statusbestand meldt `0 van 2 geverifieerd` -- en tóch exit 0. Het respijt bestaat om NIET te
+  // oordelen op een bestand dat mogelijk achterloopt; is dat bestand juist de nieuwste van de twee,
+  // dan loopt het nergens op achter en is er niets meer om op te wachten. Dat is het incident van
+  // 22-08 opnieuw, nu gekocht met een verse publicatie ernaast.
+  const status = lees(200, statusTekstVan(BRONNEN_LEEG, CONTRACT_NU, new Date(NU - 60000).toISOString()));
+  const r = toets({
+    paginaStatus: 200,
+    paginaHtml: paginaMetBronnen(BRONNEN_LEEG, { gebouwdOp: new Date(NU - 4 * 3600 * 1000).toISOString() }),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: CONTRACT_NU,
+    bronstand: status.bronnen,
+    bronContractVersie: status.contract,
+    nu: NU,
+  });
+  assert.equal(r.ok, false, 'nul bewezen bronnen in het nieuwste bestand mag niet groen blijven');
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON']);
+  assert.match(r.bevindingen[0].uitleg, /uit de nieuwste van de twee bouwen/);
+  assert.equal(r.waarschuwingen.some((w) => /niet beoordeeld/.test(w)), false,
+    'juist niet uitstellen: het oordeel valt deze ronde');
+  assert.equal(r.waarschuwingen.some((w) => /wél de nieuwste van de twee/.test(w)), true,
+    'en de reden staat er zichtbaar bij');
+
+  // NEGATIEVE CONTROLE 1 — de andere kant blijft ongemoeid. Een OUDER nul-statusbestand naast een
+  // NIEUWERE pagina is precies de gezonde verse publicatie die het respijt beschermt: daar loopt het
+  // statusbestand wél achter en mag de waakvlam niet vals rood worden.
+  const ouder = lees(200, statusTekstVan(BRONNEN_LEEG, CONTRACT_NU, new Date(NU - 10 * 60000).toISOString()));
+  const g = toets({
+    paginaStatus: 200,
+    paginaHtml: paginaMetBronnen(ALLES_BEWEZEN, { gebouwdOp: new Date(NU - 60000).toISOString() }),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: CONTRACT_NU,
+    bronstand: ouder.bronnen,
+    bronContractVersie: ouder.contract,
+    nu: NU,
+  });
+  assert.deepEqual(g.bevindingen, [], 'een achterlopend nul-bestand houdt het respijt');
+  assert.equal(g.waarschuwingen.some((w) => /niet beoordeeld/.test(w)), true);
+
+  // NEGATIEVE CONTROLE 2 — het nieuwste bestand mét bewezen bronnen blijft ook gewoon groen; de
+  // nieuwe tak oordeelt over de nulstand, niet over het nieuwer-zijn op zichzelf.
+  const nieuwsteBewezen = lees(200, statusTekstVan(ALLES_BEWEZEN, CONTRACT_NU, new Date(NU - 60000).toISOString()));
+  const b = toets({
+    paginaStatus: 200,
+    paginaHtml: paginaMetBronnen(BRONNEN_LEEG, { gebouwdOp: new Date(NU - 4 * 3600 * 1000).toISOString() }),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: CONTRACT_NU,
+    bronstand: nieuwsteBewezen.bronnen,
+    bronContractVersie: nieuwsteBewezen.contract,
+    nu: NU,
+  });
+  assert.deepEqual(b.bevindingen, []);
+  assert.equal(b.waarschuwingen.some((w) => /niet beoordeeld/.test(w)), true);
+});
+
+test('op het nieuwe oordeelpad reist de categorie van een bron zonder herkomst mee', () => {
+  // Orderdiscipline R2: waar de telling werkelijk beoordeeld wordt, moet de vaste categorie tot in
+  // de publieke alarmregel overleven -- ook op het pad dat ronde 11 erbij zette. Zonder de gedeelde
+  // `meldOngeteld()` viel `BRON_ZONDER_HERKOMST` hier stil weg en bleef alleen "0 van 1" over.
+  const zonderHerkomst = [{ trust: 'VERIFIED_CURRENT' }];
+  const status = lees(200, statusTekstVan(zonderHerkomst, '9.9.9', new Date(NU - 60000).toISOString()));
+  assert.equal(status.bronnen.ongeteld, 1, 'de opzet klopt alleen met één ongetelde bron');
+  const r = toets({
+    paginaStatus: 200,
+    paginaHtml: paginaMetBronnen(BRONNEN_LEEG, { gebouwdOp: new Date(NU - 4 * 3600 * 1000).toISOString() }),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: CONTRACT_NU,
+    bronstand: status.bronnen,
+    bronContractVersie: status.contract,
+    nu: NU,
+  });
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON']);
+  assert.deepEqual(r.nevenpunten.map((n) => n.code), ['BRON_ZONDER_HERKOMST']);
+  assert.match(r.nevenpunten[0].uitleg, /1 van 1/);
 });
