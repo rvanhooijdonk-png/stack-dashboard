@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   parseRuntimeFeed, auditRuntimeFeedSchema, RUNTIME_FEED_SCHEMA, FRESHNESS, CODES,
-  STALE_DREMPEL_MS, FUTURE_SKEW_MS,
+  STALE_DREMPEL_MS, FUTURE_SKEW_MS, parseTijdstempel,
 } from '../scripts/lib/runtime-feed.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -768,3 +768,47 @@ test('B5: een geldige schrikkeldag (29 februari 2024) blijft wel een leesbaar ti
   const r = parseRuntimeFeed(raw, { now: new Date('2024-02-29T12:00:00Z') });
   assert.equal(r.actors[0].current_task.active, true);
 });
+
+// Codex ronde 13 (P2) -- `date-time` in JSON Schema staat op RFC 3339, en daar loopt het uur van 00
+// t/m 23 (§5.6). V8 rekt dat op: `T24:00:00.000Z` rolt stilzwijgend door naar middernacht van de
+// volgende dag. Dat is dezelfde stille normalisatie als 30 februari hierboven, en met een
+// millisecondevergelijking op de bouwidentiteit bond zo'n stempel als DEZELFDE bouw als de pagina
+// van middernacht erna. Reproductie van Codex over http: pagina `2026-08-23T00:00:00.000Z`,
+// statusbestand `2026-08-22T24:00:00.000Z`, één VERIFIED_CURRENT bron -> `verschil ... 0 s`, exit 0.
+test('parseTijdstempel weigert het uur 24, dat V8 stilzwijgend doorrolt', () => {
+  assert.equal(parseTijdstempel('2026-08-22T24:00:00.000Z'), null,
+    'RFC 3339 kent geen uur 24; V8 maakt er middernacht van de volgende dag van');
+  assert.equal(Date.parse('2026-08-22T24:00:00.000Z'), Date.parse('2026-08-23T00:00:00.000Z'),
+    'en juist dat maakt het gevaarlijk: het bindt op de milliseconde aan een ander tijdstip');
+  assert.equal(parseTijdstempel('2026-08-23T00:00:00.000Z'), Date.parse('2026-08-23T00:00:00.000Z'),
+    'de geldige schrijfwijze van hetzelfde moment blijft gewoon leesbaar');
+});
+
+// Dezelfde begrenzing, de andere klokdelen en de zone. Minuten en seconden weigerde `Date.parse`
+// al; ze staan nu ook in de vorm, zodat de eis leesbaar is in plaats van afhankelijk van V8.
+for (const [naam, ongeldig] of [
+  ['uur 24', '2026-08-22T24:00:00.000Z'],
+  ['uur 99', '2026-08-22T99:00:00.000Z'],
+  ['minuut 60', '2026-08-22T12:60:00.000Z'],
+  ['seconde 60 (schrikkelseconde)', '2026-08-22T23:59:60.000Z'],
+  ['zone-uur 24', '2026-08-22T12:00:00.000+24:00'],
+  ['zone-minuut 60', '2026-08-22T12:00:00.000+02:60'],
+]) {
+  test(`parseTijdstempel weigert een klokdeel buiten zijn bereik (${naam})`, () => {
+    assert.equal(parseTijdstempel(ongeldig), null);
+  });
+}
+
+// Negatieve controle op diezelfde begrenzing: de randen die WEL geldig zijn moeten blijven werken,
+// anders is de vorm te streng geworden en verdwijnen echte bouwstempels stilletjes in ONLEESBAAR.
+for (const geldig of [
+  '2026-08-22T00:00:00.000Z',
+  '2026-08-22T23:59:59.999Z',
+  '2026-08-22T23:59:59.999+23:59',
+  '2026-08-22T12:00:00.000-05:30',
+  '2026-08-22T12:00:00Z',
+]) {
+  test(`parseTijdstempel houdt de geldige rand leesbaar (${geldig})`, () => {
+    assert.equal(parseTijdstempel(geldig), Date.parse(geldig));
+  });
+}

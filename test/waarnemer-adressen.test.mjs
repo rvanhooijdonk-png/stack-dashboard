@@ -62,14 +62,31 @@ async function plaatselijkeBron(t) {
   const server = createServer((req, res) => {
     const route = req.url.split('?')[0];
     gezien.push(route);
-    if (route === '/contentstroom.html') {
+    // Het statusbestand hoort bij de plaat: sinds de waakvlam haalt de waarnemer het naast de
+    // pagina op, afgeleid uit BASE_URL. Het hoeft hier geen gezonde inhoud te dragen — deze suite
+    // meet adressen, niet oordelen — maar het moet wél bestaan, anders meet de routelijst hieronder
+    // een 404 in plaats van een afleiding.
+    if (route === '/plaat/status.json') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+      return;
+    }
+    if (route === '/plaat/contentstroom.html') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end('<!doctype html><html><body><footer>Gegenereerd door <code>stack-dashboard</code> '
         + '(contract 2.4.0)</footer></body></html>');
       return;
     }
-    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('# publieke spiegel\n');
+    if (route === '/bron/kanaalpost-publiek.md') {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('# publieke spiegel\n');
+      return;
+    }
+    // Alles wat hierbuiten valt is een verkeerd afgeleid adres en hoort als zodanig zichtbaar te
+    // zijn. Antwoordde deze server op ELK pad met de spiegel, dan zou een mutant die het verkeerde
+    // adres bouwt gewoon 200 krijgen en niets verraden.
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('niet gevonden');
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -77,8 +94,13 @@ async function plaatselijkeBron(t) {
   const { port } = server.address();
   return {
     gezien,
-    base: `http://127.0.0.1:${port}/contentstroom.html`,
-    spiegel: `http://127.0.0.1:${port}/kanaalpost-publiek.md`,
+    base: `http://127.0.0.1:${port}/plaat/contentstroom.html`,
+    // De spiegel staat met opzet in een ANDERE map dan de plaat. Stonden ze naast elkaar, dan zou
+    // `new URL('./status.json', SPIEGEL_URL)` hetzelfde pad opleveren als `new URL('./status.json',
+    // BASE_URL)` en zou een mutant die het statusadres uit de spiegel afleidt hier ongemerkt
+    // groen blijven (Codex ronde 14, P3). Nu is `/plaat/status.json` iets anders dan
+    // `/bron/status.json` en meet de routelijst hieronder het verschil.
+    spiegel: `http://127.0.0.1:${port}/bron/kanaalpost-publiek.md`,
   };
 }
 
@@ -91,7 +113,12 @@ test('met BEIDE adressen expliciet draait de waarnemer buiten Actions, zonder id
   assert.doesNotMatch(cli.stderr, IDENTITEITSFOUT, cli.stderr);
   // Niet alleen "geen fout": beide MEEGEGEVEN adressen zijn ook werkelijk opgehaald, en de run is
   // doorgelopen tot het oordeel. Anders zou een script dat stilletjes niets doet hier slagen.
-  assert.deepEqual([...bron.gezien].sort(), ['/contentstroom.html', '/kanaalpost-publiek.md']);
+  // Het statusbestand staat er als derde bij, en het staat er onder `/plaat/`. Dat is twee dingen
+  // tegelijk: het adres komt uit het MEEGEGEVEN BASE_URL (was het uit de identiteit afgeleid, dan
+  // zag deze server het nooit), en het komt uit de PAGINA en niet uit de spiegel (die staat onder
+  // `/bron/`).
+  assert.deepEqual([...bron.gezien].sort(),
+    ['/bron/kanaalpost-publiek.md', '/plaat/contentstroom.html', '/plaat/status.json']);
   assert.match(cli.stdout, /waarnemer — pagina http 200, logboek http 200/);
   assert.match(cli.stdout, /AFWIJKING/);
   assert.equal(cli.status, 1);
@@ -104,7 +131,8 @@ test('een misvormde override blokkeert een volledig expliciete run niet', async 
   const cli = await draai({ BASE_URL: bron.base, SPIEGEL_URL: bron.spiegel, DASHBOARD_REPOSITORY: 'kapot' });
 
   assert.doesNotMatch(cli.stderr, IDENTITEITSFOUT, cli.stderr);
-  assert.deepEqual([...bron.gezien].sort(), ['/contentstroom.html', '/kanaalpost-publiek.md']);
+  assert.deepEqual([...bron.gezien].sort(),
+    ['/bron/kanaalpost-publiek.md', '/plaat/contentstroom.html', '/plaat/status.json']);
   assert.equal(cli.status, 1);
 });
 

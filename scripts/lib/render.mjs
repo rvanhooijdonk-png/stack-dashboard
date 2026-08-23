@@ -769,6 +769,28 @@ a{color:var(--acc)}
 `;
 
 /**
+ * DE BRONSTAND ALS MACHINEMERK, in de KOP van elke pagina.
+ *
+ * De plaat zegt in haar inleiding al in mensentaal hoeveel bronnen bewezen zijn. Die zin is prima
+ * voor een lezer en ongeschikt voor een bewaker: hij staat in de body, en de body draagt ook
+ * gesaneerde bronregels. Eén kanaalpost-melding die diezelfde woorden bevat zou de meting kunnen
+ * vervangen (vals groen) of verdubbelen (vals rood) — bevinding Codex, 23-08-2026.
+ *
+ * Daarom staat de meetwaarde hier waar plaatinhoud nooit kan komen: in de `<head>`. Dat is exact de
+ * tuchtregel die de bouwstempel al hanteert (`stempelUitHtml` leest alleen vóór `</head>` en eist
+ * precies één treffer). Getallen, geen proza, dus een hernoeming van de inleidende zin maakt de
+ * bewaker niet blind.
+ *
+ * `bewezen` telt uitsluitend `VERIFIED_CURRENT`. Alles daarbuiten — STALE, UNVERIFIED,
+ * SOURCE_UNAVAILABLE — is geen bewijs, dezelfde grens die de statusgen-paneellaag hanteert.
+ */
+export function bronstandMerk(sources) {
+  const lijst = Array.isArray(sources) ? sources : [];
+  const bewezen = lijst.filter((x) => x && x.trust === 'VERIFIED_CURRENT').length;
+  return `<meta name="bronstand" content="bewezen=${num(bewezen)} totaal=${num(lijst.length)}">`;
+}
+
+/**
  * Bouw de volledige pagina. `snapshot` moet al door assertPublishable zijn gegaan.
  *
  * `nav` is optioneel en standaard leeg: zonder dat argument is de uitvoer byte-identiek aan vóór
@@ -797,6 +819,7 @@ export function renderHtml(snapshot, { refreshSeconds = 900, nav = '', pagePath 
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="${refresh}; url=${refreshPath}?v=${cacheBust}">
 <meta name="robots" content="noindex,nofollow">
+${bronstandMerk(s.sources)}
 <meta http-equiv="content-security-policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
 <title>Stack-dashboard — ${esc(titelStamp(s.generatedAt))}</title>
 <style>${STYLE}</style>
@@ -808,7 +831,7 @@ ${nav ? `${nav}\n` : ''}<header>
   <p class="stamp">Laatst bijgewerkt: <strong>${esc(buildStamp(s.generatedAt))}</strong> · deze pagina haalt zichzelf elke ${num(refresh / 60)} min opnieuw op</p>
 </header>
 <p class="muted">Weergave van bestaande canon — nooit een tweede waarheid. Alles is read-only en gesaneerd;
-${stale.length === 0 ? 'alle bronnen zijn geverifieerd.' : `<strong>${num(stale.length)}</strong> van ${num(s.sources.length)} bronnen is niet geverifieerd (zie de badges).`}
+${stale.length === 0 ? `alle ${num(s.sources.length)} bronnen zijn geverifieerd.` : `<strong>${num(stale.length)}</strong> van ${num(s.sources.length)} bronnen is niet geverifieerd (zie de badges).`}
 <strong>Lees altijd eerst de stempel hierboven:</strong> deze pagina is statisch en wordt opnieuw gebouwd
 bij elke push naar main en bij een handmatige run — <strong>niet op een gegarandeerd interval</strong>.
 De geplande kwartierrun staat wel ingesteld, maar GitHub voert die hier niet betrouwbaar uit. Een oude

@@ -31,7 +31,12 @@
  */
 
 import { kanaalpostUitTekst, toPublicKanaalpost, ontdaan } from './kanaalpost.mjs';
+import { validate } from './validate.mjs';
 import { canoniek } from './spiegelwet.mjs';
+// HERGEBRUIK-EERST: dezelfde strikte tijdstipontleding die de runtime-feed al gebruikt. `Date.parse`
+// is géén validator -- V8 leest `"0"` als 31-12-1999 en rolt `2026-02-30` stilzwijgend door naar
+// 2 maart. Beide kochten daarmee bewijs op de plekken hieronder (bevinding Codex, ronde 10).
+import { parseTijdstempel } from './runtime-feed.mjs';
 
 /** Vanaf deze contractversie MOET de pagina een kanaalpost-sectie hebben. */
 export const KANAALPOST_VANAF = '2.4.0';
@@ -132,6 +137,14 @@ export const CODES = {
   SECTIE_ONTBREEKT: 'een verplichte sectie ontbreekt op de pagina',
   SECTIE_LEEG: 'een sectie op de pagina is leeg zonder uitleg',
   PAGINA_KAPOT: 'op de pagina staat een lege of onberekende waarde in plaats van gegevens',
+  GEEN_GEVERIFIEERDE_BRON: 'de pagina staat er wel, maar geen enkele bron erachter is geverifieerd',
+  BRONSTAND_ONLEESBAAR: 'er is niet te lezen hoeveel van de bronnen achter de plaat geverifieerd zijn',
+  BRONSTAND_ANDERE_BOUW: 'de bronstand hoort bij een andere bouw dan de pagina die nu geserveerd wordt',
+  CONTRACT_ONLEESBAAR: 'er is niet te lezen welke versie van de plaat dit is',
+  CONTRACT_UITEEN: 'de plaat en het statusbestand noemen verschillende contractversies terwijl ze uit dezelfde bouw komen',
+  // Een NEVENPUNT: het maakt op zichzelf geen ronde rood, maar het reist wél mee in de publieke
+  // melding zodra er om een andere reden alarm is. Zie NEVENPUNTEN hieronder.
+  BRON_ZONDER_HERKOMST: 'er zijn bronnen die zich geverifieerd noemen zonder herkomst; die tellen niet mee',
 };
 
 const UUR = 3600 * 1000;
@@ -151,10 +164,12 @@ const ZONE_SPELING_MS = 3 * UUR;
 
 /** Versievergelijking op drie getallen; alles wat niet leesbaar is telt als "ouder dan". */
 export function versieMinstens(gevonden, minimaal) {
+  // Begrensd lezen: zie VERSIE_VORM. Een cijferreeks die `parseInt` naar `Infinity` tilt is geen
+  // versie maar een aanval op de vergelijking zelf.
+  if (!VERSIE_VORM.test(String(gevonden ?? ''))) return false;
   const lees = (v) => String(v ?? '').split('.').map((x) => Number.parseInt(x, 10));
   const a = lees(gevonden);
   const b = lees(minimaal);
-  if (a.length !== 3 || a.some((x) => !Number.isInteger(x))) return false;
   for (let i = 0; i < 3; i += 1) {
     if (a[i] !== b[i]) return a[i] > b[i];
   }
@@ -262,30 +277,201 @@ export function rijMoment(datum) {
   return Number.isNaN(t) ? null : t;
 }
 
+/** De vorm van een contractversie. BEGRENSD, want `versieMinstens()` zet de delen om met
+ *  `parseInt`: bij een paar honderd cijfers wordt dat `Infinity` en heet elke versie ineens
+ *  "ouder" — waarmee elke versiepoort zichzelf uitschakelt (bevinding Codex ronde 4, 23-08-2026).
+ *  Dezelfde vorm geldt overal: wat de vergelijker niet aankan, heet ook niet leesbaar. */
+export const VERSIE_VORM = /^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/;
+
+/**
+ * De velden die een bron IDENTIFICEERBAAR en DATEERBAAR maken. Alleen een bron die ze alle drie
+ * draagt mag als bewijs meetellen; dat is wat een verzonnen `{ trust: "VERIFIED_CURRENT" }` zonder
+ * herkomst tegenhoudt (bevinding Codex, ronde 7).
+ *
+ * Dit is met opzet een KORTE, met de hand genoemde kern en niet het hele schema. Ronde 8 liet zien
+ * waarom: een uit het schema afgeleide vormkeuring bindt onvermijdelijk óók de `required`-lijst en
+ * de enums van ÉÉN versie, en dan geeft elke schemabump een luide ronde op een kerngezonde oudere
+ * kopie — Codex reproduceerde dat met een 2.8-schema tegen een gezonde 2.7-plaat (8 afwijkingen) en
+ * met een nieuwe trust-waarde tegen het oude schema (1 afwijking). Zo'n alarm komt bovendien
+ * blijvend in het openbare logboek te staan. De kern hieronder verandert niet mee met het contract
+ * en heeft dat venster dus niet.
+ *
+ * De prijs is afdrijving, en die is afgedekt: een test bindt dat elk kernveld ook in het schema
+ * `required` is (orderdiscipline R2 — elke lijst met vaste literalen krijgt een test). De kern mag
+ * krimpen, nooit groeien: een veld toevoegen is precies het venster dat we hier vermijden.
+ */
+export const KERN_BRONVELDEN = ['key', 'trust', 'retrievedAt'];
+
+/**
+ * Draagt deze bron de kern? Leeg of niet-tekst telt niet als "draagt", en `retrievedAt` moet een
+ * LEESBAAR TIJDSTIP zijn en niet zomaar tekst: tot ronde 9 kwam `"geen datum"` er gewoon doorheen
+ * en kocht daarmee bewijs (bevinding Codex, ronde 9). Een tijdstip is een tijdstip in elke
+ * contractversie, dus deze eis heeft het bumpvenster niet dat het vormschema wél had.
+ *
+ * De eis is in ronde 10 aangescherpt van `Date.parse` naar `parseTijdstempel`: `Date.parse("0")`
+ * leverde een geldig getal en dus bewijs, en `2026-02-30` werd stilzwijgend rechtgezet naar 2
+ * maart. Een tijdstip moet zonebewust ISO-8601 zijn én op de kalender bestaan; anders is het geen
+ * herkomst maar tekst die eruitziet als herkomst (bevinding Codex, ronde 10).
+ */
+export function kernCompleet(bron) {
+  if (!bron || typeof bron !== 'object' || Array.isArray(bron)) return false;
+  if (!KERN_BRONVELDEN.every((veld) => typeof bron[veld] === 'string' && bron[veld].trim() !== '')) return false;
+  return parseTijdstempel(bron.retrievedAt) !== null;
+}
+
+/**
+ * Het machineleesbare statusbestand van de plaat (`public/status.json`), gelezen met een parser.
+ *
+ * Vier reviewrondes lang stond de meting in de HTML-kop en vier keer vond de review daar hetzelfde
+ * soort gat: een zelfgeschreven scanner is geen HTML5-parser, en de klasse "leest anders dan een
+ * browser" liet zich niet per geval dichtmetselen (`<noscript>`, `<div>` dat de kop impliciet
+ * sluit, `<!doctype html <meta>>`, karakterverwijzingen). Een echte parser meenemen kan niet:
+ * de waakvlam draait `node scripts/waarnemer.mjs` zonder installatiestap.
+ *
+ * Daarom leest de waakvlam de meting niet meer uit opmaak maar uit het kanaal dat er al voor
+ * bestond: `status.json` staat op de publicatie-allowlist, heeft een eigen schema
+ * (`contracts/status-json.schema.json`) met `contractVersion` en per bron een `trust`, en komt uit
+ * dezelfde build als de pagina. JSON.parse kent geen dubbelzinnigheid; een tweede, tegensprekende
+ * waarde bestaat er niet. Het merk in de kop van de pagina blijft staan als eerlijke mededeling
+ * aan wie de pagina zelf bekijkt, maar het is niet meer wat de waakvlam beoordeelt.
+ */
+export function statusUitTekst(httpStatus, tekst, schema = null) {
+  const leeg = { totaal: null, bewezen: null, ongeteld: null, gebouwdOp: null, getoetst: false };
+  const mis = (reden) => ({ contract: null, bronnen: { leesbaar: false, reden, ...leeg } });
+
+  if (Number(httpStatus) !== 200) return mis(`statusbestand http ${Number(httpStatus) || 0}`);
+  let json;
+  try { json = JSON.parse(String(tekst ?? '')); } catch { return mis('statusbestand is geen geldige JSON'); }
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return mis('statusbestand is geen object');
+
+  const contract = VERSIE_VORM.test(String(json.contractVersion ?? '')) ? String(json.contractVersion) : null;
+  // De bouwidentiteit. `generatedAt` is hetzelfde tijdstip dat de pagina als cache-buster in haar
+  // refresh-tag zet; op de live publicatie gemeten (23-08-2026): status.json
+  // `2026-08-23T09:14:09.272Z` naast paginabuster `?v=20260823091409272`, dezelfde bouw tot op de
+  // milliseconde. Zonder dit veld is een statusbestand niet aan een pagina toe te schrijven.
+  // Ook hier de strikte ontleding en niet `Date.parse`: met `generatedAt: "0"` werd 31-12-1999 een
+  // geldig bouwmoment, en dat bouwmoment kocht via het respijt de CDN-vrijstelling waarmee de
+  // bronstand ongemoeid bleef -- groen op nul bronnen (bevinding Codex, ronde 10).
+  const gebouwdOp = parseTijdstempel(json.generatedAt) !== null ? json.generatedAt : null;
+  // `getoetst` zegt of de KEURING heeft plaatsgevonden, niet of ze slaagde. Een bestand dat op zijn
+  // eigen schema valt is wél gekeurd; het tegenovergestelde melden zou de oorzaak wegpoetsen op
+  // precies het pad waar hij gevonden is (orderdiscipline R2).
+  const onleesbaar = (reden, gekeurd = false) => ({
+    contract, bronnen: { leesbaar: false, reden, ...leeg, gebouwdOp, getoetst: gekeurd },
+  });
+
+  // Een onleesbare contractversie is zelf een afwijking, precies zoals bij de PAGINA. Zonder
+  // leesbare versie is niet te zeggen welk contract dit bestand beweert te volgen, en tot ronde 8
+  // kocht juist die onleesbaarheid een vrijstelling van de volle keuring: `getoetst` werd `false`
+  // en daarmee gold alleen de kern (bevinding Codex, ronde 8).
+  if (contract === null) return onleesbaar('contractversie van het statusbestand is niet te lezen');
+
+  // Het schema is de enige plek waar de vorm van dit bestand vastligt; `JSON.parse` alleen keurt
+  // niets (bevinding Codex, ronde 5). Er wordt op TWEE niveaus gekeurd:
+  //
+  //  - Beweert het bestand ONZE contractversie, dan is ons schema er het gezag over en geldt het
+  //    volle contract, `additionalProperties: false` incluis. Vals alarm kan hier niet: het bestand
+  //    zegt zelf dat het deze versie is.
+  //  - Beweert het een ANDERE versie, dan mag ons schema niet het laatste woord hebben — een oudere
+  //    of nieuwere gepubliceerde kopie kent per definitie andere verplichte velden en andere enums.
+  //    Daar geldt alleen de kern (`KERN_BRONVELDEN`), en die geldt per bron, niet over het hele
+  //    bestand: een bron zonder herkomst telt niet mee, de rest wordt gewoon geteld.
+  //
+  // Wat hier NIET meer staat is een versiepoort: er is geen tak die het oordeel overslaat op gezag
+  // van het bestand zelf. Een vreemde versie maakt de keuring milder, nooit afwezig, en de TELLING
+  // wordt altijd geveld.
+  if (schema === null) return onleesbaar('geen schema om het statusbestand aan te toetsen');
+  const schemaVersie = schema?.properties?.contractVersion?.const ?? null;
+  const getoetst = schemaVersie !== null && contract === schemaVersie;
+  if (getoetst) {
+    const fouten = validate(schema, json);
+    if (fouten.length) {
+      return onleesbaar(`statusbestand volgt zijn eigen contract niet (${fouten.length} afwijking${fouten.length === 1 ? '' : 'en'})`, true);
+    }
+  }
+
+  if (!Array.isArray(json.sources)) return onleesbaar('statusbestand noemt geen bronnen');
+  // Alleen een bron met de kern telt als bewijs. `ongeteld` houdt bij hoeveel er zich WEL bewezen
+  // noemden maar geen herkomst droegen — dat mag niet in stilte verdwijnen (orderdiscipline R2).
+  const beweren = json.sources.filter((x) => x && typeof x === 'object' && x.trust === 'VERIFIED_CURRENT');
+  const bewezen = beweren.filter(kernCompleet).length;
+  const ongeteld = beweren.length - bewezen;
+  return {
+    contract,
+    bronnen: { leesbaar: true, reden: null, totaal: json.sources.length, bewezen, ongeteld, gebouwdOp, getoetst },
+  };
+}
+
+/*
+ * Hier stond `BRONSTAND_VANAF = '2.7.0'`: de versiepoort waarmee een oudere kopie van de plaat
+ * buiten de bronstandtoets viel. Die is weg (Codex ronde 6). Hij hoorde bij het merk in de KOP van
+ * de pagina, dat pas vanaf 2.7.0 bestaat — maar de meting komt niet uit de kop, ze komt uit
+ * `status.json`, en dat draagt `sources` met `trust` al veel langer. De poort stelde dus niets vrij
+ * dat vrijstelling nodig had, en las zijn voorwaarde uit hetzelfde bestand dat hij vrijstelde.
+ * De rest van de zelf-bewapening (`KANAALPOST_VANAF`, `SECTIES_VANAF`) blijft ongemoeid: díe
+ * toetsen lezen wél de pagina, en daar is de versiepoort op zijn plaats.
+ */
+
+/**
+ * Hoeveel bronnen achter de pagina zijn bewezen? De plaat draagt dat als machinemerk in haar kop
+ * (`bronstandMerk` in render.mjs). Alleen de KOP wordt gelezen en er moet precies één treffer zijn
+ * — dezelfde tuchtregel als bij de bouwstempel, en om dezelfde reden: de body van de plaat bevat
+ * gesaneerde bronregels, en die mogen een meetwaarde nooit kunnen namaken of verdubbelen.
+ *
+ * Onmogelijke getallen tellen als onleesbaar, niet als stand. Meer bewezen dan gelezen bronnen,
+ * een negatief aantal of iets buiten het veilige integerbereik betekent dat de kop niet klopt; dan
+ * hoort de waarnemer te zeggen dat hij het niet weet in plaats van door te rekenen op onzin.
+ */
+/**
+ * Elementen waarvan de INHOUD geen opmaak is. Wat hierin staat ziet de browser als tekst, dus de
+ * waarnemer mag het ook niet als element lezen. `template` staat er bewust bij: de inhoud daarvan
+ * is wél DOM, maar inert — een merk daarin meet niets.
+ */
+
 /**
  * De hele toetsing over binnengehaalde tekst. Geen netwerk, geen klok van zichzelf: `nu` komt van
  * buiten zodat elke uitkomst in een test exact te zetten is.
  */
+/**
+ * Nevenpunten zijn geen bevindingen: ze maken een ronde niet rood. Ze reizen wél mee in de publieke
+ * alarmregel zodra er om een andere reden alarm is, want een reductie mag de oorzaak niet weggooien
+ * (orderdiscipline R2). Tot ronde 9 bleef `ongeteld` steken in een waarschuwing die alleen in de
+ * runlog stond; in de openbare melding was er niets van terug te vinden (bevinding Codex, ronde 9).
+ *
+ * Gesloten lijst van vaste literalen — een nevenpunt is altijd een sleutel uit `CODES`.
+ */
+export const NEVENPUNTEN = Object.freeze(['BRON_ZONDER_HERKOMST']);
+
 export function toets({
   paginaStatus, paginaHtml, spiegelStatus, spiegelTekst,
-  paginaRoute, contractVersie = null, nu = 0,
+  paginaRoute, contractVersie = null, bronstand = null, bronContractVersie = null, nu = 0,
   drempelMs = DREMPEL_UREN * UUR, graceMs = GRACE_MINUTEN * MIN,
 } = {}) {
   const bevindingen = [];
   const waarschuwingen = [];
-  const gemeten = { stempelIso: null, leeftijdMs: null, paginaRij: null, bronRij: null, contract: contractVersie };
+  const nevenpunten = [];
+  const gemeten = { stempelIso: null, leeftijdMs: null, paginaRij: null, bronRij: null, contract: contractVersie, bronnen: null, bouwVerschilMs: null };
   const meld = (code, extra = '') => bevindingen.push({ code, uitleg: CODES[code] + (extra ? ` (${extra})` : '') });
 
   // 1 — bereikbaar en bestempeld.
   if (Number(paginaStatus) !== 200) {
     meld('PAGINA_ONBEREIKBAAR');
-    return { ok: false, bevindingen, waarschuwingen, gemeten };
+    return { ok: false, bevindingen, waarschuwingen, nevenpunten, gemeten };
   }
   const html = String(paginaHtml ?? '');
   if (html.trim().length < 200) {
     meld('PAGINA_LEEG');
-    return { ok: false, bevindingen, waarschuwingen, gemeten };
+    return { ok: false, bevindingen, waarschuwingen, nevenpunten, gemeten };
   }
+  // 1b -- de plaat moet zelf zeggen welke contractversie haar bouwde. Zonder leesbare versie is
+  // ELKE versiepoort hieronder blind: `null` leest daar als "ouder dan", waardoor toets 3, 4 en 5
+  // zichzelf uitschakelen op precies de pagina die de waarnemer niet herkent. Codex bewees dat gat
+  // (P2, 23-08-2026): met de contractvoettekst weggehaald gaf `toets()` `contract=null, ok=true,
+  // bevindingen=[]`. Een onherkenbare plaat is daarom zelf een bevinding, en die valt VOOR de
+  // poorten -- niet erna, want dan zou de bevinding afhangen van de poort die ze moet redden.
+  const contractLeesbaar = VERSIE_VORM.test(String(contractVersie ?? ''));
+  if (!contractLeesbaar) meld('CONTRACT_ONLEESBAAR');
+
   const stempel = stempelUitHtml(html, { route: paginaRoute });
   if (!stempel.gevonden) meld('STEMPEL_ONTBREEKT');
   else if (!stempel.iso) meld('STEMPEL_ONLEESBAAR');
@@ -387,7 +573,134 @@ export function toets({
   const spoor = KAPOT_SPOREN.find((k) => html.includes(k));
   if (spoor) meld('PAGINA_KAPOT');
 
-  return { ok: bevindingen.length === 0, bevindingen, waarschuwingen, gemeten };
+  // 5 — de plaat rust op minstens een bewezen bron. Toets 1 t/m 4 kijken naar de VORM van de
+  // pagina: staat ze er, is ze vers, staan de secties erin. Ze kijken niet naar de vraag of er nog
+  // iets ACHTER die vorm zit. Op 22-08-2026 bleek dat gat echt: vanaf 14:24 UTC leverde de bouw
+  // vijftien uur lang een plaat af waarin geen enkele bron geverifieerd was, en de waarnemer draaide
+  // in datzelfde venster 81 keer groen (gemeten met `gh run list --workflow=waarnemer.yml`). De
+  // pagina was namelijk keurig vers en compleet; alleen leeg vanbinnen. Een bewaker die dat groen
+  // noemt bewaakt de lijst en niet de plaat.
+  //
+  // GEEN PUBLICATIEPOORT. Deze toets houdt niets tegen. De plaat hoort eerlijk te publiceren met
+  // "niet geverifieerd" erop -- dat is haar fail-closed-gedrag en dat is goed. Wat ontbrak was het
+  // SIGNAAL: rood in de run en een regel in de spiegel, zodat een lege plaat niet stil kan blijven.
+  //
+  // De meting komt binnen als al gelezen feit uit `statusUitTekst()` -- het statusbestand van de
+  // plaat, niet haar opmaak. Deze toets oordeelt, hij parseert niet.
+  const gemetenBron = bronstand
+    ?? { leesbaar: false, reden: 'geen bronstand gemeten', totaal: null, bewezen: null, ongeteld: null, gebouwdOp: null, getoetst: false };
+  gemeten.bronnen = gemetenBron;
+
+  // De bouwidentiteit bindt de meting aan DEZE pagina. Zonder die band oordeelt de waakvlam over een
+  // willekeurig ander bestand: een statusbestand uit een oudere bouw kon zowel de telling leveren als
+  // de versie waarmee die telling zichzelf vrijstelt (bevinding Codex, ronde 5). De vergelijking is
+  // exact — `generatedAt` en de cache-buster van de pagina zijn hetzelfde tijdstip — maar op het
+  // TIJDSTIP, niet op de schrijfwijze. Tot ronde 12 stonden hier twee tekenreeksen naast elkaar,
+  // terwijl de pagina haar stempel altijd als `...Z` opbouwt (`stempelUitHtml`) en `status.json` net
+  // zo goed `...+00:00` mag dragen: dezelfde bouw gold dan als twee bouwen, en dat kocht precies de
+  // naijlingsvrijstelling die het oordeel overslaat (bevinding Gemini, ronde 10).
+  //
+  // Het respijt meet hoe VERS de nieuwste van de twee bouwen is, niet hoe ver ze uit elkaar liggen.
+  // Dat onderscheid is een correctie op ronde 6: naijling van de CDN duurt hooguit ongeveer tien
+  // minuten, maar twee opeenvolgende bouwen kunnen uren uit elkaar liggen (publish draait 05:45 en
+  // 15:45). Op het verschil tussen de bouwen afgaan gaf daardoor vals rood op precies het moment dat
+  // een gezonde publicatie half was doorgezakt naar de CDN. Wat telt is: is er zojuist gepubliceerd?
+  // Dan is een mengsel van oud en nieuw te verwachten en oordeelt de waakvlam deze ronde niet, met
+  // een zichtbare waarschuwing. Staat de nieuwste bouw al langer dan het respijt stil en lopen de
+  // twee bestanden nog steeds uiteen, dan is de publicatie blijven steken en is dat een bevinding.
+  const stempelMs = gemeten.stempelIso === null ? null : Date.parse(gemeten.stempelIso);
+  const bronMs = gemetenBron.gebouwdOp === null ? null : Date.parse(gemetenBron.gebouwdOp);
+  const zelfdeBouw = bronMs !== null && stempelMs !== null
+    && Number.isFinite(bronMs) && Number.isFinite(stempelMs) && bronMs === stempelMs;
+  const nieuwsteBouwMs = [stempelMs, bronMs].filter((x) => x !== null && Number.isFinite(x))
+    .reduce((a, b) => Math.max(a, b), Number.NEGATIVE_INFINITY);
+  // Het venster loopt naar twee kanten, maar niet even ver. Naar ACHTEREN het volle respijt: zo lang
+  // mag een publicatie erover doen om overal aan te komen. Naar VOREN alleen de klokspeling tussen
+  // bouwmachine en controlemachine — een bouwstempel dat verder in de toekomst ligt is geen verse
+  // publicatie maar een verzet uurwerk of een verzonnen stempel, en zo'n stempel mag zichzelf niet
+  // als naijling voordoen. Tot ronde 7 stond hier `-graceMs`, waardoor een stempel tot drie kwartier
+  // vooruit juist wél als vers gold; dat was precies de vrijstelling die een verzonnen tijd kon
+  // kopen (bevinding Codex, ronde 7).
+  const bouwOuderdomMs = Number.isFinite(nieuwsteBouwMs) ? nu - nieuwsteBouwMs : null;
+  const verseBouw = bouwOuderdomMs !== null && bouwOuderdomMs >= -KLOKSPELING_MS && bouwOuderdomMs <= graceMs;
+  gemeten.bouwVerschilMs = stempelMs !== null && bronMs !== null && Number.isFinite(stempelMs) && Number.isFinite(bronMs)
+    ? Math.abs(bronMs - stempelMs)
+    : null;
+  // Is het statusbestand het VERSTE dat we van deze publicatie kunnen zien? Dan loopt het nergens op
+  // achter en is er geen reden om zijn telling uit te stellen (bevinding Codex, ronde 11).
+  // Gelijk hoeft hier niet meegeteld: twee gelijke tijdstippen zijn sinds ronde 12 dezelfde bouw en
+  // komen niet op dit pad. Een dode gelijkheidshelft zou bovendien precies zijn wat Codex in ronde
+  // 12 aanwees: een tak die geen enkele test kan raken.
+  const bronIsNieuwste = bronMs !== null && Number.isFinite(bronMs)
+    && (stempelMs === null || !Number.isFinite(stempelMs) || bronMs > stempelMs);
+
+  // Dezelfde categorie op elke plek waar de telling werkelijk beoordeeld wordt: een reductie mag de
+  // oorzaak niet weggooien, ook niet op een tweede pad (orderdiscipline R2).
+  const meldOngeteld = () => {
+    if (!gemetenBron.ongeteld) return;
+    waarschuwingen.push(`${gemetenBron.ongeteld} bron(nen) noemden zich bewezen zonder herkomst (${KERN_BRONVELDEN.join(', ')}) en tellen dus niet mee`);
+    nevenpunten.push({ code: 'BRON_ZONDER_HERKOMST', uitleg: `${CODES.BRON_ZONDER_HERKOMST} (${gemetenBron.ongeteld} van ${gemetenBron.totaal})` });
+  };
+
+  // Geen enkele tak mag het bronstandoordeel nog OVERSLAAN op gezag van het statusbestand zelf.
+  // Er stonden hier twee zulke ontsnappingen — een versiepoort (`BRONSTAND_VANAF`) en de
+  // schemakeuring — en allebei lazen ze hun voorwaarde uit hetzelfde bestand dat ze vrijstelden
+  // (bevinding Codex, ronde 6). De versiepoort was bovendien een overblijfsel: hij hoorde bij het
+  // merk in de kop van de pagina, dat pas vanaf 2.7.0 bestond. `status.json` draagt `sources` met
+  // `trust` al veel langer — de LIVE 2.6.0-plaat levert er gewoon `4 van 8` uit — dus een oudere
+  // kopie kán deze toets doorstaan en hoeft er niet van vrijgesteld te worden. Wat overblijft is één
+  // regel zonder uitzonderingen: is de stand leesbaar en hoort hij bij deze bouw, dan wordt hij
+  // beoordeeld. Een ongekeurd bestand (andere contractversie dan het schema) wordt óók beoordeeld;
+  // dat het niet gekeurd kon worden is een waarschuwing, geen vrijbrief.
+  if (!gemetenBron.leesbaar) meld('BRONSTAND_ONLEESBAAR', gemetenBron.reden ?? undefined);
+  else if (!zelfdeBouw) {
+    // De naijlingsvrijstelling stelt het oordeel over de bronstand één ronde uit omdat er zojuist
+    // gepubliceerd is en een mengsel van oud en nieuw dan te verwachten is. Ze vraagt daarom een
+    // statusbestand dat AAN EEN BOUW VASTZIT: zonder bruikbaar `generatedAt` is er niets om het
+    // oordeel naar door te schuiven, en is het bestand niet "onderweg" maar niet toe te schrijven.
+    // Zonder deze eis kocht een stempel als `"0"` de vrijstelling zolang de PAGINA maar vers was --
+    // en de vrijstelling slaat juist de telling over. Echte reproductie: pagina 5 min oud,
+    // `generatedAt: "0"`, `bronnen: 0 van 2 geverifieerd`, exit 0 (bevinding Gemini, ronde 8).
+    if (!(verseBouw && gemetenBron.gebouwdOp !== null)) {
+      meld('BRONSTAND_ANDERE_BOUW', gemetenBron.gebouwdOp === null
+        ? 'geen bouwtijd om aan te knopen'
+        : (bouwOuderdomMs !== null && bouwOuderdomMs < -KLOKSPELING_MS
+          ? `de nieuwste van de twee bouwen ligt ${Math.round(-bouwOuderdomMs / 60000)} min in de toekomst, meer dan de klokspeling van ${Math.round(KLOKSPELING_MS / 60000)} min`
+          : `de nieuwste van de twee bouwen is ${Math.round((bouwOuderdomMs ?? 0) / 60000)} min oud, ruim buiten het respijt van ${Math.round(graceMs / 60000)} min`));
+    } else if (bronIsNieuwste && gemetenBron.bewezen === 0) {
+      // Het respijt bestaat om NIET te oordelen op een bestand dat mogelijk achterloopt. Is het
+      // statusbestand juist de NIEUWSTE van de twee, dan loopt het nergens op achter: dan is het het
+      // verste dat we van deze publicatie kunnen zien, en meldt het nul bewezen bronnen. Daar valt
+      // niets meer op te wachten -- dat IS het incident van 22-08, alleen tijdens een publicatie.
+      // Echte reproductie: pagina 4 uur oud uit de cache, statusbestand 1 min oud, beide 2.7.0,
+      // beide nul bewezen -- `exit 0` met een naijlingswaarschuwing (bevinding Codex, ronde 11).
+      // De andere kant blijft ongemoeid: een OUDER nul-statusbestand naast een NIEUWERE pagina mag
+      // een gezonde verse publicatie niet vals rood maken, en houdt dus het respijt.
+      waarschuwingen.push('het statusbestand komt van een andere bouw dan de pagina die nu geserveerd wordt; het is wél de nieuwste van de twee, dus de bronstand wordt beoordeeld en niet uitgesteld');
+      meldOngeteld();
+      meld('GEEN_GEVERIFIEERDE_BRON', `0 van ${gemetenBron.totaal} bronnen (uit de nieuwste van de twee bouwen)`);
+    } else {
+      waarschuwingen.push('het statusbestand komt van een andere bouw dan de pagina die nu geserveerd wordt; er is zojuist gepubliceerd, dus dit telt als naijling van de CDN en de bronstand is deze ronde niet beoordeeld');
+    }
+  } else {
+    // Pagina en statusbestand komen hier aantoonbaar uit DEZELFDE bouw (`zelfdeBouw` hierboven, op
+    // `generatedAt` = de cache-buster van de pagina). Eén bouw kan maar één contractversie hebben.
+    // Noemen ze er twee, dan is minstens één van beide verzonnen of verwisseld -- en precies dat was
+    // het groene pad dat Codex in ronde 9 reproduceerde: een pagina met 2.7.0 en nul bewezen bronnen
+    // naast een statusbestand dat zich 9.9.9 noemde, daarmee de volle keuring uitschakelde en met
+    // drie losse strings zijn eigen bewijs leverde. De milde kernkeuring hoort bij een ECHTE oudere
+    // of nieuwere gepubliceerde kopie -- dan draagt de PAGINA diezelfde vreemde versie ook.
+    if (bronContractVersie !== null && contractLeesbaar && bronContractVersie !== contractVersie) {
+      meld('CONTRACT_UITEEN', `plaat ${contractVersie}, statusbestand ${bronContractVersie}`);
+    }
+    if (!gemetenBron.getoetst) {
+      waarschuwingen.push('het statusbestand draagt een andere contractversie dan het schema dat de waakvlam kent; alleen de kernvelden per bron zijn gekeurd, niet het volle contract — de telling wordt wél beoordeeld');
+    }
+    meldOngeteld();
+    if (gemetenBron.bewezen === 0) meld('GEEN_GEVERIFIEERDE_BRON', `0 van ${gemetenBron.totaal} bronnen`);
+  }
+
+  return { ok: bevindingen.length === 0, bevindingen, waarschuwingen, nevenpunten, gemeten };
 }
 
 /** `STEMPEL_TE_OUD` → `stempel-te-oud`: leesbaar in de spiegel én weer terug te lezen bij de
@@ -418,9 +731,13 @@ export const ALARM_KOP = '**De automatische controle ziet de openbare plaat afwi
  * De tekst blijft bewust arm: wát er afwijkt, in gewone taal, zonder adressen, paden of nummers.
  * Wie het naadje wil weten leest de run; de spiegel is de plek van het signaal.
  */
-export function alarmRij({ bevindingen, nu, sabotage = false, maxOnderwerp = 560 }) {
-  const codes = [...new Set(bevindingen.map((b) => b.code))];
-  const zinnen = [...new Set(bevindingen.map((b) => b.uitleg))].join('; ');
+export function alarmRij({ bevindingen, nevenpunten = [], nu, sabotage = false, maxOnderwerp = 560 }) {
+  // Nevenpunten staan achteraan: de aanleiding van het alarm hoort vooraan te blijven staan, ook als
+  // de tekst wordt afgekapt. Hun categorie zit in de staart met controlepunten en overleeft het
+  // afkappen dus hoe dan ook (orderdiscipline R2).
+  const alles = [...bevindingen, ...nevenpunten.filter((n) => NEVENPUNTEN.includes(n?.code))];
+  const codes = [...new Set(alles.map((b) => b.code))];
+  const zinnen = [...new Set(alles.map((b) => b.uitleg))].join('; ');
   const staart = ` (controlepunten: ${codes.map(codeWoord).join(', ')})`;
   const test = sabotage ? ' Dit is een geplande sabotagetest van de waarnemer zelf, geen echte storing.' : '';
   const kop = ALARM_KOP;
