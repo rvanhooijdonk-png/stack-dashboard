@@ -1357,12 +1357,14 @@ test('op het nieuwe oordeelpad reist de categorie van een bron zonder herkomst m
 });
 
 test('twee schrijfwijzen van hetzelfde tijdstip laten de nulstand niet ontsnappen', () => {
-  // Codex ronde 12 (P3): `bronIsNieuwste` gebruikt `bronMs >= stempelMs`, en die `=` was door geen
-  // enkele test bewaakt -- de andere tests zetten óf letterlijk dezelfde tekenreeks neer (die loopt
-  // eerder al via `zelfdeBouw`) óf duidelijk verschillende tijden. Codex' mutant `>` liet alle 102
-  // waarnemertests groen en kocht over http `exit 0` op nul bewezen bronnen: pagina `...Z`,
-  // statusbestand `...+00:00`, hetzelfde milliseconde-tijdstip. Twee schrijfwijzen van hetzelfde
-  // moment horen niet minder streng beoordeeld te worden dan één.
+  // Codex ronde 12 (P3) zette dit geval neer: pagina `...Z`, statusbestand `...+00:00`, hetzelfde
+  // milliseconde-tijdstip; zijn mutant `>` op `bronMs >= stempelMs` liet toen alle waarnemertests
+  // groen en kocht over http `exit 0` op nul bewezen bronnen. Gemini wees in ronde 10 de oorzaak
+  // een laag dieper aan: `zelfdeBouw` vergeleek TEKENREEKSEN, dus dezelfde bouw gold als twee
+  // bouwen en kwam op het respijtpad terecht -- terwijl de pagina haar stempel altijd als `...Z`
+  // opbouwt en `status.json` net zo goed `...+00:00` mag dragen. Sinds ronde 12 vergelijkt
+  // `zelfdeBouw` het tijdstip: dit is ÉÉN bouw, dus geen naijlingswaarschuwing en een kale telling.
+  // De mutant die deze test doodt is de terugkeer naar de tekenreeksvergelijking.
   const zelfdeMoment = new Date(NU - 60000);
   const metZ = zelfdeMoment.toISOString();                       // ...T11:53:00.000Z
   const metOffset = metZ.replace(/Z$/, '+00:00');                // ...T11:53:00.000+00:00
@@ -1381,6 +1383,9 @@ test('twee schrijfwijzen van hetzelfde tijdstip laten de nulstand niet ontsnappe
     nu: NU,
   });
   assert.deepEqual(r.bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON'],
-    'gelijk is niet ouder: deze stand loopt nergens op achter');
-  assert.match(r.bevindingen[0].uitleg, /uit de nieuwste van de twee bouwen/);
+    'hetzelfde tijdstip in twee schrijfwijzen is één bouw, en die stand wordt gewoon geteld');
+  assert.match(r.bevindingen[0].uitleg, new RegExp(`\\(0 van ${BRONNEN_LEEG.length} bronnen\\)$`),
+    'geen respijt-achtige toevoeging: er is niets uit te stellen, dit is dezelfde bouw');
+  assert.ok(!r.waarschuwingen.some((w) => /andere bouw/.test(w)),
+    'twee schrijfwijzen van hetzelfde moment mogen geen bouwverschil melden');
 });

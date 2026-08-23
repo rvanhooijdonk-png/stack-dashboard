@@ -594,7 +594,11 @@ export function toets({
   // De bouwidentiteit bindt de meting aan DEZE pagina. Zonder die band oordeelt de waakvlam over een
   // willekeurig ander bestand: een statusbestand uit een oudere bouw kon zowel de telling leveren als
   // de versie waarmee die telling zichzelf vrijstelt (bevinding Codex, ronde 5). De vergelijking is
-  // exact — `generatedAt` en de cache-buster van de pagina zijn hetzelfde tijdstip.
+  // exact — `generatedAt` en de cache-buster van de pagina zijn hetzelfde tijdstip — maar op het
+  // TIJDSTIP, niet op de schrijfwijze. Tot ronde 12 stonden hier twee tekenreeksen naast elkaar,
+  // terwijl de pagina haar stempel altijd als `...Z` opbouwt (`stempelUitHtml`) en `status.json` net
+  // zo goed `...+00:00` mag dragen: dezelfde bouw gold dan als twee bouwen, en dat kocht precies de
+  // naijlingsvrijstelling die het oordeel overslaat (bevinding Gemini, ronde 10).
   //
   // Het respijt meet hoe VERS de nieuwste van de twee bouwen is, niet hoe ver ze uit elkaar liggen.
   // Dat onderscheid is een correctie op ronde 6: naijling van de CDN duurt hooguit ongeveer tien
@@ -606,8 +610,8 @@ export function toets({
   // twee bestanden nog steeds uiteen, dan is de publicatie blijven steken en is dat een bevinding.
   const stempelMs = gemeten.stempelIso === null ? null : Date.parse(gemeten.stempelIso);
   const bronMs = gemetenBron.gebouwdOp === null ? null : Date.parse(gemetenBron.gebouwdOp);
-  const zelfdeBouw = gemetenBron.gebouwdOp !== null && gemeten.stempelIso !== null
-    && gemetenBron.gebouwdOp === gemeten.stempelIso;
+  const zelfdeBouw = bronMs !== null && stempelMs !== null
+    && Number.isFinite(bronMs) && Number.isFinite(stempelMs) && bronMs === stempelMs;
   const nieuwsteBouwMs = [stempelMs, bronMs].filter((x) => x !== null && Number.isFinite(x))
     .reduce((a, b) => Math.max(a, b), Number.NEGATIVE_INFINITY);
   // Het venster loopt naar twee kanten, maar niet even ver. Naar ACHTEREN het volle respijt: zo lang
@@ -624,8 +628,11 @@ export function toets({
     : null;
   // Is het statusbestand het VERSTE dat we van deze publicatie kunnen zien? Dan loopt het nergens op
   // achter en is er geen reden om zijn telling uit te stellen (bevinding Codex, ronde 11).
+  // Gelijk hoeft hier niet meegeteld: twee gelijke tijdstippen zijn sinds ronde 12 dezelfde bouw en
+  // komen niet op dit pad. Een dode gelijkheidshelft zou bovendien precies zijn wat Codex in ronde
+  // 12 aanwees: een tak die geen enkele test kan raken.
   const bronIsNieuwste = bronMs !== null && Number.isFinite(bronMs)
-    && (stempelMs === null || !Number.isFinite(stempelMs) || bronMs >= stempelMs);
+    && (stempelMs === null || !Number.isFinite(stempelMs) || bronMs > stempelMs);
 
   // Dezelfde categorie op elke plek waar de telling werkelijk beoordeeld wordt: een reductie mag de
   // oorzaak niet weggooien, ook niet op een tweede pad (orderdiscipline R2).
