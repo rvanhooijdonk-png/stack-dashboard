@@ -21,13 +21,16 @@
 
 import { writeFileSync } from 'node:fs';
 import {
-  toets, alarmRij, magAppenden, alarmRijPubliceerbaar, zelfRouteUitUrl, bronstandUitHtml, contractUitHtml,
+  toets, alarmRij, magAppenden, alarmRijPubliceerbaar, zelfRouteUitUrl, statusUitTekst,
   DREMPEL_UREN, GRACE_MINUTEN,
 } from './lib/waarnemer.mjs';
 
 const BASE_URL = process.env.BASE_URL || 'https://rvanhooijdonk-png.github.io/stack-dashboard/contentstroom.html';
 const SPIEGEL_URL = process.env.SPIEGEL_URL
   || 'https://raw.githubusercontent.com/rvanhooijdonk-png/stack-dashboard/main/data/kanaalpost-publiek.md';
+// Het statusbestand staat naast de pagina op dezelfde publicatie. Afgeleid uit BASE_URL, zodat
+// een proef tegen een lokale kopie automatisch óók de lokale status.json leest.
+const STATUS_URL = process.env.STATUS_URL || new URL('./status.json', BASE_URL).toString();
 const SABOTAGE = process.env.SABOTAGE || 'geen';
 const RIJ_BESTAND = process.env.RIJ_BESTAND || '';
 const PAGINA_ROUTE = zelfRouteUitUrl(BASE_URL);
@@ -62,8 +65,9 @@ const uitvoer = (sleutel, waarde) => {
   if (process.env.GITHUB_OUTPUT) writeFileSync(process.env.GITHUB_OUTPUT, `${sleutel}=${waarde}\n`, { flag: 'a' });
 };
 
-const [pagina, spiegel] = await Promise.all([haal(BASE_URL), haal(SPIEGEL_URL)]);
-const contract = contractUitHtml(pagina.tekst);
+const [pagina, spiegel, statusbestand] = await Promise.all([haal(BASE_URL), haal(SPIEGEL_URL), haal(STATUS_URL)]);
+const gelezen = statusUitTekst(statusbestand.status, statusbestand.tekst);
+const contract = gelezen.contract;
 const nu = Date.now();
 
 // De sabotage grijpt precies één toets aan en verandert verder niets: de drempel gaat naar nul, dus
@@ -82,47 +86,42 @@ const drempelMs = SABOTAGE === 'stempel' ? 0 : getal('DREMPEL_UREN', DREMPEL_URE
  * hebben — anders was de pagina al stuk en bewijst het rood niets — en na de ingreep moet de stand
  * leesbaar zijn met hetzelfde totaal en nul bewezen. Klopt dat niet, dan stopt de proef hardop.
  */
-function saboteerBronnen(html) {
-  const voor = bronstandUitHtml(html);
+function saboteerBronnen(voor) {
   if (!voor.leesbaar || voor.bewezen < 1) {
-    console.log(`::error::sabotageproef kan niets bewijzen: de pagina had geen leesbare bronstand met minstens één bewezen bron (${JSON.stringify(voor)}).`);
+    console.log(`::error::sabotageproef kan niets bewijzen: het statusbestand gaf geen leesbare bronstand met minstens één bewezen bron (${JSON.stringify(voor)}).`);
     process.exit(2);
   }
-  // Een functie als vervanger, geen `$1`-sjabloon: `$10` zou daar "groep 10" kunnen betekenen.
-  const uit = html.replace(
-    /(<meta name="bronstand" content="bewezen=)\d{1,9}( totaal=\d{1,9}">)/,
-    (_m, kop, staart) => `${kop}0${staart}`,
-  );
-  const na = bronstandUitHtml(uit);
+  const na = { ...voor, bewezen: 0 };
   if (!na.leesbaar || na.bewezen !== 0 || na.totaal !== voor.totaal) {
     console.log(`::error::sabotageproef greep niet aan: stand ging van ${JSON.stringify(voor)} naar ${JSON.stringify(na)}.`);
     process.exit(2);
   }
   console.log(`sabotage: bronstand verlaagd van ${voor.bewezen} naar 0 van ${voor.totaal}`);
-  return uit;
+  return na;
 }
-const paginaHtml = SABOTAGE === 'bronnen' ? saboteerBronnen(pagina.tekst) : pagina.tekst;
+const bronstand = SABOTAGE === 'bronnen' ? saboteerBronnen(gelezen.bronnen) : gelezen.bronnen;
 
 const r = toets({
   paginaStatus: pagina.status,
-  paginaHtml,
+  paginaHtml: pagina.tekst,
   paginaRoute: PAGINA_ROUTE,
   spiegelStatus: spiegel.status,
   spiegelTekst: spiegel.tekst,
   contractVersie: contract,
+  bronstand,
   nu,
   drempelMs,
   graceMs: getal('GRACE_MINUTEN', GRACE_MINUTEN) * MIN,
 });
 
-console.log(`waarnemer — pagina http ${pagina.status}, logboek http ${spiegel.status}, contract ${contract ?? 'onbekend'}`);
+console.log(`waarnemer — pagina http ${pagina.status}, logboek http ${spiegel.status}, statusbestand http ${statusbestand.status}, contract ${contract ?? 'onbekend'}`);
 console.log(`stempel ${r.gemeten.stempelIso ?? 'onbekend'}, leeftijd ${
   r.gemeten.leeftijdMs === null ? 'onbekend' : `${Math.round(r.gemeten.leeftijdMs / MIN)} min`}, drempel ${
   SABOTAGE === 'stempel' ? '0 (SABOTAGE)' : `${getal('DREMPEL_UREN', DREMPEL_UREN)} uur`}`);
 const bs = r.gemeten.bronnen;
 console.log(`bronnen: ${bs && bs.leesbaar
   ? `${bs.bewezen} van ${bs.totaal} geverifieerd${SABOTAGE === 'bronnen' ? ' (SABOTAGE)' : ''}`
-  : 'geen leesbaar bronstand-merk in de kop'}`);
+  : (bs && bs.reden) || 'geen leesbare bronstand'}`);
 if (r.gemeten.bronRij) console.log(`bron bovenaan: ${r.gemeten.bronRij.tab} ${r.gemeten.bronRij.datum}`);
 if (r.gemeten.paginaRij) console.log(`plaat bovenaan: ${r.gemeten.paginaRij.tab} ${r.gemeten.paginaRij.datum}`);
 for (const w of r.waarschuwingen) console.log(`waarschuwing: ${w}`);

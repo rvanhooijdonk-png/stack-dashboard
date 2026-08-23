@@ -19,13 +19,17 @@ import { kanaalpostUitTekst, toPublicKanaalpost } from '../scripts/lib/kanaalpos
 import {
   toets, alarmRij, magAppenden, alarmRijPubliceerbaar, stempelUitHtml, sectieUitHtml,
   eersteKanaalpostRij, rijMoment, versieMinstens, codeWoord, CODES, VEROUDERD_MARKER, KANAALPOST_VANAF,
-  SECTIES_VANAF, zelfRouteUitUrl, bronstandUitHtml, contractUitHtml, BRONSTAND_VANAF,
+  SECTIES_VANAF, zelfRouteUitUrl, statusUitTekst, BRONSTAND_VANAF, VERSIE_VORM,
 } from '../scripts/lib/waarnemer.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8'));
 
 const NU = Date.parse('2026-07-26T12:00:00.000Z');
+
+/** Een gezonde bronstand: de meting is gelukt en er staat bewijs achter de plaat. Toetsen die iets
+ *  anders onderzoeken geven die mee, zodat toets 5 hun uitkomst niet vertroebelt. */
+const BRONSTAND_OK = { leesbaar: true, reden: null, totaal: 8, bewezen: 8 };
 /** De contractversie die de plaat vandaag stempelt — uit de fixture, niet nagetypt. */
 const NIEUWSTE_CONTRACT = fixture.contractVersion;
 const KOP = ['| datum-tijd | tab-rol | onderwerp | status | actie voor |',
@@ -311,7 +315,8 @@ test('de verplichte-sectielijst eist niets wat de plaat op de huidige contractve
   }
   const html = pagina(basisSpiegel, { contract: NIEUWSTE_CONTRACT });
   const r = toets({
-    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: NIEUWSTE_CONTRACT, nu: NU,
+    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: NIEUWSTE_CONTRACT,
+    bronstand: BRONSTAND_OK, nu: NU,
   });
   assert.deepEqual(r.bevindingen, []);
 });
@@ -358,7 +363,8 @@ test('de roadmap-sectie is bewust niet verplicht: zonder workstreams hoort ze er
   const html = renderHtml(snap);
   assert.equal(sectieUitHtml(html, 'roadmap'), null);
   const r = toets({
-    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: NIEUWSTE_CONTRACT, nu: NU,
+    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: NIEUWSTE_CONTRACT,
+    bronstand: BRONSTAND_OK, nu: NU,
   });
   assert.deepEqual(r.bevindingen, []);
 });
@@ -534,18 +540,21 @@ test('een verzonnen waarnemer-regel uit de verre toekomst legt de waarnemer niet
 
 // --- toets 5: rust de plaat nog op een bewezen bron? ---
 //
-// Deze toetsen draaien op een ECHT gerenderde pagina, niet op handgeschreven HTML: de waarnemer
-// leest een merk dat `render.mjs` in de kop zet, dus als dat merk van vorm verandert of verdwijnt
-// horen deze tests om te vallen en niet de productie.
+// De meting komt NIET uit de opmaak van de pagina maar uit `status.json`, het machineleesbare
+// bestand dat de build naast de pagina publiceert en dat een eigen schema heeft. Vier reviewrondes
+// lang stond de meting in een `<meta>` in de kop en vier keer vond de review daar hetzelfde soort
+// gat: een zelfgeschreven scanner is geen HTML5-parser (`<noscript>`, een `<div>` dat de kop
+// impliciet sluit, `<!doctype html <meta>>`, karakterverwijzingen). Een echte parser meenemen kan
+// niet — de waakvlam draait zonder installatiestap. JSON.parse kent die dubbelzinnigheid niet.
 
-/** Dezelfde plaat als `pagina()`, maar met een bronnenlijst en contractversie die de test bepaalt. */
-function paginaMetBronnen(sources, { contract = BRONSTAND_VANAF, spiegelTekst = basisSpiegel } = {}) {
-  const snap = structuredClone(fixture);
-  snap.contractVersion = contract;
-  snap.generatedAt = '2026-07-26T11:55:00.000Z';
-  snap.kanaalpost = toPublicKanaalpost(kanaalpostUitTekst(spiegelTekst));
-  snap.sources = sources;
-  return renderHtml(snap, {});
+/** Precies zoals `build.mjs` `status.json` samenstelt: vier velden uit hetzelfde snapshot. */
+function statusTekstVan(sources, contract = BRONSTAND_VANAF) {
+  return JSON.stringify({
+    contractVersion: contract,
+    generatedAt: '2026-07-26T11:55:00.000Z',
+    overallStatus: 'OK',
+    sources,
+  }, null, 2);
 }
 
 /** De vorm van 22-08-2026: acht bronnen gelezen, geen enkele bewezen. */
@@ -557,400 +566,147 @@ const BRONNEN_LEEG = Array.from({ length: 8 }, (_, i) => ({
 }));
 const ALLES_BEWEZEN = BRONNEN_LEEG.map((b) => ({ ...b, trust: 'VERIFIED_CURRENT' }));
 
-const toetsVan = (html, contract = BRONSTAND_VANAF) => toets({
-  paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel,
-  contractVersie: contract, nu: NU,
-});
+/** Dezelfde plaat als `pagina()`, maar met een bronnenlijst en contractversie die de test bepaalt. */
+function paginaMetBronnen(sources, { contract = BRONSTAND_VANAF, spiegelTekst = basisSpiegel } = {}) {
+  const snap = structuredClone(fixture);
+  snap.contractVersion = contract;
+  snap.generatedAt = '2026-07-26T11:55:00.000Z';
+  snap.kanaalpost = toPublicKanaalpost(kanaalpostUitTekst(spiegelTekst));
+  snap.sources = sources;
+  return renderHtml(snap, {});
+}
 
-test('een verse, complete pagina waar geen enkele bron achter bewezen is, is een afwijking', () => {
-  const r = toetsVan(paginaMetBronnen(BRONNEN_LEEG));
-  assert.deepEqual(r.bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON']);
+/**
+ * De executor-route, in één stuk: het opgehaalde statusbestand wordt gelezen zoals productie het
+ * leest, en wat daaruit komt gaat als gemeten feit de toets in. Zo kan de test niet groen blijven
+ * op een leesroute die productie helemaal niet gebruikt.
+ */
+function toetsMetStatus(sources, { contract = BRONSTAND_VANAF, httpStatus = 200, tekst = null } = {}) {
+  const gelezen = statusUitTekst(httpStatus, tekst ?? statusTekstVan(sources, contract));
+  return toets({
+    paginaStatus: 200,
+    paginaHtml: paginaMetBronnen(sources, { contract }),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: gelezen.contract,
+    bronstand: gelezen.bronnen,
+    nu: NU,
+  });
+}
+
+test('een verse, complete plaat waar geen enkele bron achter bewezen is, is een afwijking', () => {
+  // Precies het incident van 22-08-2026: de pagina stond er, was vers en compleet, en de waakvlam
+  // draaide in diezelfde periode 81 keer groen — omdat niemand naar de bronnen keek.
+  const r = toetsMetStatus(BRONNEN_LEEG);
   assert.equal(r.ok, false);
-  assert.deepEqual(r.gemeten.bronnen, { leesbaar: true, totaal: 8, bewezen: 0 });
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON']);
+  assert.match(r.bevindingen[0].uitleg, /0 van 8/);
+  assert.deepEqual(r.gemeten.bronnen, { leesbaar: true, reden: null, totaal: 8, bewezen: 0 });
 });
 
-test('NEGATIEVE CONTROLE — precies die pagina komt door toets 1 t/m 4 heen', () => {
-  // Dit is de reden dat toets 5 bestaat. De pagina is vers, draagt een kloppende stempel, toont de
-  // laatste bronregel en heeft al haar verplichte secties: elke bestaande toets zegt "in orde".
-  // Op 22-08-2026 draaide de waarnemer daarom 81 keer groen over een plaat zonder inhoud.
-  const r = toetsVan(paginaMetBronnen(BRONNEN_LEEG));
-  const oude = r.bevindingen.map((b) => b.code).filter((c) => c !== 'GEEN_GEVERIFIEERDE_BRON');
-  assert.deepEqual(oude, [], 'toets 1 t/m 4 vinden niets — dat was precies het gat');
-  assert.equal(r.gemeten.stempelIso, '2026-07-26T11:55:00.000Z', 'de pagina was wel degelijk vers');
+test('NEGATIEVE CONTROLE — precies die plaat komt door toets 1 t/m 4 heen', () => {
+  // Zonder deze controle bewijst de test hierboven niets: dan zou de plaat om een héél andere
+  // reden rood kunnen zijn en zou toets 5 nog steeds kunnen ontbreken.
+  const r = toets({
+    paginaStatus: 200,
+    paginaHtml: paginaMetBronnen(BRONNEN_LEEG),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: BRONSTAND_VANAF,
+    bronstand: { leesbaar: true, reden: null, totaal: 8, bewezen: 1 },
+    nu: NU,
+  });
+  assert.deepEqual(r.bevindingen, [], 'de plaat zelf is volgens toets 1 t/m 4 in orde');
 });
 
 test('één bewezen bron is genoeg om niet te alarmeren', () => {
   const bijna = BRONNEN_LEEG.map((b, i) => (i === 3 ? { ...b, trust: 'VERIFIED_CURRENT' } : b));
-  const r = toetsVan(paginaMetBronnen(bijna));
-  assert.deepEqual(r.bevindingen, []);
-  assert.deepEqual(r.gemeten.bronnen, { leesbaar: true, totaal: 8, bewezen: 1 });
+  assert.deepEqual(toetsMetStatus(bijna).bevindingen, []);
 });
 
 test('alleen VERIFIED_CURRENT telt als bewijs — STALE is dat niet', () => {
-  const stale = BRONNEN_LEEG.map((b) => ({ ...b, trust: 'STALE' }));
-  const r = toetsVan(paginaMetBronnen(stale));
-  assert.deepEqual(r.bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON'],
-    'acht verouderde bronnen zijn nul bewijzen');
-});
-
-test('een plaat waarvan alle bronnen bewezen zijn, meldt niets', () => {
-  const r = toetsVan(paginaMetBronnen(ALLES_BEWEZEN));
-  assert.deepEqual(r.bevindingen, []);
-  assert.deepEqual(r.gemeten.bronnen, { leesbaar: true, totaal: 8, bewezen: 8 });
+  const verlopen = BRONNEN_LEEG.map((b) => ({ ...b, trust: 'STALE' }));
+  assert.deepEqual(toetsMetStatus(verlopen).bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON']);
 });
 
 test('een plaat zonder ENKELE gelezen bron is een afwijking, geen "alles in orde"', () => {
-  // Het ergste geval, en tot 23-08-2026 het stilste: `sources: []` maakte `stale.length === 0`, dus
-  // de plaat zei "alle bronnen zijn geverifieerd" en kwam door alle vier de bestaande toetsen heen
-  // — gemeten, niet aangenomen.
-  const r = toetsVan(paginaMetBronnen([]));
-  assert.deepEqual(r.bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON']);
-  assert.deepEqual(r.gemeten.bronnen, { leesbaar: true, totaal: 0, bewezen: 0 });
+  // Nul van nul is geen bewijs van gezondheid maar het ontbreken van elk bewijs.
+  assert.deepEqual(toetsMetStatus([]).bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON']);
 });
 
-test('het merk wordt uit de ECHTE pagina gelezen, dus een hernoeming valt hier om', () => {
-  assert.deepEqual(bronstandUitHtml(paginaMetBronnen(BRONNEN_LEEG)), { leesbaar: true, totaal: 8, bewezen: 0 });
-  assert.deepEqual(bronstandUitHtml(paginaMetBronnen(ALLES_BEWEZEN)), { leesbaar: true, totaal: 8, bewezen: 8 });
+// --- het statusbestand zelf: gelezen met een parser, niet met een regex ---
+
+test('de meting komt uit hetzelfde statusbestand dat build.mjs publiceert', () => {
+  // Bindend: verandert de vorm van status.json, dan valt deze test om en niet de productie.
+  const gelezen = statusUitTekst(200, statusTekstVan(ALLES_BEWEZEN));
+  assert.equal(gelezen.contract, BRONSTAND_VANAF);
+  assert.deepEqual(gelezen.bronnen, { leesbaar: true, reden: null, totaal: 8, bewezen: 8 });
 });
 
-test('verdwijnt het merk uit de kop, dan zwijgt de waarnemer niet maar meldt hij dat', () => {
-  const html = paginaMetBronnen(ALLES_BEWEZEN).replace(/<meta name="bronstand"[^>]*>/, '');
-  const codes = toetsVan(html).bevindingen.map((b) => b.code);
-  assert.deepEqual(codes, ['BRONSTAND_ONLEESBAAR']);
+test('een statusbestand dat er niet is, is geen "geen bronnen" maar onleesbaar', () => {
+  for (const http of [0, 404, 500]) {
+    const gelezen = statusUitTekst(http, '');
+    assert.equal(gelezen.contract, null);
+    assert.equal(gelezen.bronnen.leesbaar, false);
+    assert.match(gelezen.bronnen.reden, new RegExp(`http ${http}`));
+  }
 });
 
-test('inhoud van de plaat kan het merk niet namaken: alleen de kop telt', () => {
-  // De body draagt gesaneerde bronregels. Zou de parser de hele pagina lezen, dan kon één melding
-  // een weggevallen merk vervangen (vals groen) of een gezond merk verdubbelen (vals rood).
-  // Bevinding Codex 23-08-2026; opgelost door alleen vóór `</head>` te kijken.
-  const namaak = '<meta name="bronstand" content="bewezen=99 totaal=99">';
-
-  const zonderKop = paginaMetBronnen(BRONNEN_LEEG).replace(/<meta name="bronstand"[^>]*>/, '');
-  const vervangen = zonderKop.replace('<body>', `<body>${namaak}`);
-  assert.deepEqual(toetsVan(vervangen).bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR'],
-    'een merk in de body mag een weggevallen merk niet vervangen');
-
-  const gezond = paginaMetBronnen(ALLES_BEWEZEN).replace('<body>', `<body>${namaak}`);
-  assert.deepEqual(toetsVan(gezond).bevindingen, [],
-    'en mag een gezonde pagina ook niet vals rood maken');
+test('onleesbare inhoud van het statusbestand is een afwijking, geen stilte', () => {
+  for (const tekst of ['', 'geen json', '[]', 'null', '"tekst"', '{"sources": "geen lijst"}']) {
+    const gelezen = statusUitTekst(200, tekst);
+    assert.equal(gelezen.bronnen.leesbaar, false, `${tekst} hoort onleesbaar te zijn`);
+  }
+  const r = toetsMetStatus(ALLES_BEWEZEN, { tekst: 'geen json' });
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['CONTRACT_ONLEESBAAR', 'BRONSTAND_ONLEESBAAR']);
 });
 
-test('twee merken in de kop is onleesbaar, niet "de eerste maar nemen"', () => {
-  const html = paginaMetBronnen(ALLES_BEWEZEN)
-    .replace('</head>', '<meta name="bronstand" content="bewezen=0 totaal=8"></head>');
-  assert.deepEqual(toetsVan(html).bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR']);
+test('een bron zonder trust telt niet stilletjes als bewezen', () => {
+  const rommel = [{ key: 'a' }, null, 'tekst', { key: 'b', trust: 'VERIFIED_CURRENT' }];
+  assert.deepEqual(statusUitTekst(200, statusTekstVan(rommel)).bronnen,
+    { leesbaar: true, reden: null, totaal: 4, bewezen: 1 });
 });
 
-test('onmogelijke aantallen zijn geen stand', () => {
-  // Meer bewezen dan gelezen kan niet. Doorrekenen op onzin levert een groen dat niets betekent.
-  const html = paginaMetBronnen(BRONNEN_LEEG)
-    .replace(/<meta name="bronstand"[^>]*>/, '<meta name="bronstand" content="bewezen=9 totaal=8">');
-  assert.deepEqual(bronstandUitHtml(html), { leesbaar: false, totaal: null, bewezen: null });
-  assert.deepEqual(toetsVan(html).bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR']);
-});
+// --- de versiepoort: zelf-bewapening zonder schakelaar ---
 
 test('een kopie van vóór de bronstand-versie wordt niet rood, maar zwijgt ook niet', () => {
-  // Zelf-bewapening: een 2.6.0-plaat kan het merk onmogelijk dragen. Die mag daar niet om vallen,
-  // maar de uitzondering hangt aan een versie — niet aan een datum of aan iemands geheugen.
-  const oud = paginaMetBronnen([], { contract: '2.6.0' }).replace(/<meta name="bronstand"[^>]*>/, '');
-  const r = toetsVan(oud, '2.6.0');
-  assert.deepEqual(r.bevindingen, [], 'een oude kopie is geen afwijking');
-  assert.equal(r.waarschuwingen.length, 1, 'maar hij zegt wel hardop dat hij niet kon kijken');
-  assert.equal(versieMinstens('2.7.0', BRONSTAND_VANAF), true, 'en vanaf 2.7.0 is de toets hard');
+  const r = toetsMetStatus(BRONNEN_LEEG, { contract: '2.6.0' });
+  assert.deepEqual(r.bevindingen, [], 'een oudere kopie is geen afwijking');
+  assert.equal(r.waarschuwingen.length, 1);
+  assert.match(r.waarschuwingen[0], /gebouwd vóór de bronstand/);
 });
 
-// --- de drie gaten die Codex vond in de eerste versie van toets 5 (23-08-2026) ---
-
-/**
- * Zoals de EXECUTOR het doet: contractversie uit de pagina lezen, niet injecteren. `toetsVan()`
- * hierboven geeft de versie mee en dekt daardoor precies de fout niet die Codex vond — daar zat de
- * verdenking op de brug tussen productie en test, dus die brug wordt hier zelf getest.
- */
-const toetsAlsExecutor = (html) => toets({
-  paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel,
-  contractVersie: contractUitHtml(html), nu: NU,
-});
-
-test('de executor en de test lezen dezelfde contractversie uit dezelfde plaat', () => {
-  // Bindt de gedeelde extractie aan de echte plaat: verandert de voettekst van vorm, dan valt dit
-  // om in plaats van dat productie stilletjes `null` gaat lezen.
-  assert.equal(contractUitHtml(paginaMetBronnen(ALLES_BEWEZEN)), BRONSTAND_VANAF);
-  assert.equal(contractUitHtml(paginaMetBronnen([], { contract: '2.6.0' })), '2.6.0');
-  assert.equal(contractUitHtml('<html><body>geen voettekst</body></html>'), null);
-});
-
-test('een plaat zonder leesbare contractversie is geen oude kopie, maar een afwijking', () => {
-  // Codex P1, letterlijk zijn proef: haal op een verder gezonde 2.7-pagina zowel het merk als de
-  // contractvoettekst weg. In de eerste versie leverde dat `ok: true` met nul bevindingen op — de
-  // overgangsuitzondering voor oude kopieën dekte óók de pagina die haar versie niet meer zegt.
-  const html = paginaMetBronnen(ALLES_BEWEZEN)
-    .replace(/<meta name="bronstand"[^>]*>/, '')
-    .replace(/Gegenereerd door <code>stack-dashboard<\/code> \(contract [0-9.]+\)/, 'Gegenereerd door iets anders');
-  assert.equal(contractUitHtml(html), null, 'de proef moet de voettekst echt onleesbaar maken');
-  const r = toetsAlsExecutor(html);
-  assert.deepEqual(r.bevindingen.map((b) => b.code), ['CONTRACT_ONLEESBAAR', 'BRONSTAND_ONLEESBAAR']);
-  assert.equal(r.ok, false);
-});
-
-test('een échte oude kopie krijgt de uitzondering nog steeds — ook via de executor-route', () => {
-  // De tegenhanger: de uitzondering mag door de reparatie hierboven niet stilletjes verdwijnen,
-  // anders wordt elke gecachte 2.6.0-plaat vals rood.
-  const oud = paginaMetBronnen([], { contract: '2.6.0' }).replace(/<meta name="bronstand"[^>]*>/, '');
-  const r = toetsAlsExecutor(oud);
-  assert.deepEqual(r.bevindingen, []);
-  assert.equal(r.waarschuwingen.filter((w) => w.includes('bronstand')).length, 1);
-});
-
-test('een tweede bronstand-merk telt mee, ook in een andere attribuutvolgorde', () => {
-  // Codex P3: "precies één treffer" mag niet "precies één treffer van MIJN schrijfwijze" betekenen.
-  // Een tegensprekend merk dat de attributen omdraait moet de meting onleesbaar maken, niet
-  // onzichtbaar zijn. Beide richtingen: het mag niet vals groen (0 bewezen naast 8) en niet vals
-  // rood (8 naast 8) worden — het antwoord op tegenspraak is "ik weet het niet".
-  for (const namaak of [
-    '<meta content="bewezen=0 totaal=8" name="bronstand">',
-    "<meta name='bronstand' content='bewezen=0 totaal=8'>",
-    '<meta name=bronstand content="bewezen=0 totaal=8">',
-  ]) {
-    const html = paginaMetBronnen(ALLES_BEWEZEN).replace('</head>', `${namaak}</head>`);
-    assert.deepEqual(bronstandUitHtml(html), { leesbaar: false, totaal: null, bewezen: null },
-      `een tweede merk als ${namaak} hoort de meting onleesbaar te maken`);
-    assert.deepEqual(toetsVan(html).bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR']);
-  }
-});
-
-test('een meta die alleen maar op bronstand lijkt, telt niet mee', () => {
-  // De keerzijde van de regel hierboven: was de naamherkenning te ruim, dan zou een ongerelateerde
-  // `<meta name="bronstandaard">` de gezonde meting onleesbaar maken — vals rood door een woord.
-  const html = paginaMetBronnen(ALLES_BEWEZEN)
-    .replace('</head>', '<meta name="bronstandaard" content="bewezen=0 totaal=8"></head>');
-  assert.deepEqual(bronstandUitHtml(html), { leesbaar: true, totaal: 8, bewezen: 8 });
-  assert.deepEqual(toetsVan(html).bevindingen, []);
-});
-
-test('de waarde van het enige merk moet exact de afgesproken vorm hebben', () => {
-  // Eén kandidaat, maar met een waarde die iets anders zegt dan afgesproken: dan hoort de waarnemer
-  // te zeggen dat hij het niet kan lezen — niet welwillend te gaan interpreteren.
-  const html = paginaMetBronnen(ALLES_BEWEZEN)
-    .replace(/<meta name="bronstand"[^>]*>/, '<meta name="bronstand" content="bewezen=8/8">');
-  assert.deepEqual(bronstandUitHtml(html), { leesbaar: false, totaal: null, bewezen: null });
-});
-
-test('een merk in andere hoofdletters of volgorde blijft leesbaar — typografie is geen betekenis', () => {
-  // Gemini P2/P4: de eerste opzet las de tag als één vaste tekenreeks. Een tussenlaag die
-  // attribuutnamen normaliseert of herordent maakte de bewaker dan blind op een KERNGEZONDE
-  // pagina, en een bewaker die vals rood slaat wordt uitgezet. Hoofdletters en volgorde
-  // veranderen niets aan wat er staat; de waarde blijft wel op de letter getoetst.
-  for (const vorm of [
-    '<META NAME="bronstand" CONTENT="bewezen=8 totaal=8">',
-    '<meta content="bewezen=8 totaal=8" name="bronstand">',
-    "<meta  name='bronstand'   content='bewezen=8 totaal=8'>",
-  ]) {
-    const html = paginaMetBronnen(ALLES_BEWEZEN).replace(/<meta name="bronstand"[^>]*>/, vorm);
-    assert.deepEqual(bronstandUitHtml(html), { leesbaar: true, totaal: 8, bewezen: 8 }, `${vorm} hoort leesbaar te zijn`);
-    assert.deepEqual(toetsVan(html).bevindingen, []);
-  }
-});
-
-test('tekst BINNEN een andere meta-waarde telt niet als tweede merk', () => {
-  // Gemini P3: zocht de teller in de ruwe tagtekst, dan maakte een beschrijving die toevallig
-  // "name=bronstand" bevat de meting onleesbaar. De attribuut-tokenizer eet een waarde tussen
-  // aanhalingstekens in zijn geheel op, dus zoiets kan geen kandidaat meer worden.
-  const html = paginaMetBronnen(ALLES_BEWEZEN)
-    .replace('</head>', '<meta name="description" content="documentatie over name=bronstand in deze app"></head>');
-  assert.deepEqual(bronstandUitHtml(html), { leesbaar: true, totaal: 8, bewezen: 8 });
-  assert.deepEqual(toetsVan(html).bevindingen, []);
-});
-
-test('een merk met een extra attribuut is niet ons merk', () => {
-  // De keerzijde van de soepelheid hierboven: soepel op vorm mag niet soepel op inhoud worden.
-  // Wat de bouw schrijft heeft precies twee attributen; iets anders is een pagina die wij niet
-  // hebben gemaakt, en dan is "ik weet het niet" het juiste antwoord.
-  const html = paginaMetBronnen(ALLES_BEWEZEN)
-    .replace(/<meta name="bronstand"[^>]*>/, '<meta name="bronstand" content="bewezen=8 totaal=8" data-bron="elders">');
-  assert.deepEqual(bronstandUitHtml(html), { leesbaar: false, totaal: null, bewezen: null });
-  assert.deepEqual(toetsVan(html).bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR']);
-});
-
-// --- ronde 2 van de review: wat er wel STAAT maar niet WERKT (Codex, 23-08-2026) ---
-
-test('een uitgecommentarieerd of ingesloten merk telt niet als meting', () => {
-  // Codex' probe: drie pagina's zonder één werkend bronstand-element leverden alle drie
-  // `{leesbaar: true, bewezen: 8}` op. Een merk in commentaar kon de bewaking dus groen houden —
-  // precies de stille groenmelding waar deze hele toets tegen is.
-  const namaak = '<meta name="bronstand" content="bewezen=8 totaal=8">';
-  for (const ruis of [
-    `<!-- ${namaak} -->`,
-    `<script>const x = '${namaak}'</script>`,
-    `<title>${namaak}</title>`,
-    `<style>/* ${namaak} */</style>`,
-  ]) {
-    const html = paginaMetBronnen(BRONNEN_LEEG)
-      .replace(/<meta name="bronstand"[^>]*>/, '')
-      .replace('</head>', `${ruis}</head>`);
-    assert.deepEqual(bronstandUitHtml(html), { leesbaar: false, totaal: null, bewezen: null },
-      `${ruis} is geen element en mag geen meting opleveren`);
-    assert.deepEqual(toetsVan(html).bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR']);
-  }
-});
-
-test('ruis náást het echte merk maakt de meting niet stuk, en verandert haar ook niet', () => {
-  // De keerzijde: het weghalen van commentaar en script-inhoud mag het echte merk niet meesleuren,
-  // en een tegensprekend getal in commentaar mag de meting ook niet overschrijven.
-  const html = paginaMetBronnen(ALLES_BEWEZEN)
-    .replace('</head>', '<!-- <meta name="bronstand" content="bewezen=0 totaal=8"> --></head>');
-  assert.deepEqual(bronstandUitHtml(html), { leesbaar: true, totaal: 8, bewezen: 8 });
-  assert.deepEqual(toetsVan(html).bevindingen, []);
-});
-
-test('een los attribuut of een herhaald attribuut telt gewoon mee', () => {
-  // Met een object als tokenizer verdwenen deze twee vormen uit de telling en glipten ze langs de
-  // eis "precies twee attributen" (Codex ronde 2). Een tag met een tweede, tegensprekende
-  // content-waarde is per definitie geen leesbare stand.
-  for (const vorm of [
-    '<meta disabled name="bronstand" content="bewezen=8 totaal=8">',
-    '<meta name="bronstand" content="bewezen=8 totaal=8" content="bewezen=0 totaal=8">',
-  ]) {
-    const html = paginaMetBronnen(ALLES_BEWEZEN).replace(/<meta name="bronstand"[^>]*>/, vorm);
-    assert.deepEqual(bronstandUitHtml(html), { leesbaar: false, totaal: null, bewezen: null },
-      `${vorm} hoort onleesbaar te zijn`);
-  }
-});
-
-test('</HEAD> is dezelfde grens als </head>', () => {
-  // Hoofdlettergevoelig zoeken maakte een semantisch geldige pagina vals rood.
-  const html = paginaMetBronnen(ALLES_BEWEZEN).replace('</head>', '</HEAD >');
-  assert.deepEqual(bronstandUitHtml(html), { leesbaar: true, totaal: 8, bewezen: 8 });
-});
-
-test('een tweede contractvoettekst is geen versie, ook niet in commentaar', () => {
-  // Codex ronde 2: een nagebootste 2.6-voettekst vóór de echte 2.7-voettekst leverde `2.6.0` op en
-  // zette daarmee de overgangsuitzondering weer aan op een pagina die het merk hoorde te dragen.
-  const echt = paginaMetBronnen(ALLES_BEWEZEN);
-  assert.equal(contractUitHtml(echt), BRONSTAND_VANAF, 'nulmeting: één voettekst leest gewoon');
-  const namaak = '<!-- Gegenereerd door <code>stack-dashboard</code> (contract 2.6.0) -->';
-  const vervalst = echt.replace('<body>', `<body>${namaak}`).replace(/<meta name="bronstand"[^>]*>/, '');
-  assert.equal(contractUitHtml(vervalst), null, 'twee voetteksten die elkaar tegenspreken = geen versie');
-  const r = toetsAlsExecutor(vervalst);
-  assert.deepEqual(r.bevindingen.map((b) => b.code), ['CONTRACT_ONLEESBAAR', 'BRONSTAND_ONLEESBAAR']);
-});
-
-// --- ronde 3: tekst die eruitziet als opmaak (Codex, 23-08-2026) ---
-
-test('een merk dat als TEKST in een andere attribuutwaarde staat, is geen element', () => {
-  // Codex' probe. `<meta\b[^>]*>` stopte bij de `>` binnen de aanhalingstekens, waardoor de
-  // ingesloten tekst als echt merk werd gelezen: met het echte merk weggehaald kwam er
-  // `ok: true, bewezen: 8` uit — een pagina zonder bronnen die groen bleef.
-  const namaak = `<meta name="description" content='x > <meta name="bronstand" content="bewezen=8 totaal=8">'>`;
-  const html = paginaMetBronnen(BRONNEN_LEEG)
-    .replace(/<meta name="bronstand"[^>]*>/, '')
-    .replace('</head>', `${namaak}</head>`);
-  assert.deepEqual(bronstandUitHtml(html), { leesbaar: false, totaal: null, bewezen: null });
-  assert.deepEqual(toetsVan(html).bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR']);
-});
-
-test('een merk in <template> of achter een onafgesloten comment werkt niet', () => {
-  for (const ruis of [
-    '<template><meta name="bronstand" content="bewezen=8 totaal=8"></template>',
-    '<!-- <meta name="bronstand" content="bewezen=8 totaal=8">',
-  ]) {
-    const html = paginaMetBronnen(BRONNEN_LEEG)
-      .replace(/<meta name="bronstand"[^>]*>/, '')
-      .replace('</head>', `${ruis}</head>`);
-    assert.deepEqual(bronstandUitHtml(html), { leesbaar: false, totaal: null, bewezen: null },
-      `${ruis} hoort geen meting op te leveren`);
-  }
-});
-
-test('een <!-- BINNEN een attribuutwaarde eet het echte merk niet op', () => {
-  // De keerzijde: de vorige opzet knipte vanaf zo'n `<!--` tot een veel latere `-->` en nam het
-  // ECHTE merk mee. Vals rood op een pagina die de browser probleemloos leest (Codex ronde 3).
-  const html = paginaMetBronnen(ALLES_BEWEZEN)
-    .replace('</head>', '<meta name="description" content="<!--"><!-- einde --></head>');
-  assert.deepEqual(bronstandUitHtml(html), { leesbaar: true, totaal: 8, bewezen: 8 });
-  assert.deepEqual(toetsVan(html).bevindingen, []);
-});
-
-test('een pagina zonder afgesloten kop levert geen meting op', () => {
-  assert.deepEqual(bronstandUitHtml('<html><head><meta name="bronstand" content="bewezen=1 totaal=1">'),
-    { leesbaar: false, totaal: null, bewezen: null });
+test('de nieuwe versie bewapent zichzelf: dezelfde plaat op 2.7.0 is wél rood', () => {
+  assert.deepEqual(toetsMetStatus(BRONNEN_LEEG, { contract: BRONSTAND_VANAF }).bevindingen.map((b) => b.code),
+    ['GEEN_GEVERIFIEERDE_BRON']);
 });
 
 test('een onleesbare contractversie is zelf een afwijking, vóór de versiepoorten', () => {
-  // Codex ronde 3, P2. Zijn probe: haal ALLEEN de contractvoettekst weg en laat de pagina verder
-  // volledig gezond (merk intact, alle bronnen bewezen). `contractUitHtml()` gaf dan `null`, en
-  // `null` leest bij ELKE versiepoort als "ouder dan" — dus toets 3 (KANAALPOST_VANAF), toets 4
-  // (SECTIES_VANAF) én de overgangsuitzondering van toets 5 schakelden zichzelf uit. Uitkomst:
-  // `contract=null, ok=true, bevindingen=[]` op een pagina die de waarnemer niet herkende.
-  const gezond = paginaMetBronnen(ALLES_BEWEZEN);
-  assert.deepEqual(toetsAlsExecutor(gezond).bevindingen, [], 'nulmeting: de gezonde plaat is groen');
-
-  const zonderVersie = gezond
-    .replace(/Gegenereerd door <code>stack-dashboard<\/code> \(contract [0-9.]+\)/, 'Gegenereerd door iets anders');
-  assert.equal(contractUitHtml(zonderVersie), null, 'de proef moet de versie echt onleesbaar maken');
-  const r = toetsAlsExecutor(zonderVersie);
-  // Het merk is er nog en alle bronnen zijn bewezen, dus toets 5 zwijgt terecht. De bevinding komt
-  // van de plaat zelf: wie zijn versie niet zegt, mag niet door de poorten heen groen blijven.
+  // Codex ronde 3, P2. `null` leest bij ELKE versiepoort als "ouder dan", dus toets 3, 4 én de
+  // overgangsuitzondering van toets 5 schakelden zichzelf uit op precies de plaat die de waarnemer
+  // niet herkende. Uitkomst was `contract=null, ok=true, bevindingen=[]`.
+  const r = toetsMetStatus(ALLES_BEWEZEN, { tekst: statusTekstVan(ALLES_BEWEZEN).replace(/"2\.7\.0"/, '"onbekend"') });
   assert.deepEqual(r.bevindingen.map((b) => b.code), ['CONTRACT_ONLEESBAAR']);
   assert.equal(r.ok, false);
   assert.equal(r.gemeten.bronnen.bewezen, 8, 'de bronstand blijft gewoon leesbaar');
 });
 
-// --- Gemini ronde 2: waar de scanner anders leest dan een browser (23-08-2026) ---
-
-test('een aanhalingsteken midden in een ongequote waarde is een letter, geen quote', () => {
-  // Gemini's probe. Een browser leest `class=don't` als de waarde `don't` en sluit de tag bij de
-  // eerste `>`. De scanner zette de aanhalingsstand aan en scande daarna de rest van het document
-  // mee — waarmee een volstrekt gezonde plaat vals `BRONSTAND_ONLEESBAAR` kreeg.
-  // De ruis staat op een ANDER element: het merk zelf blijft ongemoeid. Precies daar zat het gat,
-  // want één verkeerd gelezen tag verderop in de kop nam het echte merk mee de mist in.
-  const html = paginaMetBronnen(ALLES_BEWEZEN).replace('<head>', "<head><meta name=viewport content=don't-care>");
-  assert.deepEqual(bronstandUitHtml(html), { leesbaar: true, totaal: 8, bewezen: 8 });
-  assert.deepEqual(toetsVan(html, BRONSTAND_VANAF).bevindingen, []);
+test('een versie die de vergelijker niet aankan, heet ook niet leesbaar', () => {
+  // Codex ronde 4: `versieMinstens()` zet delen om met parseInt. Een paar honderd cijfers wordt
+  // `Infinity` en dan heet elke versie "ouder" — waarmee elke versiepoort zichzelf uitschakelde.
+  const absurd = `${'9'.repeat(309)}.0.0`;
+  assert.equal(VERSIE_VORM.test(absurd), false);
+  assert.equal(versieMinstens(absurd, BRONSTAND_VANAF), false, 'de vergelijker noemt hem niet nieuwer');
+  const r = toetsMetStatus(BRONNEN_LEEG, { contract: absurd });
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['CONTRACT_ONLEESBAAR', 'GEEN_GEVERIFIEERDE_BRON'],
+    'geen stille groenmelding: onleesbare versie is een bevinding, en de bronstand wordt gewoon geteld');
 });
 
-test('een merk in een scriptlichaam telt niet, ook niet achter <script />', () => {
-  // Gemini's tweede probe, en de gevaarlijke kant op. HTML5 kent geen zelfsluitende <script/>:
-  // de inhoud loopt door tot </script>. De scanner honoreerde de schuine streep en las het merk
-  // in het scriptlichaam als echte meting — een pagina zonder bronnen die groen bleef.
-  const gezond = paginaMetBronnen(ALLES_BEWEZEN);
-  const scriptje = '<script src="x.js" /><meta name="bronstand" content="bewezen=9 totaal=9"></script>';
-  const html = gezond.replace(/<meta name="bronstand"[^>]*>/, scriptje);
-  assert.deepEqual(bronstandUitHtml(html), { leesbaar: false, totaal: null, bewezen: null });
-  assert.deepEqual(toetsVan(html, BRONSTAND_VANAF).bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR']);
-});
-
-test('de kop sluit ook zonder </head>, namelijk waar de body begint', () => {
-  // Een browser sluit de kop impliciet bij <body>. Zonder die regel heette een geldige pagina
-  // die </head> weglaat onleesbaar (vals rood), én werd de body alsnog meegescand.
-  const html = paginaMetBronnen(ALLES_BEWEZEN).replace('</head>', '');
-  assert.deepEqual(bronstandUitHtml(html), { leesbaar: true, totaal: 8, bewezen: 8 });
-  // De body blijft buiten beeld: een merk ná <body> verandert de meting niet.
-  const metBody = html.replace('<body', '<meta name="bronstand" content="bewezen=9 totaal=9"><body');
-  assert.deepEqual(bronstandUitHtml(metBody), { leesbaar: false, totaal: null, bewezen: null },
-    'twee merken vóór de body = geen meting; de body zelf telt niet mee');
-});
-
-test('gegevens die de voettekst letterlijk citeren maken de versie niet onleesbaar', () => {
-  // Gemini vreesde hier een vals alarm: `contractUitHtml()` eist PRECIES één voettekst, dus een
-  // bronnaam of logboekregel die de voettekst citeert zou de teller op twee zetten en de hele
-  // plaat `CONTRACT_ONLEESBAAR` maken. Dat kan niet: alles wat uit gegevens komt, gaat ontsnapt de
-  // pagina op, dus `<code>` wordt `&lt;code&gt;` en matcht de voettekst nooit. De eis van Codex
-  // ronde 2 (twee voetteksten = geen versie) blijft daarmee overeind zonder vals-positieven.
-  const citaat = 'Gegenereerd door <code>stack-dashboard</code> (contract 2.6.0)';
-  const snap = structuredClone(fixture);
-  snap.contractVersion = BRONSTAND_VANAF;
-  snap.generatedAt = '2026-07-26T11:55:00.000Z';
-  const spiegel = spiegelMet(
-    rij('2026-07-26 08:00', 'CONTROL', 'Een eerdere melding uit de vloot.'),
-    rij('2026-07-26 09:00', 'DASHBOARD', citaat),
-  );
-  snap.kanaalpost = toPublicKanaalpost(kanaalpostUitTekst(spiegel));
-  snap.sources = ALLES_BEWEZEN;
-  const html = renderHtml(snap, {});
-  assert.equal(html.includes('&lt;code&gt;stack-dashboard&lt;/code&gt;'), true, 'het citaat staat ontsnapt op de plaat');
-  assert.equal(contractUitHtml(html), BRONSTAND_VANAF);
-  assert.deepEqual(toets({
-    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: spiegel,
-    contractVersie: contractUitHtml(html), nu: NU,
-  }).bevindingen, []);
+test('de plaat blijft haar bronstand ook zelf zeggen', () => {
+  // Het merk in de kop wordt niet meer BEOORDEELD, maar het hoort er wel te staan: wie de pagina
+  // zelf bekijkt, moet kunnen zien waar ze op rust. De vorm is dezelfde rekensom als in status.json.
+  const html = paginaMetBronnen(BRONNEN_LEEG);
+  const kop = html.slice(0, html.indexOf('</head>'));
+  assert.equal(kop.includes('<meta name="bronstand" content="bewezen=0 totaal=8">'), true);
+  assert.equal(paginaMetBronnen(ALLES_BEWEZEN).includes('content="bewezen=8 totaal=8"'), true);
 });
