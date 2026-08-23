@@ -19,7 +19,7 @@
  *   SABOTAGE=bronnen node scripts/waarnemer.mjs → dwingt de bronstandtoets te falen (acceptatiebewijs)
  */
 
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import {
   toets, alarmRij, magAppenden, alarmRijPubliceerbaar, zelfRouteUitUrl, statusUitTekst,
   DREMPEL_UREN, GRACE_MINUTEN,
@@ -65,8 +65,23 @@ const uitvoer = (sleutel, waarde) => {
   if (process.env.GITHUB_OUTPUT) writeFileSync(process.env.GITHUB_OUTPUT, `${sleutel}=${waarde}\n`, { flag: 'a' });
 };
 
+/**
+ * Het contract van het statusbestand, uit de repo waarin deze waakvlam draait (`waarnemer.yml` doet
+ * een checkout vóór deze stap, dus het bestand staat er). Zonder schema keurt `JSON.parse` niets en
+ * zou een leeg of half bestand als geldige meting doorgaan; lukt het lezen niet, dan gaat er
+ * bewust `null` door en meldt de toets dat hij de bronstand niet kon keuren.
+ */
+function schemaLezen() {
+  try {
+    return JSON.parse(readFileSync(new URL('../contracts/status-json.schema.json', import.meta.url), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+const STATUS_SCHEMA = schemaLezen();
+
 const [pagina, spiegel, statusbestand] = await Promise.all([haal(BASE_URL), haal(SPIEGEL_URL), haal(STATUS_URL)]);
-const gelezen = statusUitTekst(statusbestand.status, statusbestand.tekst);
+const gelezen = statusUitTekst(statusbestand.status, statusbestand.tekst, STATUS_SCHEMA);
 const contract = gelezen.contract;
 const nu = Date.now();
 
@@ -115,6 +130,9 @@ const r = toets({
 });
 
 console.log(`waarnemer — pagina http ${pagina.status}, logboek http ${spiegel.status}, statusbestand http ${statusbestand.status}, contract ${contract ?? 'onbekend'}`);
+console.log(`bronstand — bouw ${gelezen.bronnen.gebouwdOp ?? 'onbekend'}, ${
+  gelezen.bronnen.getoetst ? 'tegen het schema getoetst' : 'niet tegen het schema getoetst'}, verschil met de pagina ${
+  r.gemeten.bouwVerschilMs === null ? 'onbekend' : `${Math.round(r.gemeten.bouwVerschilMs / 1000)} s`}`);
 console.log(`stempel ${r.gemeten.stempelIso ?? 'onbekend'}, leeftijd ${
   r.gemeten.leeftijdMs === null ? 'onbekend' : `${Math.round(r.gemeten.leeftijdMs / MIN)} min`}, drempel ${
   SABOTAGE === 'stempel' ? '0 (SABOTAGE)' : `${getal('DREMPEL_UREN', DREMPEL_UREN)} uur`}`);

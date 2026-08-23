@@ -24,12 +24,20 @@ import {
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8'));
+/** Hetzelfde schema dat build.mjs gebruikt om status.json te keuren vóór publicatie (build.mjs:477).
+ *  De waakvlam keurt de opgehaalde kopie ermee, dus producent en bewaker houden elkaar vast. */
+const STATUS_SCHEMA = JSON.parse(await readFile(join(ROOT, 'contracts/status-json.schema.json'), 'utf8'));
+/** De vaste bronkeys, uit het contract zelf — niet nagetypt. */
+const BRONKEYS = STATUS_SCHEMA.properties.sources.items.properties.key.enum;
 
 const NU = Date.parse('2026-07-26T12:00:00.000Z');
 
 /** Een gezonde bronstand: de meting is gelukt en er staat bewijs achter de plaat. Toetsen die iets
  *  anders onderzoeken geven die mee, zodat toets 5 hun uitkomst niet vertroebelt. */
-const BRONSTAND_OK = { leesbaar: true, reden: null, totaal: 8, bewezen: 8 };
+const BRONSTAND_OK = {
+  leesbaar: true, reden: null, totaal: 8, bewezen: 8,
+  gebouwdOp: '2026-07-26T11:55:00.000Z', getoetst: true,
+};
 /** De contractversie die de plaat vandaag stempelt — uit de fixture, niet nagetypt. */
 const NIEUWSTE_CONTRACT = fixture.contractVersion;
 const KOP = ['| datum-tijd | tab-rol | onderwerp | status | actie voor |',
@@ -61,7 +69,8 @@ const basisSpiegel = spiegelMet(
 test('een verse pagina die de laatste bronregel toont, is in orde', () => {
   const html = pagina(basisSpiegel);
   const r = toets({
-    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: KANAALPOST_VANAF, nu: NU,
+    paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: basisSpiegel, contractVersie: KANAALPOST_VANAF,
+    bronstand: BRONSTAND_OK, nu: NU,
   });
   assert.deepEqual(r.bevindingen, []);
   assert.equal(r.ok, true);
@@ -548,18 +557,21 @@ test('een verzonnen waarnemer-regel uit de verre toekomst legt de waarnemer niet
 // niet — de waakvlam draait zonder installatiestap. JSON.parse kent die dubbelzinnigheid niet.
 
 /** Precies zoals `build.mjs` `status.json` samenstelt: vier velden uit hetzelfde snapshot. */
-function statusTekstVan(sources, contract = BRONSTAND_VANAF) {
+function statusTekstVan(sources, contract = BRONSTAND_VANAF, gebouwdOp = '2026-07-26T11:55:00.000Z') {
   return JSON.stringify({
     contractVersion: contract,
-    generatedAt: '2026-07-26T11:55:00.000Z',
+    generatedAt: gebouwdOp,
     overallStatus: 'OK',
     sources,
   }, null, 2);
 }
 
+/** Lezen zoals de executor het doet: mét het schema uit de repo. */
+const lees = (httpStatus, tekst) => statusUitTekst(httpStatus, tekst, STATUS_SCHEMA);
+
 /** De vorm van 22-08-2026: acht bronnen gelezen, geen enkele bewezen. */
-const BRONNEN_LEEG = Array.from({ length: 8 }, (_, i) => ({
-  key: `bron${i}`,
+const BRONNEN_LEEG = BRONKEYS.map((key, i) => ({
+  key,
   retrievedAt: '2026-07-26T11:50:00.000Z',
   trust: i === 0 ? 'UNVERIFIED' : 'SOURCE_UNAVAILABLE',
   rijen: null,
@@ -567,10 +579,12 @@ const BRONNEN_LEEG = Array.from({ length: 8 }, (_, i) => ({
 const ALLES_BEWEZEN = BRONNEN_LEEG.map((b) => ({ ...b, trust: 'VERIFIED_CURRENT' }));
 
 /** Dezelfde plaat als `pagina()`, maar met een bronnenlijst en contractversie die de test bepaalt. */
-function paginaMetBronnen(sources, { contract = BRONSTAND_VANAF, spiegelTekst = basisSpiegel } = {}) {
+function paginaMetBronnen(sources, {
+  contract = BRONSTAND_VANAF, spiegelTekst = basisSpiegel, gebouwdOp = '2026-07-26T11:55:00.000Z',
+} = {}) {
   const snap = structuredClone(fixture);
   snap.contractVersion = contract;
-  snap.generatedAt = '2026-07-26T11:55:00.000Z';
+  snap.generatedAt = gebouwdOp;
   snap.kanaalpost = toPublicKanaalpost(kanaalpostUitTekst(spiegelTekst));
   snap.sources = sources;
   return renderHtml(snap, {});
@@ -581,11 +595,14 @@ function paginaMetBronnen(sources, { contract = BRONSTAND_VANAF, spiegelTekst = 
  * leest, en wat daaruit komt gaat als gemeten feit de toets in. Zo kan de test niet groen blijven
  * op een leesroute die productie helemaal niet gebruikt.
  */
-function toetsMetStatus(sources, { contract = BRONSTAND_VANAF, httpStatus = 200, tekst = null } = {}) {
-  const gelezen = statusUitTekst(httpStatus, tekst ?? statusTekstVan(sources, contract));
+function toetsMetStatus(sources, {
+  contract = BRONSTAND_VANAF, httpStatus = 200, tekst = null,
+  paginaContract = contract, paginaGebouwdOp = '2026-07-26T11:55:00.000Z',
+} = {}) {
+  const gelezen = lees(httpStatus, tekst ?? statusTekstVan(sources, contract));
   return toets({
     paginaStatus: 200,
-    paginaHtml: paginaMetBronnen(sources, { contract }),
+    paginaHtml: paginaMetBronnen(sources, { contract: paginaContract, gebouwdOp: paginaGebouwdOp }),
     spiegelStatus: 200,
     spiegelTekst: basisSpiegel,
     contractVersie: gelezen.contract,
@@ -601,7 +618,10 @@ test('een verse, complete plaat waar geen enkele bron achter bewezen is, is een 
   assert.equal(r.ok, false);
   assert.deepEqual(r.bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON']);
   assert.match(r.bevindingen[0].uitleg, /0 van 8/);
-  assert.deepEqual(r.gemeten.bronnen, { leesbaar: true, reden: null, totaal: 8, bewezen: 0 });
+  assert.deepEqual(r.gemeten.bronnen, {
+    leesbaar: true, reden: null, totaal: 8, bewezen: 0,
+    gebouwdOp: '2026-07-26T11:55:00.000Z', getoetst: true,
+  });
 });
 
 test('NEGATIEVE CONTROLE — precies die plaat komt door toets 1 t/m 4 heen', () => {
@@ -613,7 +633,7 @@ test('NEGATIEVE CONTROLE — precies die plaat komt door toets 1 t/m 4 heen', ()
     spiegelStatus: 200,
     spiegelTekst: basisSpiegel,
     contractVersie: BRONSTAND_VANAF,
-    bronstand: { leesbaar: true, reden: null, totaal: 8, bewezen: 1 },
+    bronstand: { ...BRONSTAND_OK, totaal: 8, bewezen: 1 },
     nu: NU,
   });
   assert.deepEqual(r.bevindingen, [], 'de plaat zelf is volgens toets 1 t/m 4 in orde');
@@ -634,18 +654,21 @@ test('een plaat zonder ENKELE gelezen bron is een afwijking, geen "alles in orde
   assert.deepEqual(toetsMetStatus([]).bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON']);
 });
 
-// --- het statusbestand zelf: gelezen met een parser, niet met een regex ---
+// --- het statusbestand zelf: gelezen met een parser, gekeurd met zijn eigen contract ---
 
 test('de meting komt uit hetzelfde statusbestand dat build.mjs publiceert', () => {
   // Bindend: verandert de vorm van status.json, dan valt deze test om en niet de productie.
-  const gelezen = statusUitTekst(200, statusTekstVan(ALLES_BEWEZEN));
+  const gelezen = lees(200, statusTekstVan(ALLES_BEWEZEN));
   assert.equal(gelezen.contract, BRONSTAND_VANAF);
-  assert.deepEqual(gelezen.bronnen, { leesbaar: true, reden: null, totaal: 8, bewezen: 8 });
+  assert.deepEqual(gelezen.bronnen, {
+    leesbaar: true, reden: null, totaal: 8, bewezen: 8,
+    gebouwdOp: '2026-07-26T11:55:00.000Z', getoetst: true,
+  });
 });
 
 test('een statusbestand dat er niet is, is geen "geen bronnen" maar onleesbaar', () => {
   for (const http of [0, 404, 500]) {
-    const gelezen = statusUitTekst(http, '');
+    const gelezen = lees(http, '');
     assert.equal(gelezen.contract, null);
     assert.equal(gelezen.bronnen.leesbaar, false);
     assert.match(gelezen.bronnen.reden, new RegExp(`http ${http}`));
@@ -654,17 +677,110 @@ test('een statusbestand dat er niet is, is geen "geen bronnen" maar onleesbaar',
 
 test('onleesbare inhoud van het statusbestand is een afwijking, geen stilte', () => {
   for (const tekst of ['', 'geen json', '[]', 'null', '"tekst"', '{"sources": "geen lijst"}']) {
-    const gelezen = statusUitTekst(200, tekst);
+    const gelezen = lees(200, tekst);
     assert.equal(gelezen.bronnen.leesbaar, false, `${tekst} hoort onleesbaar te zijn`);
   }
   const r = toetsMetStatus(ALLES_BEWEZEN, { tekst: 'geen json' });
   assert.deepEqual(r.bevindingen.map((b) => b.code), ['CONTRACT_ONLEESBAAR', 'BRONSTAND_ONLEESBAAR']);
 });
 
-test('een bron zonder trust telt niet stilletjes als bewezen', () => {
-  const rommel = [{ key: 'a' }, null, 'tekst', { key: 'b', trust: 'VERIFIED_CURRENT' }];
-  assert.deepEqual(statusUitTekst(200, statusTekstVan(rommel)).bronnen,
-    { leesbaar: true, reden: null, totaal: 4, bewezen: 1 });
+// --- Codex ronde 5, P1 #2: JSON.parse keurt niets ---
+
+test('het statusbestand wordt tegen zijn EIGEN schema gehouden, niet alleen tegen JSON.parse', () => {
+  // Zonder schemakeuring telde de waakvlam elk object met een `trust`-veld mee. Een bestand met een
+  // verzonnen bronkey, een verzonnen trust-waarde of zonder de verplichte velden ging dan door voor
+  // een geldige meting — en juist die vorm is wat een halve build oplevert.
+  const gevallen = [
+    [[{ ...ALLES_BEWEZEN[0], key: 'verzonnen-bron' }], 'een bronkey die niet in het contract staat'],
+    [[{ ...ALLES_BEWEZEN[0], trust: 'PRIMA' }], 'een trust-waarde die niet in het contract staat'],
+    [[{ key: BRONKEYS[0], trust: 'VERIFIED_CURRENT' }], 'een bron zonder retrievedAt en rijen'],
+    [[{ ...ALLES_BEWEZEN[0], extra: 'iets' }], 'een bron met een veld dat het contract niet kent'],
+  ];
+  for (const [sources, waarom] of gevallen) {
+    const gelezen = lees(200, statusTekstVan(sources));
+    assert.equal(gelezen.bronnen.leesbaar, false, `${waarom} hoort onleesbaar te zijn`);
+    assert.match(gelezen.bronnen.reden, /volgt zijn eigen contract niet/);
+  }
+});
+
+test('NEGATIEVE CONTROLE — precies dezelfde vorm mét geldige velden komt er wél door', () => {
+  const gelezen = lees(200, statusTekstVan([ALLES_BEWEZEN[0]]));
+  assert.equal(gelezen.bronnen.leesbaar, true);
+  assert.deepEqual([gelezen.bronnen.totaal, gelezen.bronnen.bewezen], [1, 1]);
+});
+
+test('zonder schema keurt de waakvlam niets en zegt dat ook', () => {
+  // Faalt het lezen van het contractbestand, dan is het antwoord "ik weet het niet" — geen groen.
+  const gelezen = statusUitTekst(200, statusTekstVan(ALLES_BEWEZEN), null);
+  assert.equal(gelezen.bronnen.leesbaar, false);
+  assert.match(gelezen.bronnen.reden, /geen schema/);
+});
+
+test('een kopie met een andere contractversie wordt niet gekeurd en dus ook niet beoordeeld', () => {
+  // Het schema pint `contractVersion` op één waarde. Een oudere of nieuwere gepubliceerde kopie zou
+  // er per definitie op vallen; die heet daarom ongetoetst, niet fout.
+  const gelezen = lees(200, statusTekstVan(BRONNEN_LEEG, '9.9.9'));
+  assert.equal(gelezen.bronnen.leesbaar, true);
+  assert.equal(gelezen.bronnen.getoetst, false);
+  const r = toetsMetStatus(BRONNEN_LEEG, { contract: '9.9.9', paginaContract: '9.9.9' });
+  assert.deepEqual(r.bevindingen, []);
+  assert.match(r.waarschuwingen.join(' '), /zonder schemakeuring/);
+});
+
+// --- Codex ronde 5, P1 #1: het statusbestand moet bij DEZE pagina horen ---
+
+test('een statusbestand uit een andere bouw levert geen oordeel en geen vrijstelling', () => {
+  // De reproductie van Codex: een verse 2.7.0-pagina met nul bewezen bronnen naast een apart
+  // opgehaald status.json met contractVersion 2.6.0 gaf letterlijk ok:true. Dat oude bestand
+  // leverde zowel de telling als de versie waarmee die telling zichzelf vrijstelde.
+  const r = toetsMetStatus(BRONNEN_LEEG, {
+    contract: '2.6.0',
+    paginaContract: BRONSTAND_VANAF,
+    tekst: statusTekstVan(BRONNEN_LEEG, '2.6.0', '2026-07-25T11:55:00.000Z'),
+  });
+  assert.equal(r.ok, false, 'een vreemd statusbestand mag nooit stil groen opleveren');
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['BRONSTAND_ANDERE_BOUW']);
+});
+
+test('binnen het respijt heet een ander bouwmoment naijling van de CDN, geen defect', () => {
+  // De waakvlam draait direct na `publish`; GitHub Pages/Fastly mag dan nog ongeveer tien minuten
+  // een oudere kopie serveren. Een hard rood daarop zou bij bijna elke publicatie afgaan.
+  const r = toetsMetStatus(ALLES_BEWEZEN, {
+    tekst: statusTekstVan(ALLES_BEWEZEN, BRONSTAND_VANAF, '2026-07-26T11:45:00.000Z'),
+  });
+  assert.deepEqual(r.bevindingen, []);
+  assert.match(r.waarschuwingen.join(' '), /andere bouw/);
+  assert.equal(r.gemeten.bouwVerschilMs, 10 * 60 * 1000);
+});
+
+test('buiten het respijt is een achterlopend statusbestand wél een afwijking', () => {
+  const r = toetsMetStatus(ALLES_BEWEZEN, {
+    tekst: statusTekstVan(ALLES_BEWEZEN, BRONSTAND_VANAF, '2026-07-26T09:00:00.000Z'),
+  });
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['BRONSTAND_ANDERE_BOUW']);
+});
+
+test('een statusbestand zonder bouwmoment is nergens aan vast te knopen', () => {
+  // Twee wegen naar hetzelfde antwoord, en allebei nodig. Draagt het bestand de contractversie die
+  // het schema kent, dan valt het al op de schemakeuring: `generatedAt` is daar verplicht. Draagt
+  // het een ándere versie, dan is er geen keuring en vangt de bouwtoets het — want zonder bouwtijd
+  // is er niets om deze meting aan deze pagina vast te knopen.
+  const gekeurd = JSON.stringify({ contractVersion: BRONSTAND_VANAF, overallStatus: 'OK', sources: ALLES_BEWEZEN });
+  const r1 = toetsMetStatus(ALLES_BEWEZEN, { tekst: gekeurd });
+  assert.equal(r1.ok, false);
+  assert.deepEqual(r1.bevindingen.map((b) => b.code), ['BRONSTAND_ONLEESBAAR']);
+  assert.match(r1.bevindingen[0].uitleg, /volgt zijn eigen contract niet/);
+
+  const ongekeurd = JSON.stringify({ contractVersion: '9.9.9', overallStatus: 'OK', sources: ALLES_BEWEZEN });
+  const r2 = toetsMetStatus(ALLES_BEWEZEN, { tekst: ongekeurd, paginaContract: '9.9.9' });
+  assert.equal(r2.ok, false);
+  assert.deepEqual(r2.bevindingen.map((b) => b.code), ['BRONSTAND_ANDERE_BOUW']);
+  assert.match(r2.bevindingen[0].uitleg, /geen bouwtijd/);
+});
+
+test('NEGATIEVE CONTROLE — hetzelfde bestand mét het bouwmoment van de pagina oordeelt wél', () => {
+  const r = toetsMetStatus(BRONNEN_LEEG);
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['GEEN_GEVERIFIEERDE_BRON']);
 });
 
 // --- de versiepoort: zelf-bewapening zonder schakelaar ---
@@ -697,9 +813,12 @@ test('een versie die de vergelijker niet aankan, heet ook niet leesbaar', () => 
   const absurd = `${'9'.repeat(309)}.0.0`;
   assert.equal(VERSIE_VORM.test(absurd), false);
   assert.equal(versieMinstens(absurd, BRONSTAND_VANAF), false, 'de vergelijker noemt hem niet nieuwer');
-  const r = toetsMetStatus(BRONNEN_LEEG, { contract: absurd });
-  assert.deepEqual(r.bevindingen.map((b) => b.code), ['CONTRACT_ONLEESBAAR', 'GEEN_GEVERIFIEERDE_BRON'],
-    'geen stille groenmelding: onleesbare versie is een bevinding, en de bronstand wordt gewoon geteld');
+  const r = toetsMetStatus(BRONNEN_LEEG, { contract: absurd, paginaContract: BRONSTAND_VANAF });
+  assert.equal(r.ok, false, 'geen stille groenmelding op een versie die niemand kan lezen');
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['CONTRACT_ONLEESBAAR']);
+  // De bronstand zelf wordt niet meer geveld: zonder leesbare versie is er ook geen schemakeuring,
+  // en een ongekeurd bestand mag geen oordeel dragen. De run is al rood, dus niets blijft stil.
+  assert.match(r.waarschuwingen.join(' '), /zonder schemakeuring/);
 });
 
 test('de plaat blijft haar bronstand ook zelf zeggen', () => {

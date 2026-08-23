@@ -31,6 +31,7 @@
  */
 
 import { kanaalpostUitTekst, toPublicKanaalpost, ontdaan } from './kanaalpost.mjs';
+import { validate } from './validate.mjs';
 import { canoniek } from './spiegelwet.mjs';
 
 /** Vanaf deze contractversie MOET de pagina een kanaalpost-sectie hebben. */
@@ -134,6 +135,7 @@ export const CODES = {
   PAGINA_KAPOT: 'op de pagina staat een lege of onberekende waarde in plaats van gegevens',
   GEEN_GEVERIFIEERDE_BRON: 'de pagina staat er wel, maar geen enkele bron erachter is geverifieerd',
   BRONSTAND_ONLEESBAAR: 'er is niet te lezen hoeveel van de bronnen achter de plaat geverifieerd zijn',
+  BRONSTAND_ANDERE_BOUW: 'de bronstand hoort bij een andere bouw dan de pagina die nu geserveerd wordt',
   CONTRACT_ONLEESBAAR: 'er is niet te lezen welke versie van de plaat dit is',
 };
 
@@ -289,17 +291,46 @@ export const VERSIE_VORM = /^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/;
  * waarde bestaat er niet. Het merk in de kop van de pagina blijft staan als eerlijke mededeling
  * aan wie de pagina zelf bekijkt, maar het is niet meer wat de waakvlam beoordeelt.
  */
-export function statusUitTekst(httpStatus, tekst) {
-  const geen = { totaal: null, bewezen: null };
-  const mis = (reden) => ({ contract: null, bronnen: { leesbaar: false, reden, ...geen } });
+export function statusUitTekst(httpStatus, tekst, schema = null) {
+  const leeg = { totaal: null, bewezen: null, gebouwdOp: null, getoetst: false };
+  const mis = (reden) => ({ contract: null, bronnen: { leesbaar: false, reden, ...leeg } });
+
   if (Number(httpStatus) !== 200) return mis(`statusbestand http ${Number(httpStatus) || 0}`);
   let json;
   try { json = JSON.parse(String(tekst ?? '')); } catch { return mis('statusbestand is geen geldige JSON'); }
   if (!json || typeof json !== 'object' || Array.isArray(json)) return mis('statusbestand is geen object');
+
   const contract = VERSIE_VORM.test(String(json.contractVersion ?? '')) ? String(json.contractVersion) : null;
-  if (!Array.isArray(json.sources)) return { contract, bronnen: { leesbaar: false, reden: 'statusbestand noemt geen bronnen', ...geen } };
+  // De bouwidentiteit. `generatedAt` is hetzelfde tijdstip dat de pagina als cache-buster in haar
+  // refresh-tag zet; op de live publicatie gemeten (23-08-2026): status.json
+  // `2026-08-23T09:14:09.272Z` naast paginabuster `?v=20260823091409272`, dezelfde bouw tot op de
+  // milliseconde. Zonder dit veld is een statusbestand niet aan een pagina toe te schrijven.
+  const gebouwdOp = typeof json.generatedAt === 'string' && Number.isFinite(Date.parse(json.generatedAt))
+    ? json.generatedAt
+    : null;
+  const onleesbaar = (reden) => ({ contract, bronnen: { leesbaar: false, reden, ...leeg, gebouwdOp } });
+
+  // Het schema is de enige plek waar de vorm van dit bestand vastligt; `JSON.parse` alleen keurt niets
+  // (bevinding Codex, ronde 5). Toetsen mag alleen tegen dezelfde contractversie: het schema pint
+  // `contractVersion` op één waarde, dus een oudere of nieuwere gepubliceerde kopie zou er per
+  // definitie op vallen. Zo'n kopie heet daarom niet fout maar ONGETOETST — toets 5 velt er geen
+  // bronstandoordeel over in plaats van een vals rood of een vals groen.
+  if (schema === null) return onleesbaar('geen schema om het statusbestand aan te toetsen');
+  const schemaVersie = schema?.properties?.contractVersion?.const ?? null;
+  const getoetst = schemaVersie !== null && contract !== null && contract === schemaVersie;
+  if (getoetst) {
+    const fouten = validate(schema, json);
+    if (fouten.length) {
+      return onleesbaar(`statusbestand volgt zijn eigen contract niet (${fouten.length} afwijking${fouten.length === 1 ? '' : 'en'})`);
+    }
+  }
+
+  if (!Array.isArray(json.sources)) return onleesbaar('statusbestand noemt geen bronnen');
   const bewezen = json.sources.filter((x) => x && typeof x === 'object' && x.trust === 'VERIFIED_CURRENT').length;
-  return { contract, bronnen: { leesbaar: true, reden: null, totaal: json.sources.length, bewezen } };
+  return {
+    contract,
+    bronnen: { leesbaar: true, reden: null, totaal: json.sources.length, bewezen, gebouwdOp, getoetst },
+  };
 }
 
 /**
@@ -341,7 +372,7 @@ export function toets({
 } = {}) {
   const bevindingen = [];
   const waarschuwingen = [];
-  const gemeten = { stempelIso: null, leeftijdMs: null, paginaRij: null, bronRij: null, contract: contractVersie, bronnen: null };
+  const gemeten = { stempelIso: null, leeftijdMs: null, paginaRij: null, bronRij: null, contract: contractVersie, bronnen: null, bouwVerschilMs: null };
   const meld = (code, extra = '') => bevindingen.push({ code, uitleg: CODES[code] + (extra ? ` (${extra})` : '') });
 
   // 1 — bereikbaar en bestempeld.
@@ -478,15 +509,42 @@ export function toets({
   //
   // De meting komt binnen als al gelezen feit uit `statusUitTekst()` -- het statusbestand van de
   // plaat, niet haar opmaak. Deze toets oordeelt, hij parseert niet.
-  const gemetenBron = bronstand ?? { leesbaar: false, reden: 'geen bronstand gemeten', totaal: null, bewezen: null };
+  const gemetenBron = bronstand
+    ?? { leesbaar: false, reden: 'geen bronstand gemeten', totaal: null, bewezen: null, gebouwdOp: null, getoetst: false };
   gemeten.bronnen = gemetenBron;
+
+  // De bouwidentiteit bindt de meting aan DEZE pagina. Zonder die band oordeelt de waakvlam over een
+  // willekeurig ander bestand: een statusbestand uit een oudere bouw kon zowel de telling leveren als
+  // de versie waarmee die telling zichzelf vrijstelt (bevinding Codex, ronde 5). De vergelijking is
+  // exact — `generatedAt` en de cache-buster van de pagina zijn hetzelfde tijdstip.
+  //
+  // Naijling van de CDN is echt en gemeten (publish.yml: tot ongeveer tien minuten), dus binnen het
+  // respijt is een verschil geen defect maar ruis: dan luidt het oordeel "deze ronde niet te
+  // beoordelen", zichtbaar als waarschuwing. Daarbuiten is het wél een bevinding — een statusbestand
+  // dat uren achterloopt op de pagina betekent dat de publicatie halverwege is blijven steken.
+  const bouwVerschilMs = gemetenBron.gebouwdOp !== null && gemeten.stempelIso !== null
+    ? Math.abs(Date.parse(gemetenBron.gebouwdOp) - Date.parse(gemeten.stempelIso))
+    : null;
+  const zelfdeBouw = gemetenBron.gebouwdOp !== null && gemeten.stempelIso !== null
+    && gemetenBron.gebouwdOp === gemeten.stempelIso;
+  gemeten.bouwVerschilMs = bouwVerschilMs;
+
+  if (!gemetenBron.leesbaar) meld('BRONSTAND_ONLEESBAAR', gemetenBron.reden ?? undefined);
+  else if (!zelfdeBouw) {
+    if (bouwVerschilMs !== null && bouwVerschilMs <= graceMs) {
+      waarschuwingen.push('het statusbestand komt van een andere bouw dan de pagina die nu geserveerd wordt; binnen het respijt telt dat als naijling van de CDN, dus de bronstand is deze ronde niet beoordeeld');
+    } else {
+      meld('BRONSTAND_ANDERE_BOUW', bouwVerschilMs === null ? 'geen bouwtijd om aan te knopen' : undefined);
+    }
   // De overgangsuitzondering geldt alleen voor een plaat die zélf zegt dat ze ouder is. Kan de
   // contractversie niet worden gelezen, dan is dat GEEN oude kopie maar een plaat die de waarnemer
-  // niet herkent (zie 1b), en dan hoort ook deze toets hard te zijn.
-  if (contractLeesbaar && !versieMinstens(contractVersie, BRONSTAND_VANAF)) {
+  // niet herkent (zie 1b), en dan hoort ook deze toets hard te zijn. Deze tak komt bewust ná de
+  // bouwtoets: anders kan een vreemd, ouder statusbestand zichzelf nog altijd vrijstellen.
+  } else if (contractLeesbaar && !versieMinstens(contractVersie, BRONSTAND_VANAF)) {
     waarschuwingen.push('deze kopie van de plaat is gebouwd vóór de bronstand werd gemeten; die telt nog niet als afwijking');
-  } else if (!gemetenBron.leesbaar) meld('BRONSTAND_ONLEESBAAR', gemetenBron.reden ?? undefined);
-  else if (gemetenBron.bewezen === 0) {
+  } else if (!gemetenBron.getoetst) {
+    waarschuwingen.push('het statusbestand draagt een andere contractversie dan het schema dat de waakvlam kent; zonder schemakeuring wordt de bronstand niet beoordeeld');
+  } else if (gemetenBron.bewezen === 0) {
     meld('GEEN_GEVERIFIEERDE_BRON', `0 van ${gemetenBron.totaal} bronnen`);
   }
 

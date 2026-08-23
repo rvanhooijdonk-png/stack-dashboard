@@ -29,6 +29,10 @@ import {
   toets, eersteKanaalpostRij, sectieUitHtml, stempelUitHtml,
 } from '../scripts/lib/waarnemer.mjs';
 
+/** Een gezonde bronstand die bij DEZE pagina hoort. Deze tests gaan over toets 4 (plaat versus bron);
+ *  zonder zo'n meting zou toets 5 hun uitkomst vertroebelen met een terechte eigen klacht. */
+const gezond = (iso) => ({ leesbaar: true, reden: null, totaal: 8, bewezen: 8, gebouwdOp: iso, getoetst: true });
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = JSON.parse(await readFile(join(ROOT, 'data/fixture.json'), 'utf8'));
 
@@ -91,6 +95,7 @@ test('de waarnemer meldt GEEN afwijking op een plaat die precies deze bron toont
     spiegelStatus: 200,
     spiegelTekst: bronTekst,
     contractVersie: '2.4.0',
+    bronstand: gezond(stempel.iso),
     nu: Date.parse(stempel.iso) + 60_000,
   });
   assert.deepEqual(
@@ -114,7 +119,7 @@ test('een afgekapte rij ZONDER actiehouder geeft ook geen afwijking — het elli
   const stempel = stempelUitHtml(html);
   const uitkomst = toets({
     paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: bronTekst,
-    contractVersie: '2.4.0', nu: Date.parse(stempel.iso) + 60_000,
+    contractVersie: '2.4.0', bronstand: gezond(stempel.iso), nu: Date.parse(stempel.iso) + 60_000,
   });
   assert.deepEqual(uitkomst.bevindingen.map((b) => b.code), []);
 });
@@ -142,9 +147,10 @@ test('de tolerantie is precies het afkap-teken en niet meer — twee punten blij
   verminkt.kanaalpost = structuredClone(publiek);
   verminkt.kanaalpost.rows[0].onderwerp = publiek.rows[0].onderwerp.replace(/…$/, '..');
   const html = renderHtml(verminkt);
+  const stempel = stempelUitHtml(html);
   const uitkomst = toets({
     paginaStatus: 200, paginaHtml: html, spiegelStatus: 200, spiegelTekst: bronTekst,
-    contractVersie: '2.4.0', nu: Date.parse(stempelUitHtml(html).iso) + 60_000,
+    contractVersie: '2.4.0', bronstand: gezond(stempel.iso), nu: Date.parse(stempel.iso) + 60_000,
   });
   assert.deepEqual(uitkomst.bevindingen.map((b) => b.code), ['PAGINA_TOONT_OUDE_DATA']);
 });
