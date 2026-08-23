@@ -26,11 +26,17 @@ import {
 } from '../scripts/lib/repo-identity.mjs';
 import {
   HOSTING_OWNER_OF_RECORD, REPOSITORY_NAME, OPERATIONELE_PADEN, OVERTREDING, UITZONDERINGEN,
-  UITZONDERINGEN_PAD, POORT_MODULE, verwachtPagesVoorvoegsel, toetsBestand, toetsBoom,
-  gevolgdeBestanden, leesUitzonderingen,
+  UITZONDERINGEN_PAD, POORT_MODULE, VORIGE_HOSTING_EIGENAARS, EIGENAARSKLASSE,
+  verwachtPagesVoorvoegsel, toetsBestand, toetsBoom, gevolgdeBestanden, leesUitzonderingen,
 } from '../scripts/lib/org-migration.mjs';
 import { claimEvidence, evidenceUrlPrefixes } from '../scripts/lib/runtime-feed-view.mjs';
 
+// Deze twee dragen de namen uit de tijd waarin sectie 1 is geschreven: `NU` is het persoonlijke
+// account waar deze repository vandaan komt, `STRAKS` de organisatie waarnaar zij wordt
+// overgedragen. Sectie 1 meet ZUIVERE ADRESOPBOUW voor twee genoemde eigenaars, en die metingen
+// blijven waar aan beide kanten van de overdracht — daarom zijn ze hier niet hernoemd. Wat de
+// DECLARATIE van vandaag is, staat in sectie 6, en dat bindt aan `HOSTING_OWNER_OF_RECORD` in
+// plaats van aan een naam in een toets.
 const NU = { owner: 'rvanhooijdonk-png', repo: 'stack-dashboard' };
 const STRAKS = { owner: 'RVH-Speaking', repo: 'stack-dashboard' };
 
@@ -669,4 +675,161 @@ test('C3 — R3 meet verbruik, niet aanwezigheid: dekking op een niet-uitvoerend
   const weg = toetsBoom([{ pad: 'docs/RAPPORT.md', tekst: 'geen naam meer\n' }], { uitzonderingen: [post] });
   assert.equal(weg.length, 1);
   assert.equal(weg[0].code, OVERTREDING.VERVALLEN_UITZONDERING);
+});
+
+// --- 6. De overdracht zelf: de drie plaatsen die als één geheel omslaan -------------------------
+
+/**
+ * Sectie 1 tot en met 5 meten dat deze repository OVERDRAAGBAAR is. Deze sectie meet de
+ * overdracht: de stand die zegt waar het dashboard staat, en de plaatsen die daar onlosmakelijk aan
+ * vastzitten.
+ *
+ * Waarom dat een eigen sectie is en geen extra regel bij C1: de drie carriers falen elk op hun
+ * eigen manier als er één achterblijft, en die manieren zijn niet inwisselbaar. Een achtergebleven
+ * README-adres is zichtbaar verkeerd; een achtergebleven `HOSTING_OWNER_OF_RECORD` maakt de poort
+ * blind voor precies de fout die dan telt; een achtergebleven plist laat de feedgenerator elk
+ * kwartier stil een onvolledige feed publiceren. Alleen als alle drie tegen dezelfde declaratie
+ * worden gehouden, is "vergeten" onmogelijk in plaats van onwaarschijnlijk.
+ */
+
+const VORIGE = VORIGE_HOSTING_EIGENAARS[0];
+
+test('C4 — de eigenaarsstand, het Pages-adres en het launchd-plist slaan als één geheel om', () => {
+  // De declaratie zelf, één keer letterlijk. Dit is de enige plaats in deze toetsen waar de naam
+  // van de doelorganisatie als verwachting wordt opgeschreven; al het andere hangt eraan.
+  assert.equal(HOSTING_OWNER_OF_RECORD, STRAKS.owner);
+  assert.equal(REPOSITORY_NAME, STRAKS.repo);
+  assert.deepEqual([...VORIGE_HOSTING_EIGENAARS], [NU.owner]);
+
+  // Carrier 1 — het Pages-adres dat bij vaste tekst hoort, met de host in kleine letters.
+  assert.equal(verwachtPagesVoorvoegsel(), 'https://rvh-speaking.github.io/stack-dashboard');
+  const readme = readFileSync('README.md', 'utf8');
+  assert.ok(readme.includes(`${verwachtPagesVoorvoegsel()}/`), 'README noemt het actuele Pages-adres');
+  // Carrier 2 — en niet meer dat van de vorige eigenaar. Zonder deze kant zou de toets hierboven ook
+  // groen zijn met beide adressen in de README, en dan wijst de helft van de lezers nog verkeerd.
+  assert.ok(
+    !readme.includes(verwachtPagesVoorvoegsel(VORIGE)),
+    'de README draagt het Pages-adres van de vorige eigenaar niet meer',
+  );
+
+  // Carrier 3 — het plist, gelezen uit de bytes die werkelijk worden verscheept.
+  const env = plistOmgeving(PLIST);
+  assert.deepEqual(resolveIdentity(env), { owner: HOSTING_OWNER_OF_RECORD, repo: REPOSITORY_NAME });
+
+  // NEGATIEVE CONTROLE op dezelfde meting: hetzelfde plist met de oude waarde erin moet hier
+  // omvallen. Anders meet C1 hierboven alleen dat er íéts geldigs staat.
+  const map = mkdtempSync(join(tmpdir(), 'orgmig-plist-'));
+  const achtergebleven = join(map, 'oud.plist');
+  writeFileSync(achtergebleven, readFileSync(PLIST, 'utf8')
+    .replace(`<string>${HOSTING_OWNER_OF_RECORD}/${REPOSITORY_NAME}</string>`, `<string>${VORIGE}/${REPOSITORY_NAME}</string>`));
+  assert.notDeepEqual(
+    resolveIdentity(plistOmgeving(achtergebleven)),
+    { owner: HOSTING_OWNER_OF_RECORD, repo: REPOSITORY_NAME },
+  );
+  assert.deepEqual(resolveIdentity(plistOmgeving(achtergebleven)), { owner: VORIGE, repo: REPOSITORY_NAME });
+});
+
+test('C4 — één vergeten operationele binding aan de VORIGE eigenaar wordt fail-closed rood', () => {
+  // Dit is het gat dat op het moment van de overdracht opengaat. R1 kende alleen de eigenaar van
+  // vandaag; op de dag dat die eigenaar verandert, zou elke verwijzing die is blijven staan in één
+  // klap buiten de poort vallen — precies wanneer die verwijzingen het gevaarlijkst zijn, want
+  // GitHub blijft de oude naam doorverwijzen en niets voelt kapot.
+  for (const pad of ['scripts/nieuw.mjs', 'scripts/lib/nieuw.mjs', 'tools/x/y.mjs', '.github/workflows/nieuw.yml']) {
+    for (const geschreven of [VORIGE, VORIGE.toUpperCase(), 'Rvanhooijdonk-PNG']) {
+      const b = toetsBestand({ pad, tekst: `const OWNER = '${geschreven}';\n` }, geenUitzonderingen);
+      assert.equal(b.length, 1, `${pad} ${geschreven}`);
+      assert.equal(b[0].code, OVERTREDING.OPERATIONELE_EIGENAAR);
+      assert.equal(b[0].gevonden, geschreven);
+      // De remedie verschilt per klasse, dus de bevinding zegt zelf welke het is.
+      assert.equal(b[0].eigenaarsklasse, EIGENAARSKLASSE.ACHTERGEBLEVEN, `${pad} ${geschreven}`);
+    }
+  }
+
+  // De huidige eigenaar blijft even hard geweigerd, en wordt anders geëtiketteerd: daar is niets
+  // vergeten, daar hoort een afleiding te staan.
+  const nu = toetsBestand({ pad: 'scripts/nieuw.mjs', tekst: `const OWNER = '${HOSTING_OWNER_OF_RECORD}';\n` }, geenUitzonderingen);
+  assert.equal(nu.length, 1);
+  assert.equal(nu[0].eigenaarsklasse, EIGENAARSKLASSE.HUIDIG);
+
+  // En de grens verschuift niet mee: buiten de uitvoerende paden is de oude naam gewoon invoer,
+  // verslag of persoonslogin. Zou dit meeverhuizen, dan haalt de poort de drie eigenaars door
+  // elkaar die deze hele migratie juist uit elkaar houdt.
+  for (const pad of ['test/x.test.mjs', 'docs/RAPPORT.md', 'CONTROL/AUTOCODING/policy.v1.json', 'contracts/z.schema.json']) {
+    assert.deepEqual(toetsBestand({ pad, tekst: `"allowed_owner_actors": ["${VORIGE}"]\n` }, geenUitzonderingen), [], pad);
+  }
+});
+
+test('C4 — het Pages-adres van de vorige eigenaar wordt geweigerd in code, README en documentatie', () => {
+  // Hetzelfde gat als hierboven, maar dan voor R2 en met de werkelijke vorige eigenaar in plaats
+  // van een verzonnen naam: na de overdracht levert dit adres een HTTP-fout op, en die fout leest
+  // de waarnemer als "de plaat is niet vers" — niet als "het adres is verhuisd".
+  for (const pad of ['README.md', 'docs/X.md', 'CONTROL/AUTOCODING/README.md', 'scripts/x.mjs']) {
+    const b = toetsBestand({ pad, tekst: `zie ${verwachtPagesVoorvoegsel(VORIGE)}/status.json\n` }, geenUitzonderingen)
+      .filter((x) => x.code === OVERTREDING.VEROUDERD_PAGES_ADRES);
+    assert.equal(b.length, 1, pad);
+    assert.equal(b[0].verwacht, verwachtPagesVoorvoegsel(), pad);
+  }
+});
+
+test('C4 — simulatie: met GITHUB_REPOSITORY op de organisatie leidt de keten exact de verwachte adressen af', () => {
+  // De twee lagen komen langs verschillende wegen tot een adres: de poort houdt VASTE TEKST tegen
+  // `HOSTING_OWNER_OF_RECORD`, de publicatieketen LEIDT AF uit de runtime. Ze mogen nooit uit
+  // elkaar lopen, en dat is hier meetbaar in plaats van aangenomen.
+  const slug = `${HOSTING_OWNER_OF_RECORD}/${REPOSITORY_NAME}`;
+  const uitActions = detectIdentity({ GITHUB_REPOSITORY: slug }, { cwd: '/' });
+  assert.deepEqual(uitActions, { owner: HOSTING_OWNER_OF_RECORD, repo: REPOSITORY_NAME });
+  assert.equal(pagesUrl(uitActions), `${verwachtPagesVoorvoegsel()}/`);
+  assert.equal(pagesUrl(uitActions, 'contentstroom.html'), `${verwachtPagesVoorvoegsel()}/contentstroom.html`);
+  // raw en de REST-API zijn geen hostnamen: daar blijft de schrijfwijze van de organisatie staan.
+  assert.equal(
+    rawUrl(uitActions, 'main', 'data/kanaalpost-publiek.md'),
+    `https://raw.githubusercontent.com/${HOSTING_OWNER_OF_RECORD}/${REPOSITORY_NAME}/main/data/kanaalpost-publiek.md`,
+  );
+  assert.equal(repositorySlug(uitActions), slug);
+
+  // En launchd komt langs de derde weg — de sleutel uit het verscheepte plist — op exact hetzelfde
+  // object uit. Drie wegen, één plaats; dat is wat "als één geheel omslaan" hier betekent.
+  assert.deepEqual(resolveIdentity(plistOmgeving(PLIST)), uitActions);
+});
+
+test('C4 — wat NIET meeverhuist blijft aantoonbaar staan', () => {
+  // De keerzijde van de vorige toetsen. Een migratie die te ver doorslaat is net zo stuk als een
+  // die blijft steken: het bewaakte account, `stack-control` en de persoonslogin horen bij ANDERE
+  // objecten, en die zijn niet overgedragen.
+  assert.match(readFileSync('scripts/lib/collect.mjs', 'utf8'), new RegExp(`DASHBOARD_OWNER \\?\\? '${VORIGE}'`));
+  assert.match(readFileSync('tools/dashboard-feed-generator/generator.mjs', 'utf8'), new RegExp(`CONTROL_OWNER = '${VORIGE}'`));
+  const policy = JSON.parse(readFileSync('CONTROL/AUTOCODING/policy.v1.json', 'utf8'));
+  assert.ok(policy.owner_gate.allowed_owner_actors.includes(VORIGE), 'de persoonslogin verhuist niet mee');
+
+  // Historisch bewijs blijft klikbaar. Dit is de reden dat de vorige eigenaar op de bewijslijst
+  // staat: al gepubliceerde commit-URL's wijzen naar het persoonlijke account en die links zouden
+  // anders bij de overdracht doodvallen.
+  const prefixes = evidenceUrlPrefixes({ GITHUB_REPOSITORY_OWNER: HOSTING_OWNER_OF_RECORD });
+  assert.deepEqual(prefixes, [`https://github.com/${VORIGE}/`, `https://github.com/${HOSTING_OWNER_OF_RECORD}/`]);
+  assert.match(claimEvidence(BEWIJS_OUD, { prefixes }), /<a href="https:\/\/github\.com\/rvanhooijdonk-png\//);
+  assert.match(claimEvidence(BEWIJS_NIEUW, { prefixes }), /<a href="https:\/\/github\.com\/RVH-Speaking\//);
+});
+
+test('C4 — de identiteit staat op precies één operationele plaats, en de lokale afbeelding wijst ernaar', () => {
+  // Een tweede plaats met dezelfde waarde is geen extra zekerheid maar een tweede plaats om te
+  // vergeten. Deze toets houdt dat aantal op één: het plist, dat launchd nodig heeft omdat daar
+  // geen Actions-context is. Alles wat draait, leidt af.
+  const dragers = gevolgdeBestanden()
+    .filter((b) => OPERATIONELE_PADEN.some((p) => b.pad.startsWith(p)))
+    .filter((b) => b.tekst.includes(`${HOSTING_OWNER_OF_RECORD}/${REPOSITORY_NAME}`))
+    .map((b) => b.pad);
+  assert.deepEqual(dragers, [PLIST]);
+
+  // De kopie die onder launchd draait staat buiten git; een merge raakt haar niet aan. Dat is geen
+  // detail maar het verschil tussen "de overdracht is doorgevoerd" en "de overdracht is doorgevoerd
+  // behalve op de machine die elk kwartier publiceert". De afbeelding hoort dus vast te liggen
+  // vóórdat iemand hem nodig heeft.
+  const gids = readFileSync('docs/ORG-CUTOVER.md', 'utf8');
+  for (const genoemd of [
+    'tools/dashboard-feed-generator/generator.mjs',
+    'tools/dashboard-feed-generator/com.rvh.dashboard-feed-generator.plist',
+    '~/Stack-Director/bin/dashboard-feed-generator.mjs',
+    '~/Stack-Director/launchd/com.rvh.dashboard-feed-generator.plist',
+    '~/Library/LaunchAgents/com.rvh.dashboard-feed-generator.plist',
+  ]) assert.ok(gids.includes(genoemd), genoemd);
 });

@@ -9,9 +9,17 @@
  * DRIE REGELS, elk afgeleid uit een reëel faalgeval en niet uit een principe:
  *
  *  R1 `OPERATIONELE_EIGENAAR` — in uitvoerende paden (`scripts/`, `tools/`, `.github/workflows/`)
- *     mag de naam van de huidige eigenaar niet als letterlijke tekst voorkomen, tenzij hij op de
+ *     mag de naam van de eigenaar niet als letterlijke tekst voorkomen, tenzij hij op de
  *     uitzonderingenlijst hieronder staat mét reden. Grond: dit was de vorm waarin het Pages-adres,
  *     het raw-adres en het API-pad de overdracht niet zouden hebben overleefd.
+ *
+ *     R1 kijkt naar de HUIDIGE eigenaar én naar elke eigenaar die deze repository eerder droeg
+ *     (`VORIGE_HOSTING_EIGENAARS`), en zegt in `eigenaarsklasse` welke van de twee hij vond. Dat
+ *     onderscheid is de hele winst van deze twee-eigenaarsstand, want de remedie verschilt: bij
+ *     `HUIDIG` moet er een afleiding voor in de plaats komen, bij `ACHTERGEBLEVEN` is er bij de
+ *     overdracht iets vergeten. Zou R1 alleen de huidige eigenaar kennen, dan zou de poort op het
+ *     moment van de overdracht in één klap stil worden op precies de fout die dan het meest
+ *     waarschijnlijk is: een operationele verwijzing die is blijven staan.
  *
  *  R2 `VEROUDERD_PAGES_ADRES` — buiten `test/` moet elk letterlijk
  *     `https://<host>.github.io/<repo>`-adres bij de HUIDIGE eigenaar horen. Grond: een Pages-adres
@@ -57,8 +65,27 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
  * geldt uitsluitend de afleiding uit `GITHUB_REPOSITORY` in `lib/repo-identity.mjs`. Deze constante
  * dient alleen om VASTE TEKST (README, documentatie) tegen de werkelijkheid te kunnen houden.
  */
-export const HOSTING_OWNER_OF_RECORD = 'rvanhooijdonk-png';
+export const HOSTING_OWNER_OF_RECORD = 'RVH-Speaking';
 export const REPOSITORY_NAME = 'stack-dashboard';
+
+/**
+ * De eigenaars die deze repository EERDER heeft gedragen, nieuwste eerst.
+ *
+ * Zij staan hier om twee redenen, en geen van beide is nostalgie. Ten eerste blijft R1 hierdoor
+ * spreken over de vorige eigenaar: een operationele verwijzing die bij de overdracht is blijven
+ * staan wijst naar een object dat GitHub alleen nog doorverwijst, en dat is een stille fout in
+ * plaats van een luide. Ten tweede maakt deze lijst zichtbaar wat er van die eigenaar met opzet is
+ * blijven staan — het bewaakte account, `stack-control`, de persoonslogin en het al gepubliceerde
+ * bewijsmateriaal — want dat staat dan als gedekte post op de uitzonderingenlijst en niet als
+ * onopgemerkte rest in de boom.
+ *
+ * Dit is GEEN terugvaloptie voor het opbouwen van adressen; daarvoor geldt uitsluitend de afleiding
+ * in `lib/repo-identity.mjs`, die alleen bronnen leest die het heden kennen.
+ */
+export const VORIGE_HOSTING_EIGENAARS = Object.freeze(['rvanhooijdonk-png']);
+
+/** Welke eigenaar een R1-bevinding noemt: de huidige, of eentje die had moeten meeverhuizen. */
+export const EIGENAARSKLASSE = Object.freeze({ HUIDIG: 'HUIDIG', ACHTERGEBLEVEN: 'ACHTERGEBLEVEN' });
 
 /** Paden waarin code draait. Alleen hier geldt R1. */
 export const OPERATIONELE_PADEN = Object.freeze(['scripts/', 'tools/', '.github/workflows/']);
@@ -171,6 +198,7 @@ const alsPatroon = (tekst) => tekst.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  */
 function ontleedBestand({ pad, tekst }, {
   eigenaar = HOSTING_OWNER_OF_RECORD, repo = REPOSITORY_NAME, uitzonderingen = UITZONDERINGEN,
+  vorigeEigenaars = VORIGE_HOSTING_EIGENAARS,
 } = {}) {
   const bevindingen = [];
   const budget = dekkingsbudget(pad, uitzonderingen);
@@ -179,7 +207,16 @@ function ontleedBestand({ pad, tekst }, {
   // in raw- en API-adressen even goed als `RVH-Speaking`, dus een nieuwe hardcodering wordt eerder
   // in kleine letters getypt dan in de officiële schrijfwijze. Zou R1 alleen de officiële vorm
   // kennen, dan is de poort na de overdracht stil op juist de waarschijnlijkste fout.
-  const eigenaarPatroon = new RegExp(alsPatroon(eigenaar), 'i');
+  //
+  // De vorige eigenaars staan in HETZELFDE patroon en niet in een tweede ronde: één treffer per
+  // regel blijft dan één bevinding, precies zoals vóór de overdracht. De langste naam eerst, zodat
+  // een eigenaar die de tekst van een andere bevat niet als de kortere wordt gemeld — dan wijst de
+  // bevinding naar de verkeerde remedie.
+  const gezien = new Set();
+  const kandidaten = [eigenaar, ...vorigeEigenaars]
+    .filter((naam) => NAAM.test(naam ?? '') && !gezien.has(naam.toLowerCase()) && gezien.add(naam.toLowerCase()))
+    .sort((a, b) => b.length - a.length);
+  const eigenaarPatroon = new RegExp(`(?:${kandidaten.map(alsPatroon).join('|')})`, 'i');
   const verwachteHost = eigenaar.toLowerCase();
 
   tekst.split('\n').forEach((regel, i) => {
@@ -189,7 +226,16 @@ function ontleedBestand({ pad, tekst }, {
       // De GEVONDEN schrijfwijze, niet de officiële: wie de bevinding leest hoeft dan niet zelf te
       // gaan zoeken in welke vorm het er staat.
       bevindingen.push({
-        code: OVERTREDING.OPERATIONELE_EIGENAAR, pad, regel: i + 1, gevonden: treffer[0],
+        code: OVERTREDING.OPERATIONELE_EIGENAAR,
+        pad,
+        regel: i + 1,
+        gevonden: treffer[0],
+        // De klasse maakt de bevinding zelf de instructie: bij een HUIDIGE eigenaar moet er een
+        // afleiding voor in de plaats komen, bij een ACHTERGEBLEVEN eigenaar is er bij de overdracht
+        // iets over het hoofd gezien en wijst deze regel naar een object dat GitHub nog slechts
+        // doorverwijst.
+        eigenaarsklasse: treffer[0].toLowerCase() === eigenaar.toLowerCase()
+          ? EIGENAARSKLASSE.HUIDIG : EIGENAARSKLASSE.ACHTERGEBLEVEN,
       });
     }
     for (const m of (isBindend(pad) ? rest.matchAll(pagesPatroon) : [])) {
