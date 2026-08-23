@@ -133,8 +133,20 @@ function evidenceRefGeldig(ev) {
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** ISO-8601 met verplichte, expliciete zone (Z of ±HH:MM) — "timestamps timezone-aware". */
-const TZ_AWARE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+/**
+ * ISO-8601 met verplichte, expliciete zone (Z of ±HH:MM) — "timestamps timezone-aware".
+ *
+ * De klokdelen zijn BEGRENSD, niet los `\d{2}`. Grond (bevinding Codex, ronde 13): JSON Schema's
+ * `date-time` staat op RFC 3339, en daar loopt het uur van `00` t/m `23` (§5.6). V8 rekt dat op:
+ * `Date.parse('2026-08-22T24:00:00.000Z')` rolt stilzwijgend door naar `2026-08-23T00:00:00.000Z`.
+ * Dat is dezelfde soort stille normalisatie als `2026-02-30` hieronder, en sinds de waakvlam de
+ * bouwidentiteit op MILLISECONDEN vergelijkt heeft ze een tweede gevolg: een statusbestand met een
+ * ongeldig `T24:00` bond als DEZELFDE bouw als een pagina van middernacht erna, en kocht daarmee
+ * het volle-contractpad in plaats van afgekeurd te worden. Minuten en seconden stonden al vast via
+ * `Date.parse` (`12:60` en `23:59:60` gaven al `NaN`); ze staan nu ook in de vorm, zodat de eis in
+ * één regel te lezen is in plaats van in het gedrag van de ontleder.
+ */
+const TZ_AWARE = /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 
 const ISO_KALENDERDEEL = /^(\d{4})-(\d{2})-(\d{2})T/;
 

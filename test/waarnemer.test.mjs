@@ -1389,3 +1389,46 @@ test('twee schrijfwijzen van hetzelfde tijdstip laten de nulstand niet ontsnappe
   assert.ok(!r.waarschuwingen.some((w) => /andere bouw/.test(w)),
     'twee schrijfwijzen van hetzelfde moment mogen geen bouwverschil melden');
 });
+
+test('een uur-24-stempel bindt niet als dezelfde bouw', () => {
+  // Codex ronde 13 (P2). RFC 3339 -- waar `date-time` in het schema op staat -- kent alleen de uren
+  // 00 t/m 23, maar V8 rolt `T24:00:00.000Z` stilzwijgend door naar middernacht van de VOLGENDE
+  // dag. Sinds de bouwidentiteit op milliseconden vergelijkt (ronde 12) was dat geen schoonheids-
+  // foutje meer: het statusbestand bond dan als DEZELFDE bouw als de pagina van die middernacht en
+  // kwam op het volle-contractpad. Codex' reproductie over http: pagina `2026-08-23T00:00:00.000Z`,
+  // status `2026-08-22T24:00:00.000Z`, één VERIFIED_CURRENT bron, `verschil ... 0 s`, exit 0 --
+  // terwijl de pagina 784 min oud was en met de oude tekenreeksvergelijking gewoon was afgekeurd.
+  const middernacht = '2026-07-26T00:00:00.000Z';           // de pagina, 12 uur oud op NU
+  const uurVierentwintig = '2026-07-25T24:00:00.000Z';      // ongeldig, maar V8 leest hetzelfde ms
+  assert.equal(Date.parse(uurVierentwintig), Date.parse(middernacht),
+    'de opzet vraagt twee tekenreeksen die V8 op dezelfde milliseconde legt');
+
+  const status = lees(200, statusTekstVan(ALLES_BEWEZEN, CONTRACT_NU, uurVierentwintig));
+  const r = toets({
+    paginaStatus: 200,
+    paginaHtml: paginaMetBronnen(ALLES_BEWEZEN, { gebouwdOp: middernacht }),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: CONTRACT_NU,
+    bronstand: status.bronnen,
+    bronContractVersie: status.contract,
+    nu: NU,
+  });
+  assert.deepEqual(r.bevindingen.map((b) => b.code), ['BRONSTAND_ANDERE_BOUW'],
+    'een onleesbaar bouwstempel hoort nergens aan te binden, ook niet aan hetzelfde tijdstip');
+  assert.match(r.bevindingen[0].uitleg, /geen bouwtijd om aan te knopen/);
+
+  // Negatieve controle: de GELDIGE schrijfwijze van precies dat moment bindt wel, en dan is er
+  // niets aan de hand -- anders zou de begrenzing gezonde publicaties rood maken.
+  const g = toets({
+    paginaStatus: 200,
+    paginaHtml: paginaMetBronnen(ALLES_BEWEZEN, { gebouwdOp: middernacht }),
+    spiegelStatus: 200,
+    spiegelTekst: basisSpiegel,
+    contractVersie: CONTRACT_NU,
+    bronstand: lees(200, statusTekstVan(ALLES_BEWEZEN, CONTRACT_NU, middernacht)).bronnen,
+    bronContractVersie: CONTRACT_NU,
+    nu: NU,
+  });
+  assert.deepEqual(g.bevindingen.map((b) => b.code), []);
+});

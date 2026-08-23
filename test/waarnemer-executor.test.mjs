@@ -70,17 +70,28 @@ const statusTekst = ({ contract, gebouwdOp, sources }) => JSON.stringify({
  * juist die tekst terug.
  */
 async function draaiWaarnemer({ html, status, spiegelTekst = spiegelBasis, env = {} }) {
+  // Pagina en statusbestand staan onder /plaat/, de spiegel onder /bron/, en alles daarbuiten geeft
+  // 404. Dat is geen opsmuk: de executor leidt de status-URL AF uit BASE_URL
+  // (`new URL('./status.json', BASE_URL)`), en zolang de helper alles op één map serveerde -- met
+  // een vangnet dat op elk onbekend pad de pagina teruggaf -- bleef de mutant die daar SPIEGEL_URL
+  // van maakt volledig groen. In productie zijn het twee verschillende oorsprongen (GitHub Pages
+  // tegenover raw.githubusercontent.com) en haalde diezelfde mutant een 404 op met een vals
+  // `BRONSTAND_ONLEESBAAR` (bevinding Codex, ronde 13).
   const server = createServer((req, res) => {
-    if (req.url.startsWith('/status.json')) {
+    if (req.url.startsWith('/plaat/status.json')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(status);
     }
-    if (req.url.startsWith('/spiegel.md')) {
+    if (req.url.startsWith('/plaat/contentstroom.html')) {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      return res.end(html);
+    }
+    if (req.url.startsWith('/bron/spiegel.md')) {
       res.writeHead(200, { 'content-type': 'text/markdown' });
       return res.end(spiegelTekst);
     }
-    res.writeHead(200, { 'content-type': 'text/html' });
-    return res.end(html);
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    return res.end('niet gevonden');
   });
   await new Promise((klaar) => server.listen(0, '127.0.0.1', klaar));
   const poort = server.address().port;
@@ -94,8 +105,8 @@ async function draaiWaarnemer({ html, status, spiegelTekst = spiegelBasis, env =
         cwd: ROOT,
         env: {
           ...process.env,
-          BASE_URL: `http://127.0.0.1:${poort}/contentstroom.html`,
-          SPIEGEL_URL: `http://127.0.0.1:${poort}/spiegel.md`,
+          BASE_URL: `http://127.0.0.1:${poort}/plaat/contentstroom.html`,
+          SPIEGEL_URL: `http://127.0.0.1:${poort}/bron/spiegel.md`,
           RIJ_BESTAND: rijBestand,
           GITHUB_OUTPUT: receiptBestand,
           ...env,
